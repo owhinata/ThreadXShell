@@ -48,8 +48,6 @@ EXEMPT = {
     # the base vtable's transform: called BY the plugin, from inside a callback
     # whose caller already passed an entry check
     "nn_active_to_frame": "called from inside the plugin",
-    # a const pointer to a vtable in .rodata; enters nothing
-    "nn_active_base": "returns a constant",
     # records a stack depth for the loader's hook; enters nothing
     "plugin_run_note_entry": "records a depth",
     # read by nn_active_is_plugin() and the shared branch under the wrappers

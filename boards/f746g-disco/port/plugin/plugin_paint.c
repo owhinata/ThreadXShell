@@ -13,6 +13,7 @@
  */
 #include "plugin_paint.h"
 
+#include "plugin_bindings.h"
 #include "plugin_paint_span.h"
 #include "rect_geom.h"
 
@@ -62,8 +63,8 @@ static uint16_t *at(const struct paint_ctx *c, int32_t x, int32_t y)
  * and the loop below is the row-major one rect_geom_writes() counts -- which on
  * this surface is also the contiguous order.
  */
-static void paint_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565,
-                       uint16_t stroke)
+void paint_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565,
+                uint16_t stroke)
 {
 	struct paint_ctx *c = (struct paint_ctx *)ctx;
 	struct rect_geom g;
@@ -89,8 +90,8 @@ static void paint_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565,
 	}
 }
 
-static void paint_fill_rect(void *ctx, const struct plugin_rect *r,
-                            uint16_t rgb565)
+void paint_fill_rect(void *ctx, const struct plugin_rect *r,
+                     uint16_t rgb565)
 {
 	struct paint_ctx *c = (struct paint_ctx *)ctx;
 	struct plugin_paint_box b;
@@ -109,8 +110,8 @@ static void paint_fill_rect(void *ctx, const struct plugin_rect *r,
 	}
 }
 
-static void paint_blit(void *ctx, const struct plugin_rect *r,
-                       const uint16_t *src, uint32_t src_stride, int32_t key)
+void paint_blit(void *ctx, const struct plugin_rect *r,
+                const uint16_t *src, uint32_t src_stride, int32_t key)
 {
 	struct paint_ctx *c = (struct paint_ctx *)ctx;
 	struct plugin_paint_blit_span sp;
@@ -153,5 +154,7 @@ void plugin_paint_bind(struct plugin_painter *p,
 	paint_ctx.w   = w;
 	paint_ctx.h   = h;
 
-	plugin_paint_vtable(p, &paint_ctx, paint_rect, paint_fill_rect, paint_blit);
+	/* The three primitives come from the board's table (plugin_bindings.h,
+	 * issue #165), whose members are the functions above. */
+	plugin_painter_init(p, &paint_ctx);
 }

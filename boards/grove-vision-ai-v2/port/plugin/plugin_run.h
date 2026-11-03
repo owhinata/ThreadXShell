@@ -46,7 +46,9 @@ extern "C" {
  * @param v          the validated view, from plugin_parse()
  * @param container  where the container lies (the XIP window address)
  * @param lease      the caller's live NOR lease token
- * @param base       the vtable handed to the plugin; must outlive the plugin
+ *
+ * The plugin is handed the board's table (plugin_board_bindings), as
+ * plugin_exec_start() says (issue #165).
  *
  * @return PLUGIN_RUN_OK, or a reason.  PLUGIN_RUN_NO_PLUGIN when the container
  *         carries only a model -- a legal container, and the caller carries on.
@@ -62,12 +64,11 @@ extern "C" {
  * the stack pointer it will branch to entry() with -- and the hook's own small
  * frame makes it an upper bound, never an under-count (see plugin_run.c).
  */
-enum plugin_run_result plugin_run_load(const struct plugin_view *v,
-                                       const void *container, uint32_t lease,
-                                       const struct plugin_base_api *base);
+enum plugin_run_result plugin_run_start(const struct plugin_view *v,
+                                        const void *container, uint32_t lease);
 
 /**
- * plugin_run_load()'s own refusal: the caller does not hold the plugin lease
+ * plugin_run_start()'s own refusal: the caller does not hold the plugin lease
  * (port/plugin/plugin_lease.h, issue #127).  Never returned by the shared
  * loader, whose enum this board cannot extend; outside its range on purpose, so
  * it cannot be mistaken for any of them.  Before the loader runs it means

@@ -37,7 +37,7 @@ static struct plugin_exec_state pl_state;
 
 /*
  * entry()'s stack sample, from the exec_ok hook to the end of the load (issue
- * #119), kept if entry() was then called.  Touched only by the thread inside plugin_run_load() -- the caller's
+ * #119), kept if entry() was then called.  Touched only by the thread inside plugin_run_start() -- the caller's
  * claim keeps loads one at a time -- and a hook call from anywhere else is not
  * kept (nn_probe_pending_take()).
  */
@@ -45,9 +45,9 @@ static struct nn_probe_pending pl_entry_probe;
 
 /*
  * Set by the exec_ok hook when it refused for want of the plugin lease, so
- * plugin_run_load() can name that refusal rather than let the shared loader's
+ * plugin_run_start() can name that refusal rather than let the shared loader's
  * PLUGIN_RUN_MPU stand for it.  Touched only by the thread inside
- * plugin_run_load(), like the sample above.
+ * plugin_run_start(), like the sample above.
  */
 static uint8_t pl_exec_unheld;
 
@@ -116,14 +116,14 @@ static __attribute__((noinline)) int pl_exec_check(uint32_t lo, uint32_t hi,
  * the branch will use.  Read here, the depth is the entry depth plus THIS
  * function's frame: an upper bound, never an under-count, and one no constant
  * copied off an ELF can drift away from.  The sample is kept only if entry()
- * is then called, whether it accepts or not (plugin_run_load()).  If this
+ * is then called, whether it accepts or not (plugin_run_start()).  If this
  * hook's own verdict stops the load, entry() never runs and nothing is kept.
  */
 static int pl_exec_ok(uint32_t lo, uint32_t hi, const char **why)
 {
 	nn_probe_pending_take(&pl_entry_probe, tx_thread_identify(),
 	                      NN_PROBE_SP());
-	/* [!] THE LAST CHECK BEFORE entry() (issue #127).  plugin_run_load()
+	/* [!] THE LAST CHECK BEFORE entry() (issue #127).  plugin_run_start()
 	 * refuses an unheld caller before anything is touched; this is the same
 	 * question asked again at the branch, so a path into the loader that
 	 * skipped the first cannot reach entry() either. */
@@ -188,9 +188,8 @@ static const struct plugin_exec_env pl_env = {
 
 /* ---- the board-facing API ------------------------------------------------ */
 
-enum plugin_run_result plugin_run_load(const struct plugin_view *v,
-                                       const void *container, uint32_t lease,
-                                       const struct plugin_base_api *base)
+enum plugin_run_result plugin_run_start(const struct plugin_view *v,
+                                        const void *container, uint32_t lease)
 {
 	const char *why = NULL;
 	enum plugin_run_result r;
@@ -198,7 +197,7 @@ enum plugin_run_result plugin_run_load(const struct plugin_view *v,
 
 	/*
 	 * [!] THE LEASE FIRST, BEFORE THE SHARED LOADER TOUCHES ANYTHING (issue
-	 * #127).  plugin_exec_load() begins by unpublishing the previous plugin
+	 * #127).  plugin_exec_start() begins by unpublishing the previous plugin
 	 * and then copies the new image over the reservation it was running
 	 * from; a caller without the lease could be doing that under a decode.
 	 * Refused here, the previous plugin is exactly as it was.
@@ -210,7 +209,7 @@ enum plugin_run_result plugin_run_load(const struct plugin_view *v,
 	}
 	pl_exec_unheld = 0u;
 	nn_probe_pending_arm(&pl_entry_probe, tx_thread_identify());
-	r = plugin_exec_load(&pl_env, v, container, (uintptr_t)lease, base, &why);
+	r = plugin_exec_start(&pl_env, v, container, (uintptr_t)lease, &why);
 	if (r == PLUGIN_RUN_MPU && pl_exec_unheld)
 		r = PLUGIN_RUN_NOT_HELD;     /* the hook's lease refusal, by name */
 	/* Recorded whenever entry() was CALLED -- accepted or refused -- and never

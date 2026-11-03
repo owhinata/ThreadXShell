@@ -21,7 +21,8 @@ earlier image let it through" are each a failure of the delivery itself, not a
 property inferred from ninja's plan.
 
 The project mirrors how the boards feed their image, one of each:
-  - root.c         in the executable itself (the six veneer roots),
+  - root.c         in the executable itself (the six veneer roots, bound by
+                   bind.c's plugin_board_bindings -- issue #165),
   - objsrc.c       an OBJECT library taken by $<TARGET_OBJECTS:> (Grove's
                    shell_objs),
   - objlink.c      an OBJECT library in target_link_libraries (coremark_obj),
@@ -105,14 +106,22 @@ Cases:
                     command line through veneer_cost_gate_declared() (where the
                     host container verifier gets it).  A loader test cannot see
                     this: it is handed a policy, never the build's.
-  bind_decoy        (issue #165) the base table the firmware hands the plugin
-                    binds its log slot to a function deeper than DECLARED,
-                    while ROOTS still names the shallow nn_plugin_log: the
-                    check PASSES, because it walks the names in ROOTS and
-                    reads no table.  Naming the deep function in ROOTS fails
-                    (the walk sees it when told).  A documented limit for now:
-                    step 3 of #165 derives the roots from the table and this
-                    case turns into a refusal.
+  bind_decoy        (issue #165) the table the firmware hands the plugin
+                    (plugin_board_bindings) binds log to a function deeper
+                    than DECLARED.  Passed until step 3 of #165, while the
+                    check walked a ROOTS list naming the shallow
+                    nn_plugin_log; now the roots are the table's own words,
+                    and pl_base_log is refused in [budget], naming it.
+  bind_deep_each    each of the other five members deep on its own: refused
+                    for that veneer alone (the veneer per member is stated in
+                    this file, not read from the record).
+  bind_shape        the table in a writable section, weak, or with a second
+                    object of its name: refused; bind_none: no table, the
+                    link fails.
+  entry_old         an object defining one of the pre-#165 entries that took
+                    a base or a vtable's functions (plugin_exec_load,
+                    plugin_run_load, nn_active_report, nn_active_core_report,
+                    plugin_paint_vtable): refused by check_policy_entry.py.
   policy_decoy      (issue #165) the read-back's policy is right, while the
                     code hands an entry that takes a policy a different
                     read-only one whose c is 1.  Passed until step 2 of #165;
@@ -257,28 +266,6 @@ FIX_POLICY_ATTR const struct plugin_policy plugin_board_policy = {
 };
 #endif
 
-/* (issue #165, bind_decoy) The base table a board hands the plugin, as
- * nn_active.c / nn_svc_grove.c define nn_plugin_base -- with its log slot bound
- * to a function far deeper than DECLARED.  ROOTS still names nn_plugin_log. */
-#ifdef FIX_BIND_DECOY
-__attribute__((noinline, used)) void fix_deep_log(void *ctx, const char *s,
-                                                  size_t len)
-{
-    volatile char b[8192];
-    (void)ctx;
-    (void)s;
-    b[0] = (char)len;
-}
-__attribute__((used)) const struct plugin_base_api fix_plugin_base = {
-    .version = PLUGIN_ABI_VERSION,
-    .size    = (uint32_t)sizeof(struct plugin_base_api),
-    .log     = fix_deep_log,
-};
-__attribute__((noinline, used)) const struct plugin_base_api *fix_base(void)
-{
-    return &fix_plugin_base;
-}
-#endif
 
 /* (issue #165, policy_decoy) plugin_board_policy above is correct, and the
  * read-back reads it; the code hands an entry that takes a policy another
@@ -318,6 +305,9 @@ fix_load(const void *buf, size_t len, struct plugin_view *out)
     # global of another size (FIX_POLICY_ARRAY, with FIX_POLICY_NONE's absence
     # in policy.c).
     "twin.c": """
+#if defined(FIX_BIND_TWIN)
+__attribute__((used)) static const unsigned plugin_board_bindings[9] = { 1u };
+#endif
 #if defined(FIX_POLICY_TWIN)
 __attribute__((used)) static const unsigned plugin_board_policy[14] = { 1u };
 #elif defined(FIX_POLICY_ARRAY)
@@ -326,6 +316,77 @@ const unsigned plugin_board_policy[20] = { 1u };
 void plugin_board_policy(void) {}
 #endif
 int fix_twin_unit(void) { return 0; }
+""",
+    # (issue #165) The board's bindings: the six functions behind the veneers,
+    # under the name the loader and the check read.  The roots in root.c are
+    # int(int) bodies; the casts give them the members' types, which is all
+    # the check reads (a code address).  FIX_DEEP_SLOT puts fix_deep, far
+    # deeper than DECLARED, in one member.  The shapes the check refuses:
+    # FIX_BIND_RW (a writable section), FIX_BIND_WEAK, FIX_BIND_NONE (no table:
+    # the link fails), FIX_BIND_TWIN (twin.c adds a local of the name).
+    "bind.c": """
+#include "plugin_bindings.h"
+extern int nn_plugin_log(int);
+extern int nn_active_to_frame(int);
+extern int paint_rect(int);
+extern int paint_fill_rect(int);
+extern int paint_blit(int);
+extern int nn_report_write(int);
+__attribute__((noinline, used)) int fix_deep(int x)
+{
+    volatile char b[8192];
+    b[0] = (char)x;
+    return b[0] + 1;
+}
+#ifndef FIX_DEEP_SLOT
+#define FIX_DEEP_SLOT 99
+#endif
+#define PICK(i, f) ((FIX_DEEP_SLOT) == (i) ? fix_deep : (f))
+#if defined(FIX_BIND_RW)
+#define FIX_BIND_ATTR __attribute__((section(".data.fix_bind")))
+#elif defined(FIX_BIND_WEAK)
+#define FIX_BIND_ATTR __attribute__((weak))
+#else
+#define FIX_BIND_ATTR
+#endif
+#ifndef FIX_BIND_NONE
+FIX_BIND_ATTR const struct plugin_bindings plugin_board_bindings = {
+    .base = {
+        .version  = PLUGIN_ABI_VERSION,
+        .size     = (uint32_t)sizeof(struct plugin_base_api),
+        .log      = (void (*)(void *, const char *, size_t))
+                    PICK(0, nn_plugin_log),
+        .to_frame = (int (*)(void *, float, float, float, float,
+                             struct plugin_rect *))PICK(1, nn_active_to_frame),
+    },
+    .rect      = (void (*)(void *, const struct plugin_rect *, uint16_t,
+                           uint16_t))PICK(2, paint_rect),
+    .fill_rect = (void (*)(void *, const struct plugin_rect *, uint16_t))
+                 PICK(3, paint_fill_rect),
+    .blit      = (void (*)(void *, const struct plugin_rect *,
+                           const uint16_t *, uint32_t, int32_t))
+                 PICK(4, paint_blit),
+    .write     = (int (*)(void *, const char *, size_t))
+                 PICK(5, nn_report_write),
+};
+#endif
+""",
+    # (issue #165) The entries that took a base or handed a vtable its
+    # functions, under their pre-#165 names: a firmware object that still
+    # defines one is refused by check_policy_entry.py.
+    "old.c": """
+#if defined(FIX_OLD_EXEC)
+int plugin_exec_load(void) { return 0; }
+#elif defined(FIX_OLD_RUN)
+int plugin_run_load(void) { return 0; }
+#elif defined(FIX_OLD_REPORT)
+int nn_active_report(void) { return 0; }
+#elif defined(FIX_OLD_CORE_REPORT)
+int nn_active_core_report(void) { return 0; }
+#elif defined(FIX_OLD_PAINT)
+int plugin_paint_vtable(void) { return 0; }
+#endif
+int fix_old_unit(void) { return 0; }
 """,
     # What svc/plugin/plugin_load_board.c needs from a C library this
     # -nostdlib fixture does not link.  Never called: nothing runs the image.
@@ -385,14 +446,13 @@ set(FIX_DELIVERY flash CACHE STRING "")
 set(FIX_EXTRA "" CACHE STRING "")
 set(FIX_B 500 CACHE STRING "")
 set(FIX_PLUGIN OFF CACHE BOOL "")
-# (issue #165, bind_decoy) the function ROOTS names for the log slot.
-set(FIX_LOG_ROOT nn_plugin_log CACHE STRING "")
 
 # (issue #165) FIX_HOST_TU puts the host's policy-taking entry where it must
 # never be: OBJ in the firmware's object library, LIB in its static library.
 set(FIX_HOST_TU "" CACHE STRING "")
-add_library(fw_objs OBJECT objsrc.c policy.c twin.c libc.c
-            "@SVC@/plugin/plugin_load_board.c" "@SVC@/crc32.c")
+add_library(fw_objs OBJECT objsrc.c policy.c twin.c libc.c bind.c old.c
+            "@SVC@/plugin/plugin_load_board.c" "@SVC@/crc32.c"
+            "@SVC@/plugin/plugin_bindings.c")
 if(FIX_HOST_TU STREQUAL "OBJ")
     target_sources(fw_objs PRIVATE "@SVC@/plugin/plugin_load_host.c")
 endif()
@@ -436,12 +496,6 @@ veneer_cost_gate(
     FIRMWARE shell
     MAP      "${CMAKE_BINARY_DIR}/shell.map"
     DECLARED ${DECLARED}
-    ROOTS    pl_base_log=${FIX_LOG_ROOT}
-             pl_base_to_frame=nn_active_to_frame
-             pl_paint_rect=paint_rect
-             pl_paint_fill_rect=paint_fill_rect
-             pl_paint_blit=paint_blit
-             pl_print_write=nn_report_write
     PREBUILT_ROOTS "@PREBUILT@"
     DELIVERY ${FIX_DELIVERY})
 
@@ -1254,48 +1308,50 @@ def _image_words(p, sym, count):
     raise Fail("%s is in no section with bytes" % sym)
 
 
-def decoy_tree(p, results):
-    """issue #165: what the gate does not tie to what the loader uses.
+# The veneer behind each member of struct plugin_bindings, by FIX_DEEP_SLOT
+# index -- STATED HERE, not read from the record the check reads (issue #165).
+DEEP_SLOTS = ("pl_base_log", "pl_base_to_frame", "pl_paint_rect",
+              "pl_paint_fill_rect", "pl_paint_blit", "pl_print_write")
 
-    Both cases PASS today and say so: a documented limit, stated as a case so
-    that it is written down rather than discovered.  #165 turns them around
-    (policy_decoy in step 2, bind_decoy in step 3); when it does, these
-    expectations are the ones to flip.
+
+def decoy_tree(p, results):
+    """issue #165: the gate reads what the loader uses.
+
+    Both decoys passed until #165 (step 1 recorded them as documented
+    limits); both are refused now, each for its own reason.
     """
     # --- bind_decoy --------------------------------------------------------
-    p.rm("flashed")
-    p.configure(DECLARED="4096", FIX_LOG_ROOT="nn_plugin_log",
-                CMAKE_C_FLAGS=p.c_init + " -DFIX_BIND_DECOY")
-    rc, out = p.ninja("flash")
-    flat = " ".join(out.split())
-    words, addr = _image_words(p, "fix_plugin_base", 4)
-    expect(words[3] == (addr["fix_deep_log"] | 1),
-           "bind_decoy: the image's base table should bind log to "
-           "fix_deep_log (0x%08x), holds 0x%08x"
-           % (addr["fix_deep_log"] | 1, words[3]))
-    expect(rc == 0 and os.path.exists(p.path("flashed"))
-           and "check_veneer_base_cost: OK" in flat
-           and re.search(r"pl_base_log nn_plugin_log \d+ B", flat)
-           and "fix_deep_log" not in flat,
-           "bind_decoy: expected to PASS (the check walks ROOTS, not the "
-           "table the plugin is handed), which is the documented limit; if "
-           "this now fails, #165 step 3 turned it around -- update the case",
-           out)
-    # The control: the same image, with ROOTS naming what the table binds.
-    p.rm("flashed")
-    p.configure(DECLARED="4096", FIX_LOG_ROOT="fix_deep_log",
-                CMAKE_C_FLAGS=p.c_init + " -DFIX_BIND_DECOY")
-    rc, out = p.ninja("flash")
-    flat = " ".join(out.split())
-    expect(rc != 0 and not os.path.exists(p.path("flashed"))
-           and "[budget] pl_base_log needs" in flat
-           and "fix_deep_log" in flat and "declares 4096 B" in flat,
-           "bind_decoy: with ROOTS naming fix_deep_log the check should "
-           "refuse pl_base_log in [budget]", out)
-    results.append(("bind_decoy", "log bound to a function deeper than "
-                                  "DECLARED, ROOTS names nn_plugin_log: "
-                                  "passes (documented limit, #165 step 3); "
-                                  "naming it in ROOTS is refused"))
+    # [!] TURNED AROUND BY STEP 3 OF #165.  The table the plugin is handed
+    # binds log to a function deeper than DECLARED; until then ROOTS named the
+    # shallow nn_plugin_log and the check passed.  Now the roots are the
+    # table's own words, so the deep function is walked, and named.
+    for i, veneer in enumerate(DEEP_SLOTS):
+        name = "bind_decoy" if i == 0 else "bind_deep_" + veneer
+        p.rm("flashed")
+        p.configure(DECLARED="4096",
+                    CMAKE_C_FLAGS=p.c_init + " -DFIX_DEEP_SLOT=%d" % i)
+        rc, out = p.ninja("flash")
+        flat = " ".join(out.split())
+        words, addr = _image_words(p, "plugin_board_bindings", 9)
+        expect(words[3 + i] == (addr["fix_deep"] | 1),
+               "%s: the table's word for %s should be fix_deep (0x%08x), "
+               "holds 0x%08x" % (name, veneer, addr["fix_deep"] | 1,
+                                 words[3 + i]))
+        expect(rc != 0 and not os.path.exists(p.path("flashed"))
+               and not os.path.exists(p.stamp)
+               and ("[budget] %s needs" % veneer) in flat
+               and flat.count("[budget]") == 1
+               and re.search(r"%s fix_deep\s+>?=?\s*\d+ B" % veneer, flat)
+               and "declares 4096 B" in flat,
+               "%s: the table binds %s to fix_deep, and the check should "
+               "refuse that veneer alone in [budget], naming fix_deep"
+               % (name, veneer), out)
+    results.append(("bind_decoy", "the table binds log to a function deeper "
+                                  "than DECLARED: refused in [budget] for "
+                                  "pl_base_log, naming it"))
+    results.append(("bind_deep_each", "each of the other five members, deep "
+                                      "on its own: refused for that veneer "
+                                      "alone"))
 
     # --- policy_decoy ------------------------------------------------------
     # [!] TURNED AROUND BY STEP 2 OF #165.  Until then the probe pointed at a
@@ -1303,7 +1359,7 @@ def decoy_tree(p, results):
     # Now the firmware's parse takes no policy, and an entry that takes one in
     # any input of the link is refused before the probe runs.
     p.rm("flashed")
-    p.configure(DECLARED="4096", FIX_LOG_ROOT="nn_plugin_log",
+    p.configure(DECLARED="4096",
                 CMAKE_C_FLAGS=p.c_init + " -DFIX_POLICY_DECOY")
     rc, out = p.ninja("flash")
     flat = " ".join(out.split())
@@ -1444,6 +1500,62 @@ def entry_tree(p, results):
     results.append(("entry_lto", "an LTO link with the decoy: refused, read "
                                  "through gcc-nm; with a plain nm the check "
                                  "refuses rather than read wrappers"))
+
+
+def bind_shape_tree(p, results):
+    """issue #165: the one table the loader hands the plugin, by name."""
+    for name, flag, says in (
+            ("bind_writable", "-DFIX_BIND_RW",
+             "plugin_board_bindings at 0x"),
+            ("bind_weak", "-DFIX_BIND_WEAK",
+             "plugin_board_bindings is weak, not global"),
+            ("bind_twin", "-DFIX_BIND_TWIN",
+             "2 symbols named plugin_board_bindings")):
+        p.rm("flashed")
+        p.configure(DECLARED="4096", CMAKE_C_FLAGS=p.c_init + " " + flag)
+        rc, out = p.ninja("flash")
+        flat = " ".join(out.split())
+        extra = (name != "bind_writable"
+                 or "is in .data, a writable section" in flat)
+        expect(rc != 0 and not os.path.exists(p.path("flashed"))
+               and not os.path.exists(p.stamp)
+               and "check_veneer_base_cost: FAIL" in flat
+               and ("[bindings] " + says) in flat and extra,
+               "%s: the check should refuse the table (%s)" % (name, says),
+               out)
+    results.append(("bind_shape", "the table in a writable section, weak, "
+                                  "or with a second object of its name: "
+                                  "each refused"))
+    p.rm("flashed")
+    p.configure(DECLARED="4096", CMAKE_C_FLAGS=p.c_init + " -DFIX_BIND_NONE")
+    rc, out = p.ninja("shell")
+    expect(rc != 0 and "plugin_board_bindings" in out,
+           "bind_none: with no plugin_board_bindings the link should fail "
+           "naming it", out)
+    results.append(("bind_none", "no plugin_board_bindings: the link fails "
+                                 "naming it"))
+
+    # The pre-#165 entries: a loader that took the base (the shared one and
+    # both boards' had these names), the report and painter calls that took
+    # the vtable's functions.
+    for flag, old in (("FIX_OLD_EXEC", "plugin_exec_load"),
+                      ("FIX_OLD_RUN", "plugin_run_load"),
+                      ("FIX_OLD_REPORT", "nn_active_report"),
+                      ("FIX_OLD_CORE_REPORT", "nn_active_core_report"),
+                      ("FIX_OLD_PAINT", "plugin_paint_vtable")):
+        p.rm("flashed")
+        p.configure(DECLARED="4096", CMAKE_C_FLAGS=p.c_init + " -D" + flag)
+        rc, out = p.ninja("flash")
+        flat = " ".join(out.split())
+        expect(rc != 0 and not os.path.exists(p.path("flashed"))
+               and "check_policy_entry: FAIL" in flat
+               and re.search(r"old\.c\.o(bj)? defines %s \(T\)" % old, flat),
+               "entry_old_%s: an object defining %s should be refused"
+               % (old, old), out)
+    results.append(("entry_old", "an object defining plugin_exec_load, "
+                                 "plugin_run_load, nn_active_report, "
+                                 "nn_active_core_report or plugin_paint_vtable "
+                                 "(the pre-#165 entries): each refused"))
 
 
 def policy_shape_tree(p, results):
@@ -1671,6 +1783,7 @@ def main():
         ("decoy", lambda p: decoy_tree(p, results)),
         ("entry", lambda p: entry_tree(p, results)),
         ("policy_shape", lambda p: policy_shape_tree(p, results)),
+        ("bind_shape", lambda p: bind_shape_tree(p, results)),
         ("delivery", lambda p: delivery_tree(p, results)),
         ("delivery_glued", lambda p: delivery_glued_tree(p, results)),
     ]

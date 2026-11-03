@@ -178,7 +178,7 @@ gcc $CFLAGS \
     -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_plugin_decode.c" \
     "$board/port/nn/nn_active.c" "$HOST_TEST_SVC/nn/nn_desc.c" \
-    "$HOST_TEST_SVC/nn/nn_active_core.c" \
+    "$HOST_TEST_SVC/nn/nn_active_core.c" "$HOST_TEST_SVC/plugin/plugin_bindings.c" \
     "$board/port/nn/nn_preproc.c" \
     "$asset/plugins/blazeface/plugin_main.c" \
     "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \
@@ -313,7 +313,7 @@ gcc $CFLAGS -DLCD_RECT_COUNT_STORES \
     "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
     "$board/port/lcd/lcd_rect.c" "$board/../../svc/rect_geom.c" \
     "$board/../../svc/plugin/plugin_paint_budget.c" \
-    "$board/../../svc/plugin/plugin_paint_span.c" \
+    "$board/../../svc/plugin/plugin_bindings.c" "$board/../../svc/plugin/plugin_paint_span.c" \
     $LDFLAGS -o "$out/test_plugin_paint"
 "$out/test_plugin_paint"
 

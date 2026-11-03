@@ -33,6 +33,13 @@
  * wrong edit to the rule cannot move both sides and pass.
  */
 #include "plugin_paint.h"
+#include "plugin_bindings.h"
+
+/* The board's table (issue #165), as far as the painter reads it: the painter
+ * plugin_paint_bind() fills carries these three, which are this board's. */
+const struct plugin_bindings plugin_board_bindings = {
+	.rect = paint_rect, .fill_rect = paint_fill_rect, .blit = paint_blit,
+};
 
 #include <stdio.h>
 #include <string.h>

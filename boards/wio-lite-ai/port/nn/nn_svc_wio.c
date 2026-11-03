@@ -683,7 +683,7 @@ static int nn_life_lease_take(struct nn_core_model_job *j)
  * plugin, so there is no rollback: the model stays open with nothing reading
  * it -- `nn run` reports its output tensors and `nn stream start` is refused --
  * and the status says the load did not give what was asked for.
- * plugin_run_load() also logs its own reason.
+ * plugin_run_start() also logs its own reason.
  *
  * [!] THIS BRANCH IS NOT COVERED ON HARDWARE.  There is no way to build a
  * container whose plugin the device refuses -- the host packer runs the
@@ -702,8 +702,7 @@ static int nn_life_plugin_start(struct nn_core_model_job *j)
 	 * double-slotted: nn_model_load_region() hands out the INACTIVE slot, so
 	 * now that the reload has adopted the staged model, asking again would
 	 * answer with the OTHER slot. */
-	pr = plugin_run_load(&w->claims.view, w->stage, w->stage, w->cap,
-	                     nn_active_base());
+	pr = plugin_run_start(&w->claims.view, w->stage, w->stage, w->cap);
 	if (pr == PLUGIN_RUN_OK || pr == PLUGIN_RUN_NO_PLUGIN)
 		return NN_SVC_OK;
 	/* plugin_run_why(): the strerror, plus the board's own NOT_HELD by name

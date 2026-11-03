@@ -197,9 +197,10 @@ int nn_active_can_draw(void);
  *  @return 1, 0, or NN_ACTIVE_NOT_HELD */
 int nn_active_can_report(void);
 
-/** Ask it to.  Returns what its own report returned, 0 with no plugin, or
+/** Ask it to, into @p ctx through the board's write (plugin_board_bindings,
+ *  issue #165).  Returns what its own report returned, 0 with no plugin, or
  *  NN_ACTIVE_NOT_HELD. */
-int nn_active_report(nn_svc_write_fn write, void *ctx);
+int nn_active_report_to(void *ctx);
 
 /**
  * The threshold, from whichever decoder will actually use it.

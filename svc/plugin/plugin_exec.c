@@ -8,6 +8,8 @@
  */
 #include "plugin_exec.h"
 
+#include "plugin_bindings.h"
+
 #include <stddef.h>
 #include <string.h>
 
@@ -58,18 +60,21 @@ static int env_ok(const struct plugin_exec_env *env)
 
 /* ---- load / unload ------------------------------------------------------- */
 
-enum plugin_run_result plugin_exec_load(const struct plugin_exec_env *env,
-                                        const struct plugin_view *v,
-                                        const void *container, uintptr_t token,
-                                        const struct plugin_base_api *base,
-                                        const char **why)
+enum plugin_run_result plugin_exec_start(const struct plugin_exec_env *env,
+                                         const struct plugin_view *v,
+                                         const void *container, uintptr_t token,
+                                         const char **why)
 {
+	/* [!] THE BASE IS THE BOARD'S TABLE, BY NAME (issue #165): the head of
+	 * plugin_board_bindings, which the build reads the veneers' roots from.
+	 * Not an argument, so no caller can hand the plugin another one. */
+	const struct plugin_base_api *base = &plugin_board_bindings.base;
 	struct plugin_exec_state *st;
 	const char *reason = NULL;
 	plugin_entry_fn entry;
 	uint32_t res_base, res_len;
 
-	if (!env_ok(env) || v == NULL || container == NULL || base == NULL)
+	if (!env_ok(env) || v == NULL || container == NULL)
 		return PLUGIN_RUN_ARG;
 	st       = env->state;
 	res_base = (uint32_t)(uintptr_t)env->res_lo;

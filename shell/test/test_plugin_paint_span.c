@@ -284,41 +284,6 @@ static void test_rect(const struct orient *o)
 	         bud.pixels == LIMIT && bud.refused == 1u);
 }
 
-static void dummy_rect(void *ctx, const struct plugin_rect *r, uint16_t c,
-                       uint16_t s)
-{
-	(void)ctx; (void)r; (void)c; (void)s;
-}
-
-static void dummy_fill(void *ctx, const struct plugin_rect *r, uint16_t c)
-{
-	(void)ctx; (void)r; (void)c;
-}
-
-static void dummy_blit(void *ctx, const struct plugin_rect *r,
-                       const uint16_t *src, uint32_t stride, int32_t key)
-{
-	(void)ctx; (void)r; (void)src; (void)stride; (void)key;
-}
-
-static void test_vtable(void)
-{
-	struct plugin_painter p;
-	int ctx;
-
-	printf("the painter:\n");
-	memset(&p, 0xA5, sizeof p);
-	plugin_paint_vtable(&p, &ctx, dummy_rect, dummy_fill, dummy_blit);
-	ok("[!] version and size are filled -- the veneer refuses a painter "
-	   "without them",
-	   p.version == PLUGIN_ABI_VERSION && p.size == sizeof(p));
-	ok("and so are the context and all three primitives",
-	   p.ctx == &ctx && p.rect == dummy_rect && p.fill_rect == dummy_fill &&
-	   p.blit == dummy_blit);
-	plugin_paint_vtable(NULL, &ctx, dummy_rect, dummy_fill, dummy_blit);
-	ok("a NULL painter is ignored", 1);
-}
-
 int main(void)
 {
 	size_t i;
@@ -330,7 +295,6 @@ int main(void)
 		test_blit(&orients[i]);
 		test_rect(&orients[i]);
 	}
-	test_vtable();
 
 	if (failures) {
 		printf("test_plugin_paint_span: %d FAILED\n", failures);

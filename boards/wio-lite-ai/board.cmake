@@ -961,6 +961,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
          "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_exec.c"
          "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_budget.c"
          "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_span.c"
+         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_bindings.c"   # the six (#165)
          "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
          "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_run_core.c"  # its lease checks (#159)
          "${BOARD_DIR}/port/plugin/plugin_run.c"
@@ -1501,9 +1502,10 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # stack below each veneer from the shipped LTO image and refuses a
     # declaration under it, and `dfu-shell` / `flash` and every container's
     # pack wait for that to pass.  What is stated here is this board's: the
-    # function it binds behind each veneer (nn_plugin_base, plugin_paint_bind()),
-    # the charge -- the SAME variable every add_plugin() below is given -- and
-    # where the toolchain's archives live.  What gets -fstack-usage, the LTO
+    # charge -- the SAME variable every add_plugin() below is given -- and where
+    # the toolchain's archives live.  The function behind each veneer is read
+    # out of the image, from plugin_board_bindings (port/nn/nn_active.c, issue
+    # #165).  What gets -fstack-usage, the LTO
     # partition records included, is derived by the helper; the boot reference
     # build is not one of the firmware's link inputs and is never touched.
     get_filename_component(_wio_gcc_bin "${CMAKE_C_COMPILER}" DIRECTORY)
@@ -1513,12 +1515,6 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         FIRMWARE shell
         MAP      "${CMAKE_BINARY_DIR}/shell.map"
         DECLARED ${WIO_PLUGIN_VENEER_BASE_COST}
-        ROOTS    pl_base_log=nn_plugin_log
-                 pl_base_to_frame=nn_active_to_frame
-                 pl_paint_rect=paint_rect
-                 pl_paint_fill_rect=paint_fill_rect
-                 pl_paint_blit=paint_blit
-                 pl_print_write=nn_report_write
         PREBUILT_ROOTS "${WIO_TOOLCHAIN_ROOT}"
         DELIVERY dfu-shell flash)
 

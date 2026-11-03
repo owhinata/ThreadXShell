@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 ThreadX Shell Project
-"""No firmware link holds a container-parse entry that takes a policy (#165).
+"""No firmware link holds an entry that takes a policy or a binding (#165).
 
 The firmware's plugin_parse() reads the board's policy by name
 (plugin_board_policy, svc/plugin/plugin_load.h), and cmake/check_policy_probe.py
@@ -36,10 +36,19 @@ read here, and is gone by the time this runs.
 archive does not hold, an archive member from an archive the map did not load,
 an nm without the LTO plugin: each is a refusal, and the stamp is not written.
 
+[!] AND THE SAME FOR THE BINDINGS (issue #165).  The base a plugin is handed,
+and the functions its painter and printer carry, come from the board's
+plugin_board_bindings, which cmake/check_veneer_base_cost.py derives the stack
+roots from.  The entries that used to take them as arguments -- the loaders'
+base, the report's write, the painter's three -- are watched by their old names
+too: an object still defining or calling one is a firmware that can hand a
+plugin something the build did not read.
+
 What this does not see: a board that copies the parse body into a TU of its
-own under another name and calls it with another policy -- trusted native code
+own under another name and calls it with another policy, or that builds a
+vtable of its own and calls a plugin's slot with it -- trusted native code
 going around the rule on purpose (CLAUDE.md: the gate proves a stack bound, not
-the absence of such code).  It watches the shared entry's name.
+the absence of such code).  It watches the shared entries' names.
 """
 import argparse
 import os
@@ -47,8 +56,22 @@ import re
 import subprocess
 import sys
 
-# The argument-taking entry of svc/plugin/plugin_load_body.h.
-WATCHED = ("plugin_parse_with_policy",)
+# Entries that take what the firmware must read by name instead:
+WATCHED = (
+    # the container parse with a policy argument (svc/plugin/plugin_load_host.c)
+    "plugin_parse_with_policy",
+    # (issue #165) the loaders that took the base to hand entry() -- the shared
+    # one and both boards' -- before the base became the head of
+    # plugin_board_bindings (plugin_exec_start() / plugin_run_start() now)
+    "plugin_exec_load",
+    "plugin_run_load",
+    # ...and the calls that handed a callback's vtable its functions: the
+    # printer's write (nn_active_report_to() now) and the painter's three
+    # (plugin_painter_init())
+    "nn_active_report",
+    "nn_active_core_report",
+    "plugin_paint_vtable",
+)
 
 # What an LTO link writes for itself and removes: its partitions and its early
 # debug objects (gcc's /tmp/ccXXXXXX.{ltransN.ltrans,debug.temp}.o).
@@ -227,13 +250,17 @@ def main():
                 how = "references" if typ in ("U", "u") else "defines"
                 hits.append(f"{where} {how} {name} ({typ})")
     if hits:
-        return fail("the firmware link holds the container parse's "
-                    "policy-taking entry, which only the host may link "
-                    "(svc/plugin/plugin_load_host.c): "
-                    + "; ".join(hits) + ".  The firmware's loader reads the "
-                    "board's policy by name (plugin_parse(), plugin_board_"
-                    "policy); an entry that takes one could be handed a "
-                    "policy other than the one the build reads back")
+        return fail("the firmware link holds an entry that takes what the "
+                    "firmware must read by name: "
+                    + "; ".join(hits) + ".  The loader reads the board's "
+                    "policy (plugin_board_policy) and its bindings "
+                    "(plugin_board_bindings) by name; an entry that takes "
+                    "either could be handed something other than what the "
+                    "build reads back.  plugin_parse_with_policy() is the "
+                    "host's (svc/plugin/plugin_load_host.c); the others are "
+                    "the pre-#165 forms of plugin_exec_start(), "
+                    "plugin_run_start(), nn_active_report_to() and "
+                    "plugin_painter_init()")
     print(f"check_policy_entry: OK -- {read} inputs of the firmware link "
           f"({len(readable)} objects, {read - len(readable)} archive "
           f"members) read through {os.path.basename(args.nm)}; none defines "

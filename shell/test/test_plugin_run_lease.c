@@ -4,7 +4,7 @@
  *
  * Host test for the loader's plugin-lease checks (issue #130), shared since
  * issue #159 (svc/plugin/plugin_run_core.c, used by wio-lite-ai and
- * f746g-disco): plugin_run_load() refuses a caller that does not hold the lease
+ * f746g-disco): plugin_run_start() refuses a caller that does not hold the lease
  * before the shared loader touches anything, the exec_ok hook asks again
  * immediately before entry(), and plugin_run_unload() refuses too.  The same
  * three checks, and the same shape of test, as grove-vision-ai-v2's since issue
@@ -33,6 +33,7 @@
  * be observed as "it did not call".
  */
 #include "plugin_run_core.h"
+#include "plugin_bindings.h"
 #include "plugin_lease_api.h"
 
 #include <stdarg.h>
@@ -168,7 +169,11 @@ static void expect(const char *what, int cond, const char *fmt, ...)
 
 static uint8_t container[256];
 static struct plugin_view view;
-static struct plugin_base_api base;
+/* The board's table (issue #165): what the loader hands entry(). */
+const struct plugin_bindings plugin_board_bindings = {
+	.base = { PLUGIN_ABI_VERSION, (uint32_t)sizeof(struct plugin_base_api),
+	          NULL, NULL, NULL },
+};
 
 static void setup(void)
 {
@@ -183,8 +188,6 @@ static void setup(void)
 
 	mpu_asks = 0u;
 	syncs    = 0u;
-	base.version = PLUGIN_ABI_VERSION;
-	base.size    = (uint32_t)sizeof base;
 
 	held_script   = NULL;
 	held_script_n = 0u;
@@ -217,14 +220,14 @@ static int image_copied(void)
  * caller passes too. */
 static enum plugin_run_result load(void)
 {
-	return plugin_run_load(&view, container, container,
-	                       (uint32_t)sizeof container, &base);
+	return plugin_run_start(&view, container, container,
+	                        (uint32_t)sizeof container);
 }
 
 /* What this file walks without the lease; cmake/check_lease_entries.py holds
  * it against the functions plugin_run_core.c defines. */
 /* LEASE ENTRIES BEGIN */
-static const char *const walked[] = { "plugin_run_load", "plugin_run_unload",
+static const char *const walked[] = { "plugin_run_start", "plugin_run_unload",
                                       "plugin_run_exec_ok" };
 /* LEASE ENTRIES END */
 
@@ -323,7 +326,7 @@ int main(void)
 	expect("  ...with nothing counted", unheld == u0, "%u", unheld - u0);
 
 	/* [!] The hook itself, called directly without the lease: refused with the
-	 * one reason plugin_run_load() recognises, counted once, the MPU never
+	 * one reason plugin_run_start() recognises, counted once, the MPU never
 	 * asked -- and with it held, the MPU's verdict is the answer. */
 	for (o = 0u; o < 2u; o++) {
 		const char *why = NULL;

@@ -12,6 +12,8 @@
  */
 #include "nn_active_core.h"
 
+#include "plugin_bindings.h"
+
 /* The parameter id the threshold travels as (asset/plugins/blazeface). */
 #define NN_ACTIVE_PARAM_THRESH_MILLI 0u
 
@@ -87,21 +89,19 @@ int nn_active_core_can_report(const struct nn_active_board *b)
 	return b->slot(PLUGIN_SLOT_REPORT) != NULL;
 }
 
-int nn_active_core_report(const struct nn_active_board *b,
-                          nn_svc_write_fn write, void *ctx)
+int nn_active_core_report_to(const struct nn_active_board *b, void *ctx)
 {
 	plugin_report_fn fn = (plugin_report_fn)b->slot(PLUGIN_SLOT_REPORT);
 	struct plugin_printer out;
 
-	if (!nn_active_core_is_plugin(b) || fn == NULL || write == NULL)
+	if (!nn_active_core_is_plugin(b) || fn == NULL ||
+	    plugin_board_bindings.write == NULL)
 		return 0;
 
-	/* Version and size first: the plugin's veneer refuses a printer without
-	 * them (issue #111). */
-	out.version = PLUGIN_ABI_VERSION;
-	out.size    = (uint32_t)sizeof(out);
-	out.ctx     = ctx;
-	out.write   = write;
+	/* The write is the board table's (issue #165): the caller hands where the
+	 * text goes and no function.  Version and size first, as the plugin's
+	 * veneer requires (issue #111). */
+	plugin_printer_init(&out, ctx);
 	b->note(PLUGIN_SLOT_REPORT, NN_ACTIVE_CORE_SP());
 	return fn(&out);
 }

@@ -76,12 +76,8 @@ extern "C" {
 #define NN_ACTIVE_FRAME_W 320
 #define NN_ACTIVE_FRAME_H 240
 
-/**
- * @brief  The base vtable a plugin is handed.  Never NULL, never moves.
- *
- * `static const` in .rodata: the plugin keeps the pointer for its lifetime.
- */
-const struct plugin_base_api *nn_active_base(void);
+/* The base vtable a plugin is handed is the head of plugin_board_bindings
+ * (svc/plugin/plugin_bindings.h, issue #165), defined in nn_active.c. */
 
 /** The base's transform -- model input coordinates to frame pixels.  Declared
  *  here so that what a plugin is handed can be exercised directly: it is the

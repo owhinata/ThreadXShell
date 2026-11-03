@@ -28,7 +28,10 @@
 #include "nn_active_core.h"
 #include "nn_camera.h"       /* nn_camera_note_depth_at(), the frame geometry */
 #include "nn_desc.h"         /* nn_desc_of(): nn_tensor -> tensor_desc        */
+#include "plugin_bindings.h"
+#include "plugin_paint.h"     /* the painter primitives */
 #include "plugin_run_core.h"
+#include "nn_report.h"       /* nn_report_write(): the printer */
 
 /* ---- tensors ------------------------------------------------------------- */
 
@@ -164,15 +167,23 @@ static void nn_plugin_log(void *ctx, const char *s, size_t len)
 		log_write_bytes(LOG_LEVEL_INF, LOG_TAG, "plugin: ", s, len, " ...");
 }
 
-static const struct plugin_base_api nn_plugin_base = {
-	.version  = PLUGIN_ABI_VERSION,
-	.size     = sizeof(struct plugin_base_api),
-	.ctx      = NULL,
-	.log      = nn_plugin_log,
-	.to_frame = nn_active_to_frame,
+/*
+ * [!] THE SIX FUNCTIONS A PLUGIN CAN REACH, UNDER THE NAME THE LOADER AND THE
+ * BUILD READ (plugin_bindings.h, issue #165).  The head is the base the plugin
+ * is handed at entry; the painter and the printer are filled from the rest.
+ * cmake/check_veneer_base_cost.py derives the stack below each veneer from
+ * these words in shell.elf -- there is no second list of the six.
+ */
+const struct plugin_bindings plugin_board_bindings = {
+	.base = {
+		.version  = PLUGIN_ABI_VERSION,
+		.size     = (uint32_t)sizeof(struct plugin_base_api),
+		.ctx      = NULL,
+		.log      = nn_plugin_log,
+		.to_frame = nn_active_to_frame,
+	},
+	.rect      = paint_rect,
+	.fill_rect = paint_fill_rect,
+	.blit      = paint_blit,
+	.write     = nn_report_write,
 };
-
-const struct plugin_base_api *nn_active_base(void)
-{
-	return &nn_plugin_base;
-}

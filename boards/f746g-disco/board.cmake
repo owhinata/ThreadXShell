@@ -780,6 +780,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_mpu_v7m.c"  # the Armv7-M MPU verdict
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_budget.c"
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_span.c"
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_bindings.c"   # the six (#165)
         "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_lease_miss.c"
         "${BOARD_DIR}/port/nn/nn_active.c"                # this board's facts
@@ -837,11 +838,10 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # nothing checked.
     set(F746_PLUGIN_VENEER_BASE_COST 640)
 
-    # The firmware side of that charge: the function this board binds behind
-    # each veneer (nn_plugin_base in port/nn/nn_active.c, the painter in
-    # port/plugin/plugin_paint.c, the report sink in svc/nn/nn_report.c), the
-    # charge -- the SAME variable every add_plugin() below is given -- and where
-    # the toolchain's archives live.  `flash` and every container's pack wait
+    # The firmware side of that charge: the charge -- the SAME variable every
+    # add_plugin() below is given -- and where the toolchain's archives live.
+    # The function behind each veneer is read out of shell.elf, from
+    # plugin_board_bindings in port/nn/nn_active.c (issue #165).  `flash` and every container's pack wait
     # for the check, and for the policy read back out of shell.elf.
     get_filename_component(_f746_gcc_bin "${CMAKE_C_COMPILER}" DIRECTORY)
     get_filename_component(F746_TOOLCHAIN_ROOT "${_f746_gcc_bin}" DIRECTORY)
@@ -850,12 +850,6 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         FIRMWARE shell
         MAP      "${CMAKE_BINARY_DIR}/shell.map"
         DECLARED ${F746_PLUGIN_VENEER_BASE_COST}
-        ROOTS    pl_base_log=nn_plugin_log
-                 pl_base_to_frame=nn_active_to_frame
-                 pl_paint_rect=paint_rect
-                 pl_paint_fill_rect=paint_fill_rect
-                 pl_paint_blit=paint_blit
-                 pl_print_write=nn_report_write
         PREBUILT_ROOTS "${F746_TOOLCHAIN_ROOT}"
         DELIVERY flash)
 

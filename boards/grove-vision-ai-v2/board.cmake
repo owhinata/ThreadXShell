@@ -437,6 +437,7 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_exec.c"
     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_budget.c"
     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_span.c"
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_bindings.c"   # the six (#165)
     "${BOARD_DIR}/port/plugin/plugin_run.c"
     "${BOARD_DIR}/port/plugin/plugin_paint.c"
     # The one lock every path into the plugin takes (issue #127): the mutex
@@ -2019,21 +2020,16 @@ set(GROVE_PLUGIN_VENEER_BASE_COST 256)
 # The firmware side of that charge (issue #112): the build derives the stack
 # below each veneer from shell.elf and refuses a declaration under it, and
 # `flash` and every container's pack wait for that to pass.  What is stated
-# here is this board's: the function it binds behind each veneer (see
-# nn_plugin_base and plugin_paint_bind()), the charge -- the SAME variable
-# every add_plugin() below is given -- and where the toolchain's and Himax's
-# prebuilt archives live.  What gets -fstack-usage is derived by the helper.
+# here is this board's: the charge -- the SAME variable every add_plugin()
+# below is given -- and where the toolchain's and Himax's prebuilt archives
+# live.  The function behind each veneer is not stated here: the check reads
+# it out of shell.elf, from plugin_board_bindings (port/nn/nn_svc_grove.c,
+# issue #165).  What gets -fstack-usage is derived by the helper.
 include("${CMAKE_SOURCE_DIR}/cmake/veneer_cost_gate.cmake")
 veneer_cost_gate(
     FIRMWARE shell
     MAP      "${CMAKE_BINARY_DIR}/shell.map"
     DECLARED ${GROVE_PLUGIN_VENEER_BASE_COST}
-    ROOTS    pl_base_log=nn_plugin_log
-             pl_base_to_frame=nn_active_to_frame
-             pl_paint_rect=paint_rect
-             pl_paint_fill_rect=paint_fill_rect
-             pl_paint_blit=paint_blit
-             pl_print_write=nn_report_write
     PREBUILT_ROOTS "${GROVE_TOOLCHAIN_ROOT}" "${SDK}/prebuilt_libs"
     DELIVERY flash)
 

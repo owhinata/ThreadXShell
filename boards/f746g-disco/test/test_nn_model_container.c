@@ -93,13 +93,12 @@ void plugin_lease_give(void)
 	lease_held_now = 0;
 }
 
-enum plugin_run_result plugin_run_load(const struct plugin_view *v,
-                                       const void *container,
-                                       const void *stage, uint32_t cap,
-                                       const struct plugin_base_api *base)
+enum plugin_run_result plugin_run_start(const struct plugin_view *v,
+                                        const void *container,
+                                        const void *stage, uint32_t cap)
 {
 	(void)v;
-	assert(lease_held_now && base != NULL);
+	assert(lease_held_now);
 	pl_loads++;
 	pl_container = container;
 	pl_stage     = stage;
@@ -129,14 +128,6 @@ void plugin_run_unload(void)
 int plugin_run_active(void)
 {
 	return pl_active;
-}
-
-static const struct plugin_base_api test_base = { PLUGIN_ABI_VERSION,
-	sizeof(struct plugin_base_api), NULL, NULL, NULL };
-
-const struct plugin_base_api *nn_active_base(void)
-{
-	return &test_base;
 }
 
 /* ---- the staging slot and the stub backend ------------------------------- */

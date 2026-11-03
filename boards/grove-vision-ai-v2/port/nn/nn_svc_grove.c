@@ -42,8 +42,10 @@
 #include "camera.h"
 #include "cam_dp.h"
 #include "fmt.h"
+#include "plugin_bindings.h"  /* plugin_board_bindings: the six (#165) */
 #include "plugin_info.h"
 #include "plugin_load.h"
+#include "plugin_paint.h"    /* the painter primitives */
 #include "plugin_run.h"
 #include "plugin_target.h"   /* the target word this build provides (#108) */
 #include "cam_lcd_sink.h"     /* nn holds the panel's stream (#142) */
@@ -588,12 +590,25 @@ static void nn_plugin_log(void *ctx, const char *s, size_t len)
 		log_write_bytes(LOG_LEVEL_INF, LOG_TAG, "plugin: ", s, len, " ...");
 }
 
-static const struct plugin_base_api nn_plugin_base = {
-	.version  = PLUGIN_ABI_VERSION,
-	.size     = (uint32_t)sizeof(struct plugin_base_api),
-	.ctx      = NULL,
-	.log      = nn_plugin_log,
-	.to_frame = nn_active_to_frame,
+/*
+ * [!] THE SIX FUNCTIONS A PLUGIN CAN REACH, UNDER THE NAME THE LOADER AND THE
+ * BUILD READ (plugin_bindings.h, issue #165).  The head is the base the plugin
+ * is handed at entry; the painter and the printer are filled from the rest.
+ * cmake/check_veneer_base_cost.py derives the stack below each veneer from
+ * these words in shell.elf -- there is no second list of the six.
+ */
+const struct plugin_bindings plugin_board_bindings = {
+	.base = {
+		.version  = PLUGIN_ABI_VERSION,
+		.size     = (uint32_t)sizeof(struct plugin_base_api),
+		.ctx      = NULL,
+		.log      = nn_plugin_log,
+		.to_frame = nn_active_to_frame,
+	},
+	.rect      = paint_rect,
+	.fill_rect = paint_fill_rect,
+	.blit      = paint_blit,
+	.write     = nn_report_write,
 };
 
 /*
@@ -956,7 +971,7 @@ static int nn_life_lease_take(struct nn_core_model_job *j)
  *
  * [!] STILL INSIDE THE LEASE.  The image is read from the XIP window, and the
  * window is only pinned while this lease is live -- which is why the NPU keeps
- * it for as long as the model is open.  plugin_run_load() checks it too,
+ * it for as long as the model is open.  plugin_run_start() checks it too,
  * because a later caller may not know that.
  *
  * A container with no plugin is not a failure: the model half of it is still
@@ -972,9 +987,9 @@ static int nn_life_plugin_start(struct nn_core_model_job *j)
 	const struct nn_grove_job *g = j->board;
 	enum plugin_run_result pr;
 
-	pr = plugin_run_load(&nn_claims_next.view,
-	                     (const void *)(uintptr_t)g->r.src,
-	                     npu_hw_flash_lease(), &nn_plugin_base);
+	pr = plugin_run_start(&nn_claims_next.view,
+	                      (const void *)(uintptr_t)g->r.src,
+	                      npu_hw_flash_lease());
 	if (pr == PLUGIN_RUN_OK || pr == PLUGIN_RUN_NO_PLUGIN)
 		return NN_SVC_OK;
 	nn_detail_set("slot %d ('%s'): %s", g->r.slot, g->name,
@@ -1256,7 +1271,7 @@ static void nn_capture_report(const struct nn_det_snapshot *snap,
 	else if (rc != 1)
 		nn_report_set(rep, NN_REPORT_UNSUPPORTED);
 	else
-		nn_report_end(rep, nn_active_report(nn_report_write, rep));
+		nn_report_end(rep, nn_active_report_to(rep));
 }
 
 /* Every exit of `nn run` after its claim: settle the one-shot, and if that is

@@ -62,7 +62,9 @@ extern "C" {
  * @param stage      the staging region the caller was handed by its backend,
  *                   and @p cap its size.  Passed in, not looked up -- above
  * @param cap        the size of that region
- * @param base       the vtable handed to the plugin; must outlive the plugin
+ *
+ * The plugin is handed the board's table (plugin_board_bindings), as
+ * plugin_exec_start() says (issue #165).
  *
  * @return PLUGIN_RUN_OK, or a reason.  PLUGIN_RUN_NO_PLUGIN when the container
  *         carries only a model -- a legal container, and the caller carries on.
@@ -71,13 +73,12 @@ extern "C" {
  * Logs its own refusals (plugin_run_log()): plugin_exec.c returns diagnostics
  * rather than printing them, precisely so that the board decides where they go.
  */
-enum plugin_run_result plugin_run_load(const struct plugin_view *v,
-                                       const void *container,
-                                       const void *stage, uint32_t cap,
-                                       const struct plugin_base_api *base);
+enum plugin_run_result plugin_run_start(const struct plugin_view *v,
+                                        const void *container,
+                                        const void *stage, uint32_t cap);
 
 /**
- * plugin_run_load()'s own refusal: the caller does not hold the plugin lease
+ * plugin_run_start()'s own refusal: the caller does not hold the plugin lease
  * (svc/plugin/plugin_lease_api.h, issue #130).  Never returned by the shared
  * loader, whose enum this cannot extend; outside its range on purpose, so it
  * cannot be mistaken for any of them -- and the same value as
@@ -147,14 +148,14 @@ void plugin_run_note_entry(uintptr_t sp);
  * The exec_ok hook: entry()'s depth, then the lease asked again at the branch,
  * then the board's MPU verdict.  Called by plugin_exec.c from the frame entry()
  * is called from.  A caller without the lease gets -1 and the one reason only
- * this file returns, by which plugin_run_load() names the refusal NOT_HELD
+ * this file returns, by which plugin_run_start() names the refusal NOT_HELD
  * rather than letting the loader's PLUGIN_RUN_MPU stand for it.
  */
 int plugin_run_exec_ok(uint32_t lo, uint32_t hi, const char **why);
 
 /**
  * The source_ok hook: the whole of what will be read lies inside the staging
- * region the caller was handed (@p token is plugin_run_load()'s own record of
+ * region the caller was handed (@p token is plugin_run_start()'s own record of
  * it, on its stack).
  */
 int plugin_run_source_ok(const void *container, uint32_t len, uintptr_t token,

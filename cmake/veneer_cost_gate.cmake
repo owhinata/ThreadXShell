@@ -18,8 +18,6 @@
 #      MAP            <path>            that link's map
 #      DECLARED       <bytes>           the board's VENEER_BASE_COST -- the SAME
 #                                       variable every add_plugin() is given
-#      ROOTS          <veneer=func ...> the firmware function behind each veneer
-#                                       of the plugin ABI; one per veneer
 #      PREBUILT_ROOTS <dir ...>         archives under these are the toolchain's
 #                                       or a vendor's and need no record
 #      DELIVERY       <target ...>      the targets that put this firmware on
@@ -27,8 +25,13 @@
 #  )
 #
 #  [!] THE BOARD STATES FACTS; THE HELPER DERIVES THE REST.  What the board
-#  passes is what only the board knows: which function it binds to each veneer,
-#  what it declares, where its vendor's archives live, what flashes it.  What
+#  passes is what only the board knows: what it declares, where its vendor's
+#  archives live, what flashes it.  Which function sits behind each veneer is
+#  NOT passed (issue #165): the check reads it out of the shipped image, from
+#  the board's plugin_board_bindings -- the table the loader hands the plugin
+#  and fills the painter and printer from (svc/plugin/plugin_bindings.h).  A
+#  ROOTS list here was a second statement of the same fact, free to name
+#  shallow functions while the table bound deep ones.  What
 #  gets -fstack-usage is NOT passed: the helper walks the firmware's own link
 #  inputs -- $<TARGET_OBJECTS:> sources and linked OBJECT / STATIC libraries,
 #  through interface libraries -- and instruments every compile it finds.  A
@@ -109,7 +112,17 @@ include("${CMAKE_CURRENT_LIST_DIR}/plugin_stack_table.cmake")
 function(veneer_cost_gate)
     cmake_parse_arguments(G "" "FIRMWARE;MAP;DECLARED"
                           "ROOTS;PREBUILT_ROOTS;DELIVERY" ${ARGN})
-    foreach(_req FIRMWARE MAP DECLARED ROOTS PREBUILT_ROOTS DELIVERY)
+    # [!] ROOTS IS PARSED ONLY TO BE REFUSED (issue #165).  Left out of the
+    # keywords, it would be read as more values of whichever keyword came
+    # before it; the roots are the board's plugin_board_bindings, read out of
+    # the shipped image, and a list stated here is a second statement of them.
+    if(DEFINED G_ROOTS OR "ROOTS" IN_LIST G_KEYWORDS_MISSING_VALUES)
+        message(FATAL_ERROR
+            "veneer_cost_gate(): ROOTS is not accepted -- the function behind "
+            "each veneer is read out of the shipped image, from the board's "
+            "plugin_board_bindings (svc/plugin/plugin_bindings.h)")
+    endif()
+    foreach(_req FIRMWARE MAP DECLARED PREBUILT_ROOTS DELIVERY)
         if(NOT DEFINED G_${_req} OR "${G_${_req}}" STREQUAL "")
             message(FATAL_ERROR "veneer_cost_gate(): ${_req} is required")
         endif()
@@ -124,12 +137,6 @@ function(veneer_cost_gate)
             "veneer_cost_gate(): DECLARED must be a positive byte count, got "
             "'${G_DECLARED}'.  Zero is not a cost.")
     endif()
-    foreach(_r IN LISTS G_ROOTS)
-        if(NOT _r MATCHES "^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z_][A-Za-z0-9_.]*$")
-            message(FATAL_ERROR
-                "veneer_cost_gate(): ROOTS takes VENEER=FUNCTION, got '${_r}'")
-        endif()
-    endforeach()
     if(NOT TARGET "${G_FIRMWARE}")
         message(FATAL_ERROR
             "veneer_cost_gate(): FIRMWARE '${G_FIRMWARE}' is not a target")
@@ -154,7 +161,6 @@ function(veneer_cost_gate)
     set_property(GLOBAL PROPERTY VENEER_GATE_STAMP "${_stamp}")
     set_property(GLOBAL PROPERTY VENEER_GATE_MAP "${G_MAP}")
     set_property(GLOBAL PROPERTY VENEER_GATE_DECLARED "${G_DECLARED}")
-    set_property(GLOBAL PROPERTY VENEER_GATE_ROOTS "${G_ROOTS}")
     set_property(GLOBAL PROPERTY VENEER_GATE_PREBUILT "${G_PREBUILT_ROOTS}")
     set_property(GLOBAL PROPERTY VENEER_GATE_DELIVERY "${G_DELIVERY}")
 
@@ -281,7 +287,6 @@ function(_veneer_cost_gate_finish)
     get_property(stamp GLOBAL PROPERTY VENEER_GATE_STAMP)
     get_property(map GLOBAL PROPERTY VENEER_GATE_MAP)
     get_property(declared GLOBAL PROPERTY VENEER_GATE_DECLARED)
-    get_property(roots GLOBAL PROPERTY VENEER_GATE_ROOTS)
     get_property(prebuilt GLOBAL PROPERTY VENEER_GATE_PREBUILT)
     get_property(delivery GLOBAL PROPERTY VENEER_GATE_DELIVERY)
     get_property(costs GLOBAL PROPERTY VENEER_GATE_PLUGIN_COSTS)
@@ -328,6 +333,11 @@ function(_veneer_cost_gate_finish)
     # otherwise not reach the image as a symbol.
     target_link_options("${fw}" PRIVATE
         "-Wl,--require-defined=plugin_board_policy")
+    # [!] AND THE BOARD'S BINDINGS AND THE RECORD OF WHICH WORD IS WHICH
+    # VENEER (issue #165): the check derives its roots from both, by name.
+    target_link_options("${fw}" PRIVATE
+        "-Wl,--require-defined=plugin_board_bindings"
+        "-Wl,--require-defined=plugin_bind_probe")
     # The plugin-aware nm the entry check reads LTO objects with: the gcc-nm
     # beside the gcc-ar CMake found for this compiler (plain nm sees an IR
     # object's wrapper and nothing in it).
@@ -347,9 +357,6 @@ function(_veneer_cost_gate_finish)
         VERBATIM)
 
     set(_args "")
-    foreach(_r IN LISTS roots)
-        list(APPEND _args "--root=${_r}")
-    endforeach()
     foreach(_p IN LISTS prebuilt)
         list(APPEND _args --prebuilt-root "${_p}")
     endforeach()
@@ -367,7 +374,7 @@ function(_veneer_cost_gate_finish)
     # passes, so a failed check leaves no stamp for a later build to trust.
     # The check re-runs whenever the image, any of its scripts (the veneer set
     # lives in check_plugin_image.py, the decoder and the walk in
-    # thumb_stack_analysis.py since issue #124) or its command line -- roots,
+    # thumb_stack_analysis.py since issue #124) or its command line --
     # declaration, printer limits -- changes.  The witness records are not listed: each is
     # written by the same compile or link that rewrites the image.
     get_filename_component(_stamp_dir "${stamp}" DIRECTORY)

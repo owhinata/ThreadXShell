@@ -20,7 +20,7 @@
  *     with the same stack pointer, and the hook samples there: the hook's own
  *     frame is on top, so the number is an UPPER BOUND on the entry depth and
  *     needs no constant read off an ELF.  The sample waits in a
- *     struct nn_probe_pending until plugin_run_load() knows whether entry()
+ *     struct nn_probe_pending until plugin_run_start() knows whether entry()
  *     was CALLED -- the load succeeded, or entry() ran and refused -- and is
  *     recorded only then (see nn_probe_pending_settle()).
  *

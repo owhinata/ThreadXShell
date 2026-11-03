@@ -108,10 +108,10 @@ int nn_active_core_can_draw(const struct nn_active_board *b);
 /** Will it describe its result?  0 with no plugin. */
 int nn_active_core_can_report(const struct nn_active_board *b);
 
-/** Let it describe its result: what its report returned, or 0 with no plugin,
- *  no report slot or no writer. */
-int nn_active_core_report(const struct nn_active_board *b,
-                          nn_svc_write_fn write, void *ctx);
+/** Let it describe its result into @p ctx, through the board's write
+ *  (plugin_board_bindings, issue #165): what its report returned, or 0 with no
+ *  plugin, no report slot or no writer. */
+int nn_active_core_report_to(const struct nn_active_board *b, void *ctx);
 
 /** The plugin's threshold in milli, or NN_SVC_THRESH_NONE when nothing holds
  *  one (no plugin, no param_get slot, or the plugin declines). */

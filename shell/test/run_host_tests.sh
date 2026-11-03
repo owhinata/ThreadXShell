@@ -430,6 +430,16 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     $LDFLAGS -o "$out/test_plugin_paint_span"
 "$out/test_plugin_paint_span"
 
+# issue #165 -- the board's bindings table (svc/plugin/plugin_bindings.c): the
+# painter and printer are filled from it, and the record of which word is
+# which veneer is held against the plugin's own veneers (asset/common/
+# plugin_base.c), the second source cmake/check_veneer_base_cost.py relies on.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$repo/asset/common" \
+    "$here/test_plugin_bindings.c" "$svc/plugin/plugin_bindings.c" \
+    "$repo/asset/common/plugin_base.c" \
+    $LDFLAGS -o "$out/test_plugin_bindings"
+"$out/test_plugin_bindings"
+
 # issue #126 -- the one place that decides whether a plugin decodes
 # (svc/nn/nn_active_core.c), shared by grove-vision-ai-v2 and wio-lite-ai: which
 # slot is called, with what, how often, and what is answered when none is.
@@ -439,7 +449,7 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
 # it, and a question that calls nothing samples nothing.  Each board's own
 # test drives its port nn_active.c through this file with the real plugin.
 gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
-    "$here/test_nn_active_core.c" "$svc/nn/nn_active_core.c" \
+    "$here/test_nn_active_core.c" "$svc/nn/nn_active_core.c" "$svc/plugin/plugin_bindings.c" \
     $LDFLAGS -o "$out/test_nn_active_core"
 "$out/test_nn_active_core"
 
@@ -528,7 +538,7 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
 # hole read as zeroed rather than as the board's residue.
 gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_nn_active_lease.c" "$svc/nn/nn_active_lease.c" \
-    "$svc/nn/nn_active_core.c" \
+    "$svc/nn/nn_active_core.c" "$svc/plugin/plugin_bindings.c" \
     $LDFLAGS -o "$out/test_nn_active_lease"
 "$out/test_nn_active_lease"
 

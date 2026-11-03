@@ -37,7 +37,7 @@
 #include "tx_api.h"
 
 #if defined(CONFIG_NN_BACKEND_TFLM)
-#include "nn_active.h"       /* nn_active_base(): what a started plugin is handed */
+#include "nn_active.h"
 #include "nn_container.h"
 #include "plugin_claims.h"   /* the open model's claims and `nn info` lines */
 #include "plugin_lease.h"    /* the one lock into the plugin (#159 Step 4b) */
@@ -474,7 +474,7 @@ static int nn_life_lease_take(struct nn_core_model_job *j)
  * D6).  The copy into the reservation has already destroyed the previous
  * plugin, so there is no rollback: the model stays open with nothing reading
  * it (Step 4c: no resident decoder), and the status says the load did not
- * give what was asked for.  plugin_run_load() also logs its own reason.
+ * give what was asked for.  plugin_run_start() also logs its own reason.
  *
  * [!] THE STAGING REGION IS PASSED, NOT LOOKED UP: the slot the reader filled
  * (f->buf, f->cap) is the region the container lies in, and the backend's
@@ -487,8 +487,7 @@ static int nn_life_plugin_start(struct nn_core_model_job *j)
 	enum plugin_run_result pr;
 
 	/* entry()'s depth is sampled in the loader's exec_ok hook. */
-	pr = plugin_run_load(&f->claims.view, f->buf, f->buf, f->cap,
-	                     nn_active_base());
+	pr = plugin_run_start(&f->claims.view, f->buf, f->buf, f->cap);
 	if (pr == PLUGIN_RUN_OK || pr == PLUGIN_RUN_NO_PLUGIN)
 		return NN_SVC_OK;
 	nn_detail_set("%s: %s", j->spec->path, plugin_run_why(pr));

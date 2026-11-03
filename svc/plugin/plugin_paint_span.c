@@ -96,23 +96,3 @@ int plugin_paint_blit_begin(struct plugin_paint_budget *bud, uint16_t w,
 	 */
 	return plugin_paint_charge(bud, s->cols * s->rows);
 }
-
-void plugin_paint_vtable(struct plugin_painter *p, void *ctx,
-                         void (*rect)(void *ctx, const struct plugin_rect *r,
-                                      uint16_t rgb565, uint16_t stroke),
-                         void (*fill_rect)(void *ctx,
-                                           const struct plugin_rect *r,
-                                           uint16_t rgb565),
-                         void (*blit)(void *ctx, const struct plugin_rect *r,
-                                      const uint16_t *src, uint32_t src_stride,
-                                      int32_t key))
-{
-	if (p == NULL)
-		return;
-	p->version   = PLUGIN_ABI_VERSION;
-	p->size      = (uint32_t)sizeof(*p);
-	p->ctx       = ctx;
-	p->rect      = rect;
-	p->fill_rect = fill_rect;
-	p->blit      = blit;
-}

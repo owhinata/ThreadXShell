@@ -202,7 +202,7 @@ gcc $CFLAGS -DPLUGIN_PAINT_COUNT_STORES -I "$board/port/plugin" \
     -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
     "$HOST_TEST_SVC/plugin/plugin_paint_budget.c" \
-    "$HOST_TEST_SVC/plugin/plugin_paint_span.c" "$HOST_TEST_SVC/rect_geom.c" \
+    "$HOST_TEST_SVC/plugin/plugin_bindings.c" "$HOST_TEST_SVC/plugin/plugin_paint_span.c" "$HOST_TEST_SVC/rect_geom.c" \
     $LDFLAGS -o "$out/test_plugin_paint_f746"
 "$out/test_plugin_paint_f746"
 

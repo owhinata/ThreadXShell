@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the loader's two plugin-lease checks (issue #127,
- * port/plugin/plugin_run.c): plugin_run_load() refuses a caller that does not
+ * port/plugin/plugin_run.c): plugin_run_start() refuses a caller that does not
  * hold the lease before the shared loader touches anything, and the exec_ok
  * hook asks again immediately before entry().
  *
@@ -27,6 +27,7 @@
  * "it did not unpublish" can only be observed as "it did not call".
  */
 #include "plugin_run.h"
+#include "plugin_bindings.h"
 #include "plugin_lease.h"
 #include "plugin_mpu.h"
 #include "nn_probe.h"
@@ -188,7 +189,11 @@ static void expect(const char *what, int cond, const char *fmt, ...)
 
 static uint8_t container[256];
 static struct plugin_view view;
-static struct plugin_base_api base;
+/* The board's table (issue #165): what the loader hands entry(). */
+const struct plugin_bindings plugin_board_bindings = {
+	.base = { PLUGIN_ABI_VERSION, (uint32_t)sizeof(struct plugin_base_api),
+	          NULL, NULL, NULL },
+};
 
 static void setup(void)
 {
@@ -206,8 +211,6 @@ static void setup(void)
 	test_mpu.CTRL = PLUGIN_MPU_CTRL_ENABLE;
 	test_mpu.TYPE = 0u;
 
-	base.version = PLUGIN_ABI_VERSION;
-	base.size    = (uint32_t)sizeof base;
 
 	held_script   = NULL;
 	held_script_n = 0u;
@@ -238,7 +241,7 @@ static int image_copied(void)
 
 static enum plugin_run_result load(void)
 {
-	return plugin_run_load(&view, container, 0u, &base);
+	return plugin_run_start(&view, container, 0u);
 }
 
 int main(void)

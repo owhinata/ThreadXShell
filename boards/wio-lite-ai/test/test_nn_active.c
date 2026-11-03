@@ -45,6 +45,8 @@
  * added without a row is a failure, not a gap.
  */
 #include "nn_active.h"
+#include "plugin_bindings.h"
+#include "plugin_paint.h"
 #include "nn_camera.h"
 #include "nn_desc.h"
 #include "plugin_lease.h"
@@ -283,12 +285,26 @@ static void rec_reset(void)
 
 static size_t cap_len;
 
-static int cap_write(void *ctx, const char *s, size_t len)
+/* The report's write is the board table's (port/nn/nn_active.c, issue #165):
+ * svc/nn/nn_report.c's nn_report_write, which this test stands in for so the
+ * plugin's bytes are counted here. */
+int nn_report_write(void *ctx, const char *s, size_t len)
 {
 	(void)ctx; (void)s;
 	cap_len += len;
 	return (int)len;
 }
+
+/* The painter's three, which the board's table also names: plugin_paint.c's,
+ * not linked here (this test draws through its own recording painter). */
+void paint_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565,
+                uint16_t stroke)
+{ (void)ctx; (void)r; (void)rgb565; (void)stroke; }
+void paint_fill_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565)
+{ (void)ctx; (void)r; (void)rgb565; }
+void paint_blit(void *ctx, const struct plugin_rect *r, const uint16_t *src,
+                uint32_t src_stride, int32_t key)
+{ (void)ctx; (void)r; (void)src; (void)src_stride; (void)key; }
 
 /* The threshold as a number, through the shim's status-and-out-parameter form
  * (issue #130); NN_SVC_THRESH_NONE for anything but OK. */
@@ -325,7 +341,7 @@ enum entry_id {
 /* LEASE ENTRIES BEGIN */
 static const char *const entry_name[E_COUNT] = {
 	"nn_active_shapes_ok", "nn_active_decode", "nn_active_draw",
-	"nn_active_can_draw", "nn_active_can_report", "nn_active_report",
+	"nn_active_can_draw", "nn_active_can_report", "nn_active_report_to",
 	"nn_active_get_thresh_milli", "nn_active_set_thresh_milli",
 };
 /* LEASE ENTRIES END */
@@ -351,7 +367,7 @@ static int call_entry(enum entry_id e, unsigned *thresh_out)
 	case E_DRAW:        rec_reset(); return nn_active_draw(&rec_painter);
 	case E_CAN_DRAW:    return nn_active_can_draw();
 	case E_CAN_REPORT:  return nn_active_can_report();
-	case E_REPORT:      cap_len = 0u; return nn_active_report(cap_write, NULL);
+	case E_REPORT:      cap_len = 0u; return nn_active_report_to(NULL);
 	case E_THRESH_GET:
 		*thresh_out = 12345u;
 		return nn_active_get_thresh_milli(thresh_out);
@@ -500,7 +516,7 @@ int main(void)
 
 	cap_len = 0u;
 	expect("it describes nothing, successfully",
-	       nn_active_report(cap_write, NULL) == 0 && cap_len == 0u,
+	       nn_active_report_to(NULL) == 0 && cap_len == 0u,
 	       "wrote %lu B", (unsigned long)cap_len);
 	expect("and says so beforehand", nn_active_can_report() == 0,
 	       "claims a report");
@@ -543,8 +559,8 @@ int main(void)
 
 		/* pl_loaded stays 0 across the call, as the loader's own flag does on
 		 * the board: entry() runs before the plugin is published. */
-		expect("the plugin accepts the base vtable",
-		       entry(nn_active_base()) == 0, "refused");
+		expect("the plugin accepts the base vtable (the head of the board's table)",
+		       entry(&plugin_board_bindings.base) == 0, "refused");
 		pl_loaded = 1;
 	}
 
@@ -566,7 +582,7 @@ int main(void)
 
 	cap_len = 0u;
 	expect("it describes its own result", nn_active_can_report() != 0 &&
-	       nn_active_report(cap_write, NULL) >= 0 && cap_len > 0u,
+	       nn_active_report_to(NULL) >= 0 && cap_len > 0u,
 	       "wrote %lu B", (unsigned long)cap_len);
 
 	/* ================================================================
@@ -689,7 +705,7 @@ int main(void)
 		       "%u/%u/%u", depth_notes[0], depth_notes[1], depth_notes[2]);
 		memset(depth_notes, 0, sizeof depth_notes);
 		(void)nn_active_shapes_ok(&stub);
-		(void)nn_active_report(cap_write, NULL);
+		(void)nn_active_report_to(NULL);
 		(void)get_thresh();
 		(void)nn_active_set_thresh_milli(500u);
 		plugin_run_note_entry(0u);
@@ -704,7 +720,7 @@ int main(void)
 		(void)nn_active_decode(&stub);
 		nn_active_draw(&rec_painter);
 		(void)nn_active_shapes_ok(&stub);
-		(void)nn_active_report(cap_write, NULL);
+		(void)nn_active_report_to(NULL);
 		(void)get_thresh();
 		(void)nn_active_set_thresh_milli(500u);
 		site_sum = depth_notes[0] + depth_notes[1] + depth_notes[2];
@@ -718,7 +734,7 @@ int main(void)
 	 * nothing at all for an empty or NULL text.
 	 */
 	{
-		const struct plugin_base_api *b = nn_active_base();
+		const struct plugin_base_api *b = &plugin_board_bindings.base;
 		static const char msg[5] = { 'h', 'e', 'l', 'l', 'o' };  /* no NUL */
 
 		lb_calls = 0u;

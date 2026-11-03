@@ -22,6 +22,7 @@
  * that did not happen is a depth nobody was ever at.
  */
 #include "nn_active_core.h"
+#include "plugin_bindings.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -176,6 +177,9 @@ static int w_write(void *ctx, const char *s, size_t len)
 	return (int)len;
 }
 
+/* The board's table (issue #165): the printer's write comes from here. */
+const struct plugin_bindings plugin_board_bindings = { .write = w_write };
+
 static const struct plugin_painter painter = {
 	PLUGIN_ABI_VERSION, sizeof(struct plugin_painter), NULL, NULL, NULL, NULL
 };
@@ -213,7 +217,7 @@ static void test_nobody(const char *state)
 		         "so first (%s)", state, who);
 		ok(what, nn_active_core_can_draw(b) == 0 &&
 		         nn_active_core_can_report(b) == 0 &&
-		         nn_active_core_report(b, w_write, NULL) == 0);
+		         nn_active_core_report_to(b, NULL) == 0);
 
 		snprintf(what, sizeof what, "%s: no threshold, and setting one is "
 		         "'nothing holds it', not a refused value (%s)", state, who);
@@ -274,8 +278,9 @@ static void test_plugin(void)
 
 	answer = 12;
 	reset();
-	ok("report gets a versioned, sized printer over the caller's writer",
-	   nn_active_core_report(&accepts, w_write, (void *)&answer) == 12 &&
+	ok("report gets a versioned, sized printer over the caller's context and "
+	   "the board table's writer (issue #165)",
+	   nn_active_core_report_to(&accepts, (void *)&answer) == 12 &&
 	   seen_out.version == PLUGIN_ABI_VERSION &&
 	   seen_out.size == sizeof(struct plugin_printer) &&
 	   seen_out.ctx == (void *)&answer && seen_out.write == w_write &&
@@ -313,7 +318,7 @@ static void test_plugin(void)
 	   nn_active_core_can_draw(&refuses) == 0 && total(calls) == 0u);
 	ok("no report slot: nothing reported, and it says so",
 	   nn_active_core_can_report(&refuses) == 0 &&
-	   nn_active_core_report(&refuses, w_write, NULL) == 0);
+	   nn_active_core_report_to(&refuses, NULL) == 0);
 	ok("[!] no parameters (a classifier): no threshold, and NO_DECODER",
 	   nn_active_core_get_thresh_milli(&refuses) == NN_SVC_THRESH_NONE &&
 	   nn_active_core_set_thresh_milli(&refuses, 500u) ==
@@ -332,8 +337,9 @@ static void test_plugin(void)
 	ok("and is an argument error to decode",
 	   nn_active_core_decode(&accepts, NULL, 4u) == BF_ERR_ARG);
 	nn_active_core_draw(&accepts, NULL);
-	ok("no painter, no draw; no writer, no report",
-	   nn_active_core_report(&accepts, NULL, NULL) == 0);
+	/* No writer is no longer an argument: the write is the board table's,
+	 * and the build refuses a table with a NULL word (issue #165). */
+	ok("no painter, no draw", 1);
 	ok("and none of them called or sampled anything",
 	   total(calls) == 0u && total(notes) == 0u);
 }

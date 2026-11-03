@@ -86,6 +86,7 @@ gcc $CFLAGS -I "$board/port/nn" -I "$board/port/plugin" -I "$board/svc" \
     "$here/test_nn_active.c" \
     "$board/port/nn/nn_active.c" "$HOST_TEST_SVC/nn/nn_desc.c" \
     "$HOST_TEST_SVC/nn/nn_active_lease.c" "$HOST_TEST_SVC/nn/nn_active_core.c" \
+    "$HOST_TEST_SVC/plugin/plugin_bindings.c" \
     "$asset/plugins/blazeface/plugin_main.c" \
     "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \
     "$asset/common/plugin_text.c" \
@@ -239,7 +240,7 @@ gcc $CFLAGS -DPLUGIN_PAINT_COUNT_STORES \
     -I "$board/port/plugin" -I "$board/../../svc" -I "$board/../../svc/nn" -I "$board/../../svc/plugin" -I "$board/../../svc/camera" \
     "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
     "$board/../../svc/plugin/plugin_paint_budget.c" "$board/../../svc/rect_geom.c" \
-    "$board/../../svc/plugin/plugin_paint_span.c" \
+    "$board/../../svc/plugin/plugin_bindings.c" "$board/../../svc/plugin/plugin_paint_span.c" \
     $LDFLAGS -o "$out/test_plugin_paint"
 "$out/test_plugin_paint"
 

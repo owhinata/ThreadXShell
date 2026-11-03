@@ -24,7 +24,7 @@
 
 /*
  * The exec_ok hook's lease refusal, by identity.  plugin_exec.c hands the
- * hook's reason back unchanged, so plugin_run_load() recognises this very
+ * hook's reason back unchanged, so plugin_run_start() recognises this very
  * pointer and names the refusal NOT_HELD -- the board used to keep a flag for
  * it, which is mutable storage this file may not own and a second place for
  * "why" to live.
@@ -63,7 +63,7 @@ static __attribute__((noinline)) void pl_log(int error, const char *f, ...)
 int plugin_run_exec_ok(uint32_t lo, uint32_t hi, const char **why)
 {
 	plugin_run_note_entry(NN_ACTIVE_CORE_SP());
-	/* [!] THE LAST CHECK BEFORE entry() (issue #130).  plugin_run_load()
+	/* [!] THE LAST CHECK BEFORE entry() (issue #130).  plugin_run_start()
 	 * refuses an unheld caller before anything is touched; this is the same
 	 * question asked again at the branch, so a path into the loader that
 	 * skipped the first cannot reach entry() either. */
@@ -79,7 +79,7 @@ int plugin_run_exec_ok(uint32_t lo, uint32_t hi, const char **why)
 /*
  * The staging region the CALLER was handed, travelling as the port token.
  *
- * [!] A STACK OBJECT OF plugin_run_load()'s, not a file-scope one.  It is valid
+ * [!] A STACK OBJECT OF plugin_run_start()'s, not a file-scope one.  It is valid
  * for exactly the call that passes it, which is the whole lifetime the check
  * needs -- and a static would be a second place for "which region" to live.
  */
@@ -155,10 +155,9 @@ static __attribute__((noinline)) void pl_report(enum plugin_run_result r,
 	}
 }
 
-enum plugin_run_result plugin_run_load(const struct plugin_view *v,
-                                       const void *container,
-                                       const void *stage, uint32_t cap,
-                                       const struct plugin_base_api *base)
+enum plugin_run_result plugin_run_start(const struct plugin_view *v,
+                                        const void *container,
+                                        const void *stage, uint32_t cap)
 {
 	struct pl_source src = { (const uint8_t *)stage, cap };
 	const char *why = NULL;
@@ -166,7 +165,7 @@ enum plugin_run_result plugin_run_load(const struct plugin_view *v,
 
 	/*
 	 * [!] THE LEASE FIRST, BEFORE THE SHARED LOADER TOUCHES ANYTHING (issue
-	 * #130, as grove-vision-ai-v2's since #127).  plugin_exec_load() begins by
+	 * #130, as grove-vision-ai-v2's since #127).  plugin_exec_start() begins by
 	 * unpublishing the previous plugin and then copies the new image over the
 	 * reservation it was running from; a caller without the lease could be
 	 * doing that under a decode or a draw.  Refused here, the previous plugin
@@ -177,8 +176,8 @@ enum plugin_run_result plugin_run_load(const struct plugin_view *v,
 		pl_log(1, "load refused: %s", plugin_run_why(PLUGIN_RUN_NOT_HELD));
 		return PLUGIN_RUN_NOT_HELD;
 	}
-	r = plugin_exec_load(&plugin_run_env, v, container, (uintptr_t)&src, base,
-	                     &why);
+	r = plugin_exec_start(&plugin_run_env, v, container, (uintptr_t)&src,
+	                      &why);
 	if (r == PLUGIN_RUN_MPU && why == pl_unheld_why) {
 		/* the hook's lease refusal, by name -- not the MPU's */
 		pl_log(1, "load refused at entry: %s",

@@ -25,6 +25,7 @@
  */
 #define _GNU_SOURCE
 #include "plugin_exec.h"
+#include "plugin_bindings.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -194,9 +195,13 @@ static void put_entry_stub(uint8_t *at, void *target)
 }
 #endif
 
-static const struct plugin_base_api base_api = {
-	.version = PLUGIN_ABI_VERSION,
-	.size    = sizeof(struct plugin_base_api),
+/* The board's table (issue #165): the loader hands entry() its head, by
+ * name, and takes no base argument. */
+const struct plugin_bindings plugin_board_bindings = {
+	.base = {
+		.version = PLUGIN_ABI_VERSION,
+		.size    = sizeof(struct plugin_base_api),
+	},
 };
 
 static void reset(int with_entry)
@@ -233,18 +238,15 @@ static void reset(int with_entry)
 static void test_arguments(void)
 {
 	printf("arguments and an empty binding:\n");
-	CHECK(plugin_exec_load(NULL, &view, container, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(NULL, &view, container, 0u, NULL) ==
 	              PLUGIN_RUN_ARG,
 	      "a null binding is refused");
-	CHECK(plugin_exec_load(&env, NULL, container, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(&env, NULL, container, 0u, NULL) ==
 	              PLUGIN_RUN_ARG,
 	      "a null view is refused");
-	CHECK(plugin_exec_load(&env, &view, NULL, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(&env, &view, NULL, 0u, NULL) ==
 	              PLUGIN_RUN_ARG,
 	      "a null container is refused");
-	CHECK(plugin_exec_load(&env, &view, container, 0u, NULL, NULL) ==
-	              PLUGIN_RUN_ARG,
-	      "a null base vtable is refused -- the plugin would be handed it");
 	CHECK(plugin_exec_active(&env) == 0 && plugin_exec_slot(&env, 0u) == NULL,
 	      "nothing is active and no slot resolves after a refusal");
 	CHECK(plugin_exec_attribute(&env, (uint32_t)(uintptr_t)res_lo, NULL) ==
@@ -260,7 +262,7 @@ static void test_refusals(void)
 
 	reset(1);
 	view.has_plugin = 0u;
-	CHECK(plugin_exec_load(&env, &view, container, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(&env, &view, container, 0u, NULL) ==
 	              PLUGIN_RUN_NO_PLUGIN,
 	      "a container carrying only a model is NO_PLUGIN, not an error");
 	CHECK(saw.source_at == 0 && saw.caches_at == 0,
@@ -268,14 +270,14 @@ static void test_refusals(void)
 
 	reset(1);
 	view.mem_size = RES_BYTES + 1u;
-	CHECK(plugin_exec_load(&env, &view, container, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(&env, &view, container, 0u, NULL) ==
 	              PLUGIN_RUN_TOO_BIG,
 	      "an image larger than the reservation is refused");
 	CHECK(!image_landed(), "and nothing was copied into it");
 
 	reset(1);
 	view.link_addr = (uint32_t)(uintptr_t)res_lo + 16u;
-	CHECK(plugin_exec_load(&env, &view, container, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(&env, &view, container, 0u, NULL) ==
 	              PLUGIN_RUN_TOO_BIG,
 	      "an image prelinked at another address is refused");
 	CHECK(!image_landed(), "and nothing was copied into it");
@@ -283,7 +285,7 @@ static void test_refusals(void)
 	reset(1);
 	saw.source_refuse = 1;
 	why = NULL;
-	CHECK(plugin_exec_load(&env, &view, container, 0u, &base_api, &why) ==
+	CHECK(plugin_exec_start(&env, &view, container, 0u, &why) ==
 	              PLUGIN_RUN_NO_SOURCE,
 	      "an unpinned source is refused");
 	CHECK(why != NULL && strcmp(why, "the test refused it") == 0,
@@ -293,7 +295,7 @@ static void test_refusals(void)
 	reset(1);
 	saw.exec_refuse = 1;
 	why = NULL;
-	CHECK(plugin_exec_load(&env, &view, container, 0u, &base_api, &why) ==
+	CHECK(plugin_exec_start(&env, &view, container, 0u, &why) ==
 	              PLUGIN_RUN_MPU,
 	      "a reservation that is not executable is refused");
 	CHECK(why != NULL && strcmp(why, "the test refused it") == 0,
@@ -302,7 +304,7 @@ static void test_refusals(void)
 	      "a refusal after the copy still publishes nothing");
 
 	reset(0);              /* no ENTRY slot */
-	CHECK(plugin_exec_load(&env, &view, container, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(&env, &view, container, 0u, NULL) ==
 	              PLUGIN_RUN_ENTRY,
 	      "a manifest with no entry point is refused rather than branched to 0");
 	CHECK(plugin_exec_active(&env) == 0 && !published(),
@@ -315,7 +317,7 @@ static void test_order(void)
 
 	reset(1);
 	saw.exec_refuse = 1;   /* stop before the branch; the order so far is the point */
-	(void)plugin_exec_load(&env, &view, container, 0u, &base_api, NULL);
+	(void)plugin_exec_start(&env, &view, container, 0u, NULL);
 
 	CHECK(saw.source_at == 1 && saw.caches_at == 2 && saw.exec_at == 3,
 	      "source, then caches, then executability");
@@ -339,7 +341,7 @@ static void test_unload_precedes_the_has_plugin_test(void)
 
 #if HAVE_EXEC_RESERVATION
 	reset(1);
-	CHECK(plugin_exec_load(&env, &view, container, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(&env, &view, container, 0u, NULL) ==
 	              PLUGIN_RUN_OK,
 	      "a plugin is loaded");
 	CHECK(plugin_exec_active(&env) == 1, "and is active");
@@ -349,19 +351,19 @@ static void test_unload_precedes_the_has_plugin_test(void)
 	 * otherwise decode a new model with an old model's decoder. */
 	memset(&saw, 0, sizeof saw);
 	view.has_plugin = 0u;
-	CHECK(plugin_exec_load(&env, &view, container, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(&env, &view, container, 0u, NULL) ==
 	              PLUGIN_RUN_NO_PLUGIN,
 	      "a model-only container returns NO_PLUGIN");
 	CHECK(plugin_exec_active(&env) == 0 && !published(),
 	      "[!] and the PREVIOUS plugin is no longer active or attributable");
 
 	reset(1);
-	CHECK(plugin_exec_load(&env, &view, container, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(&env, &view, container, 0u, NULL) ==
 	              PLUGIN_RUN_OK,
 	      "a plugin is loaded again");
 	memset(&saw, 0, sizeof saw);
 	saw.source_refuse = 1;
-	CHECK(plugin_exec_load(&env, &view, container, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(&env, &view, container, 0u, NULL) ==
 	              PLUGIN_RUN_NO_SOURCE,
 	      "the next load is refused at the source check");
 	CHECK(saw.published_at_source == 0,
@@ -382,12 +384,12 @@ static void test_the_branch(void)
 	printf("the branch, and what the fault reporter sees across it:\n");
 
 	reset(1);
-	CHECK(plugin_exec_load(&env, &view, container, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(&env, &view, container, 0u, NULL) ==
 	              PLUGIN_RUN_OK,
 	      "a well formed plugin loads");
 	CHECK(entry_called == 1, "its entry point was really called");
-	CHECK(entry_saw_base == &base_api,
-	      "and was handed the base vtable it was given");
+	CHECK(entry_saw_base == &plugin_board_bindings.base,
+	      "and was handed the head of the board's table (issue #165)");
 	CHECK(saw.published_at_entry == 1,
 	      "[!] the plugin was ALREADY published when entry ran -- a fault "
 	      "inside it names it");
@@ -419,7 +421,7 @@ static void test_the_branch(void)
 
 	reset(1);
 	saw.entry_refuse = 1;
-	CHECK(plugin_exec_load(&env, &view, container, 0u, &base_api, NULL) ==
+	CHECK(plugin_exec_start(&env, &view, container, 0u, NULL) ==
 	              PLUGIN_RUN_ENTRY,
 	      "a plugin that refuses its own entry point is refused");
 	CHECK(entry_called == 1, "it did run");
@@ -438,7 +440,7 @@ static void test_bss_is_zeroed(void)
 	reset(1);
 	memset(res_lo, 0x5Au, RES_BYTES);
 	saw.exec_refuse = 1;          /* stop before the branch; the copy is the point */
-	(void)plugin_exec_load(&env, &view, container, 0u, &base_api, NULL);
+	(void)plugin_exec_start(&env, &view, container, 0u, NULL);
 
 	CHECK(res_lo[0] == 0xA5u, "the file part was copied");
 	CHECK(res_lo[view.file_size] == 0u &&

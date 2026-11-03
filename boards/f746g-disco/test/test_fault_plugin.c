@@ -11,7 +11,7 @@
  * A plugin cannot be made to fault on demand on the board, so this is where the
  * decision is seen.  The REAL svc/plugin/plugin_run_core.c and plugin_exec.c
  * answer the attribution, over a loader state this test publishes by hand (the
- * shape plugin_exec_load() leaves after a successful load).
+ * shape plugin_exec_start() leaves after a successful load).
  */
 #include "fault_plugin.h"
 #include "plugin_run_core.h"

@@ -17,7 +17,7 @@
  * Where each slot runs.  Every console command can also be sent to the
  * background with `&`, which runs it on a job thread instead:
  *
- *   entry       `nn model load` -> plugin_run_load()     console / bg
+ *   entry       `nn model load` -> plugin_run_start()     console / bg
  *   shapes_ok   the `nn stream start` admission          console / bg
  *   decode      `nn stream`, `nn run` (nn_camera_work)  worker (#129)
  *   draw        the panel thread, under the panel guard  panel

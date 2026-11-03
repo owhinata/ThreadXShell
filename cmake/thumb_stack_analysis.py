@@ -1263,6 +1263,25 @@ class Image:
                 return a, size, what
         return None
 
+    def thumb_entry(self, val):
+        """(address, None) when the code-pointer word @p val is the Thumb
+        entry of a function -- the Thumb bit set and the rest exactly a
+        function's first byte -- else (address or None, why): "not_thumb"
+        (None, or the bit clear) or "no_entry" (no function begins there).
+
+        [!] THE ONE RULE FROM A WORD TO A FUNCTION.  A linker veneer's literal
+        and a board's bindings table (issue #165) are both read through it, so
+        the roots the firmware check derives follow the same rule as every
+        edge it walks: a function is identified by its address (aliases at one
+        address are one body), and its symbols' problems (an ARM-state symbol,
+        sizes that disagree) are refused when the body is analysed."""
+        if val is None or not val & 1:
+            return (val & ~1 if val is not None else None), "not_thumb"
+        tgt = val & ~1
+        if tgt not in self.nodes:
+            return tgt, "no_entry"
+        return tgt, None
+
     def node_containing(self, addr):
         i = bisect.bisect_right(self.starts, addr) - 1
         if i >= 0:
@@ -1386,13 +1405,12 @@ class Image:
             lit = entry.target
             in_own_data = any(s <= lit and lit + 4 <= e for s, e in datas)
             if in_own_data:
-                val = self.elf.u32(lit)
-                tgt = val & ~1 if val is not None else None
-                if val is None or not val & 1:
+                tgt, why = self.thumb_entry(self.elf.u32(lit))
+                if why == "not_thumb":
                     info.flow_errs.append(
                         (node.addr, "a long-branch veneer whose literal is "
                                     "not a Thumb address"))
-                elif tgt not in self.nodes:
+                elif why is not None:
                     info.flow_errs.append(
                         (node.addr, f"a long-branch veneer to 0x{tgt:08x}, "
                                     "which is no function's entry"))

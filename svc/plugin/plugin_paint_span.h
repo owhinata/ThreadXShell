@@ -105,22 +105,9 @@ int plugin_paint_blit_begin(struct plugin_paint_budget *bud, uint16_t w,
                             uint32_t src_stride,
                             struct plugin_paint_blit_span *s);
 
-/**
- * @brief  Fill in a painter: version and size first, then @p ctx and the three
- *         primitives.
- *
- * The plugin's veneer refuses a painter without its version and size (issue
- * #111), so a member left out here is a draw that silently does nothing.
- */
-void plugin_paint_vtable(struct plugin_painter *p, void *ctx,
-                         void (*rect)(void *ctx, const struct plugin_rect *r,
-                                      uint16_t rgb565, uint16_t stroke),
-                         void (*fill_rect)(void *ctx,
-                                           const struct plugin_rect *r,
-                                           uint16_t rgb565),
-                         void (*blit)(void *ctx, const struct plugin_rect *r,
-                                      const uint16_t *src, uint32_t src_stride,
-                                      int32_t key));
+/* The painter itself is filled by plugin_painter_init() (plugin_bindings.h,
+ * issue #165): from the board's table, so a board hands a context and no
+ * function. */
 
 #ifdef __cplusplus
 }

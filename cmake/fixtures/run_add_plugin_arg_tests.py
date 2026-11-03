@@ -105,8 +105,6 @@ GATE = {
     "FIRMWARE": "fw",
     "MAP": '"${CMAKE_BINARY_DIR}/fw.map"',
     "DECLARED": "256",
-    "ROOTS": ("pl_base_log=f pl_base_to_frame=f pl_paint_rect=f "
-              "pl_paint_fill_rect=f pl_paint_blit=f pl_print_write=f"),
     "PREBUILT_ROOTS": '"${CMAKE_BINARY_DIR}/prebuilt"',
     "DELIVERY": "fake_flash",
 }
@@ -293,15 +291,16 @@ GATE_CASES = [
     ("cost_mismatch", {"DECLARED": "300"}, {}, False,
      "is charged VENEER_BASE_COST 256, but the firmware is checked against "
      "300"),
-    ("gate_no_roots", {"ROOTS": None}, {}, False, "ROOTS is required"),
     ("gate_no_delivery", {"DELIVERY": None}, {}, False,
      "DELIVERY is required"),
     ("gate_no_prebuilt", {"PREBUILT_ROOTS": None}, {}, False,
      "PREBUILT_ROOTS is required"),
     ("gate_zero_declared", {"DECLARED": "0"}, {"VENEER_BASE_COST": "0"}, False,
      "DECLARED must be a positive byte count"),
-    ("gate_bad_root", {"ROOTS": "pl_base_log"}, {}, False,
-     "ROOTS takes VENEER=FUNCTION"),
+    # [!] (issue #165) the roots are read out of the image, so a board that
+    # still states them is refused, not quietly ignored.
+    ("gate_roots_refused", {"ROOTS": "pl_base_log=f"}, {}, False,
+     "ROOTS is not accepted"),
     ("gate_no_firmware", {"FIRMWARE": "no_such_fw"}, {}, False,
      "FIRMWARE 'no_such_fw' is not a target"),
     ("gate_firmware_not_exe", {"FIRMWARE": "fake_flash"}, {}, False,

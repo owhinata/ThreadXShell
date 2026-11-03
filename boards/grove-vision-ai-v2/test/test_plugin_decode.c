@@ -55,6 +55,7 @@
  * since issue #169.
  */
 #include "nn_active.h"
+#include "plugin_bindings.h"
 #include "nn_desc.h"
 #include "nn_preproc.h"
 #include "nn_probe.h"
@@ -358,6 +359,10 @@ static int cap_write(void *ctx, const char *s, size_t len)
 	return (int)len;
 }
 
+/* The board's table (port/nn/nn_svc_grove.c, issue #165), as far as report
+ * reads it: the printer's write is the table's, and here it is the capture. */
+const struct plugin_bindings plugin_board_bindings = { .write = cap_write };
+
 static void cap_reset(void)
 {
 	cap_len = 0u;
@@ -557,7 +562,7 @@ static int call_entry(enum entry_id e, unsigned *thresh_out)
 	case E_DRAW:        rec_reset(); return nn_active_draw(&rec_painter);
 	case E_CAN_DRAW:    return nn_active_can_draw();
 	case E_CAN_REPORT:  return nn_active_can_report();
-	case E_REPORT:      cap_reset(); return nn_active_report(cap_write, NULL);
+	case E_REPORT:      cap_reset(); return nn_active_report_to(NULL);
 	case E_THRESH_GET:
 		*thresh_out = 12345u;
 		return nn_active_get_thresh_milli(thresh_out);
@@ -719,7 +724,7 @@ int main(void)
 
 	cap_reset();
 	expect("and reports nothing, successfully",
-	       nn_active_report(cap_write, NULL) == 0 && cap_len == 0u,
+	       nn_active_report_to(NULL) == 0 && cap_len == 0u,
 	       "wrote %zu B", cap_len);
 
 	expect("the threshold is reported absent, not borrowed from anywhere",
@@ -839,7 +844,7 @@ int main(void)
 	 * ================================================================ */
 	cap_reset();
 	expect("the plugin's report succeeds",
-	       nn_active_report(cap_write, NULL) == 0, "refused");
+	       nn_active_report_to(NULL) == 0, "refused");
 
 	{
 		char want[64];
@@ -873,7 +878,7 @@ int main(void)
 	cap_reset();
 	cap_fail_at = 2;
 	expect("[!] a writer that refuses is propagated, not written past",
-	       nn_active_report(cap_write, NULL) < 0, "reported success");
+	       nn_active_report_to(NULL) < 0, "reported success");
 	expect("and nothing was written after the refusal",
 	       cap_calls == 3u, "%u write(s) -- it carried on", cap_calls);
 
@@ -898,7 +903,7 @@ int main(void)
 	expect("a threshold read took one stack sample, for param_get",
 	       probe_only(PLUGIN_SLOT_PARAM_GET), "%u sample(s)", probe_total());
 	probe_reset();
-	(void)nn_active_report(cap_write, NULL);
+	(void)nn_active_report_to(NULL);
 	expect("a report took one stack sample, for report",
 	       probe_only(PLUGIN_SLOT_REPORT), "%u sample(s)", probe_total());
 	expect("[!] while the reference decoder's threshold has not moved",
@@ -909,7 +914,7 @@ int main(void)
 	/* And it is the number the next decode really applies. */
 	cap_reset();
 	(void)nn_active_decode(tens, 4);
-	(void)nn_active_report(cap_write, NULL);
+	(void)nn_active_report_to(NULL);
 	expect("[!] and the plugin's next decode applies it",
 	       strstr(cap_buf, "thresh 800/1000") != NULL,
 	       "the report says otherwise:\n%s", cap_buf);
@@ -946,7 +951,7 @@ int main(void)
 	       rec_n == 0u, "%u rectangle(s) at unknown coordinates", rec_n);
 
 	cap_reset();
-	(void)nn_active_report(cap_write, NULL);
+	(void)nn_active_report_to(NULL);
 	expect("and says so rather than printing a box it could not map",
 	       strstr(cap_buf, "outside the frame") != NULL, "report was:\n%s",
 	       cap_buf);
@@ -995,7 +1000,7 @@ int main(void)
 		/* (c) a refusal the plugin has to REPORT, since it has no boxes */
 		cap_reset();
 		expect("the plugin reports the refusal rather than zero faces",
-		       nn_active_report(cap_write, NULL) == 0 &&
+		       nn_active_report_to(NULL) == 0 &&
 		       strstr(cap_buf, "decode refused") != NULL, "report was:\n%s",
 		       cap_buf);
 		rec_reset();

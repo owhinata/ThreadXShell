@@ -10,6 +10,12 @@ that did not resolve -- is a failure of the case, not a pass.  That is how the
 plugin gate's recursion fixture went on "passing" for the wrong reason until a
 second bug was fixed (issue #103).
 
+[!] THE ROOTS ARE BOUND, NOT NAMED (issue #165).  The gate reads the function
+behind each veneer from the image's plugin_board_bindings, so each case binds
+its functions into a copy of the image (bind_image(): the table's words at the
+offsets BIND_OFFSET states here, not read from the record the gate reads), and
+the bind_* cases refuse the words the gate must not take as a root.
+
 [!] AND EVERY ACCEPT IS ASSERTED TO THE BYTE.  "It accepted" says nothing about
 whether the number is right; a walk that dropped an edge or trusted -fstack-
 usage for a variadic frame would accept too, with a smaller number.  The
@@ -56,6 +62,35 @@ CFLAGS = ["-Os", "-std=gnu11", "-ffreestanding", "-fno-builtin",
           "-fno-asynchronous-unwind-tables", "-fstack-usage"]
 VENEERS = ["pl_base_log", "pl_base_to_frame", "pl_paint_rect",
            "pl_paint_fill_rect", "pl_paint_blit", "pl_print_write"]
+# [!] WHERE EACH VENEER'S WORD IS IN THE BOARD'S TABLE, STATED HERE (issue
+# #165), not read from the record the gate reads: struct plugin_bindings on a
+# 32-bit target is the base (version, size, ctx, log, to_frame) then rect,
+# fill_rect, blit, write.  A record whose pairs disagreed with this would bind
+# the cases' functions to the wrong veneers, and the per-veneer expectations
+# below would fail.
+BIND_OFFSET = {"pl_base_log": 12, "pl_base_to_frame": 16,
+               "pl_paint_rect": 20, "pl_paint_fill_rect": 24,
+               "pl_paint_blit": 28, "pl_print_write": 32}
+BIND_TABLE = "plugin_board_bindings"
+# The board's table, all NULL: each case binds its functions into a copy of
+# the image (bind_image()), the way a board's table binds its own.  The record
+# of which word is which veneer is the real svc/plugin/plugin_bindings.c.
+BIND_SOURCE = r"""
+#include "plugin_bindings.h"
+__attribute__((used)) const struct plugin_bindings plugin_board_bindings = {
+    { 0u, 0u, 0, 0, 0 }, 0, 0, 0, 0 };
+/* Targets for the table cases: a body with a frame, an alias of it, and a
+ * second body with a second symbol of another size at its address. */
+__attribute__((noinline, used)) int bind_target(int x)
+{ volatile int b[4]; b[x & 3] = x; return b[0] + b[1]; }
+extern int bind_alias(int) __attribute__((alias("bind_target")));
+__attribute__((noinline, used)) int bind_sized_body(int x)
+{ volatile int b[2]; b[x & 1] = x; return b[0]; }
+__asm__(".global bind_sized\n\t.type bind_sized, %function\n\t"
+        ".set bind_sized, bind_sized_body\n\t.size bind_sized, 2\n");
+"""
+BIND_CFLAGS = ["-I", os.path.join(REPO, "svc", "plugin"),
+               "-I", os.path.join(REPO, "svc")]
 
 LINKER_SCRIPT = """
 MEMORY { ITCM (rx) : ORIGIN = 0x00000000, LENGTH = 64K
@@ -1073,11 +1108,26 @@ def sh(cmd, cwd):
     return r.stdout
 
 
+def bind_objects(tools, flags, work):
+    """The board's table and the shared record, as plain (non-LTO) objects."""
+    os.makedirs(os.path.join(work, "obj"), exist_ok=True)
+    with open(os.path.join(work, "bind.c"), "w") as fh:
+        fh.write(BIND_SOURCE)
+    out = []
+    for src, obj in (("bind.c", "obj/bind.c.obj"),
+                     (os.path.join(REPO, "svc", "plugin", "plugin_bindings.c"),
+                      "obj/plugin_bindings.c.obj")):
+        sh([tools.cc] + flags + CFLAGS + BIND_CFLAGS + ["-c", src, "-o", obj],
+           work)
+        out.append(obj)
+    return out
+
+
 def build_main(tools, arch, work):
     """The non-LTO image: C objects with their records, the assembler shapes
     in a prebuilt archive, and one in-tree archive."""
     flags = ARCHES[arch]
-    os.makedirs(os.path.join(work, "obj"))
+    os.makedirs(os.path.join(work, "obj"), exist_ok=True)
     os.makedirs(os.path.join(work, "prebuilt"))
     os.makedirs(os.path.join(work, "prebuilt_tree"))
     with open(os.path.join(work, "fix.ld"), "w") as fh:
@@ -1094,6 +1144,7 @@ def build_main(tools, arch, work):
         obj = f"obj/{name}.obj"
         sh([tools.cc] + flags + CFLAGS + ["-c", name, "-o", obj], work)
         objs.append(obj)
+    objs += bind_objects(tools, flags, work)
     with open(os.path.join(work, "intree.S"), "w") as fh:
         fh.write(INTREE_ASM)
     sh([tools.cc] + flags + ["-c", "intree.S", "-o", "obj/intree.obj"], work)
@@ -1127,6 +1178,7 @@ def build_lto(tools, arch, work):
         sh([tools.cc] + flags + CFLAGS + ["-flto", "-c", name, "-o", obj],
            work)
         objs.append(obj)
+    objs += bind_objects(tools, flags, work)
     sh([tools.cc] + flags + ["-Os", "-flto", "-flto-partition=max",
                              "-fstack-usage", "-nostdlib", "-nostartfiles",
                              "-T", "fix.ld", "-Wl,-Map=lto.map",
@@ -1188,8 +1240,75 @@ def objdump_frame(tools, work, elf, name):
 
 
 # --- running the gate --------------------------------------------------------
+def _elf_symbols(path):
+    """[(name, value, size, type)] and the raw bytes and sections of a 32-bit
+    ELF -- the fixture's own reader, not the gate's."""
+    import struct
+    raw = bytearray(open(path, "rb").read())
+    shoff, = struct.unpack_from("<I", raw, 0x20)
+    shentsize, shnum, _ = struct.unpack_from("<HHH", raw, 0x2E)
+    secs = [struct.unpack_from("<10I", raw, shoff + i * shentsize)
+            for i in range(shnum)]
+    syms = []
+    for h in secs:
+        if h[1] != 2:                       # SHT_SYMTAB
+            continue
+        strtab = secs[h[6]]
+        for off in range(h[4], h[4] + h[5], 16):
+            no, val, size, info, _o, _x = struct.unpack_from("<IIIBBH", raw,
+                                                             off)
+            o = strtab[4] + no
+            syms.append((raw[o:raw.index(b"\0", o)].decode(), val, size,
+                         info & 0xF))
+    return raw, secs, syms
+
+
+def bind_image(work, image, roots):
+    """A copy of the image whose table binds each veneer to the function the
+    case names ('*' the default, None a NULL word).  "even:F" is F with the
+    Thumb bit clear, "inside:F" two bytes into F, "data:S" any symbol S with
+    the Thumb bit set."""
+    import struct
+    src = os.path.join(work, image["elf"])
+    raw, secs, syms = _elf_symbols(src)
+    tab = [v for n, v, _s, _t in syms if n == BIND_TABLE]
+    if len(tab) != 1:
+        raise RuntimeError(f"{len(tab)} symbols named {BIND_TABLE}")
+    sec = [h for h in secs if h[1] == 1 and h[3] <= tab[0] < h[3] + h[5]]
+    if len(sec) != 1:
+        raise RuntimeError(f"{BIND_TABLE} is not in one PROGBITS section")
+    base = sec[0][4] + tab[0] - sec[0][3]
+    for v in VENEERS:
+        f = roots.get(v, roots.get("*", "leaf"))
+        kind = None
+        if isinstance(f, str) and ":" in f:
+            kind, f = f.split(":", 1)
+        if f is None:
+            word = 0
+        elif kind == "data":
+            hits = [val for n, val, _s, _t in syms if n == f]
+            if len(hits) != 1:
+                raise RuntimeError(f"{v}: {len(hits)} symbols named {f}")
+            word = hits[0] | 1
+        else:
+            hits = [val for n, val, _s, t in syms if t == 2 and (
+                n == f or re.match(re.escape(f) + r"(\.lto_priv\.\d+)+$", n))]
+            if len(set(hits)) != 1:
+                raise RuntimeError(f"{v}: {f} names {len(set(hits))} "
+                                   "functions in the image")
+            word = hits[0]
+            if kind == "even":
+                word &= ~1
+            elif kind == "inside":
+                word = (word & ~1) + 2 | 1
+        struct.pack_into("<I", raw, base + BIND_OFFSET[v], word)
+    out = os.path.join(work, "bound_" + image["elf"])
+    open(out, "wb").write(raw)
+    return out
+
+
 def run_gate(gate, work, image, roots, declared, extra=()):
-    args = [sys.executable, gate, os.path.join(work, image["elf"]),
+    args = [sys.executable, gate, bind_image(work, image, roots),
             "--map", os.path.join(work, image["map"]),
             "--declared", str(declared),
             # [!] THE REAL ROOT IS THE MIDDLE OF THREE, so that a check that
@@ -1198,13 +1317,6 @@ def run_gate(gate, work, image, roots, declared, extra=()):
             "--prebuilt-root", os.path.join(work, "no_such_root_a"),
             "--prebuilt-root", os.path.join(work, "prebuilt"),
             "--prebuilt-root", os.path.join(work, "no_such_root_b")]
-    for v in VENEERS:
-        if v in roots and roots[v] is None:
-            continue
-        args.append(f"--root={v}={roots.get(v, roots.get('*', 'leaf'))}")
-    for v, f in roots.items():
-        if v not in VENEERS and v != "*":
-            args.append(f"--root={v}={f}")
     for f in image["ltrans"]:
         args += ["--ltrans-su", os.path.join(work, f)]
     args += list(extra)
@@ -1337,6 +1449,81 @@ def p_delete(path):
 
 def p_extra(*args):
     return lambda tools, work, image: list(args)
+
+
+def _sym_entry(raw, secs, name):
+    """File offset of the one symtab entry named @p name, and the entry."""
+    import struct
+    found = []
+    for h in secs:
+        if h[1] != 2:
+            continue
+        strtab = secs[h[6]]
+        for off in range(h[4], h[4] + h[5], 16):
+            no = struct.unpack_from("<I", raw, off)[0]
+            o = strtab[4] + no
+            if raw[o:raw.index(b"\0", o)].decode() == name:
+                found.append(off)
+    if len(found) != 1:
+        raise RuntimeError(f"{len(found)} symbols named {name}")
+    return found[0]
+
+
+def _at(raw, secs, addr):
+    hits = [h for h in secs if h[1] == 1 and h[3] <= addr < h[3] + h[5]]
+    if len(hits) != 1:
+        raise RuntimeError(f"0x{addr:08x} is in no PROGBITS section")
+    return hits[0][4] + addr - hits[0][3]
+
+
+def p_record(edit):
+    """Edit the image's record of which word is which veneer (issue #165):
+    @p edit(raw, at) gets the bytes and the record's file offset."""
+    def prepare(tools, work, image):
+        path = os.path.join(work, image["elf"])
+        raw, secs, syms = _elf_symbols(path)
+        rec = [v for n, v, _s, _t in syms if n == "plugin_bind_probe"]
+        if len(rec) != 1:
+            raise RuntimeError("no plugin_bind_probe to edit")
+        edit(raw, _at(raw, secs, rec[0]))
+        open(path, "wb").write(raw)
+        return []
+    return prepare
+
+
+def p_symbol(name, field, value):
+    """Set one field of a symbol's entry: 'name' (a byte of its string),
+    'size' (st_size) or 'type' (STT_*)."""
+    def prepare(tools, work, image):
+        import struct
+        path = os.path.join(work, image["elf"])
+        raw, secs, _syms = _elf_symbols(path)
+        off = _sym_entry(raw, secs, name)
+        if field == "size":
+            struct.pack_into("<I", raw, off + 8, value)
+        elif field == "type":
+            raw[off + 12] = (raw[off + 12] & 0xF0) | value
+        elif field == "name":
+            strtab = [h for h in secs if h[1] == 2][0]
+            no = struct.unpack_from("<I", raw, off)[0]
+            raw[secs[strtab[6]][4] + no + value] ^= 0x20   # case-flip a byte
+        open(path, "wb").write(raw)
+        return []
+    return prepare
+
+
+def _rec_name(k, text):
+    def edit(raw, at):
+        o = at + 12 + k * 28 + 4
+        raw[o:o + 24] = text.encode().ljust(24, b"\0")[:24]
+    return edit
+
+
+def _rec_word(o, value):
+    def edit(raw, at):
+        import struct
+        struct.pack_into("<I", raw, at + o, value)
+    return edit
 
 
 def p_dynamic_middle(path, name):
@@ -1839,27 +2026,71 @@ CASES = [
     ("ltrans_stale", "lto", BOTH, {"*": "lto_leaf"}, 1024, p_ltrans_stale,
      ("reject", [("witness", "which this image's map does not contain")]),
      "a partition record left by an earlier link"),
-    # --- roots and budget ----------------------------------------------------
-    ("root_missing", "main", BOTH, {"pl_print_write": None}, 1024, p_none,
-     ("reject", [("roots", "declared behind veneer pl_print_write")]),
-     "a veneer with no root"),
-    ("root_extra", "main", BOTH, {"pl_not_a_veneer": "leaf"}, 1024, p_none,
-     ("reject", [("roots", "pl_not_a_veneer is not a veneer")]),
-     "a root for something that is not a veneer"),
-    ("root_ambiguous", "main", BOTH, {"pl_base_log": "helper1"}, 1024, p_none,
-     ("reject", [("roots", "helper1 names 2 functions")]),
-     "a root that names two bodies"),
-    ("root_no_equals", "main", BOTH, {}, 1024,
-     p_extra("--root=just_a_veneer_name"),
-     ("reject", [("roots", "is not VENEER=FUNCTION")]),
-     "a --root with no =FUNCTION"),
-    ("root_duplicate", "main", BOTH, {}, 1024,
-     p_extra("--root=pl_base_log=root_chain"),
-     ("reject", [("roots", "veneer pl_base_log is declared twice")]),
-     "one veneer declared twice"),
-    ("root_unresolved", "main", BOTH, {"pl_base_log": "no_such_fn"}, 1024,
-     p_none, ("reject", [("roots", "no_such_fn is not a function")]),
-     "a root that names none"),
+    # --- roots: the board's table (issue #165) --------------------------------
+    ("bind_null", "main", BOTH, {"pl_print_write": None}, 1024, p_none,
+     ("reject", [("bindings", "(pl_print_write) is NULL")]),
+     "a veneer whose word in the table is NULL"),
+    ("bind_not_thumb", "main", BOTH, {"pl_base_log": "even:bind_target"}, 1024,
+     p_none, ("reject", [("bindings", "not a Thumb code address")]),
+     "a word with the Thumb bit clear"),
+    ("bind_inside", "main", BOTH, {"pl_base_log": "inside:bind_target"}, 1024,
+     p_none, ("reject", [("bindings", "), not its entry")]),
+     "a word inside a function's body, not at its entry"),
+    ("bind_data", "main", BOTH, {"pl_base_log": "data:plugin_bind_probe"},
+     1024, p_none, ("reject", [("bindings", "which is no function's entry")]),
+     "a word that is no function at all (the record, a data object)"),
+    ("bind_alias", "main", BOTH, {"pl_base_log": "bind_alias"}, 1024, p_none,
+     ("accept", {"pl_base_log": lambda t, w, i: su_frame(
+         os.path.join(w, "obj", "bind.c.su"), "bind_target")}),
+     "a word naming an alias: the one body at that address"),
+    ("bind_size_disagrees", "main", BOTH, {"pl_base_log": "bind_sized"}, 1024,
+     p_none, ("reject", [("walk", "its symbols disagree about its size")]),
+     "two symbols at one address with different sizes"),
+    # The record of which word is which veneer, and the table's symbol.
+    ("record_absent", "main", BOTH, {}, 1024,
+     p_symbol("plugin_bind_probe", "name", 0),
+     ("reject", [("bindings", "0 symbols named plugin_bind_probe")]),
+     "no record"),
+    ("record_magic", "main", BOTH, {}, 1024, p_record(_rec_word(0, 0x1234)),
+     ("reject", [("bindings", "plugin_bind_probe magic 0x00001234")]),
+     "a record with another magic"),
+    ("record_count", "main", BOTH, {}, 1024, p_record(_rec_word(8, 5)),
+     ("reject", [("bindings", "not the 5 fields it says it holds")]),
+     "a record whose count disagrees with its size"),
+    ("record_unknown", "main", BOTH, {}, 1024,
+     p_record(_rec_name(5, "pl_print_wrong")),
+     ("reject", [("bindings", "names pl_print_wrong, which is not a veneer"),
+                 ("bindings", "no field for veneer pl_print_write")]),
+     "a field named for no veneer, and so one veneer with no field"),
+    ("record_twice", "main", BOTH, {}, 1024,
+     p_record(_rec_name(5, "pl_base_log")),
+     ("reject", [("bindings", "names veneer pl_base_log 2 times"),
+                 ("bindings", "no field for veneer pl_print_write")]),
+     "one veneer named twice"),
+    ("record_unterminated", "main", BOTH, {}, 1024,
+     p_record(_rec_name(0, "x" * 24)),
+     ("reject", [("bindings", "field 0: the veneer name is not terminated"),
+                 ("bindings", "which is not a veneer"),
+                 ("bindings", "no field for veneer pl_base_log")]),
+     "a veneer name with no terminator"),
+    ("record_offset_shared", "main", BOTH, {}, 1024,
+     p_record(_rec_word(12 + 28, 12)),
+     ("reject", [("bindings", "offset 12 is given to more than one veneer"),
+                 ("bindings", "offset 12 is given to more than one veneer")]),
+     "two veneers given one word"),
+    ("record_offset_odd", "main", BOTH, {}, 1024,
+     p_record(_rec_word(12, 14)),
+     ("reject", [("bindings", "field at offset 14 is not a word inside")]),
+     "an offset that is not a word of the table"),
+    ("table_size", "main", BOTH, {}, 1024,
+     p_symbol("plugin_board_bindings", "size", 40),
+     ("reject", [("bindings", "plugin_board_bindings is 40 B, but "
+                              "sizeof(struct plugin_bindings) is 36 B")]),
+     "a table symbol of another size"),
+    ("table_not_object", "main", BOTH, {}, 1024,
+     p_symbol("plugin_board_bindings", "type", 2),
+     ("reject", [("bindings", "plugin_board_bindings is symbol type 2")]),
+     "a table symbol that is not a data object"),
     ("printer_limit", "main", BOTH, {}, 256, p_extra("--printer-limit",
                                                      "fixture=300"),
      ("reject", [("budget", "bounded at 300 B, above VENEER_BASE_COST 256")]),
@@ -1934,7 +2165,7 @@ def check_case(tools, gate, arch, base_work, image_proto, case):
 def empty_abi_case(gate, work, image):
     """The ABI's veneer set is imported, so an empty one can only be made by
     patching the import -- which is what this does, in-process, on a real
-    image with no roots at all."""
+    image (its table is not read: there is no veneer to read it for)."""
     import contextlib
     import io
     mod = _load_gate(gate, "gate_under_test")
@@ -2041,7 +2272,7 @@ def input_error_cases(gate, work, image):
     mp = os.path.join(work, image["map"])
     prebuilt = os.path.join(work, "prebuilt")
     base = [sys.executable, gate, elf, "--map", mp, "--declared", "1024",
-            "--prebuilt-root", prebuilt] + [f"--root={v}=leaf" for v in VENEERS]
+            "--prebuilt-root", prebuilt]
     cases = []
     notelf = os.path.join(work, "notelf.bin")
     open(notelf, "w").write("this is not an ELF\n")
@@ -2175,8 +2406,7 @@ def main():
                         iargs = [sys.executable, gate, strp, "--map",
                                  os.path.join(iwork, iimg["map"]),
                                  "--declared", "1024", "--prebuilt-root",
-                                 os.path.join(iwork, "prebuilt")] + [
-                                     f"--root={v}=leaf" for v in VENEERS]
+                                 os.path.join(iwork, "prebuilt")]
                     ran += 1
                     label = f"{arch}:input_{iname}"
                     r = subprocess.run(iargs, capture_output=True, text=True)

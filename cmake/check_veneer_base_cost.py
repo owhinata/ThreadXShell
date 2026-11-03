@@ -20,13 +20,37 @@ firmware that can no longer tell (the loader compares a manifest with a policy,
 not with this build).  Raising the declaration is a diff someone has to write,
 and that diff is the signal that containers must be re-packed and re-sent.
 
-[!] THE BOARD'S FACT IS WHICH FIRMWARE FUNCTION SITS BEHIND EACH VENEER, and it
-is the one thing here that is stated rather than derived (--root).  The SET of
-veneers is not the board's: it is the plugin gate's VENEERS, imported, and the
-roots must cover it exactly -- none missing, none extra.  The result holds for
-the bindings as declared; binding a different callback without updating the
-declaration is invisible here, the same layer of "board states a fact" as the
-FORBIDDEN table.
+[!] THE ROOTS ARE READ OUT OF THE IMAGE, NOT DECLARED (issue #165).  Which
+firmware function sits behind each veneer is the board's table
+plugin_board_bindings (svc/plugin/plugin_bindings.h): its head is the base the
+loader hands entry(), and the painter and printer are filled from its other
+members, so its words in the shipped ELF ARE the six bindings.  Which word is
+which veneer is the record plugin_bind_probe (offsets taken from the struct,
+veneer names beside them).  So the roots are derived:
+
+    plugin_bind_probe   one symbol, magic, size of the table, count, and per
+                        field an offset and a veneer name; the names must be
+                        the plugin gate's VENEERS exactly (imported -- the one
+                        declaration of the set), each once, the offsets
+                        distinct, word-aligned and inside the table
+    plugin_board_bindings
+                        one symbol, global (not weak, not local), a data
+                        object of exactly that size, inside one loadable
+                        read-only section
+    each word           the Thumb entry of a function, by the same rule a
+                        linker veneer's literal is read with
+                        (thumb_stack_analysis.Image.thumb_entry): NULL, a
+                        clear Thumb bit, an address inside a body or in no
+                        body at all are refused.  Aliases at one address are
+                        one body; an ARM-state symbol or sizes that disagree
+                        are refused when the body is analysed.
+
+Until #165 the board named the six by hand (--root), and a board whose table
+bound a deep function while the list named a shallow one passed.
+
+What this does not see: trusted firmware code that hands a callback a vtable
+it built itself, or that writes the const table through a cast (Grove's
+.rodata is SRAM) -- going around the shared code on purpose.
 
 [!] AND NOTHING HERE HAS A BOARD NAME OR A -mcpu IN IT.  The decoder covers the
 Thumb-2 of Armv7E-M and Armv8.1-M Mainline as far as this needs it, which is
@@ -38,9 +62,8 @@ is in thumb_stack_analysis.py -- shared with the plugin image gate, which
 stops at its veneers instead -- and the roots, which bodies may have no
 record, and the budget here):
 
-  functions  are ELF FUNC symbols, identified by ADDRESS.  A name is only ever
-             used to resolve a root, and a root that names two bodies (two
-             statics in two files) is refused.  Extents come from st_size, or
+  functions  are ELF FUNC symbols, identified by ADDRESS, and so are the
+             roots (above).  Extents come from st_size, or
              -- for assembler that declared none -- from the next function or
              the end of the map's input section, whichever is first.  Code and
              data inside an extent come from the mapping symbols ($t / $d).
@@ -178,6 +201,156 @@ def fmt_chain(image, chain):
 
 
 # ============================================================================
+#  The roots, from the board's table (issue #165)
+# ============================================================================
+TABLE = "plugin_board_bindings"
+RECORD = "plugin_bind_probe"
+RECORD_MAGIC = 0x444E4250        # svc/plugin/plugin_bindings.h "PBND"
+NAME_MAX = 24                    # PLUGIN_BIND_NAME_MAX
+SHT_NOBITS = 8
+SHF_WRITE = 0x1
+SHF_ALLOC = 0x2
+STB_GLOBAL = 1
+STT_OBJECT = 1
+
+
+def _home(elf, addr, size):
+    """The loadable, non-empty sections that hold [addr, addr + size)."""
+    return [s for s in elf.sections
+            if s.flags & SHF_ALLOC and s.type != SHT_NOBITS and s.size
+            and s.addr <= addr and addr + size <= s.addr + s.size]
+
+
+def _bytes(elf, addr, size):
+    home = _home(elf, addr, size)
+    if len(home) != 1:
+        return None
+    o = home[0].offset + addr - home[0].addr
+    return elf.raw[o:o + size]
+
+
+def _word(elf, addr):
+    b = _bytes(elf, addr, 4)
+    return None if b is None else int.from_bytes(b, "little")
+
+
+def display_name(node):
+    """The name a root is shown by: an LTO-localised static without its
+    .lto_priv suffix, so that a row reads the same with and without LTO."""
+    n = node.name
+    m = LTO_PRIV.match(n)
+    return m.group(1) if m else n
+
+
+def derive_roots(elf, image, abi):
+    """({veneer: addr}, {veneer: name}, [error]) from the board's table."""
+    errs = []
+    recs = [x for x in elf.symbols if x[0] == RECORD]
+    if len(recs) != 1:
+        return {}, {}, [f"{len(recs)} symbols named {RECORD}; the firmware "
+                        "links svc/plugin/plugin_bindings.c, which defines it "
+                        "once"]
+    _, raddr, rsize, _, _ = recs[0]
+    head = _bytes(elf, raddr, 12) if rsize >= 12 else None
+    if head is None:
+        return {}, {}, [f"{RECORD} at 0x{raddr:08x} ({rsize} B) is not in "
+                        "loadable bytes"]
+    magic, tsize, count = (int.from_bytes(head[i:i + 4], "little")
+                           for i in (0, 4, 8))
+    if magic != RECORD_MAGIC:
+        return {}, {}, [f"{RECORD} magic 0x{magic:08x}, not "
+                        f"0x{RECORD_MAGIC:08x}"]
+    if rsize != 12 + count * (4 + NAME_MAX):
+        return {}, {}, [f"{RECORD} is {rsize} B, not the {count} fields it "
+                        "says it holds"]
+    body = _bytes(elf, raddr, rsize)
+    fields = []
+    for k in range(count):
+        o = 12 + k * (4 + NAME_MAX)
+        off = int.from_bytes(body[o:o + 4], "little")
+        raw = body[o + 4:o + 4 + NAME_MAX]
+        name = raw.split(b"\0", 1)[0].decode("ascii", "replace")
+        if b"\0" not in raw:
+            errs.append(f"{RECORD} field {k}: the veneer name is not "
+                        "terminated")
+        fields.append((off, name))
+    names = [n for _, n in fields]
+    for n in sorted(set(names)):
+        if names.count(n) > 1:
+            errs.append(f"{RECORD} names veneer {n} {names.count(n)} times")
+    for n in sorted(set(names) - abi):
+        errs.append(f"{RECORD} names {n}, which is not a veneer of the plugin "
+                    f"ABI ({', '.join(sorted(abi))})")
+    for n in sorted(abi - set(names)):
+        errs.append(f"{RECORD} has no field for veneer {n} -- every veneer "
+                    "the ABI has must be bound by the table")
+    offs = [o for o, _ in fields]
+    for o, n in fields:
+        if o % 4 or o + 4 > tsize:
+            errs.append(f"{RECORD}: the {n} field at offset {o} is not a "
+                        f"word inside a {tsize} B table")
+        elif offs.count(o) > 1:
+            errs.append(f"{RECORD}: offset {o} is given to more than one "
+                        "veneer")
+
+    tabs = [(x, b) for x, b in zip(elf.symbols, elf.binds) if x[0] == TABLE]
+    if len(tabs) != 1:
+        errs.append(f"{len(tabs)} symbols named {TABLE}; the board defines "
+                    "exactly one (svc/plugin/plugin_bindings.h)")
+        return {}, {}, errs
+    (_, taddr, size, stype, _), bind = tabs[0]
+    if bind != STB_GLOBAL:
+        how = {0: "local", 2: "weak"}.get(bind, f"binding {bind}")
+        errs.append(f"{TABLE} is {how}, not global: a weak one can be "
+                    "replaced at link by a table this did not read, a local "
+                    "one is not the table the loader names")
+    if stype != STT_OBJECT:
+        errs.append(f"{TABLE} is symbol type {stype}, not a data object")
+    if size != tsize:
+        errs.append(f"{TABLE} is {size} B, but sizeof(struct plugin_bindings) "
+                    f"is {tsize} B ({RECORD})")
+    home = _home(elf, taddr, tsize)
+    if len(home) != 1:
+        errs.append(f"{TABLE} at 0x{taddr:08x} is not inside one loadable "
+                    "section")
+    elif home[0].flags & SHF_WRITE:
+        errs.append(f"{TABLE} at 0x{taddr:08x} is in {home[0].name}, a "
+                    "writable section: the image holds only its initial "
+                    "words.  Define the board's table const.")
+    if errs:
+        return {}, {}, errs
+
+    resolved, shown = {}, {}
+    for off, v in sorted(fields, key=lambda f: f[1]):
+        w = _word(elf, taddr + off)
+        where = f"{TABLE}+{off} ({v})"
+        if w is None:
+            errs.append(f"{where} is not in loadable bytes")
+            continue
+        if w == 0:
+            errs.append(f"{where} is NULL -- the plugin would call address 0 "
+                        "through that veneer")
+            continue
+        tgt, why = image.thumb_entry(w)
+        if why == "not_thumb":
+            errs.append(f"{where} holds 0x{w:08x}, which is not a Thumb code "
+                        "address (bit 0 clear)")
+            continue
+        if why is not None:
+            inside = image.node_containing(tgt)
+            if inside is not None:
+                errs.append(f"{where} holds 0x{w:08x}, inside "
+                            f"{inside.name} (0x{inside.addr:08x}), not its "
+                            "entry")
+            else:
+                errs.append(f"{where} holds 0x{w:08x}, which is no "
+                            "function's entry")
+            continue
+        resolved[v] = tgt
+        shown[v] = display_name(image.nodes[tgt])
+    return resolved, shown, errs
+
+
 def positive(v):
     try:
         n = int(v, 0)
@@ -199,9 +372,6 @@ def main(argv=None):
     ap.add_argument("--link-dir",
                     help="the directory the link ran in (relative map paths "
                          "resolve against it); default: the map's directory")
-    ap.add_argument("--root", action="append", default=[], metavar="V=F",
-                    help="veneer V of the plugin ABI reaches firmware "
-                         "function F; one per veneer, no more, no fewer")
     ap.add_argument("--declared", required=True, type=positive,
                     help="the board's VENEER_BASE_COST, in bytes")
     ap.add_argument("--printer-limit", action="append", default=[],
@@ -252,48 +422,16 @@ def run(args):
     wit = Witnesses(image, link_dir, args.prebuilt_root, args.ltrans_su)
     errors += [("witness", e) for e in wit.errors]
 
-    # --- roots ---------------------------------------------------------------
+    # --- roots: read out of the image (issue #165) ---------------------------
     abi = set(check_plugin_image.VENEERS)
-    roots = {}
     if not abi:
         errors.append(("roots", "the ABI's veneer set is empty -- there is "
                                 "nothing to derive a cost for, which is not "
                                 "the same as a cost of zero"))
-    for spec in args.root:
-        v, sep, f = spec.partition("=")
-        if not sep or not v or not f:
-            errors.append(("roots", f"--root {spec!r} is not VENEER=FUNCTION"))
-            continue
-        if v in roots:
-            errors.append(("roots", f"veneer {v} is declared twice"))
-            continue
-        roots[v] = f
-    for v in sorted(set(roots) - abi):
-        errors.append(("roots", f"{v} is not a veneer of the plugin ABI "
-                                f"({', '.join(sorted(abi))})"))
-    for v in sorted(abi - set(roots)):
-        errors.append(("roots", f"no firmware function is declared behind "
-                                f"veneer {v} -- every veneer the ABI has must "
-                                "be accounted for"))
-    resolved = {}
-    for v, f in sorted(roots.items()):
-        if v not in abi:
-            continue
-        exact = [a for a, n in image.nodes.items() if f in n.names]
-        if not exact:
-            exact = [a for a, n in image.nodes.items()
-                     if any(LTO_PRIV.match(x) and LTO_PRIV.match(x).group(1)
-                            == f for x in n.names)]
-        if not exact:
-            errors.append(("roots", f"{v}: {f} is not a function in "
-                                    f"{os.path.basename(args.elf)}"))
-        elif len(exact) > 1:
-            where = ", ".join(f"0x{a:08x}" for a in sorted(exact))
-            errors.append(("roots", f"{v}: {f} names {len(exact)} functions "
-                                    f"({where}) -- a root must be exactly "
-                                    "one body"))
-        else:
-            resolved[v] = exact[0]
+    resolved, roots = {}, {}
+    if abi:
+        resolved, roots, errs = derive_roots(elf, image, abi)
+        errors += [("bindings", e) for e in errs]
 
     # --- walk ----------------------------------------------------------------
     walk = Walk(image)

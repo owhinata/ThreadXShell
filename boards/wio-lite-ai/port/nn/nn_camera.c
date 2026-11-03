@@ -903,7 +903,7 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
 			else if (rc != 1)
 				nn_report_set(rep, NN_REPORT_UNSUPPORTED);
 			else
-				nn_report_end(rep, nn_active_report(nn_report_write, rep));
+				nn_report_end(rep, nn_active_report_to(rep));
 		} else {
 			/* A plugin is loaded but this record is not its work -- nothing
 			 * has been decoded yet in this session, say. */

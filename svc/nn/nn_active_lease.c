@@ -118,11 +118,11 @@ int nn_active_can_report(void)
 	return nn_active_core_can_report(nn_active_facts.core);
 }
 
-int nn_active_report(nn_svc_write_fn write, void *ctx)
+int nn_active_report_to(void *ctx)
 {
 	if (!nn_active_held())
 		return NN_ACTIVE_NOT_HELD;
-	return nn_active_core_report(nn_active_facts.core, write, ctx);
+	return nn_active_core_report_to(nn_active_facts.core, ctx);
 }
 
 int nn_active_get_thresh_milli(unsigned *milli)

@@ -170,9 +170,10 @@ int nn_active_can_draw(void);
  * @return 0, negative when the writer refused, or NN_ACTIVE_NOT_HELD
  *
  * A no-op returning 0 with no plugin loaded, for the same reason as
- * @ref nn_active_draw.
+ * @ref nn_active_draw.  The text goes into @p ctx through the board's write
+ * (plugin_board_bindings, issue #165).
  */
-int nn_active_report(nn_svc_write_fn write, void *ctx);
+int nn_active_report_to(void *ctx);
 
 /**
  * The score threshold, in milli, of whichever decoder is in force -- or

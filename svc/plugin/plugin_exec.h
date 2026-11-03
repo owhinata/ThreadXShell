@@ -167,7 +167,11 @@ struct plugin_exec_env {
  * @param v          the validated view, from plugin_parse()
  * @param container  where the container lies
  * @param token      the board's proof for @ref plugin_exec_port::source_ok
- * @param base       the vtable handed to the plugin; must outlive the plugin
+ *
+ * The plugin is handed &plugin_board_bindings.base (plugin_bindings.h): the
+ * board's table, by name, and no argument (issue #165; until then this was
+ * plugin_exec_load() with a base argument, a name cmake/check_policy_entry.py
+ * now refuses in a firmware link).
  * @param why        optional; on a refusal the port's reason, else untouched
  *
  * @return PLUGIN_RUN_OK, or a reason.  PLUGIN_RUN_NO_PLUGIN when the container
@@ -180,11 +184,10 @@ struct plugin_exec_env {
  * On any failure nothing is left published: a plugin that refused its own entry
  * is not active, and the fault reporter will not name it.
  */
-enum plugin_run_result plugin_exec_load(const struct plugin_exec_env *env,
-                                        const struct plugin_view *v,
-                                        const void *container, uintptr_t token,
-                                        const struct plugin_base_api *base,
-                                        const char **why);
+enum plugin_run_result plugin_exec_start(const struct plugin_exec_env *env,
+                                         const struct plugin_view *v,
+                                         const void *container, uintptr_t token,
+                                         const char **why);
 
 /**
  * @brief  Forget the active plugin.

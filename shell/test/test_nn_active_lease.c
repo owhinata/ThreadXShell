@@ -17,6 +17,7 @@
  * holds the entry list derived from this file's object.
  */
 #include "nn_active_lease.h"
+#include "plugin_bindings.h"
 #include "plugin_lease_api.h"
 
 #include <stdio.h>
@@ -185,6 +186,9 @@ static int sink(void *ctx, const char *s, size_t len)
 	return (int)len;
 }
 
+/* The board's table (issue #165): the printer's write comes from here. */
+const struct plugin_bindings plugin_board_bindings = { .write = sink };
+
 static const struct plugin_painter painter = {
 	PLUGIN_ABI_VERSION, sizeof(struct plugin_painter), NULL, NULL, NULL, NULL
 };
@@ -199,7 +203,7 @@ enum entry_id {
 /* LEASE ENTRIES BEGIN */
 static const char *const entry_name[E_COUNT] = {
 	"nn_active_shapes_ok", "nn_active_decode", "nn_active_draw",
-	"nn_active_can_draw", "nn_active_can_report", "nn_active_report",
+	"nn_active_can_draw", "nn_active_can_report", "nn_active_report_to",
 	"nn_active_get_thresh_milli", "nn_active_set_thresh_milli",
 };
 /* LEASE ENTRIES END */
@@ -212,7 +216,7 @@ static int call_entry(enum entry_id e, unsigned *th)
 	case E_DRAW:       return nn_active_draw(&painter);
 	case E_CAN_DRAW:   return nn_active_can_draw();
 	case E_CAN_REPORT: return nn_active_can_report();
-	case E_REPORT:     return nn_active_report(sink, NULL);
+	case E_REPORT:     return nn_active_report_to(NULL);
 	case E_THRESH_GET: *th = 12345u; return nn_active_get_thresh_milli(th);
 	case E_THRESH_SET: return nn_active_set_thresh_milli(650u);
 	default:           break;
@@ -298,7 +302,7 @@ static void test_held(void)
 	ok("can_draw / can_report answer yes", nn_active_can_draw() == 1 &&
 	   nn_active_can_report() == 1);
 	reset();
-	ok("report writes", nn_active_report(sink, NULL) == 1 && wrote == 1u);
+	ok("report writes", nn_active_report_to(NULL) == 1 && wrote == 1u);
 	ok("set reaches the plugin's threshold",
 	   nn_active_set_thresh_milli(650u) == NN_ACTIVE_THRESH_OK &&
 	   thresh == 650u);

@@ -61,6 +61,17 @@ void plugin_paint_bind(struct plugin_painter *p,
                        struct plugin_paint_budget *bud,
                        uint16_t *fb, uint16_t sw, uint16_t sh);
 
+/*
+ * The three primitives, for the board's plugin_board_bindings (issue #165):
+ * the table is what the painter is filled from, and what the build derives the
+ * painter veneers' roots from.  Not for calling directly.
+ */
+void paint_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565,
+                uint16_t stroke);
+void paint_fill_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565);
+void paint_blit(void *ctx, const struct plugin_rect *r, const uint16_t *src,
+                uint32_t src_stride, int32_t key);
+
 #ifdef __cplusplus
 }
 #endif

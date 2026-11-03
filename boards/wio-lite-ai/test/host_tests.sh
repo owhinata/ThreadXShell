@@ -324,6 +324,17 @@ gcc $CFLAGS -I "$board/src" \
     $LDFLAGS -o "$out/test_psram_guard"
 "$out/test_psram_guard"
 
+# issue #113 -- has the DMA2D stopped writing the PSRAM (port/ltdc/dma2d_quiesce.c):
+# a timeout whose ABORT is read back as stopped loses that frame only, one that is
+# not read back stopped (or a START already set before the setup) is permanent and
+# is what the OCTOSPI1 reconfiguration gate asks; a HAL_OK poll with TE / CE, an
+# error interrupt, TE with TC and a refused setup are all failures.  None of these
+# can be produced at a console.  The registers and the clock are injected fakes.
+gcc $CFLAGS -I "$board/port/ltdc" \
+    "$here/test_dma2d_quiesce.c" "$board/port/ltdc/dma2d_quiesce.c" \
+    $LDFLAGS -o "$out/test_dma2d_quiesce"
+"$out/test_dma2d_quiesce"
+
 # issue #142 review -- which band stream a stop waits for: svc/camera/cam_gen.h, shared
 # with f746g-disco since issue #143, so its test is shell/test/test_cam_gen.c.
 

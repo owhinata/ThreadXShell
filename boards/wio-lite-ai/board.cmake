@@ -729,6 +729,7 @@ option(BSP_ENABLE_LCD "Enable the FPC-40 RGB LCD (LTDC) and the lcd command" ON)
 if(BSP_ENABLE_LCD)
     list(APPEND SHELL_SOURCES
         "${BOARD_DIR}/port/ltdc/ltdc_display.c"
+        "${BOARD_DIR}/port/ltdc/dma2d_quiesce.c"
         "${BOARD_DIR}/port/ltdc/st7789_rgb.c"
         "${BOARD_DIR}/cmds/cmd_lcd.c")
 endif()

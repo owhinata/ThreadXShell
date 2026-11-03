@@ -105,6 +105,21 @@ Cases:
                     command line through veneer_cost_gate_declared() (where the
                     host container verifier gets it).  A loader test cannot see
                     this: it is handed a policy, never the build's.
+  bind_decoy        (issue #165) the base table the firmware hands the plugin
+                    binds its log slot to a function deeper than DECLARED,
+                    while ROOTS still names the shallow nn_plugin_log: the
+                    check PASSES, because it walks the names in ROOTS and
+                    reads no table.  Naming the deep function in ROOTS fails
+                    (the walk sees it when told).  A documented limit for now:
+                    step 3 of #165 derives the roots from the table and this
+                    case turns into a refusal.
+  policy_decoy      (issue #165) the probe points at a correct read-only
+                    policy, while the code hands the parse entry a different
+                    read-only policy whose c is 1: the probe PASSES, because
+                    it reads what it points at, not what the parse entry is
+                    given.  A documented limit for now: step 2 of #165 binds
+                    the policy by a fixed name and this case turns into a
+                    refusal.
 """
 import argparse
 import importlib.util
@@ -215,6 +230,55 @@ static FIX_POLICY_QUAL struct plugin_policy fix_policy = {
     .stack_accounting = PLUGIN_STACK_ACCOUNTING,
 };
 PLUGIN_POLICY_PROBE(fix_policy);
+
+/* (issue #165, bind_decoy) The base table a board hands the plugin, as
+ * nn_active.c / nn_svc_grove.c define nn_plugin_base -- with its log slot bound
+ * to a function far deeper than DECLARED.  ROOTS still names nn_plugin_log. */
+#ifdef FIX_BIND_DECOY
+__attribute__((noinline, used)) void fix_deep_log(void *ctx, const char *s,
+                                                  size_t len)
+{
+    volatile char b[8192];
+    (void)ctx;
+    (void)s;
+    b[0] = (char)len;
+}
+__attribute__((used)) const struct plugin_base_api fix_plugin_base = {
+    .version = PLUGIN_ABI_VERSION,
+    .size    = (uint32_t)sizeof(struct plugin_base_api),
+    .log     = fix_deep_log,
+};
+__attribute__((noinline, used)) const struct plugin_base_api *fix_base(void)
+{
+    return &fix_plugin_base;
+}
+#endif
+
+/* (issue #165, policy_decoy) The probe above points at fix_policy, which is
+ * correct; the code hands the parse entry another read-only policy, with c = 1.
+ * The entry is a stand-in under the real name and prototype (plugin_load.h). */
+#ifdef FIX_POLICY_DECOY
+__attribute__((used)) const struct plugin_policy fix_policy_used = {
+    .stack_limit      = { FIX_STACK_A, FIX_STACK_A, FIX_STACK_A, FIX_STACK_B,
+                          FIX_STACK_A, FIX_STACK_A, FIX_STACK_A },
+    .veneer_cost      = 1u,
+    .stack_accounting = PLUGIN_STACK_ACCOUNTING,
+};
+__attribute__((noinline, used)) enum plugin_result
+plugin_parse(const void *buf, size_t len, const struct plugin_policy *pol,
+             struct plugin_view *out)
+{
+    (void)buf;
+    (void)len;
+    (void)out;
+    return pol->veneer_cost != 0u ? PLUGIN_OK : PLUGIN_ERR_SHORT;
+}
+__attribute__((noinline, used)) enum plugin_result
+fix_load(const void *buf, size_t len, struct plugin_view *out)
+{
+    return plugin_parse(buf, len, &fix_policy_used, out);
+}
+#endif
 """,
     "record.py": """import sys
 open(sys.argv[2], "w").write(sys.argv[1] + "\\n")
@@ -254,6 +318,8 @@ set(FIX_DELIVERY flash CACHE STRING "")
 set(FIX_EXTRA "" CACHE STRING "")
 set(FIX_B 500 CACHE STRING "")
 set(FIX_PLUGIN OFF CACHE BOOL "")
+# (issue #165, bind_decoy) the function ROOTS names for the log slot.
+set(FIX_LOG_ROOT nn_plugin_log CACHE STRING "")
 
 add_library(fw_objs OBJECT objsrc.c policy.c)
 target_include_directories(fw_objs PRIVATE "@SVC@" "@SVC@/nn" "@SVC@/plugin" "@SVC@/camera")
@@ -292,7 +358,7 @@ veneer_cost_gate(
     FIRMWARE shell
     MAP      "${CMAKE_BINARY_DIR}/shell.map"
     DECLARED ${DECLARED}
-    ROOTS    pl_base_log=nn_plugin_log
+    ROOTS    pl_base_log=${FIX_LOG_ROOT}
              pl_base_to_frame=nn_active_to_frame
              pl_paint_rect=paint_rect
              pl_paint_fill_rect=paint_fill_rect
@@ -1090,6 +1156,99 @@ def delivery_tree(p, results):
     p.configure(DECLARED="4096", FIX_EXTRA="", FIX_DELIVERY="flash")
 
 
+def _image_words(p, sym, count):
+    """The first @p count 32-bit words of @p sym, as the shipped image holds
+    them, and the address of every symbol (the copied analysis' ELF reader)."""
+    spec = importlib.util.spec_from_file_location(
+        "thumb_stack_analysis_under_test",
+        os.path.join(p.src, "cmake", "thumb_stack_analysis.py"))
+    tsa = importlib.util.module_from_spec(spec)
+    sys.dont_write_bytecode = True
+    spec.loader.exec_module(tsa)
+    elf = tsa.Elf(p.elf)
+    addr = {s[0]: s[1] for s in elf.symbols if s[0]}
+    a = addr[sym]
+    for sec in elf.sections:
+        if sec.type != 8 and sec.size and sec.addr <= a < sec.addr + sec.size:
+            o = sec.offset + a - sec.addr
+            return [int.from_bytes(elf.raw[o + 4 * i:o + 4 * i + 4], "little")
+                    for i in range(count)], addr
+    raise Fail("%s is in no section with bytes" % sym)
+
+
+def decoy_tree(p, results):
+    """issue #165: what the gate does not tie to what the loader uses.
+
+    Both cases PASS today and say so: a documented limit, stated as a case so
+    that it is written down rather than discovered.  #165 turns them around
+    (policy_decoy in step 2, bind_decoy in step 3); when it does, these
+    expectations are the ones to flip.
+    """
+    # --- bind_decoy --------------------------------------------------------
+    p.rm("flashed")
+    p.configure(DECLARED="4096", FIX_LOG_ROOT="nn_plugin_log",
+                CMAKE_C_FLAGS=p.c_init + " -DFIX_BIND_DECOY")
+    rc, out = p.ninja("flash")
+    flat = " ".join(out.split())
+    words, addr = _image_words(p, "fix_plugin_base", 4)
+    expect(words[3] == (addr["fix_deep_log"] | 1),
+           "bind_decoy: the image's base table should bind log to "
+           "fix_deep_log (0x%08x), holds 0x%08x"
+           % (addr["fix_deep_log"] | 1, words[3]))
+    expect(rc == 0 and os.path.exists(p.path("flashed"))
+           and "check_veneer_base_cost: OK" in flat
+           and re.search(r"pl_base_log nn_plugin_log \d+ B", flat)
+           and "fix_deep_log" not in flat,
+           "bind_decoy: expected to PASS (the check walks ROOTS, not the "
+           "table the plugin is handed), which is the documented limit; if "
+           "this now fails, #165 step 3 turned it around -- update the case",
+           out)
+    # The control: the same image, with ROOTS naming what the table binds.
+    p.rm("flashed")
+    p.configure(DECLARED="4096", FIX_LOG_ROOT="fix_deep_log",
+                CMAKE_C_FLAGS=p.c_init + " -DFIX_BIND_DECOY")
+    rc, out = p.ninja("flash")
+    flat = " ".join(out.split())
+    expect(rc != 0 and not os.path.exists(p.path("flashed"))
+           and "[budget] pl_base_log needs" in flat
+           and "fix_deep_log" in flat and "declares 4096 B" in flat,
+           "bind_decoy: with ROOTS naming fix_deep_log the check should "
+           "refuse pl_base_log in [budget]", out)
+    results.append(("bind_decoy", "log bound to a function deeper than "
+                                  "DECLARED, ROOTS names nn_plugin_log: "
+                                  "passes (documented limit, #165 step 3); "
+                                  "naming it in ROOTS is refused"))
+
+    # --- policy_decoy ------------------------------------------------------
+    p.rm("flashed")
+    p.configure(DECLARED="4096", FIX_LOG_ROOT="nn_plugin_log",
+                CMAKE_C_FLAGS=p.c_init + " -DFIX_POLICY_DECOY")
+    rc, out = p.ninja("flash")
+    flat = " ".join(out.split())
+    # struct plugin_policy_probe: magic, size, off_veneer_cost,
+    # off_accounting, off_stack_limit, policy.
+    probe, addr = _image_words(p, "plugin_policy_probe", 6)
+    used, _ = _image_words(p, "fix_policy_used", probe[1] // 4)
+    expect(probe[5] == addr["fix_policy"] and probe[5] != addr["fix_policy_used"]
+           and used[probe[2] // 4] == 1,
+           "policy_decoy: the probe should point at fix_policy and the "
+           "policy the code passes should hold c = 1 (probe -> 0x%08x, "
+           "fix_policy 0x%08x, fix_policy_used 0x%08x c = %d)"
+           % (probe[5], addr["fix_policy"], addr["fix_policy_used"],
+              used[probe[2] // 4]))
+    expect(rc == 0 and os.path.exists(p.path("flashed"))
+           and "check_policy_probe: OK" in flat
+           and "charges c = 4096 B (= DECLARED)" in flat,
+           "policy_decoy: expected to PASS (the probe reads the policy it "
+           "points at, not the one the parse entry is given), which is the "
+           "documented limit; if this now fails, #165 step 2 turned it "
+           "around -- update the case", out)
+    results.append(("policy_decoy", "the probe reads a correct policy while "
+                                    "the parse entry is handed one with c = "
+                                    "1: passes (documented limit, #165 "
+                                    "step 2)"))
+
+
 def cost_tree(p, results):
     """DECLARED -> the policy TU's compile and the asset's command line."""
     nm = p.cc[:-len("gcc")] + "nm"
@@ -1277,6 +1436,7 @@ def main():
         ("ltrans_drop", lambda p: lto_tree(p, results)),
         ("cost_wiring", lambda p: cost_tree(p, results)),
         ("stack_wiring", lambda p: stack_tree(p, results)),
+        ("decoy", lambda p: decoy_tree(p, results)),
         ("delivery", lambda p: delivery_tree(p, results)),
         ("delivery_glued", lambda p: delivery_glued_tree(p, results)),
     ]

@@ -15,17 +15,16 @@
  *
  * [!] IT DRAWS WITH THE CPU, INCLUDING THE FILLS, AND THAT IS THE DESIGN.  The
  * panel's own primitives (ltdc_fill_rect) run on DMA2D, and a plugin's draw()
- * must not: the frame transaction ends when ltdc_flip() presents, and this port
- * has no way to establish that an outstanding DMA2D transfer has stopped
- * writing before then.  The small-transfer path polls with a HAL call that
- * returns WITHOUT aborting on timeout, ltdc_dma2d_fill() discards that result,
- * and ltdc_fill_rect() returns void -- so a timed-out fill can still be in
- * flight when its destination becomes the displayed buffer, and suppressing
- * that one flip does not help because the next producer frame reuses the
- * buffer.  Repairing that is the port's own problem and its own issue; a
- * painter that never arms a transfer does not have it.  The rotating blit this
- * panel already uses (svc/gfx_rot.c) writes the same framebuffer with the CPU,
- * so this is the access the panel already performs, not a new one.
+ * must not, for two reasons (issue #113).  First, whether a DMA2D transfer has
+ * stopped writing is visible only as CR.START reading back 0, and RM0468 does
+ * not say that the writes to the PSRAM have completed at that moment -- the
+ * port's stop-and-confirm (port/ltdc/dma2d_quiesce.h) rests on that as an
+ * assumption, not a guarantee.  Second, a DMA2D draw that cannot be confirmed
+ * stopped latches the whole display down until a reset; a plugin's drawing
+ * must not be able to do that to the panel.  A painter that never arms a
+ * transfer has neither problem.  The rotating blit this panel already uses
+ * (svc/gfx_rot.c) writes the same framebuffer with the CPU, so this is the
+ * access the panel already performs, not a new one.
  *
  * [!] THE COORDINATES ARE LANDSCAPE 320x240, like everything else that draws
  * here, and the rotation to the panel's 240x320 happens in the loops.

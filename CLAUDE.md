@@ -244,7 +244,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - **decode と draw を隔てるものが無い**ので**結果リース**で囲う: **常にリース → フレームロック**、
   worker は decode と publish の全体を保持、**パネルは待たない**。**リース保持は「描いてよい」ではない**。
 - **report は snapshot と同じ保護区間で採取し、バッファは呼び出し側のフレーム**。**長さは状態ではない**。
-- **painter は全部 CPU**（DMA2D に静止を確かめる機構が無い）。**輪郭は書く画素数で課金する**。
+- **painter は全部 CPU**（DMA2D の静止は START の読み戻しでしか見えず PSRAM 書込みの完了は RM が保証しない・plugin の描画で表示を恒久故障に落とさない）。**輪郭は書く画素数で課金する**。
 - **スタックは 2 つの量**（入口の空き / veneer の下）。不足ならスレッドを広げる。
 - **`nn info` の claim は開いているモデルに従い**、reload 後の状態は `nn_model_reload()` の戻り値で
   決める（無ロックの `nn info` が別コンソールから呼ぶので後から問い合わせない）。

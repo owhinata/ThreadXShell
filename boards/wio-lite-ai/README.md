@@ -482,6 +482,106 @@ clears LTDCEN and marks the display disabled; the reconfigurer's scan-out gate
 reads that disabled flag (set only after LTDCEN is cleared), not the fault flag,
 so a fault never hides a running LTDC.  The fault path is review-only.
 
+**And a DMA2D that was not confirmed stopped (issue #113).**  A DMA2D draw
+whose engine cannot be confirmed stopped latches the display down the same way
+(next section), so from then on the scan-out gate answers "not scanning" while
+the DMA2D may still be writing the frame buffer -- a display fault alone would
+hide it.  The reconfigurer therefore also asks `ltdc_dma2d_unconfirmed()`
+(with PRIMASK set, in `psram_acquire()`).  That mark is raised inside the
+drawing command, before the command gives its PSRAM user place back, and is
+never lowered, so `psram clk`, `membench psram`, `devmem` on PSRAM and `wifi
+flash` stay refused until a reset.  Review-only, like the LTDC fault path.
+
+### [!] A failed DMA2D draw (issue #113)
+
+Only `lcd fill`, `bar`, `clear`, `anim` and `blit` use the DMA2D (`lcd grad`,
+the camera preview's transpose and the plugin painter are CPU).  Transfers under
+16,384 pixels poll; larger ones wait on the completion interrupt for 30 ticks.
+Until issue #113 a failed transfer could not be seen: the HAL's poll returns
+`HAL_OK` when START is already 0, so a TE or CE that ended a transfer at once
+looked like success; a timeout left the engine running; the interrupt path's
+`HAL_DMA2D_Abort()` result was discarded; and `ltdc_flip()` presented whatever
+the back buffer held.
+
+Every transfer now goes through `port/ltdc/dma2d_quiesce.c` (no HAL, CMSIS or
+ThreadX; host-tested by `test/test_dma2d_quiesce.c` against a fake DMA2D and a
+fake clock):
+
+- **Before setup**: if CR.START already reads 1, nothing is configured (RM0468
+  sec 18.5.1: the setup registers cannot be written during a transfer) and the
+  failure is permanent.  Otherwise TC / TE / CE are cleared, so the verdict
+  cannot read a stale flag.
+- **Verdict**: polled = `HAL_OK` and no TE / CE in DMA2D_ISR; interrupt = the
+  completion callback ran and the error callback did not.  The two callbacks
+  are separate because `HAL_DMA2D_IRQHandler()` handles TE and then TC in one
+  call and leaves the handle READY either way.  Both paths also need START and
+  ABORT reading 0.  A refused Init / ConfigLayer / Start is a failure too.
+- **Stop and confirm**, one procedure for both paths: ABORT is written only if
+  START reads 1 (START is never written as 1), then CR is read back until START
+  and ABORT are both 0, against a wall-clock deadline of 5 ThreadX ticks (1 ms
+  each; "elapsed > 5", so at least 4-5 ms).  An ABORT stops the engine at the end
+  of its current burst, microseconds; even a whole transfer is shorter (a
+  9,600-pixel R2M fill is under 1 ms on a healthy PSRAM, a full-screen 76,800
+  pixels a few ms).  Still busy after that means a write that is not completing.
+- **Confirmed stopped -- this frame only.**  The flags are cleared and a "this
+  back buffer's draw failed" mark is raised.  The next `ltdc_flip()` stages
+  nothing, returns `LTDC_ERR_DRAW` and lowers the mark; the display stays up and
+  the flip after that presents again.  A later successful draw does not lower
+  it (a failed background under a successful rectangle is still half drawn).
+  The command prints `lcd: draw failed, frame not presented`.
+- **Not confirmed -- permanent.**  The display is latched down as for a stuck
+  reload (backlight and LTDCEN off), `ltdc_dma2d_unconfirmed()` turns true for
+  good and the OCTOSPI1 reconfiguration gate refuses (previous section).  The
+  command prints `lcd: present failed, display down (reset to recover)`.
+  Recovery is a reset.
+
+`HAL_DMA2D_Abort()` is not used: it spins up to 1 s on `HAL_GetTick()` and
+returns a timeout without the caller learning whether START dropped.  The port
+does the hardware half itself and puts the HAL handle back to READY and unlocked
+by hand -- `HAL_DMA2D_Start()` leaves it locked, and a locked handle makes the
+next `HAL_DMA2D_ConfigLayer()` / `Start()` return `HAL_BUSY`, so every later
+draw would fail its setup.
+
+[!] **"START reads 0, so every DMA2D write to the PSRAM has completed" is an
+assumption, not something RM0468 guarantees.**  Sec 18.3.15 / 18.5.1 say the
+hardware clears START at the end of a transfer, on ABORT, on a transfer error
+and on a configuration error, and clears ABORT when START is cleared; nothing
+says the write path has drained by then, and START (with ABORT) is the only
+status the DMA2D exposes.  ES0491 lists no DMA2D erratum.  The successful path
+has always rested on the same assumption.
+
+**Accepted race.**  If a transfer ends between the read that saw START = 1 and
+the ABORT write, ABORT lands on an idle engine and may stay set (the hardware
+clears it "when the START bit is reset", which has already happened).  That
+reads as not stopped, i.e. permanent, for an engine that had stopped.  The
+window is one register read, the error is in the safe direction, and recovery
+is a reset.
+
+**What the frame-only failure guarantees, and what it does not.**  It keeps the
+FAILED COMMAND from presenting its own half-drawn buffer: every `lcd` drawing
+command draws the whole back buffer and flips under one hold of the frame lock.
+It does not make that buffer impossible to show: a preview flip that waited on
+the frame lock during the failed command, or preview bands drawn into the same
+back buffer afterwards, can still present it.  By then the DMA2D has stopped,
+so this is the same mixing of two writers that `src/cam_preview.c` already
+accepts.
+
+The failure paths cannot be produced at a console.  For a one-off hardware
+check, build with `-DLTDC_DMA2D_FAULT_INJECT=1` in the C flags (for example
+`cmake -B build/wio-inject -DBOARD=wio-lite-ai
+-DCMAKE_C_FLAGS=-DLTDC_DMA2D_FAULT_INJECT=1`; never part of the default build).
+The completion wait becomes 0 on both paths, so a transfer is abandoned while it
+runs, and every transfer logs `inject: START=<0|1> before, CR=0x... after,
+result <r>` (0 drawn, 1 this frame only, 2 permanent).  `lcd on` then `lcd fill
+red` (one full-screen transfer on the interrupt path) should show `START=1
+before`, result 1 and `lcd: draw failed, frame not presented`; `lcd bar`'s short
+polled fills may already have finished (`START=0`).  A result 2 leaves the
+display down until a reset.
+
+| Date | Firmware | Command | `START` before | Result | Console |
+|---|---|---|---|---|---|
+| | | | | | |
+
 ### Measured after issue #142
 
 2026-10-11, a plugin container loaded.  The rates were taken on firmware
@@ -528,7 +628,7 @@ table moved to `svc/nn/` in issue #163, see svc/README.md):
 | `port/nn/tflm/nn_tflm_bufs.c` | as above | The arena and the two model staging slots in the cacheable, CPU-only PSRAM carve-out (`.psram_ai`), defined in C so `check_psram_ai_residency.py` sees their plain names, and the staging capacity object `load_region()` hands out. |
 | `port/plugin/plugin_run.c` | console (load / unload), fault handler | The reservation in the top 32 KB of AXI-SRAM (a Cortex-M7 cannot fetch from DTCM), M7 I/D-cache maintenance and the Armv7-M MPU read-back.  The lease checks, the log lines and the staging-region precondition around them are `svc/plugin/plugin_run_core.c`, shared with f746g-disco (issue #159). |
 | `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex: the preview thread outranks the worker and would otherwise preempt a decode mid-way. |
-| `port/plugin/plugin_paint.c` | panel | CPU pixel loops into the rotated, native-order RGB565 LTDC frame (no DMA2D, which has no way to prove it stopped before the flip). |
+| `port/plugin/plugin_paint.c` | panel | CPU pixel loops into the rotated, native-order RGB565 LTDC frame (no DMA2D: see [the painter](#-the-painter-draws-with-the-cpu-fills-included)). |
 | `port/camera/cam_band.c` | camera producer (band callback), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one band sink, running the preview step and then the nn step; each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
 
 [!] **`nn run`'s driver (`nn_svc_run_once()`) stays in this board's adapter** (issue #174 D7).  Its policy is shared already: the refusals and the base words of how a run ends (`svc/nn/nn_refusal`), when the wait ends (`svc/nn/nn_run_wait`) and how one run ended (`svc/nn/nn_shot`).  What is left is the camera API (the start's arguments and refusals, how a lost stream is read, the decode read-out), the teardown's clause, and ThreadX's sleep and clock -- `svc/` cannot include `tx_api.h`, so a shared driver would need a hook table as large as the loop itself.
@@ -1179,17 +1279,15 @@ way" and "it could not be reached in time", because length is not a status.
 ### [!] The painter draws with the CPU, fills included
 
 The panel's own `ltdc_fill_rect()` runs on DMA2D and a plugin's `draw()` must
-not.  The frame transaction ends when `ltdc_flip()` presents, and this port
-cannot establish that an outstanding DMA2D transfer has stopped writing before
-then: the small-transfer path polls with a HAL call that returns WITHOUT
-aborting on timeout, `ltdc_dma2d_fill()` discards that result and
-`ltdc_fill_rect()` returns void.  A timed-out fill can therefore still be in
-flight when its destination becomes the displayed buffer, and suppressing that
-one flip does not help because the next producer frame reuses the buffer.
-**Repairing that is the port's own problem and its own issue.**  A painter that
-never arms a transfer does not have it, and the rotating blit this panel
-already uses writes the same framebuffer with the CPU, so this is an access the
-panel already performs.
+not, for two reasons.  Whether a DMA2D transfer has stopped writing is visible
+only as CR.START reading back 0, and RM0468 does not say the PSRAM writes have
+completed at that moment: the port's stop-and-confirm
+([A failed DMA2D draw](#-a-failed-dma2d-draw-issue-113)) rests on that as an
+assumption, not a guarantee.  And a DMA2D draw that cannot be confirmed stopped
+latches the whole display down until a reset, which a plugin's drawing must not
+be able to do to the panel.  A painter that never arms a transfer has neither
+problem, and the rotating blit this panel already uses writes the same
+framebuffer with the CPU, so this is an access the panel already performs.
 
 The budget is a quarter of the surface (19,200 pixels) plus 64 dispatches,
 charged BEFORE the framebuffer is touched so a refused primitive leaves nothing

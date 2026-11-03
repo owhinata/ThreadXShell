@@ -191,7 +191,10 @@ below 2^30 -- r10_* / r10b_* / md_offline_off_2e30*, all FORMAT but the controls
 and r10_rank7_big (TENSOR: the rank rule's).  By profile, in OP_CASES: r11_*
 (elementwise element counts), r12_* (pool ranks), r4_* / r6_* (PAD's and
 TRANSPOSE's values), r13_* (MEAN's reduced shape); r11_neg is R10's FORMAT on
-every profile.
+every profile.  Step 2: r1w_* / r2w_* / r12b_* / r7_batch, _ch, _in_rank3 --
+the window formula, CONV_2D's 65535 bounds, the depthwise int16 bases, and the
+pools' / RESIZE's batch and channels; the earlier CONV_2D and pool cases carry
+the options the formula reads, so they keep their answers.
 
 And the depth half of the header's claim: schema_table_depth.py runs on the
 schema.fbs the gate was built from (the first -I directory holding one, else the
@@ -555,6 +558,40 @@ OP_CASES = [
     ("r13_axis_oob.tflite", FORMAT, "MEAN", None),
     ("r13_axis_nodata.tflite", FORMAT, "MEAN", None),
     ("r13_axis_int8.tflite", FORMAT, "MEAN", None),
+    # Issue #188 step 2: the window formula (TFLM's ComputeOutSize()) for
+    # CONV_2D / DEPTHWISE_CONV_2D / pools, CONV_2D's uint16 bounds, the
+    # depthwise int16 bases, the pools' and RESIZE's batch and channels.
+    ("r1w_1x1_ok.tflite", None, "CONV_2D", None),
+    ("r1w_3x3_same_s2_ok.tflite", None, "CONV_2D", None),
+    ("r1w_3x3_valid_d2_ok.tflite", None, "CONV_2D", None),
+    ("r1w_1x1_smaller.tflite", FORMAT, "CONV_2D", None),
+    ("r1w_h_plus1.tflite", FORMAT, "CONV_2D", None),
+    ("r1w_stride0.tflite", FORMAT, "CONV_2D", None),
+    ("r1w_dil0.tflite", FORMAT, "CONV_2D", None),
+    ("r1w_no_opts.tflite", FORMAT, "CONV_2D", None),
+    ("r1w_pad2.tflite", FORMAT, "CONV_2D", None),
+    ("r1w_dil_overflow.tflite", FORMAT, "CONV_2D", None),
+    ("r1w_valid_neg.tflite", FORMAT, "CONV_2D", None),
+    ("r1w_stride_65536.tflite", FORMAT, "CONV_2D", None),
+    ("r1w_dim_65536.tflite", FORMAT, "CONV_2D", None),
+    ("r2w_3x3_ok.tflite", None, "DEPTHWISE_CONV_2D", None),
+    ("r2w_opt_ok.tflite", None, "DEPTHWISE_CONV_2D", None),
+    ("r2w_int16_32767.tflite", None, "DEPTHWISE_CONV_2D", None),
+    ("r2w_h_big.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
+    ("r2w_int16_32768.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
+    ("r2w_batch.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
+    ("r12b_same_ok.tflite", None, "MAX_POOL_2D", None),
+    ("r12b_valid_ok.tflite", None, "MAX_POOL_2D", None),
+    ("r12b_avg_s2_ok.tflite", None, "AVERAGE_POOL_2D", None),
+    ("r12b_h_ne.tflite", FORMAT, "MAX_POOL_2D", None),
+    ("r12b_batch.tflite", FORMAT, "MAX_POOL_2D", None),
+    ("r12b_ch.tflite", FORMAT, "MAX_POOL_2D", None),
+    ("r12b_stride0.tflite", FORMAT, "MAX_POOL_2D", None),
+    ("r12b_filter0.tflite", FORMAT, "MAX_POOL_2D", None),
+    ("r12b_no_opts.tflite", FORMAT, "MAX_POOL_2D", None),
+    ("r7_batch.tflite", FORMAT, "RESIZE_BILINEAR", None),
+    ("r7_ch.tflite", FORMAT, "RESIZE_BILINEAR", None),
+    ("r7_in_rank3.tflite", FORMAT, "RESIZE_BILINEAR", None),
 ]
 # What each profile registers of the operators above (svc/nn/tflm/nn_tflm_ops.h;
 # a profile changing there must change here, or these cases fail).

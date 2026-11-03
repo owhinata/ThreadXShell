@@ -375,6 +375,28 @@
  *                           _axes_5 (5 values, all in range), _axis_oob ({4}),
  *                           _axis_nodata, _axis_int8 refused
  *
+ * And step 2 of #188, the window (TFLM's ComputeOutSize()).  The CONV_2D and
+ * pool cases above carry the options the rule reads, chosen so they keep their
+ * answers: CONV_2D Conv2DOptions stride 1, VALID for a 1x1 filter and SAME for
+ * the 3x3 ones; the pools Pool2DOptions VALID, stride 2, filter 2x2.  New:
+ *
+ *   r1w_*                   CONV_2D int8, filter with data, INT32 bias:
+ *                           _1x1_ok, _3x3_same_s2_ok ([1, 5, 5, 2] -> 3x3),
+ *                           _3x3_valid_d2_ok (dilation 2, [1, 6, 6, 2] -> 2x2)
+ *                           are controls; _1x1_smaller (output 2x2 of a 4x4
+ *                           input, the fast path's case), _h_plus1, _stride0,
+ *                           _dil0, _no_opts, _pad2 (padding value 2),
+ *                           _dil_overflow (SAME, dilation 2^30: only the int32
+ *                           range refuses it), _valid_neg (filter 7 over 4),
+ *                           _stride_65536 (the formula holds), _dim_65536 (W
+ *                           65536, not graph I/O) refused
+ *   r2w_*                   DEPTHWISE_CONV_2D dm 1: _3x3_ok, _opt_ok (5x1
+ *                           VALID) and _int16_32767 ((2 - 1) x 32767) are
+ *                           controls; _h_big, _int16_32768, _batch refused
+ *   r12b_*                  pools: _same_ok, _valid_ok, _avg_s2_ok; _h_ne,
+ *                           _batch, _ch, _stride0, _filter0, _no_opts refused
+ *   r7_batch / _ch / _in_rank3  RESIZE_BILINEAR: refused
+ *
  * Every file stays under 512 KB (checked here) and within the 4096 visits.
  *
  * Usage: gen_model_io_fixtures <out-dir>
@@ -950,12 +972,18 @@ struct opr_spec {
 	int                     opts;          /* 0 none, 1 DepthwiseConv2DOptions
 	                                        * {dm}, 2 Conv2DOptions, 3
 	                                        * ConcatenationOptions {axis: dm}, 4
-	                                        * ReducerOptions {keep_dims: dm != 0} */
+	                                        * ReducerOptions {keep_dims: dm != 0},
+	                                        * 5 Pool2DOptions (issue #188) */
 	int32_t                 dm;
 	uint32_t                codes;         /* operator codes, all `kind` (0: 1) */
 	uint32_t                opcode_index;
 	bool                    deprecated_only; /* the kind in deprecated_builtin_code
 	                                          * only, builtin_code ADD (0) */
+	/* issue #188: the window of options 1 / 2 / 5 (filter: 5 only). */
+	int                     padding = tflite::Padding_VALID;
+	int32_t                 stride_h = 1, stride_w = 1;
+	int32_t                 dil_h = 1, dil_w = 1;
+	int32_t                 filt_h = 1, filt_w = 1;
 };
 
 /* Model, SubGraph, the tensors, the operator and its options, the codes, buffer
@@ -1003,17 +1031,25 @@ bool write_op_model(const std::string &dir, const opr_spec &sp)
 
 	if (sp.opts == 1) {
 		ot = tflite::BuiltinOptions_DepthwiseConv2DOptions;
-		ov = tflite::CreateDepthwiseConv2DOptions(fbb, tflite::Padding_VALID, 1, 1, sp.dm)
-		         .Union();
+		ov = tflite::CreateDepthwiseConv2DOptions(fbb, (tflite::Padding)sp.padding, sp.stride_w,
+		                                          sp.stride_h, sp.dm,
+		                                          tflite::ActivationFunctionType_NONE,
+		                                          sp.dil_w, sp.dil_h).Union();
 	} else if (sp.opts == 2) {
 		ot = tflite::BuiltinOptions_Conv2DOptions;
-		ov = tflite::CreateConv2DOptions(fbb, tflite::Padding_VALID, 1, 1).Union();
+		ov = tflite::CreateConv2DOptions(fbb, (tflite::Padding)sp.padding, sp.stride_w,
+		                                 sp.stride_h, tflite::ActivationFunctionType_NONE,
+		                                 sp.dil_w, sp.dil_h).Union();
 	} else if (sp.opts == 3) {
 		ot = tflite::BuiltinOptions_ConcatenationOptions;
 		ov = tflite::CreateConcatenationOptions(fbb, sp.dm).Union();
 	} else if (sp.opts == 4) {
 		ot = tflite::BuiltinOptions_ReducerOptions;
 		ov = tflite::CreateReducerOptions(fbb, sp.dm != 0).Union();
+	} else if (sp.opts == 5) {
+		ot = tflite::BuiltinOptions_Pool2DOptions;
+		ov = tflite::CreatePool2DOptions(fbb, (tflite::Padding)sp.padding, sp.stride_w,
+		                                 sp.stride_h, sp.filt_w, sp.filt_h).Union();
 	}
 	const auto op = tflite::CreateOperator(fbb, sp.opcode_index, fbb.CreateVector(sp.in),
 	                                       fbb.CreateVector(sp.out), ot, ov);
@@ -1995,6 +2031,157 @@ int main(int argc, char **argv)
 			os.push_back(mean("r13_axis_nodata.tflite", T(I32, { 2 }, 0u), { 1, 8 }, 0));
 			os.push_back(mean("r13_axis_int8.tflite",
 			                  rtensor{ I8, { 2 }, 2u, {} }, { 1, 8 }, 0));
+		}
+
+		/* Issue #188 step 2: the cases above get the options the window rule
+		 * reads, with which they keep their answers -- CONV_2D Conv2DOptions,
+		 * stride 1, VALID for a 1x1 filter and SAME for the 3x3 ones (both give
+		 * the input's H and W); the pools Pool2DOptions VALID, stride 2, a 2x2
+		 * filter ([., 4, 4, .] -> [., 2, 2, .]).  DEPTHWISE_CONV_2D already has
+		 * its options, 1x1, VALID, stride 1. */
+		for (opr_spec &sp : os) {
+			if (sp.kind == CONV && sp.opts == 0) {
+				sp.opts = 2;
+				if (sp.t.size() > 1 && sp.t[1].shape.size() == 4 && sp.t[1].shape[1] > 1)
+					sp.padding = tflite::Padding_SAME;
+			} else if ((sp.kind == tflite::BuiltinOperator_MAX_POOL_2D ||
+			            sp.kind == tflite::BuiltinOperator_AVERAGE_POOL_2D) && sp.opts == 0) {
+				sp.opts = 5;
+				sp.stride_h = sp.stride_w = 2;
+				sp.filt_h = sp.filt_w = 2;
+			}
+		}
+
+		/* Issue #188 step 2: the window rules.  R1 CONV_2D int8, filter data and
+		 * an INT32 bias of its output channels; the window in the arguments. */
+		{
+			auto conv = [&](const char *file, std::vector<int32_t> x, std::vector<int32_t> f,
+			                std::vector<int32_t> y, int pad, int32_t sh, int32_t sw,
+			                int32_t dh, int32_t dwf) {
+				uint32_t fb = 1;
+
+				for (int32_t v : f)
+					fb *= (uint32_t)v;
+				opr_spec sp = op(file, CONV,
+				                 { T(I8, x, 0u), T(I8, f, fb), T(I32, { f[0] }, 4u * (uint32_t)f[0]),
+				                   T(I8, y, 0u) }, { 0, 1, 2 });
+				sp.opts = 2;
+				sp.padding = pad;
+				sp.stride_h = sh;
+				sp.stride_w = sw;
+				sp.dil_h = dh;
+				sp.dil_w = dwf;
+				return sp;
+			};
+			const int V = tflite::Padding_VALID, SM = tflite::Padding_SAME;
+			const std::vector<int32_t> f11 = { 3, 1, 1, 2 }, f33 = { 3, 3, 3, 2 };
+
+			os.push_back(conv("r1w_1x1_ok.tflite", { 1, 4, 4, 2 }, f11, { 1, 4, 4, 3 },
+			                  V, 1, 1, 1, 1));
+			os.push_back(conv("r1w_3x3_same_s2_ok.tflite", { 1, 5, 5, 2 }, f33, { 1, 3, 3, 3 },
+			                  SM, 2, 2, 1, 1));
+			os.push_back(conv("r1w_3x3_valid_d2_ok.tflite", { 1, 6, 6, 2 }, f33, { 1, 2, 2, 3 },
+			                  V, 1, 1, 2, 2));
+			os.push_back(conv("r1w_1x1_smaller.tflite", { 1, 4, 4, 2 }, f11, { 1, 2, 2, 3 },
+			                  V, 1, 1, 1, 1));
+			os.push_back(conv("r1w_h_plus1.tflite", { 1, 5, 5, 2 }, f33, { 1, 4, 3, 3 },
+			                  SM, 2, 2, 1, 1));
+			os.push_back(conv("r1w_stride0.tflite", { 1, 4, 4, 2 }, f11, { 1, 4, 4, 3 },
+			                  V, 0, 1, 1, 1));
+			os.push_back(conv("r1w_dil0.tflite", { 1, 4, 4, 2 }, f11, { 1, 4, 4, 3 },
+			                  V, 1, 1, 0, 1));
+			{
+				opr_spec sp = conv("r1w_no_opts.tflite", { 1, 4, 4, 2 }, f11, { 1, 4, 4, 3 },
+				                   V, 1, 1, 1, 1);
+				sp.opts = 0;
+				os.push_back(sp);
+			}
+			os.push_back(conv("r1w_pad2.tflite", { 1, 4, 4, 2 }, f11, { 1, 4, 4, 3 },
+			                  2, 1, 1, 1, 1));
+			/* SAME ignores the filter, so only the range check refuses it: eff
+			 * (3 - 1) x 2^30 + 1 is past int32. */
+			os.push_back(conv("r1w_dil_overflow.tflite", { 1, 4, 4, 2 }, f33, { 1, 4, 4, 3 },
+			                  SM, 1, 1, 1 << 30, 1));
+			os.push_back(conv("r1w_valid_neg.tflite", { 1, 4, 4, 2 }, { 3, 7, 1, 2 },
+			                  { 1, 0, 4, 3 }, V, 1, 1, 1, 1));
+			/* The formula holds ((4 + 65535) / 65536 == 1): only the bound refuses. */
+			os.push_back(conv("r1w_stride_65536.tflite", { 1, 4, 4, 2 }, f11, { 1, 1, 4, 3 },
+			                  SM, 65536, 1, 1, 1));
+			/* Not graph I/O (65536 is DIMS there). */
+			os.push_back(off_io_n(off_io_n(conv("r1w_dim_65536.tflite", { 1, 4, 65536, 2 }, f11,
+			                                    { 1, 4, 65536, 3 }, V, 1, 1, 1, 1),
+			                               false), true));
+		}
+
+		/* R2 DEPTHWISE_CONV_2D int8, dm 1, 2 channels; the window in the
+		 * arguments. */
+		{
+			auto dww = [&](const char *file, std::vector<int32_t> x, int32_t fh, int32_t fw,
+			               std::vector<int32_t> y, int pad, int32_t sh, int32_t sw) {
+				opr_spec sp = dw(file,
+				                 { T(I8, x, 0u), T(I8, { 1, fh, fw, 2 }, (uint32_t)(fh * fw * 2)),
+				                   T(I32, { 2 }, 8u), T(I8, y, 0u) }, 1);
+				sp.padding = pad;
+				sp.stride_h = sh;
+				sp.stride_w = sw;
+				return sp;
+			};
+			const int V = tflite::Padding_VALID, SM = tflite::Padding_SAME;
+
+			os.push_back(dww("r2w_3x3_ok.tflite", { 1, 4, 4, 2 }, 3, 3, { 1, 4, 4, 2 }, SM, 1, 1));
+			/* The opt path's shape: filter 5x1, dm 1, batch 1, not 3x3. */
+			os.push_back(dww("r2w_opt_ok.tflite", { 1, 6, 6, 2 }, 5, 1, { 1, 2, 6, 2 }, V, 1, 1));
+			os.push_back(dww("r2w_h_big.tflite", { 1, 6, 6, 2 }, 5, 1, { 1, 3, 6, 2 }, V, 1, 1));
+			/* (2 - 1) x 32767 / x 32768, the formula holding in both. */
+			os.push_back(dww("r2w_int16_32767.tflite", { 1, 32768, 1, 2 }, 1, 1, { 1, 2, 1, 2 },
+			                 SM, 32767, 1));
+			os.push_back(dww("r2w_int16_32768.tflite", { 1, 32769, 1, 2 }, 1, 1, { 1, 2, 1, 2 },
+			                 SM, 32768, 1));
+			os.push_back(dww("r2w_batch.tflite", { 2, 4, 4, 2 }, 3, 3, { 1, 4, 4, 2 }, SM, 1, 1));
+		}
+
+		/* R12b MAX_POOL_2D / AVERAGE_POOL_2D. */
+		{
+			auto pool = [&](const char *file, tflite::BuiltinOperator k, std::vector<int32_t> x,
+			                std::vector<int32_t> y, int pad, int32_t s, int32_t f) {
+				opr_spec sp = op(file, k, { T(I8, x, 0u), T(I8, y, 0u) }, { 0 });
+				sp.opts = 5;
+				sp.padding = pad;
+				sp.stride_h = sp.stride_w = s;
+				sp.filt_h = sp.filt_w = f;
+				return sp;
+			};
+			const tflite::BuiltinOperator MP = tflite::BuiltinOperator_MAX_POOL_2D;
+			const tflite::BuiltinOperator AP = tflite::BuiltinOperator_AVERAGE_POOL_2D;
+			const int V = tflite::Padding_VALID, SM = tflite::Padding_SAME;
+			const std::vector<int32_t> x4 = { 1, 4, 4, 2 }, y3 = { 1, 3, 3, 2 };
+
+			os.push_back(pool("r12b_same_ok.tflite", MP, { 1, 5, 5, 2 }, y3, SM, 2, 3));
+			os.push_back(pool("r12b_valid_ok.tflite", MP, x4, y3, V, 1, 2));
+			os.push_back(pool("r12b_avg_s2_ok.tflite", AP, x4, { 1, 2, 2, 2 }, V, 2, 2));
+			os.push_back(pool("r12b_h_ne.tflite", MP, x4, { 1, 2, 3, 2 }, V, 1, 2));
+			os.push_back(pool("r12b_batch.tflite", MP, { 2, 4, 4, 2 }, y3, V, 1, 2));
+			os.push_back(pool("r12b_ch.tflite", MP, x4, { 1, 3, 3, 1 }, V, 1, 2));
+			os.push_back(pool("r12b_stride0.tflite", MP, x4, y3, V, 0, 2));
+			os.push_back(pool("r12b_filter0.tflite", MP, x4, y3, V, 1, 0));
+			{
+				opr_spec sp = pool("r12b_no_opts.tflite", MP, x4, y3, V, 1, 2);
+				sp.opts = 0;
+				os.push_back(sp);
+			}
+		}
+
+		/* R7 RESIZE_BILINEAR: the input rank 4, batch and channels the output's. */
+		{
+			const tflite::BuiltinOperator RB = tflite::BuiltinOperator_RESIZE_BILINEAR;
+			const rtensor sz = { I32, { 2 }, 8u, { 4, 6 } };
+
+			os.push_back(op("r7_batch.tflite", RB,
+			                { T(I8, { 2, 2, 2, 1 }, 0u), sz, T(I8, { 1, 4, 6, 1 }, 0u) }, { 0, 1 }));
+			os.push_back(op("r7_ch.tflite", RB,
+			                { T(I8, { 1, 2, 2, 1 }, 0u), sz, T(I8, { 1, 4, 6, 2 }, 0u) }, { 0, 1 }));
+			os.push_back(op("r7_in_rank3.tflite", RB,
+			                { T(I8, { 2, 2, 1 }, 0u), sz, T(I8, { 1, 4, 6, 1 }, 0u) }, { 0, 1 }));
 		}
 
 		for (const opr_spec &sp : os) {

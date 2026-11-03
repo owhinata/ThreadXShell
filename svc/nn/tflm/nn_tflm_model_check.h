@@ -248,7 +248,11 @@
  *                         row by the input's channels, arm_convolve_s16.c:79,
  *                         arm_convolve_s4.c:89, and read groups times past the
  *                         filter; int8 with an INT8 filter handles groups,
- *                         arm_convolve_s8.c:92-99, and stays allowed).
+ *                         arm_convolve_s8.c:92-99, and stays allowed); and
+ *                         (issue #188) Conv2DOptions present, H, W and C of
+ *                         the three and both strides at most 65535 (the
+ *                         general path holds them in uint16), and output[1] /
+ *                         [2] the window formula's ("OUTPUT FRAMES").
  *   R2 DEPTHWISE_CONV_2D  the three rank 4; filter[0] == 1 (the reference
  *                         DCHECK; the kernels read only filter[1..3]);
  *                         filter[3] == output[3];
@@ -256,7 +260,10 @@
  *                         table is 0, as TFLM reads it) and input[3] x
  *                         depth_multiplier == filter[3]; a bias of filter[3]
  *                         elements, FLOAT32 / FLOAT32, INT8 / INT32 or
- *                         INT16 / INT64.
+ *                         INT16 / INT64; and (issue #188) output[1] / [2] the
+ *                         window formula's, the batch the input's (a policy),
+ *                         and (output - 1) x stride at most 32767 in H and W
+ *                         (the kernels' int16 bases; an output of 0 is 0).
  *   R3 FULLY_CONNECTED    weights rank 2, output rank 2..4; weights[0] == the
  *                         output's last dimension; the input's elements ==
  *                         (the output's other dimensions multiplied) x
@@ -286,7 +293,10 @@
  *                         compared: Prepare()'s live "constant" check refuses
  *                         such a model on the board, as NN_MODEL_ERR_ARENA,
  *                         while the gates, which do not plan, pass it -- a
- *                         difference that predates this walk and stays.
+ *                         difference that predates this walk and stays.  And
+ *                         (issue #188) the input rank 4, its batch and
+ *                         channels the output's (a policy: the kernels loop
+ *                         over the smaller).
  *   R8 ADD / SUB / MUL    (two inputs or more: inputs 0 and 1, the only
  *                         ones the kernels read; ADD's and SUB's Prepare()
  *                         do not count the inputs) the three ranks at most
@@ -334,8 +344,8 @@
  *      under CMSIS-NN: CONV_2D's 1x1 fast path sizes its rows by the INPUT's
  *      n x h x w (arm_convolve_1x1_s8_fast.c), and the depthwise opt path
  *      memsets the scratch by an output H past the formula, with its row and
- *      column bases held in int16 (arm_depthwise_conv_s8_opt.c).  Those are
- *      the next step's window rules.
+ *      column bases held in int16 (arm_depthwise_conv_s8_opt.c).  Hence the
+ *      window rule below.
  *   3. A size past int is not RESHAPE's alone: the planner multiplies every
  *      tensor's shape in int (memory_helpers.cc), so [1, 65536, 65537, 1] int8
  *      is planned as 64 KB and a pool / conv / pad over its dims writes 4 GB.
@@ -372,8 +382,10 @@
  *       LOGISTIC /       CMSIS-NN kernel writes the input's outer x min(last),
  *       LEAKY_RELU /     inside the output when the counts are equal).  The
  *       SOFTMAX          shapes may differ.
- *   R12a MAX_POOL_2D /   input and output rank 4.
- *        AVERAGE_POOL_2D
+ *   R12a MAX_POOL_2D /   input and output rank 4; R12b, Pool2DOptions present,
+ *        AVERAGE_POOL_2D output[1] / [2] the window formula's (filter_height
+ *                        / _width, the strides, dilation 1), the batch and the
+ *                        channels the input's (a policy, as for RESIZE).
  *   R13 MEAN             the axis (input 1) INT32 and WITH data (without, the
  *                        walk cannot know which dims are reduced: refused), at
  *                        most NN_TFLM_MAX_MEAN_AXES elements counted before any
@@ -386,6 +398,18 @@
  *                        reference kernel adds into positions it builds from the
  *                        input's dims outside the axes.
  *   R4 / R6 (above)      PAD's and TRANSPOSE's values.
+ *   the window           (CONV_2D, DEPTHWISE_CONV_2D, the pools; R1 / R2 above)
+ *                        TFLM's ComputeOutSize(): eff = (filter - 1) x
+ *                        dilation + 1, SAME out = (in + stride - 1) / stride,
+ *                        VALID out = (in + stride - eff) / stride.  Stride,
+ *                        dilation and filter at least 1, in and the output not
+ *                        negative, padding SAME or VALID and the options table
+ *                        present (an absent one reads as stride 0), eff, the
+ *                        numerator and Prepare()'s padding (out - 1) x stride +
+ *                        eff - in inside int32 (computed in 64 bits), a 32-bit
+ *                        division truncating as TFLM's does, and the result
+ *                        equal to the declared output.  A negative result is
+ *                        refused too.
  *
  * RESHAPE needs no rule: under R10 Prepare()'s live element-count compare and
  * the memcpy of the input's bytes are exact (the -1 it would resolve is R10's).
@@ -445,7 +469,9 @@
  *                       dimension values, one options field and, for RESIZE,
  *                       two data words (issue #185); for PAD, TRANSPOSE and MEAN
  *                       at most 2 x NN_TFLM_MAX_TENSOR_RANK data words, counted
- *                       before they are read (issue #188)
+ *                       before they are read, and for a convolution or a pool
+ *                       a few options fields and two window formulas (issue
+ *                       #188)
  *
  * Every tensor and operator entry is one table visit of the verifier (a shared
  * subgraph's are visited once per entry naming it), so behind the 16 / 4096
@@ -1263,6 +1289,64 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_xfby(const tflite::Operator *op,
 	return true;
 }
 
+/*
+ * The window rule (issue #188, step 2; the file header, "OUTPUT FRAMES"): is
+ * @p want the output size TFLM's ComputeOutSize() (kernels/padding.h) gives for
+ * an input of @p in, a filter of @p filter, @p stride, @p dilation and
+ * @p padding (the schema's Padding value)?  The same formula --
+ *
+ *   eff   = (filter - 1) x dilation + 1
+ *   SAME  : out = (in + stride - 1) / stride
+ *   VALID : out = (in + stride - eff) / stride
+ *
+ * -- judged only where TFLM's int arithmetic does not wrap: stride, dilation
+ * and filter at least 1 (TFLM reads stride 0 as an output of 0 and an unknown
+ * padding as 0, neither a real output), in and want not negative, padding SAME
+ * or VALID; eff, the numerator and the padding Prepare() derives, (want - 1) x
+ * stride + eff - in, computed in 64 bits (additions and multiplications only)
+ * and refused outside int32; then a 32-bit division, truncating toward 0 as
+ * TFLM's does, a negative result refused and the result equal to @p want.
+ */
+NN_TFLM_RULE_HELPER bool nn_tflm_window_ok(int32_t in, int32_t filter, int32_t stride,
+                                           int32_t dilation, int padding, int32_t want)
+{
+	if (stride < 1 || dilation < 1 || filter < 1 || in < 0 || want < 0)
+		return false;
+	if (padding != tflite::Padding_SAME && padding != tflite::Padding_VALID)
+		return false;
+
+	const int64_t eff = (int64_t)(filter - 1) * dilation + 1;
+	const int64_t num = padding == tflite::Padding_SAME ? (int64_t)in + stride - 1
+	                                                    : (int64_t)in + stride - eff;
+	const int64_t pad = ((int64_t)want - 1) * stride + eff - in;
+
+	if (eff > INT32_MAX || num < INT32_MIN || num > INT32_MAX ||
+	    pad < INT32_MIN || pad > INT32_MAX)
+		return false;
+
+	const int32_t out = (int32_t)num / stride;
+
+	return out >= 0 && out == want;
+}
+
+/* The H and W of a convolution or a pool: input [1] / [2], filter height /
+ * width @p fh / @p fw, the options' strides and dilations, output [1] / [2]
+ * (all three tensors rank 4, checked by the caller). */
+NN_TFLM_RULE_HELPER bool nn_tflm_window_hw_ok(const tflite::Tensor *x, const tflite::Tensor *y,
+                                              int32_t fh, int32_t fw, const flatbuffers::Table *o,
+                                              flatbuffers::voffset_t vt_padding,
+                                              flatbuffers::voffset_t vt_stride_h,
+                                              flatbuffers::voffset_t vt_stride_w,
+                                              int32_t dil_h, int32_t dil_w)
+{
+	const int padding = o->GetField<int8_t>(vt_padding, 0);
+	const int32_t sh = o->GetField<int32_t>(vt_stride_h, 0);
+	const int32_t sw = o->GetField<int32_t>(vt_stride_w, 0);
+
+	return nn_tflm_window_ok(nn_tflm_dim(x, 1u), fh, sh, dil_h, padding, nn_tflm_dim(y, 1u)) &&
+	       nn_tflm_window_ok(nn_tflm_dim(x, 2u), fw, sw, dil_w, padding, nn_tflm_dim(y, 2u));
+}
+
 /* R1 (the file header). */
 NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_CONV_2D(const tflite::Operator *op,
                                                   const nn_tflm_tensor_vec *tensors,
@@ -1288,6 +1372,29 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_CONV_2D(const tflite::Operator *op,
 	if ((nn_tflm_tensor_type(x) == tflite::TensorType_INT16 ||
 	     nn_tflm_tensor_type(f) == tflite::TensorType_INT4) &&
 	    nn_tflm_dim(f, 3u) != nn_tflm_dim(x, 3u))
+		return false;
+
+	/* Issue #188: H, W and C of the three and the strides at most 65535 (the
+	 * CMSIS-NN general path holds them in uint16, arm_convolve_s8.c), and the
+	 * output's H and W the window formula's (the 1x1 fast path sizes its
+	 * rows by the INPUT's n x h x w). */
+	const flatbuffers::Table *o = nn_tflm_op_options(op, tflite::BuiltinOptions_Conv2DOptions);
+
+	if (!o)
+		return false;
+	for (uint32_t d = 1; d < 4u; d++)
+		if (nn_tflm_dim(x, d) > 65535 || nn_tflm_dim(f, d) > 65535 ||
+		    nn_tflm_dim(y, d) > 65535)
+			return false;
+	if (o->GetField<int32_t>(tflite::Conv2DOptions::VT_STRIDE_H, 0) > 65535 ||
+	    o->GetField<int32_t>(tflite::Conv2DOptions::VT_STRIDE_W, 0) > 65535)
+		return false;
+	if (!nn_tflm_window_hw_ok(x, y, nn_tflm_dim(f, 1u), nn_tflm_dim(f, 2u), o,
+	                          tflite::Conv2DOptions::VT_PADDING,
+	                          tflite::Conv2DOptions::VT_STRIDE_H,
+	                          tflite::Conv2DOptions::VT_STRIDE_W,
+	                          o->GetField<int32_t>(tflite::Conv2DOptions::VT_DILATION_H_FACTOR, 1),
+	                          o->GetField<int32_t>(tflite::Conv2DOptions::VT_DILATION_W_FACTOR, 1)))
 		return false;
 	return nn_tflm_bias_ok(b, nn_tflm_dim(y, 3u), nn_tflm_tensor_type(x), true);
 }
@@ -1326,6 +1433,32 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_DEPTHWISE_CONV_2D(const tflite::Operato
 	if (!nn_tflm_count_mul(&n, nn_tflm_dim(x, 3u)) || !nn_tflm_count_mul(&n, dm) ||
 	    fc < 0 || n != (uint32_t)fc)
 		return false;
+
+	/* Issue #188: the output's H and W the window formula's (the opt path
+	 * memsets the scratch by an output H past it), the batch the input's
+	 * (a policy: the kernels loop over the smaller), and (output - 1) x
+	 * stride within int16 in H and W (the kernels' row / column bases,
+	 * arm_depthwise_conv_s8_opt.c; an output of 0 counts as 0). */
+	if (!nn_tflm_window_hw_ok(x, y, nn_tflm_dim(f, 1u), nn_tflm_dim(f, 2u), o,
+	                          tflite::DepthwiseConv2DOptions::VT_PADDING,
+	                          tflite::DepthwiseConv2DOptions::VT_STRIDE_H,
+	                          tflite::DepthwiseConv2DOptions::VT_STRIDE_W,
+	                          o->GetField<int32_t>(
+	                                  tflite::DepthwiseConv2DOptions::VT_DILATION_H_FACTOR, 1),
+	                          o->GetField<int32_t>(
+	                                  tflite::DepthwiseConv2DOptions::VT_DILATION_W_FACTOR, 1)))
+		return false;
+	if (nn_tflm_dim(x, 0u) != nn_tflm_dim(y, 0u))
+		return false;
+	for (uint32_t d = 1; d < 3u; d++) {
+		const int32_t od = nn_tflm_dim(y, d);
+		const int32_t st = o->GetField<int32_t>(d == 1u ?
+			tflite::DepthwiseConv2DOptions::VT_STRIDE_H :
+			tflite::DepthwiseConv2DOptions::VT_STRIDE_W, 0);
+
+		if (od > 0 && ((int64_t)od - 1) * st > 32767)
+			return false;
+	}
 	return nn_tflm_bias_ok(b, fc, nn_tflm_tensor_type(x), false);
 }
 
@@ -1533,6 +1666,17 @@ NN_TFLM_RULE_HELPER bool nn_tflm_resize_ok(const tflite::Operator *op,
 	if (!nn_tflm_index_tensor_ok(sz, 2) || nn_tflm_rank(sz) != 1u || nn_tflm_rank(y) != 4u)
 		return false;
 
+	/* Issue #188: the input rank 4 (its rank judged first), and its batch and
+	 * channels the output's -- a policy, not a bound: the kernels loop over
+	 * the smaller (MatchingDim()). */
+	const tflite::Tensor *x;
+
+	if (!nn_tflm_op_tensor(op->inputs(), 0u, tensors, &x))
+		return false;
+	if (x && (nn_tflm_rank(x) != 4u || nn_tflm_dim(x, 0u) != nn_tflm_dim(y, 0u) ||
+	          nn_tflm_dim(x, 3u) != nn_tflm_dim(y, 3u)))
+		return false;
+
 	const flatbuffers::Vector<uint8_t> *d =
 		nn_tflm_buffer_data(buffers, nn_tflm_tensor_buffer(sz));
 
@@ -1712,7 +1856,11 @@ NN_TFLM_RULE_HELPER bool nn_tflm_unary_ok(const tflite::Operator *op,
 
 /* R12a (issue #188): a pool's input and output are rank 4 -- its Prepare()
  * checks neither, and below rank 4 RuntimeShape::Dims(3) reads past the shape
- * (an uninitialized stack word), which sets the kernel's loop counts. */
+ * (an uninitialized stack word), which sets the kernel's loop counts.  R12b
+ * (step 2): Pool2DOptions present, the output's H and W the window formula's
+ * (filter_height / _width, the strides, dilation 1), and the batch and the
+ * channels the input's -- a policy, not a bound: the kernels loop over the
+ * smaller (MatchingDim()). */
 NN_TFLM_RULE_HELPER bool nn_tflm_pool_ok(const tflite::Operator *op,
                                          const nn_tflm_tensor_vec *tensors)
 {
@@ -1721,7 +1869,23 @@ NN_TFLM_RULE_HELPER bool nn_tflm_pool_ok(const tflite::Operator *op,
 
 	if (!nn_tflm_op_in_out(op, 0u, tensors, &x, &y, &apply))
 		return false;
-	return !apply || (nn_tflm_rank(x) == 4u && nn_tflm_rank(y) == 4u);
+	if (!apply)
+		return true;
+	if (nn_tflm_rank(x) != 4u || nn_tflm_rank(y) != 4u)
+		return false;
+
+	const flatbuffers::Table *o = nn_tflm_op_options(op, tflite::BuiltinOptions_Pool2DOptions);
+
+	if (!o)
+		return false;
+	if (!nn_tflm_window_hw_ok(x, y,
+	                          o->GetField<int32_t>(tflite::Pool2DOptions::VT_FILTER_HEIGHT, 0),
+	                          o->GetField<int32_t>(tflite::Pool2DOptions::VT_FILTER_WIDTH, 0), o,
+	                          tflite::Pool2DOptions::VT_PADDING,
+	                          tflite::Pool2DOptions::VT_STRIDE_H,
+	                          tflite::Pool2DOptions::VT_STRIDE_W, 1, 1))
+		return false;
+	return nn_tflm_dim(x, 0u) == nn_tflm_dim(y, 0u) && nn_tflm_dim(x, 3u) == nn_tflm_dim(y, 3u);
 }
 
 /* The rules that are one helper over the operator and its subgraph's tensors. */

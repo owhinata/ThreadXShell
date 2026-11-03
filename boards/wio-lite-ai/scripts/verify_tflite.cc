@@ -44,7 +44,8 @@
  *      every operator's code index, and the operator rules this profile's
  *      operators have: CONV_2D, DEPTHWISE_CONV_2D, FULLY_CONNECTED, PAD,
  *      STRIDED_SLICE, TRANSPOSE, RESIZE_*, ADD / SUB / MUL, CONCATENATION, the
- *      elementwise operators, the pools and MEAN's tensors fitting together),
+ *      elementwise operators, the pools and MEAN's tensors fitting together,
+ *      and the convolutions' and pools' windows),
  *      every tensor's rank, and that every
  *      DECLARED dimension of subgraph 0's I/O tensors fits a descriptor
  *      (0..65535) -- the FIRMWARE'S OWN check, svc/nn/tflm/nn_tflm_model_check.h,
@@ -296,7 +297,13 @@ int main(int argc, char **argv)
 		       "          an elementwise operator whose output's element count is\n"
 		       "          not its input's; a pool not of rank 4; a PAD /\n"
 		       "          TRANSPOSE / MEAN output that is not the shape its input\n"
-		       "          and values make.  The board refuses it as\n"
+		       "          and values make; a CONV_2D / DEPTHWISE_CONV_2D / pool\n"
+		       "          output whose height or width is not the window's\n"
+		       "          (its options' padding, strides, dilation), a CONV_2D\n"
+		       "          dimension or stride above 65535, a DEPTHWISE_CONV_2D\n"
+		       "          (output - 1) x stride above 32767, or a pool / RESIZE /\n"
+		       "          DEPTHWISE_CONV_2D batch (pool / RESIZE: channels)\n"
+		       "          other than its input's.  The board refuses it as\n"
 		       "          NN_MODEL_ERR_FORMAT (%d).\n",
 		       NN_TFLM_MAX_OP_TENSORS, NN_TFLM_MAX_QUANT_CHANNELS,
 		       NN_TFLM_MAX_TENSOR_RANK - 1u, NN_TFLM_MAX_QUANT_REFS,
@@ -360,7 +367,8 @@ int main(int argc, char **argv)
 	 * tensor: conv / depthwise / FC filter, weights, bias and output, the index
 	 * tensors' types and lengths, broadcast and concatenation shapes -- and, for
 	 * the output frames (issue #188), every tensor's planned size and the
-	 * outputs of the elementwise operators, the pools, PAD, TRANSPOSE and MEAN.
+	 * outputs of the elementwise operators, the pools, PAD, TRANSPOSE and MEAN,
+	 * and the convolutions' and pools' H / W by the window formula.
 	 * What was NOT established, and cannot be from here, is that
 	 * each kernel's Prepare() accepts the rest of this model's tensor shapes and
 	 * types, that the operator VERSIONS are

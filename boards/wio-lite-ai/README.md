@@ -937,7 +937,7 @@ a PAD's paddings with data counted before they are read, none negative
 MEAN and the other elementwise operators are not registered here (their rules
 are f746g-disco's `extended` profile).  Pool and RESIZE batch / channel
 mismatches do not write past the output (the kernels loop over the minimum)
-and are not refused in this step.  NOT bounded: the scratch a kernel requests
+were not refused in that step.  NOT bounded: the scratch a kernel requests
 in its `Prepare()`, sized by the kernel (the arena check stops it).  All 44
 models found that pass the verifier pass (no negative dimension; all of a
 model's tensors together at most 15,114,544 B, the mobilenet_v2 224 of
@@ -947,6 +947,24 @@ pinned blazeface int8 passes unchanged.  A model whose input or output declares
 (`shell.elf` `.text` 287,072 -> 287,744 B, `.rodata` unchanged, `shell.bin`
 376,248 -> 376,920 B), +608 B on `mlperf` (linked with `--noinhibit-exec`, as
 above: FLASH 400,168 -> 400,776 B); the `null` tree is byte-identical.
+
+[!] **Step 2 of #188, the window**: a CONV_2D, DEPTHWISE_CONV_2D or
+MAX_POOL_2D (and on `mlperf` AVERAGE_POOL_2D) must have its options table and
+an output H and W equal to TFLM's `ComputeOutSize()` for its padding (SAME or
+VALID), strides, dilation and filter (each at least 1; every intermediate value
+inside int32, computed in 64 bits) -- the CMSIS-NN CONV_2D 1x1 fast path sizes
+its rows by the INPUT's n x h x w, and the depthwise opt path memsets the
+scratch by an output H past the formula.  CONV_2D also keeps H, W and C of its
+input, filter and output and its strides at most 65535 (the general path holds
+them in uint16); DEPTHWISE_CONV_2D keeps `(output - 1) x stride` at most 32767 in
+H and W (its int16 bases) and its batch the input's; a pool keeps its batch and
+channels the input's (a policy: the kernel loops over the smaller).  All
+`NN_MODEL_ERR_FORMAT` (-7).  All 44 models found that pass the verifier pass
+(every conv / depthwise / pool output is the formula's, dilation 1); the pinned
+blazeface int8 passes unchanged.  Cost: +1,016 B of Flash on `blazeface`
+(`shell.elf` `.text` 287,744 -> 288,760 B, `.rodata` unchanged, `shell.bin`
+376,920 -> 377,936 B), +1,016 B on `mlperf` (`--noinhibit-exec`: FLASH 400,776
+-> 401,792 B); the `null` tree is byte-identical.
 
 **[!] The order matters and is not an implementation detail.**  Loading the
 plugin first would destroy the previous one's state at the fixed reservation

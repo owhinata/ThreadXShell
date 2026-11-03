@@ -2617,6 +2617,9 @@ same 41 veneers and no new symbol; only the compiler's `CSWTCH.*` tables are
 renumbered), `.text_cold` +184 B (16,376 -> 16,560 B), `.rodata` unchanged in
 size; R10 reads the shape through `nn_tflm_tensor_shape()`
 (`Table::GetPointer`), as above, and is forced inline into the load path.
+The second step's window rule (CONV_2D / DEPTHWISE_CONV_2D / pool H and W,
+RESIZE batch and channels) is an operator rule and is not compiled here: every
+loaded section of `shell.elf` is byte-identical to the first step's.
 
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 

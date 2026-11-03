@@ -314,7 +314,7 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185, #188).  The
    kernel that loops over the output's H and W is not safe under CMSIS-NN
    (CONV_2D's 1x1 fast path sizes its rows by the input, the depthwise opt path
    memsets the scratch by an output H past the formula and keeps its bases in
-   int16 -- the window rules, a later step); a size past `int` is every
+   int16 -- the window rule below); a size past `int` is every
    tensor's problem, not RESHAPE's (the planner multiplies every shape in
    `int`: `[1, 65536, 65537, 1]` int8 is planned as 64 KB); and, found here, a
    negative PAD padding moves CMSIS-NN's write BEFORE the output, MEAN's float
@@ -344,6 +344,19 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185, #188).  The
      input's rank at most 6, each axis in [-rank, rank) (negative from the end),
      a repeated one once; the output the input with each axis 1 under
      `keep_dims` (ReducerOptions; absent: false), else with the axes removed.
+   - The window (step 2), for CONV_2D, DEPTHWISE_CONV_2D and the pools: the
+     output's H and W equal TFLM's `ComputeOutSize()` -- `eff = (filter - 1) x
+     dilation + 1`, SAME `(in + stride - 1) / stride`, VALID `(in + stride -
+     eff) / stride` -- with the options table present (absent reads as stride
+     0), stride, dilation and filter at least 1, padding SAME or VALID, eff, the
+     numerator and `Prepare()`'s padding `(out - 1) x stride + eff - in` inside
+     int32 (computed in 64 bits), and a 32-bit division as TFLM's.  CONV_2D also
+     keeps H, W and C of its three tensors and its strides at most 65535 (the
+     general path holds them in uint16); DEPTHWISE_CONV_2D keeps `(output - 1)
+     x stride` at most 32767 in H and W (its int16 row / column bases) and its
+     batch the input's.  The pools (R12b; `filter_height` / `_width`, dilation
+     1) and RESIZE keep batch and channels the input's -- a policy, since those
+     kernels loop over the smaller.
    - RESHAPE needs no rule: under R10 its live element-count compare and the
      copy of the input's bytes are exact.
    NOT bounded -- what remains: the scratch a kernel requests in its `Prepare()`

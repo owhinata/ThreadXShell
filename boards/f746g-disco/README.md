@@ -580,7 +580,7 @@ is no built-in model) and after `nn model unload`.
   them (the float kernel's stack `axis[4]`), each in range, and the output the
   input reduced over them (`keep_dims` or not).  Pool and RESIZE batch /
   channel mismatches do not write past the output (the kernels loop over the
-  minimum) and are not refused in this step.  NOT bounded: the scratch a
+  minimum) and were not refused in that step.  NOT bounded: the scratch a
   kernel requests in its `Prepare()`, sized by the kernel (the arena check
   stops it).  TFLM's person_detect and the 44 models found that pass the
   verifier keep their verdict (no negative dimension; all of a model's
@@ -590,6 +590,22 @@ is no built-in model) and after `nn model unload`.
   +768 B of Flash on `build/f746-tflm` (`.text` 543,904 -> 544,632 B,
   `.rodata` unchanged; `shell.bin` 619,348 -> 620,116 B); the `null` tree is
   byte-identical.
+- [!] **Step 2 of #188, the window**: a CONV_2D, DEPTHWISE_CONV_2D or pool must
+  have its options table and an output H and W equal to TFLM's
+  `ComputeOutSize()` for its padding (SAME or VALID), strides, dilation and
+  filter (each at least 1; every intermediate value inside int32, computed in
+  64 bits) -- the CMSIS-NN CONV_2D 1x1 fast path sizes its rows by the INPUT's
+  n x h x w, and the depthwise opt path memsets the scratch by an output H past
+  the formula.  CONV_2D also keeps H, W and C of its tensors and its strides at
+  most 65535 (uint16 in the general path); DEPTHWISE_CONV_2D keeps `(output -
+  1) x stride` at most 32767 in H and W (its int16 bases) and its batch the
+  input's; a pool and a RESIZE keep batch and channels the input's, and a
+  RESIZE's input is rank 4 (a policy: those kernels loop over the smaller).
+  All `NN_MODEL_ERR_FORMAT` (-7).  TFLM's person_detect and the 44 models found
+  that pass the verifier keep their verdict (every conv / depthwise / pool
+  output is the formula's, dilation 1).  Cost: +896 B of Flash on
+  `build/f746-tflm` (`.text` 544,632 -> 545,584 B, `.rodata` unchanged;
+  `shell.bin` 620,116 -> 621,012 B); the `null` tree is byte-identical.
 - `stedgeai_reloc` is the same: it starts empty, and `builtin` used to mean
   "unload" there before #131 (use `nn model unload`).
 - `stedgeai_reloc` refuses the same dimension with the same `-13` (issue
@@ -1036,7 +1052,7 @@ index past the code vector, or an operator whose tensors do not fit together
 (conv / depthwise / FC channels and bias, PAD / STRIDED_SLICE / TRANSPOSE /
 RESIZE index tensors, ADD / SUB / MUL broadcast, CONCATENATION shapes, #185;
 elementwise element counts, pool ranks, PAD / TRANSPOSE / MEAN output shapes,
-#188), is
+the conv / depthwise / pool window, #188), is
 `NN_MODEL_ERR_FORMAT`, a tensor above rank 6 (an I/O tensor above
 4) `NN_MODEL_ERR_TENSOR`, an I/O dimension outside 0..65535 `NN_MODEL_ERR_DIMS`), and the operators the firmware registers -- read from
 `svc/nn/tflm/nn_tflm_ops.h` under the `extended` profile, the same list

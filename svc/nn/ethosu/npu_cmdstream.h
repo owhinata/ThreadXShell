@@ -51,6 +51,23 @@ struct npu_cs_region {
 	bool writable;
 };
 
+/**
+ * The NPU configuration the stream was compiled for: facts of the board, not of
+ * the walk.  The board states them once (grove-vision-ai-v2: npu_hw.h, beside
+ * the Vela --accelerator-config they belong to).
+ */
+struct npu_cs_config {
+	/** The internal SHRAM (TRM 4.2.11, 8-48 KB); bounds the one internal DMA
+	 *  accepted, a lookup table load into its last 2 KB. */
+	uint32_t shram_bytes;
+	/** The minimum output block of TRM 4.9 Table 4-139 for the configuration
+	 *  (width and height 1 or 2, depth 4 or 8); every OFM block size the
+	 *  stream sets must be a multiple of it. */
+	uint8_t min_block_width;
+	uint8_t min_block_height;
+	uint8_t min_block_depth;
+};
+
 /** Optional report: the range the stream reaches in one region. */
 struct npu_cs_extent {
 	int64_t lo;     /**< lowest offset touched */
@@ -64,8 +81,10 @@ struct npu_cs_extent {
  */
 enum npu_cs_refusal {
 	NPU_CS_OK = 0,
-	NPU_CS_BAD_ARGUMENTS,      /**< NULL stream / table, > 8 regions, or a
-	                            *   SHRAM size outside 8-48 KB */
+	NPU_CS_BAD_ARGUMENTS,      /**< NULL stream / table / configuration,
+	                            *   > 8 regions, a SHRAM size outside
+	                            *   8-48 KB or a minimum block that is not
+	                            *   in TRM Table 4-139 */
 	NPU_CS_UNKNOWN_COMMAND,    /**< C1: not in both the TRM and the driver */
 	NPU_CS_TRUNCATED_COMMAND,  /**< C1: a cmd1's data word is past the end */
 	NPU_CS_ADDRESS_EXTENSION,  /**< C2: address bits 47..32 not zero */
@@ -93,10 +112,8 @@ enum npu_cs_refusal {
  * @param regions   one entry per base pointer the kernel passes, in the
  *                  kernel's order (inputs 1.. then outputs, cut at 8)
  * @param nregions  how many entries @p regions has (<= NPU_CS_MAX_REGIONS)
- * @param shram_bytes  the NPU's internal SHRAM size for the configuration the
- *                  board compiles models for (TRM 4.2.11, 8-48 KB); bounds the
- *                  one internal DMA accepted, a lookup table load into its
- *                  last 2 KB
+ * @param config   the NPU configuration the board compiles models for (its
+ *                  SHRAM size and minimum output block)
  * @param extent    NULL, or @p nregions entries to receive the range the
  *                  stream reaches in each region (filled as far as the walk
  *                  got, also on refusal)
@@ -107,7 +124,7 @@ enum npu_cs_refusal {
 enum npu_cs_refusal npu_cmdstream_check(const uint32_t *words, uint32_t nwords,
                                         const struct npu_cs_region *regions,
                                         uint32_t nregions,
-                                        uint32_t shram_bytes,
+                                        const struct npu_cs_config *config,
                                         struct npu_cs_extent *extent);
 
 /**

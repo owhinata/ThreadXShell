@@ -179,6 +179,10 @@ output:
   cs_no_stop            no stop at the end           -> the stop sentence
   cs_out_ok / _past     4 B / 5 B into region 2, the output -> control / past
   cs_int4_ok / _past    INT4 [256] weights on 128 B: a read ending at 128 / 129
+  cs_block_ok           control: an elementwise op with output block 1 x 1 x 8
+  cs_block_depth12      the same with block depth 12, not a multiple of the
+                        board's minimum 8 -> the no-meaning sentence (refused only
+                        when the board's configuration reaches the walk)
   cs_walk_first         cs_dma_past plus a short constant: the walk's FORMAT in
                         both orders (in PL_WALK_CASES)
   cs_payload_first      cs_dma_past with input 1 == -1: the scan's -1 sentence in
@@ -472,7 +476,9 @@ CS_UNKNOWN = "the command stream has a command the Ethos-U55 does not define"
 CS_LUT = ("the command stream starts a DMA into NPU-internal memory outside the "
           "last 2 KB lookup table page")
 CS_STOP = "the command stream does not end with a stop command"
-CS_REASONS = (CS_PAST, CS_REGION, CS_WRITE, CS_UNKNOWN, CS_LUT, CS_STOP)
+CS_PARAM = ("the command stream sets a value the Ethos-U55 manual gives no "
+            "meaning to")
+CS_REASONS = (CS_PAST, CS_REGION, CS_WRITE, CS_UNKNOWN, CS_LUT, CS_STOP, CS_PARAM)
 CS_CASES = [
     # (file, expected sentence or None for a control that passes the walk)
     ("cs_ok.tflite", None),
@@ -488,6 +494,8 @@ CS_CASES = [
     ("cs_out_past.tflite", CS_PAST),
     ("cs_int4_ok.tflite", None),
     ("cs_int4_past.tflite", CS_PAST),
+    ("cs_block_ok.tflite", None),
+    ("cs_block_depth12.tflite", CS_PARAM),
 ]
 
 # The operator rules (issue #185): (file, answer where the profile registers the

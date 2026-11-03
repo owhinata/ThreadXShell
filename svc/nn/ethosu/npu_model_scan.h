@@ -32,6 +32,8 @@
 
 #include "tensorflow/lite/schema/schema_generated.h"
 
+#include "npu_cmdstream.h"   /* struct npu_cs_config */
+
 /**
  * The bytes the driver will be handed for @p op, or nullptr with @p why set.
  *
@@ -114,11 +116,11 @@ const char *npu_model_payload_refusal(const tflite::Model *model,
  * What it reads it still bounds itself, so a misuse refuses rather than reads
  * out of range.
  *
- * @param shram_bytes  the NPU's SHRAM for the configuration the board compiles
- *                     models for (grove-vision-ai-v2: npu_hw.h's
- *                     NPU_SHRAM_BYTES)
+ * @param config  the NPU configuration the board compiles models for, its SHRAM
+ *                and minimum output block (grove-vision-ai-v2: npu_hw.h's
+ *                NPU_CS_CONFIG_INIT)
  */
 const char *npu_model_cmdstream_refusal(const tflite::Model *model,
-                                        uint32_t shram_bytes);
+                                        const struct npu_cs_config *config);
 
 #endif /* NPU_MODEL_SCAN_H */

@@ -182,7 +182,7 @@ then `.rodata`, then the NOLOAD buffers, with `.plugin` still pinned at the top.
 @`0x3404D000..0x34050CC0` and `.rodata` 79,784 B from `0x34050CC0`; ITCM used
 240,640 / free 21,504 B (`check_placement_budget`).  Of the +1,280 B over the
 14,272 above, issue #175 added 112, #178 360, #179 96 and #180 336 (each its
-commit's measurement; #181 then added 240, to 15,792 B, #183 560, to 16,352 B; 16,560 B after #188, and #184 added 3,640, to 20,200 B, with `npu_hw_init()` moved here); the remaining 376 B came with the load-path changes between
+commit's measurement; #181 then added 240, to 15,792 B, #183 560, to 16,352 B; 16,560 B after #188, and #184 added 3,640, to 20,200 B, with `npu_hw_init()` moved here, and its review 184 more, to 20,384 B); the remaining 376 B came with the load-path changes between
 2026-10-31 and #175 and are not itemised here.  The list below is the
 2026-10-31 inventory.
 
@@ -2370,7 +2370,7 @@ a header is listed; `nn run`'s wait table and the console-call count moved to
 | `port/nn/nn_plugin_stack.h` | build time | Per-slot plugin stack allowances asserted against this board's thread stacks. |
 | `port/nn/nn_probe.c`, `nn_probe_rtos.c` | every thread that enters a plugin slot | Stack depth at a plugin callback's entry; the rtos half asks ThreadX which thread is running. |
 | `port/nn/nn_model_board.c` | any thread calling `svc/nn/nn.h` | The dispatcher's state and its four hooks: PRIMASK, the ThreadX tick, and a cycle counter reported UNAVAILABLE (the DWT stops in WFI while the inference thread sleeps on the driver's semaphore), so `nn_last_cycles()` is 0. |
-| `port/nn/npu/nn_ethosu_board.cc` | (state) | The Ethos-U backend's state object and this board's facts: no name prefix, the read window a model must lie inside (`NOR_XIP_BASE`, `NOR_SIZE`), and the SHRAM size the command stream walk is given (`NPU_SHRAM_BYTES`, issue #184). |
+| `port/nn/npu/nn_ethosu_board.cc` | (state) | The Ethos-U backend's state object and this board's facts: no name prefix, the read window a model must lie inside (`NOR_XIP_BASE`, `NOR_SIZE`), and the NPU configuration the command stream walk is given (`NPU_CS_CONFIG_INIT`: the SHRAM size and the minimum output block, issue #184). |
 | `port/nn/npu/npu_arena.c` | NPU (bus master), worker | `nn_ethosu_arena`, 450 KB in `.nn_arena` (SRAM, NOLOAD, 32-byte aligned), sized by `board.cmake`'s `NN_ETHOSU_ARENA_KB` and pinned by the placement gate. |
 | `port/nn/npu/npu_hw.c` | console (load / unload / info) | Ethos-U55 bring-up: SCU, the SHRAM size read back against `npu_hw.h`'s `NPU_SHRAM_BYTES` (issue #184), the NPU interrupt and its EPK wrap, the NOR reader lease the loaded model reads through. |
 | `port/nn/npu/npu_rtos.c` | worker (invoke), NPU ISR (semaphore give) | The driver's mutex and semaphore hooks as ThreadX objects (a static pool); ThreadX, which `svc/` does not include. |
@@ -4659,6 +4659,21 @@ is refused (`NN_MODEL_ERR_PAYLOAD`, -12) unless:
 - nothing is written into a tensor with data (the model, for region 0);
 - every value an address depends on is one the TRM gives a meaning to (refused,
   never masked);
+- every operation sets its output block (TRM 4.9; registers 0x115-0x117) with
+  a width of 1-64, a height of 1-32 and a depth of 4-128, each a multiple of
+  the configuration's minimum block (TRM Table 4-139: 1 x 1 x 8 for
+  `ethos-u55-64`), and a block depth that is not a multiple of 16 is at least
+  the output depth.  For the width the TRM disagrees with itself: its register
+  table says 0-31 (width - 1), its section 4.9 says 1-64; the driver's field is
+  6 bits and Vela emits 64 for this configuration (the measured models do), so
+  1-64 is taken;
+- a two-input elementwise operation that reads its second input gives it the
+  first input's signedness and precision (TRM 0x185, "MUST MATCH IFM"; the
+  second input's range is sized by its own precision, and what the NPU does
+  when they differ is not written down).  Its format may differ;
+- an external DMA and a convolution / depthwise weight stream are at least 1
+  byte long (the TRM gives length 0 no meaning).  A pool / elementwise scale
+  length of 0 under a global scale is accepted: there it means no scale stream;
 - the last command is a stop.
 
 The one NPU-internal DMA accepted is the lookup-table load Vela emits for
@@ -4675,11 +4690,19 @@ states the configuration every model is compiled for (`NPU_VELA_ACCELERATOR`,
 bits 15:8, in KB) right after the SCU bring-up and refuses the bring-up when it
 differs (`NPU SHRAM size is not the one models are compiled for`; the load
 reports it as the bring-up failure, with nothing left enabled and the NOR lease
-given back).
+given back).  Beside it stand the same configuration's minimum output block,
+`NPU_MIN_BLOCK_WIDTH` / `_HEIGHT` / `_DEPTH` = 1 / 1 / 8 (TRM Table 4-139, row
+"64"; Vela's `ofm_ublock` agrees), and `NPU_CS_CONFIG_INIT`, the one
+initializer the board facts and the host gate both use.  The minimum block has
+no read-back of its own: the SHRAM check already tells this part from the 128
+and 256 configurations (24 and 48 KB), and the 32 one's minimum (1 x 1 x 4)
+divides this one's.  `board.cmake` lists `npu_hw.h` as a configure dependency,
+so editing the accelerator name (or the inference timeout it also parses)
+re-runs configure instead of leaving vela and the driver on the old values.
 
 **The host gate runs the same function at the same point.**
 `verify_vela_model` compiles `npu_cmdstream.c` and calls
-`npu_model_cmdstream_refusal()` with `NPU_SHRAM_BYTES` after both the graph
+`npu_model_cmdstream_refusal()` with `NPU_CS_CONFIG_INIT` after both the graph
 walk and the payload scan, in its default order and with `--board-order`; a
 refusal prints the same sentence as the firmware computes, after
 `the firmware would refuse this model (NN_MODEL_ERR_PAYLOAD): `, and an accepted
@@ -4714,6 +4737,22 @@ on the console thread, statically: the deepest new chain from
 `cli_dispatch_segment` through `nn model load` to the walk is about 1.85 KB of
 the 4 KB stack (`build_interp()` 216 B, `npu_model_cmdstream_refusal()` 184 B,
 `npu_cmdstream_check()` 320 B, an operation 88 B, a feature map's range 144 B).
+
+**After the review (2026-11-03).**  The output block, the second input's
+precision and the zero lengths above were added after the implementation
+review.  All 12 models keep their verdict and sentence, and every ethos-u
+operator of the 12 files walked on its own gives the same answer and the same
+range per region as before.  The new rules are exercised by those streams:
+1,361 two-input elementwise operations read a second input (all match the
+first input's sign and precision, while 667 differ in other bits of that
+register, such as the format), 1,165 operations use a block depth that is not
+a multiple of 16 (all cover their output depth), and block widths reach 64.
+The walk's unit test has 278 cases (was 226), the generated-file cases add
+`cs_block_ok` / `cs_block_depth12` (a block depth of 12 is refused only when the
+board's minimum of 8 reaches the walk); 132 single-change mutants of the walk
+and 20 of the wiring are all caught.  Cost: ITCM 0 B, `.text_cold` +184 B
+(20,200 -> 20,384 B), `.rodata` +8 B, `npu_cmdstream_check()` 336 B of stack
+(+16 B for the three block registers).
 
 **What is still open (not closed by the walk).**
 
@@ -4881,7 +4920,7 @@ host instead of on a board at the far end of a flash cycle:
   writes has data (the shared walk, issue #183)
 - every command stream keeps the NPU's reads and writes inside the tensors
   behind its base pointers -- **the firmware's own** `npu_cmdstream.c` walk, at
-  the same point and with the same SHRAM size (issue #184; "Where a command
+  the same point and with the same NPU configuration (issue #184; "Where a command
   stream makes the NPU read and write")
 - `--blazeface` additionally pins the four output shapes the decoder looks for
 

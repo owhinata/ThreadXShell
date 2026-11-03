@@ -63,8 +63,8 @@
 #include "npu_verify.h"
 
 #include "npu_arena.h"     /* npu_arena_base() / npu_arena_bytes() */
-#include "npu_hw.h"        /* NPU_SHRAM_BYTES: the firmware's, read back from
-                              * the NPU by npu_hw_init() (issue #184) */
+#include "npu_hw.h"        /* NPU_CS_CONFIG_INIT: the firmware's, whose SHRAM
+                              * npu_hw_init() reads back (issue #184) */
 
 /* The op list the firmware's backend registers (svc/nn/tflm/nn_tflm_ops.h, its
  * ethosu profile -- issue #169).  The resolver below is built from it, so the two
@@ -460,14 +460,15 @@ int main(int argc, char **argv)
 	/*
 	 * [!] AND THE FIRMWARE'S COMMAND STREAM WALK, THE SAME FUNCTION AT THE SAME
 	 * POINT (issue #184).  npu_model_cmdstream_refusal() is what nn_ethosu.cc
-	 * calls right after the graph walk, with the SHRAM size the board states
-	 * once (npu_hw.h); its sentence is the firmware's.  It runs after the graph
+	 * calls right after the graph walk, with the NPU configuration the board
+	 * states once (npu_hw.h); its sentence is the firmware's.  It runs after the graph
 	 * walk AND the payload scan in either order, because it reads the tensor
 	 * sizes the walk proves and the streams the scan located.  A refusal stops
 	 * the run, as it stops the firmware's load.
 	 */
 	auto cmdstream_scan = [&]() -> bool {
-		const char *refusal = npu_model_cmdstream_refusal(model, NPU_SHRAM_BYTES);
+		static const npu_cs_config config = NPU_CS_CONFIG_INIT;
+		const char *refusal = npu_model_cmdstream_refusal(model, &config);
 
 		if (refusal != nullptr) {
 			fail("the firmware would refuse this model (NN_MODEL_ERR_PAYLOAD): %s\n",

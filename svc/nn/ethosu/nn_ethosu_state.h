@@ -37,6 +37,7 @@
 
 #include "nn.h"
 #include "nn_tflm_ops.h"
+#include "npu_cmdstream.h"   /* struct npu_cs_config */
 
 #include <cstdint>
 #include <type_traits>
@@ -95,12 +96,12 @@ struct nn_ethosu_board_facts {
 	 * NOR_SIZE).  The backend holds no address of its own. */
 	uint32_t window_base;
 	uint32_t window_size;
-	/* The NPU's internal SHRAM, in bytes, for the configuration every model is
-	 * compiled for (issue #184): it bounds the one NPU-internal DMA the command
-	 * stream walk accepts (npu_cmdstream.h).  The board states it once and checks
-	 * it against the hardware (grove-vision-ai-v2: npu_hw.h's NPU_SHRAM_BYTES,
-	 * read back by npu_hw_init()). */
-	uint32_t npu_shram_bytes;
+	/* The NPU configuration every model is compiled for (issue #184): its
+	 * internal SHRAM, which bounds the one NPU-internal DMA the command stream
+	 * walk accepts, and its minimum output block (npu_cmdstream.h).  The board
+	 * states it once (grove-vision-ai-v2: npu_hw.h's NPU_CS_CONFIG_INIT; the
+	 * SHRAM is read back by npu_hw_init()). */
+	struct npu_cs_config npu_cs;
 };
 
 extern "C" {

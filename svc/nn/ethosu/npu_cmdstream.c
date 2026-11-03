@@ -85,6 +85,9 @@ enum reg {
 	R_OFM_HEIGHT_M1,        /* 0x112 */
 	R_OFM_DEPTH_M1,         /* 0x113 */
 	R_OFM_PRECISION,        /* 0x114 */
+	R_OFM_BLK_WIDTH_M1,     /* 0x115 */
+	R_OFM_BLK_HEIGHT_M1,    /* 0x116 */
+	R_OFM_BLK_DEPTH_M1,     /* 0x117 */
 	R_OFM_WIDTH0_M1,        /* 0x11A */
 	R_OFM_HEIGHT0_M1,       /* 0x11B */
 	R_OFM_HEIGHT1_M1,       /* 0x11C */
@@ -153,7 +156,9 @@ _Static_assert(R_COUNT <= 64, "the set-mask is one uint64_t");
                        BIT(R_##p##_WIDTH0_M1) | BIT(R_##p##_HEIGHT0_M1) | \
                        BIT(R_##p##_HEIGHT1_M1) | BIT(R_##p##_PRECISION))
 #define M_OFM         (M_FM(OFM) | BIT(R_OFM_WIDTH_M1) | \
-                       BIT(R_OFM_HEIGHT_M1) | BIT(R_OFM_DEPTH_M1))
+                       BIT(R_OFM_HEIGHT_M1) | BIT(R_OFM_DEPTH_M1) | \
+                       BIT(R_OFM_BLK_WIDTH_M1) | BIT(R_OFM_BLK_HEIGHT_M1) | \
+                       BIT(R_OFM_BLK_DEPTH_M1))
 #define M_IFM         (M_FM(IFM) | BIT(R_IFM_DEPTH_M1))
 #define M_IFM2        (M_FM(IFM2))
 #define M_KERNEL      (BIT(R_KERNEL_WIDTH_M1) | BIT(R_KERNEL_HEIGHT_M1) | \
@@ -176,6 +181,10 @@ _Static_assert(R_COUNT <= 64, "the set-mask is one uint64_t");
 #define FORMAT_SHIFT       6u
 #define FORMAT_NHCWB16     1u
 #define OFM_GLOBAL_SCALE   0x100u
+/* IFM2_PRECISION b0 (signed) and b[3:2] (precision): "MUST MATCH IFM" (TRM
+ * Table 4-112 0x185).  What the NPU does when they differ is not written down,
+ * and the IFM2 range below is sized by IFM2's own precision. */
+#define PREC_MUST_MATCH    0x0Du
 /* IFM2_BROADCAST: b0 H, b1 W, b2 C, b6 operand order, b7 scalar. */
 #define BCAST_H            0x01u
 #define BCAST_W            0x02u
@@ -189,6 +198,18 @@ _Static_assert(R_COUNT <= 64, "the set-mask is one uint64_t");
 /* IFM_PAD_TOP / LEFT: 0-127.  IFM_UPSCALE: 0 none, 1 nearest, 2 zeros. */
 #define PAD_TL_MAX         127u
 #define UPSCALE_MAX        2u
+/* OFM_BLK_WIDTH_M1: 0-63, OFM_BLK_HEIGHT_M1: 0-31, OFM_BLK_DEPTH_M1: 3-127.
+ * Height and depth are TRM Table 4-112 0x116 / 0x117.  For the width that table
+ * says 0-31, but TRM 4.9 says "OFM_BLOCK_WIDTH must be in the range 1-64", DRV's
+ * field is 6 bits and Vela emits 64 for ethos-u55-64 (the real models this
+ * board runs do), so the two sources that agree are taken.  TRM 4.9 also has
+ * each size a multiple of the configuration's minimum block (Table 4-139,
+ * npu_cs_config) and, for a block depth that is not a multiple of 16,
+ * OFM_DEPTH <= OFM_BLOCK_DEPTH: checked per operation. */
+#define BLK_WIDTH_M1_MAX   63u
+#define BLK_HEIGHT_M1_MAX  31u
+#define BLK_DEPTH_M1_MIN   3u
+#define BLK_DEPTH_M1_MAX   127u
 /* *_REGION: 0-7. */
 #define REGION_MAX         7u
 /* DMA0_SRC/DST_REGION: b[7:0] region (b8 = 0) or core mask (b8 = 1), b8
@@ -221,7 +242,7 @@ struct cs_walk {
 	struct cs_state s;
 	const struct npu_cs_region *regions;
 	uint32_t nregions;
-	uint32_t shram_bytes;
+	const struct npu_cs_config *config;
 	struct npu_cs_extent *extent;
 };
 
@@ -268,9 +289,9 @@ static int cmd0_slot(uint32_t op)
 	case 0x112u: return R_OFM_HEIGHT_M1;
 	case 0x113u: return R_OFM_DEPTH_M1;
 	case 0x114u: return R_OFM_PRECISION;
-	case 0x115u:                      /* OFM_BLK_WIDTH_M1 (SHRAM block) */
-	case 0x116u:                      /* OFM_BLK_HEIGHT_M1 */
-	case 0x117u:                      /* OFM_BLK_DEPTH_M1 */
+	case 0x115u: return R_OFM_BLK_WIDTH_M1;
+	case 0x116u: return R_OFM_BLK_HEIGHT_M1;
+	case 0x117u: return R_OFM_BLK_DEPTH_M1;
 	case 0x118u: return SLOT_IGNORED; /* OFM_ZERO_POINT */
 	case 0x11Au: return R_OFM_WIDTH0_M1;
 	case 0x11Bu: return R_OFM_HEIGHT0_M1;
@@ -376,6 +397,12 @@ static bool value_ok(int slot, uint32_t v)
 		       ((v >> FORMAT_SHIFT) & 3u) <= FORMAT_NHCWB16;
 	case R_IFM_UPSCALE:
 		return v <= UPSCALE_MAX;
+	case R_OFM_BLK_WIDTH_M1:
+		return v <= BLK_WIDTH_M1_MAX;
+	case R_OFM_BLK_HEIGHT_M1:
+		return v <= BLK_HEIGHT_M1_MAX;
+	case R_OFM_BLK_DEPTH_M1:
+		return v >= BLK_DEPTH_M1_MIN && v <= BLK_DEPTH_M1_MAX;
 	case R_IFM_PAD_TOP:
 	case R_IFM_PAD_LEFT:
 		return v <= PAD_TL_MAX;
@@ -587,15 +614,15 @@ static enum npu_cs_refusal stream_touch(struct cs_walk *k, int region_reg,
  * Table 4-112 0x125 ACTIVATION: tables at n * 256 in that page).  Anything else
  * internal is refused, because the TRM does not say where it would land.
  *
- * The SHRAM size is the caller's: it is a property of the configuration the
- * board compiles models for, not of this walk.  TRM 4.9.1 says the 32 and 64
+ * The SHRAM size is the caller's (npu_cs_config): it is a property of the
+ * configuration the board compiles models for, not of this walk.  TRM 4.9.1 says the 32 and 64
  * configurations use no LUT -- that is in the context of its SHRAM layout
  * formula; Vela (Arm's own compiler) does emit LUTs for ethos-u55-64.
  */
 static enum npu_cs_refusal lut_dma(const struct cs_walk *k, uint32_t mask,
                                    int64_t dst, int64_t len)
 {
-	int64_t shram = (int64_t)k->shram_bytes;
+	int64_t shram = (int64_t)k->config->shram_bytes;
 
 	/* 0 < len <= 2048 follows from the two bounds on [dst, dst + len). */
 	if (mask != LUT_CORE_MASK || len <= 0 ||
@@ -605,7 +632,9 @@ static enum npu_cs_refusal lut_dma(const struct cs_walk *k, uint32_t mask,
 }
 
 /* NPU_OP_DMA_START (TRM Table 4-112 0x010 / 0x130 / 0x131, Table 4-113
- * 0x030-0x032): reads [SRC, SRC + LEN) and writes [DST, DST + LEN). */
+ * 0x030-0x032): reads [SRC, SRC + LEN) and writes [DST, DST + LEN).  A length of
+ * 0 is refused (C6): the TRM says only "transfer length in bytes" and gives 0
+ * no meaning, and the internal (lookup table) shape refuses it too. */
 static enum npu_cs_refusal dma_op(struct cs_walk *k)
 {
 	const struct cs_state *s = &k->s;
@@ -630,6 +659,8 @@ static enum npu_cs_refusal dma_op(struct cs_walk *k)
 	src = (int64_t)s->v[R_DMA0_SRC];
 	dst = (int64_t)s->v[R_DMA0_DST];
 	len = (int64_t)s->v[R_DMA0_LEN];
+	if ((dr & DMA_INTERNAL) == 0u && len == 0)
+		return NPU_CS_PARAMETER_RANGE;
 	r = touch(k, sr & DMA_REGION_FIELD, src, src + len, false);
 	if (r != NPU_CS_OK)
 		return r;
@@ -649,6 +680,18 @@ static enum npu_cs_refusal dma_op(struct cs_walk *k)
  *   POOL, ELEMENTWISE  the scale stream when OFM_PRECISION b8 = 0 (per channel);
  *                  otherwise also counted when SCALE_LENGTH is set and not 0
  *   binary ELEMENTWISE  IFM2_BROADCAST; IFM2 itself unless b7 (scalar)
+ *   all four       OFM_BLK_WIDTH_M1 / HEIGHT_M1 / DEPTH_M1 (TRM 4.9)
+ *
+ * Values only an operation can judge (C6), refused before any range:
+ *   - the OFM block (TRM 4.9 "Output feature map"): each size a multiple of the
+ *     configuration's minimum block (Table 4-139), and a block depth that is
+ *     not a multiple of 16 no smaller than OFM_DEPTH;
+ *   - IFM2, when read, has IFM's signedness and precision (TRM Table 4-112
+ *     0x185 "MUST MATCH IFM");
+ *   - CONV / DEPTHWISE weights are at least 1 byte long (TRM Table 4-113 0x021
+ *     says "byte length" and gives 0 no meaning).  A pool / elementwise scale
+ *     length of 0 is not refused: under a global scale it means "no scale
+ *     stream" (above).
  *
  * IFM extent: ELEMENTWISE reads the OFM's height and width (no kernel); the
  * others ifm_extent().  IFM depth (TRM Table 4-140 IFM_MEMBLK_DEPTH): CONV and
@@ -701,6 +744,25 @@ static enum npu_cs_refusal kernel_op(struct cs_walk *k, uint32_t op,
 	oh = s->v[R_OFM_HEIGHT_M1] + 1u;
 	ow = s->v[R_OFM_WIDTH_M1] + 1u;
 	od = s->v[R_OFM_DEPTH_M1] + 1u;
+
+	{
+		const struct npu_cs_config *c = k->config;
+		uint32_t bd = s->v[R_OFM_BLK_DEPTH_M1] + 1u;
+
+		/* The minimums are powers of two (checked on entry). */
+		if (((s->v[R_OFM_BLK_WIDTH_M1] + 1u) &
+		     (c->min_block_width - 1u)) != 0u ||
+		    ((s->v[R_OFM_BLK_HEIGHT_M1] + 1u) &
+		     (c->min_block_height - 1u)) != 0u ||
+		    (bd & (c->min_block_depth - 1u)) != 0u ||
+		    ((bd % BRICK) != 0u && od > bd))
+			return NPU_CS_PARAMETER_RANGE;
+	}
+	if (ifm2 && ((s->v[R_IFM2_PRECISION] ^ s->v[R_IFM_PRECISION]) &
+	             PREC_MUST_MATCH) != 0u)
+		return NPU_CS_PARAMETER_RANGE;
+	if (weights && s->v[R_WEIGHT_LENGTH] == 0u)
+		return NPU_CS_PARAMETER_RANGE;
 
 	fm_reach(s, &FM_OFM, oh, ow, od, &lo, &hi);
 	r = touch(k, s->v[R_OFM_REGION], lo, hi, true);
@@ -789,22 +851,27 @@ static enum npu_cs_refusal operation(struct cs_walk *k, uint32_t op,
 enum npu_cs_refusal npu_cmdstream_check(const uint32_t *words, uint32_t nwords,
                                         const struct npu_cs_region *regions,
                                         uint32_t nregions,
-                                        uint32_t shram_bytes,
+                                        const struct npu_cs_config *config,
                                         struct npu_cs_extent *extent)
 {
 	struct cs_walk k;
 	uint32_t i = 0u;
 	bool stop = false;
 
+	/* TRM Table 4-139: minimum width and height 1 or 2, depth 4 or 8. */
 	if (words == NULL || nregions > NPU_CS_MAX_REGIONS ||
-	    (regions == NULL && nregions != 0u) ||
-	    shram_bytes < SHRAM_MIN_BYTES || shram_bytes > SHRAM_MAX_BYTES)
+	    (regions == NULL && nregions != 0u) || config == NULL ||
+	    config->shram_bytes < SHRAM_MIN_BYTES ||
+	    config->shram_bytes > SHRAM_MAX_BYTES ||
+	    (uint32_t)config->min_block_width - 1u > 1u ||
+	    (uint32_t)config->min_block_height - 1u > 1u ||
+	    (config->min_block_depth != 4u && config->min_block_depth != 8u))
 		return NPU_CS_BAD_ARGUMENTS;
 
 	k.s.set = 0u;
 	k.regions = regions;
 	k.nregions = nregions;
-	k.shram_bytes = shram_bytes;
+	k.config = config;
 	k.extent = extent;
 	if (extent != NULL) {
 		uint32_t r;
@@ -879,7 +946,7 @@ const char *npu_cmdstream_refusal_text(enum npu_cs_refusal r)
 		return NULL;
 	case NPU_CS_BAD_ARGUMENTS:
 		return "the command stream check was given no stream, more "
-		       "than 8 regions or an impossible SHRAM size";
+		       "than 8 regions or an impossible NPU configuration";
 	case NPU_CS_UNKNOWN_COMMAND:
 		return "the command stream has a command the Ethos-U55 does not "
 		       "define";

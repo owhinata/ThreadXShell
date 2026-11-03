@@ -572,6 +572,13 @@ add_library(tflm_obj OBJECT
 # is load-bearing for camera.c's stop join, which budgets two of these waits.
 # A configure-time FATAL_ERROR is the point -- silently falling back to a
 # default here would put the number back to being written twice.
+#
+# Both this value and NPU_VELA_ACCELERATOR below are read from the header at
+# configure time, so an edit to it re-runs configure: otherwise the firmware and
+# the host gate would compile the new header while the driver kept the old
+# timeout and vela the old --accelerator-config.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${BOARD_DIR}/port/nn/npu/npu_hw.h")
 file(STRINGS "${BOARD_DIR}/port/nn/npu/npu_hw.h" _npu_timeout_line
      REGEX "^#define[ \t]+NPU_INFERENCE_TIMEOUT_TICKS[ \t]+[0-9]+u?[ \t]*$")
 if(NOT _npu_timeout_line)

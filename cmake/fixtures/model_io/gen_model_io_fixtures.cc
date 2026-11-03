@@ -276,6 +276,14 @@
  *                        (the outputs follow the inputs in the table)
  *   cs_int4_ok / _past   the weights INT4 [256] on the same 128 B (half a byte
  *                        per element): 64 B read from offset 64 / 65
+ *   cs_block_ok          control: an elementwise ABS, int8 1x1x8 from region 0
+ *                        (16 B read) into region 1 (16 B written), output block
+ *                        1 x 1 x 8: a multiple of the board's minimum block
+ *   cs_block_depth12     the same with block depth 12: not a multiple of the
+ *                        board's minimum depth 8 (TRM 4.9 Table 4-139, row
+ *                        "64"), though it is of the 32 row's 4 -- so it is
+ *                        refused only when the board's configuration reaches
+ *                        the walk
  *
  * And the operator rules (issue #185): one operator over tensors of its own (a
  * constant on a Buffer of its own, 16-byte aligned, exactly its shape's bytes,
@@ -1688,6 +1696,26 @@ int main(int argc, char **argv)
 		const std::vector<uint32_t> r7 = with_stop(dma(0u, 7u, 0u, 0u, 4u));
 
 		nine.insert(nine.end(), r7.begin(), r7.end());
+		/* An elementwise ABS (0x006, mode 6), int8 1x1x8 NHWC, global scale:
+		 * IFM region 0, OFM region 1, every register it uses set, output
+		 * block 1 x 1 x bd. */
+		auto ew_abs = [&](uint32_t bd) {
+			std::vector<uint32_t> v{
+				c0(0x11Fu, 1u),
+				0x4010u, 0u, 0x4011u, 0u, 0x4012u, 0u, 0x4013u, 0u,
+				0x4014u, 8u, 0x4015u, 8u, 0x4016u, 1u,
+				c0(0x114u, 0x101u), c0(0x11Au, 0u), c0(0x11Bu, 0u),
+				c0(0x11Cu, 0u), c0(0x111u, 0u), c0(0x112u, 0u),
+				c0(0x113u, 7u), c0(0x115u, 0u), c0(0x116u, 0u),
+				c0(0x117u, bd - 1u),
+				c0(0x10Fu, 0u),
+				0x4000u, 0u, 0x4001u, 0u, 0x4002u, 0u, 0x4003u, 0u,
+				0x4004u, 8u, 0x4005u, 8u, 0x4006u, 1u,
+				c0(0x105u, 1u), c0(0x10Au, 0u), c0(0x10Bu, 0u),
+				c0(0x10Cu, 0u), c0(0x104u, 7u),
+				c0(0x006u, 6u) };
+			return with_stop(v);
+		};
 		const cs_spec cs_specs[] = {
 			{ "cs_ok.tflite",                ok,                                        0u, false, false },
 			{ "cs_nine_ok.tflite",           nine,                                      6u, false, false },
@@ -1704,6 +1732,8 @@ int main(int argc, char **argv)
 			{ "cs_out_past.tflite",          with_stop(dma(0u, 2u, 0u, 0u, 5u)),        0u, false, false },
 			{ "cs_int4_ok.tflite",           with_stop(dma(0u, 1u, 64u, 0u, 64u)),      0u, false, false, true },
 			{ "cs_int4_past.tflite",         with_stop(dma(0u, 1u, 65u, 0u, 64u)),      0u, false, false, true },
+			{ "cs_block_ok.tflite",          ew_abs(8u),                                0u, false, false },
+			{ "cs_block_depth12.tflite",     ew_abs(12u),                               0u, false, false },
 		};
 
 		for (const cs_spec &sp : cs_specs) {

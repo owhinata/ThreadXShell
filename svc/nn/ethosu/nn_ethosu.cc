@@ -189,7 +189,7 @@ int build_interp(const void *data, uint32_t len)
 	 * reads are the ones the walk has just proven, and its tensor and buffer
 	 * indices are in range.  PAYLOAD, like the scan: this payload is not
 	 * launched. */
-	if (npu_model_cmdstream_refusal(model, nn_ethosu_board_facts.npu_shram_bytes) !=
+	if (npu_model_cmdstream_refusal(model, &nn_ethosu_board_facts.npu_cs) !=
 	    nullptr)
 		return NN_MODEL_ERR_PAYLOAD;
 

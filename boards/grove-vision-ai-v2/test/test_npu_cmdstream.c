@@ -50,6 +50,9 @@
 #define OFM_WIDTH_M1 0x111u
 #define OFM_HEIGHT_M1 0x112u
 #define OFM_DEPTH_M1 0x113u
+#define OFM_BLK_WIDTH_M1 0x115u
+#define OFM_BLK_HEIGHT_M1 0x116u
+#define OFM_BLK_DEPTH_M1 0x117u
 #define KERNEL_WIDTH_M1 0x120u
 #define KERNEL_HEIGHT_M1 0x121u
 #define KERNEL_STRIDE 0x122u
@@ -85,6 +88,9 @@ static const struct fmc OFM = { 0x11Fu, 0x010u, 0x014u, 0x114u, 0x11Au, 0x11Bu, 
 #define O8G OP(0u, 0u, 1u)   /* global scale */
 
 #define SHRAM 16384u
+/* The board's configuration, ethos-u55-64: SHRAM 16 KB, minimum output block
+ * 1 x 1 x 8 (TRM 4.9 Table 4-139, row "64"). */
+static const struct npu_cs_config CFG = { SHRAM, 1u, 1u, 8u };
 #define BIG (1u << 20)
 #define NREG 5u
 
@@ -157,11 +163,17 @@ static void fm(const struct fmc *f, uint32_t region, uint32_t base,
 	fm_tiles(f, region, b, sx, sy, sc, prec, 0xFFFFu, 0xFFFFu, 0xFFFFu);
 }
 
+/* The OFM's shape and a 1 x 1 x 16 output block: a multiple of every
+ * configuration's minimum (TRM 4.9 Table 4-139) and of 16, so any OFM depth is
+ * allowed under it. */
 static void ofm_shape(uint32_t h, uint32_t w, uint32_t d)
 {
 	c0(OFM_HEIGHT_M1, h - 1u);
 	c0(OFM_WIDTH_M1, w - 1u);
 	c0(OFM_DEPTH_M1, d - 1u);
+	c0(OFM_BLK_WIDTH_M1, 0u);
+	c0(OFM_BLK_HEIGHT_M1, 0u);
+	c0(OFM_BLK_DEPTH_M1, 15u);
 }
 
 static void kernel(uint32_t kh_m1, uint32_t kw_m1, uint32_t ks,
@@ -201,9 +213,27 @@ static void dma(uint32_t sr, uint32_t src, uint32_t dr, uint32_t dst,
 	c0(DMA_WAIT, 0u);
 }
 
+static enum npu_cs_refusal run_cfg(const struct npu_cs_config *c)
+{
+	return npu_cmdstream_check(s, n, reg, nreg, c, NULL);
+}
+
 static enum npu_cs_refusal run_shram(uint32_t shram)
 {
-	return npu_cmdstream_check(s, n, reg, nreg, shram, NULL);
+	struct npu_cs_config c = CFG;
+
+	c.shram_bytes = shram;
+	return run_cfg(&c);
+}
+
+static enum npu_cs_refusal run_blocks(uint8_t w, uint8_t h, uint8_t d)
+{
+	struct npu_cs_config c = CFG;
+
+	c.min_block_width = w;
+	c.min_block_height = h;
+	c.min_block_depth = d;
+	return run_cfg(&c);
 }
 
 static enum npu_cs_refusal run(void)
@@ -305,7 +335,7 @@ static void test_control(void)
 	stop();
 	expect("DMA region 0 -> 1, conv, stop", NPU_CS_OK);
 
-	r = npu_cmdstream_check(s, n, reg, nreg, SHRAM, e);
+	r = npu_cmdstream_check(s, n, reg, nreg, &CFG, e);
 	expect_r("same, with the extent report", r, NPU_CS_OK);
 	checks++;
 	if (!e[0].touched || e[0].lo != 0 || e[0].hi != 176 ||
@@ -395,6 +425,17 @@ static void test_dma(void)
 	c0(DMA_START, 0u);
 	stop();
 	expect("DMA start with no length set", NPU_CS_STATE_UNSET);
+
+	/* length 0: the TRM gives it no meaning (0x032 "transfer length in
+	 * bytes"), refused like the lookup table shape refuses it */
+	reset();
+	dma(0u, 0u, 1u, 0u, 0u);
+	stop();
+	expect("DMA of length 0", NPU_CS_PARAMETER_RANGE);
+	reset();
+	dma(0u, 0u, 1u, 0u, 1u);
+	stop();
+	boundary("DMA of length 1: write [0, 1)", 1u, 1u);
 }
 
 /* U5: lookup-table loads into the last 2 KB of the SHRAM. */
@@ -472,6 +513,23 @@ static void test_conv(void)
 	boundary("conv 3x3 s1: IFM 6x6x8", 2u, 296u);
 	boundary("conv: weights [16, 176)", 0u, 176u);
 	boundary("conv: scale [8, 48)", 4u, 48u);
+
+	/* a weight stream of 0 bytes: the TRM gives it no meaning (0x021 "byte
+	 * length"); 1 byte is the shortest accepted */
+	reset();
+	conv_setup();
+	c1(WEIGHT_LENGTH, 0u);
+	c0(CONV, 0u);
+	stop();
+	expect("conv with WEIGHT_LENGTH 0", NPU_CS_PARAMETER_RANGE);
+	s[n - 2] = DEPTHWISE;
+	expect("depthwise with WEIGHT_LENGTH 0", NPU_CS_PARAMETER_RANGE);
+	reset();
+	conv_setup();
+	c1(WEIGHT_LENGTH, 1u);
+	c0(CONV, 0u);
+	stop();
+	boundary("conv with WEIGHT_LENGTH 1: weights [16, 17)", 0u, 17u);
 
 	/* conv reads IFM_DEPTH channels even when the OFM is deeper: OFM 4x4x48
 	 * (x 48, y 192: 3*192 + 3*48 + (3-1)*1 + 48 = 770), IFM still 296 */
@@ -744,11 +802,72 @@ static void test_elementwise(void)
 	stop();
 	expect("MUL with a scalar: IFM2 not set, not read", NPU_CS_OK);
 
+	/* IFM2's signedness and precision MUST MATCH IFM (TRM 0x185); its format
+	 * need not.  IFM is signed int8 here. */
+	static const struct {
+		uint32_t prec;
+		enum npu_cs_refusal want;
+		const char *what;
+	} ip2[] = {
+		{ I8, NPU_CS_OK, "ADD, IFM2 signed int8 like IFM" },
+		{ IP(0u, 1u), NPU_CS_OK, "ADD, IFM2 NHCWB16 (format may differ)" },
+		{ IP(1u, 0u), NPU_CS_PARAMETER_RANGE, "ADD, IFM2 int16 (precision differs)" },
+		{ IP(2u, 0u), NPU_CS_PARAMETER_RANGE, "ADD, IFM2 int32 (precision differs)" },
+		{ I8 & ~1u, NPU_CS_PARAMETER_RANGE, "ADD, IFM2 unsigned (sign differs)" },
+	};
+
+	for (i = 0; i < sizeof(ip2) / sizeof(ip2[0]); i++) {
+		reset();
+		ew_setup(32u);
+		fm(&IFM2, 3u, 0u, 32u, 96u, 1u, ip2[i].prec);
+		c0(IFM2_BROADCAST, 0u);
+		c0(ELEMENTWISE, 1u);
+		stop();
+		expect(ip2[i].what, ip2[i].want);
+	}
+
+	/* not compared when IFM2 is not read: a scalar, or a unary mode */
+	reset();
+	ew_setup(32u);
+	fm(&IFM2, 3u, 0u, 32u, 96u, 1u, IP(1u, 0u));
+	c0(IFM2_BROADCAST, 0x80u);
+	c0(ELEMENTWISE, 1u);
+	stop();
+	expect("ADD with a scalar, IFM2 int16 set: not compared", NPU_CS_OK);
+	reset();
+	ew_setup(32u);
+	fm(&IFM2, 3u, 0u, 32u, 96u, 1u, IP(1u, 0u));
+	c0(ELEMENTWISE, 6u);
+	stop();
+	expect("ABS, IFM2 int16 set: not compared", NPU_CS_OK);
+
+	/* both int16 (x 64, y 192, c 2): accepted, IFM2 sized at 2 bytes:
+	 * 192 + 2*64 + (2-1)*2 + 2 bricks * 32 = 386 */
+	reset();
+	fm(&OFM, 1u, 0u, 64u, 192u, 2u, OP(1u, 0u, 1u));
+	ofm_shape(2u, 3u, 32u);
+	fm(&IFM, 2u, 0u, 64u, 192u, 2u, IP(1u, 0u));
+	c0(IFM_DEPTH_M1, 31u);
+	fm(&IFM2, 3u, 0u, 64u, 192u, 2u, IP(1u, 0u));
+	c0(IFM2_BROADCAST, 0u);
+	c0(ELEMENTWISE, 1u);
+	stop();
+	boundary("ADD, IFM and IFM2 int16: IFM2 2x3x32", 3u, 386u);
+
 	reset();
 	ew_setup(32u);
 	c0(ELEMENTWISE, 1u);
 	stop();
 	expect("ADD with IFM2_BROADCAST never set", NPU_CS_STATE_UNSET);
+
+	/* the same with every IFM2 register set, so only the broadcast word is
+	 * missing (the case above also lacks IFM2 itself) */
+	reset();
+	ew_setup(32u);
+	fm(&IFM2, 3u, 0u, 32u, 96u, 1u, I8);
+	c0(ELEMENTWISE, 1u);
+	stop();
+	expect("ADD with IFM2 set, IFM2_BROADCAST never set", NPU_CS_STATE_UNSET);
 
 	reset();
 	ew_setup(32u);
@@ -796,6 +915,110 @@ static void test_elementwise(void)
 	c0(ELEMENTWISE, 6u);
 	stop();
 	expect("per-channel ABS, scale never set", NPU_CS_STATE_UNSET);
+}
+
+/*
+ * The OFM block (TRM Table 4-112 0x115-0x117, TRM 4.9 "Output feature map").
+ * Register ranges: width - 1 in 0-63 (TRM 4.9 "1-64" and the driver's 6-bit
+ * field; Table 4-112 says 0-31), height - 1 in 0-31, depth - 1 in 3-127.  Per
+ * operation: each size a multiple of the configuration's minimum block (Table
+ * 4-139; this board's row "64" is 1 x 1 x 8), and a block depth that is not a
+ * multiple of 16 at least the OFM depth.
+ */
+static void block_conv(uint32_t bw, uint32_t bh, uint32_t bd, uint32_t od)
+{
+	reset();
+	conv_setup();
+	c0(OFM_DEPTH_M1, od - 1u);
+	c1(OFM.stride_x, 128u);            /* room for 128 channels */
+	c1(OFM.stride_x + 1u, 512u);
+	c0(OFM_BLK_WIDTH_M1, bw - 1u);
+	c0(OFM_BLK_HEIGHT_M1, bh - 1u);
+	c0(OFM_BLK_DEPTH_M1, bd - 1u);
+	c0(CONV, 0u);
+	stop();
+}
+
+static void test_ofm_block(void)
+{
+	static const struct {
+		uint32_t op, v;
+		enum npu_cs_refusal want;
+		const char *what;
+	} range[] = {
+		{ OFM_BLK_WIDTH_M1, 63u, NPU_CS_OK, "block width - 1 = 63" },
+		{ OFM_BLK_WIDTH_M1, 64u, NPU_CS_PARAMETER_RANGE, "block width - 1 = 64" },
+		{ OFM_BLK_HEIGHT_M1, 31u, NPU_CS_OK, "block height - 1 = 31" },
+		{ OFM_BLK_HEIGHT_M1, 32u, NPU_CS_PARAMETER_RANGE, "block height - 1 = 32" },
+		{ OFM_BLK_DEPTH_M1, 3u, NPU_CS_OK, "block depth - 1 = 3" },
+		{ OFM_BLK_DEPTH_M1, 2u, NPU_CS_PARAMETER_RANGE, "block depth - 1 = 2" },
+		{ OFM_BLK_DEPTH_M1, 127u, NPU_CS_OK, "block depth - 1 = 127" },
+		{ OFM_BLK_DEPTH_M1, 128u, NPU_CS_PARAMETER_RANGE, "block depth - 1 = 128" },
+	};
+	unsigned i;
+
+	printf(" OFM block\n");
+	for (i = 0; i < sizeof(range) / sizeof(range[0]); i++) {
+		reset();
+		c0(range[i].op, range[i].v);
+		stop();
+		expect(range[i].what, range[i].want);
+	}
+
+	/* the largest block the registers allow, under the board's minimum */
+	block_conv(64u, 32u, 128u, 16u);
+	expect("conv, block 64 x 32 x 128", NPU_CS_OK);
+
+	/* depth a multiple of 8 */
+	block_conv(1u, 1u, 16u, 16u);
+	expect("conv, block depth 16", NPU_CS_OK);
+	block_conv(1u, 1u, 12u, 8u);
+	expect("conv, block depth 12 (not a multiple of 8)", NPU_CS_PARAMETER_RANGE);
+	expect_r("same under a minimum depth of 4 (the 32 row)",
+	         run_blocks(1u, 1u, 4u), NPU_CS_OK);
+
+	/* a block depth not a multiple of 16 must cover the OFM depth */
+	block_conv(1u, 1u, 24u, 24u);
+	expect("conv, block depth 24, OFM depth 24", NPU_CS_OK);
+	block_conv(1u, 1u, 24u, 25u);
+	expect("conv, block depth 24, OFM depth 25", NPU_CS_PARAMETER_RANGE);
+	block_conv(1u, 1u, 8u, 9u);
+	expect("conv, block depth 8, OFM depth 9", NPU_CS_PARAMETER_RANGE);
+	block_conv(1u, 1u, 32u, 48u);
+	expect("conv, block depth 32 (16s), OFM depth 48", NPU_CS_OK);
+	block_conv(1u, 1u, 128u, 129u);
+	expect("conv, block depth 128 (16s), OFM depth 129", NPU_CS_OK);
+
+	/* width / height multiples: 1 here, 2 under the 128 / 256 rows */
+	block_conv(3u, 3u, 16u, 16u);
+	expect("conv, block 3 x 3 under minimum 1 x 1", NPU_CS_OK);
+	expect_r("same under minimum width 2", run_blocks(2u, 1u, 8u),
+	         NPU_CS_PARAMETER_RANGE);
+	expect_r("same under minimum height 2", run_blocks(1u, 2u, 8u),
+	         NPU_CS_PARAMETER_RANGE);
+	block_conv(4u, 2u, 16u, 16u);
+	expect_r("conv, block 4 x 2 under minimum 2 x 2", run_blocks(2u, 2u, 8u),
+	         NPU_CS_OK);
+
+	/* the same rules for the other three operations */
+	reset();
+	ew_setup(32u);
+	c0(OFM_BLK_DEPTH_M1, 7u);          /* 8 < OFM depth 32, not 16s */
+	c0(ELEMENTWISE, 6u);
+	stop();
+	expect("ABS, block depth 8 under OFM depth 32", NPU_CS_PARAMETER_RANGE);
+	reset();
+	out_2x2x32(O8G);
+	fm(&IFM, 2u, 0u, 8u, 16u, 1u, I8);
+	c0(IFM_DEPTH_M1, 7u);
+	kernel(0u, 0u, 0u, 0u, 0u, 0u);
+	c0(OFM_BLK_DEPTH_M1, 23u);         /* 24 < 32 */
+	c0(POOL, 0u);
+	stop();
+	expect("max pool, block depth 24 under OFM depth 32", NPU_CS_PARAMETER_RANGE);
+	block_conv(1u, 1u, 24u, 25u);
+	s[n - 2] = DEPTHWISE;
+	expect("depthwise, block depth 24 under OFM depth 25", NPU_CS_PARAMETER_RANGE);
 }
 
 /* Tiles: 4x4x16 int8 NHWC, strides x 16, y 32, c 1, WIDTH0 2, HEIGHT0 2,
@@ -1079,6 +1302,9 @@ static void test_rules(void)
 		{ KERNEL_STRIDE, 0, "conv without KERNEL_STRIDE" },
 		{ IFM_DEPTH_M1, 0, "conv without IFM_DEPTH_M1" },
 		{ OFM_DEPTH_M1, 0, "conv without OFM_DEPTH_M1" },
+		{ OFM_BLK_WIDTH_M1, 0, "conv without OFM_BLK_WIDTH_M1" },
+		{ OFM_BLK_HEIGHT_M1, 0, "conv without OFM_BLK_HEIGHT_M1" },
+		{ OFM_BLK_DEPTH_M1, 0, "conv without OFM_BLK_DEPTH_M1" },
 		{ 0x11Bu, 0, "conv without OFM_HEIGHT0_M1" },
 		{ 0x006u, 1, "conv without IFM_STRIDE_C" },
 	};
@@ -1223,17 +1449,26 @@ static void test_arguments_and_text(void)
 	printf(" arguments and sentences\n");
 	reset();
 	stop();
-	expect_r("NULL stream", npu_cmdstream_check(NULL, 0, reg, nreg, SHRAM, NULL),
+	expect_r("NULL stream", npu_cmdstream_check(NULL, 0, reg, nreg, &CFG, NULL),
 	         NPU_CS_BAD_ARGUMENTS);
-	expect_r("9 regions", npu_cmdstream_check(s, n, reg, 9, SHRAM, NULL),
+	expect_r("9 regions", npu_cmdstream_check(s, n, reg, 9, &CFG, NULL),
 	         NPU_CS_BAD_ARGUMENTS);
-	expect_r("NULL regions, 1 passed", npu_cmdstream_check(s, n, NULL, 1, SHRAM, NULL),
+	expect_r("NULL regions, 1 passed", npu_cmdstream_check(s, n, NULL, 1, &CFG, NULL),
 	         NPU_CS_BAD_ARGUMENTS);
-	expect_r("NULL regions, 0 passed", npu_cmdstream_check(s, n, NULL, 0, SHRAM, NULL),
+	expect_r("NULL regions, 0 passed", npu_cmdstream_check(s, n, NULL, 0, &CFG, NULL),
 	         NPU_CS_OK);
 	expect_r("SHRAM 8 KB", run_shram(8192u), NPU_CS_OK);
 	expect_r("SHRAM 8 KB - 1", run_shram(8191u), NPU_CS_BAD_ARGUMENTS);
 	expect_r("SHRAM 48 KB + 1", run_shram(49153u), NPU_CS_BAD_ARGUMENTS);
+	expect_r("no configuration", npu_cmdstream_check(s, n, reg, nreg, NULL, NULL),
+	         NPU_CS_BAD_ARGUMENTS);
+	expect_r("minimum block 2 x 2 x 4", run_blocks(2u, 2u, 4u), NPU_CS_OK);
+	expect_r("minimum block width 0", run_blocks(0u, 1u, 8u), NPU_CS_BAD_ARGUMENTS);
+	expect_r("minimum block width 3", run_blocks(3u, 1u, 8u), NPU_CS_BAD_ARGUMENTS);
+	expect_r("minimum block height 0", run_blocks(1u, 0u, 8u), NPU_CS_BAD_ARGUMENTS);
+	expect_r("minimum block height 3", run_blocks(1u, 3u, 8u), NPU_CS_BAD_ARGUMENTS);
+	expect_r("minimum block depth 2", run_blocks(1u, 1u, 2u), NPU_CS_BAD_ARGUMENTS);
+	expect_r("minimum block depth 16", run_blocks(1u, 1u, 16u), NPU_CS_BAD_ARGUMENTS);
 
 	checks++;
 	if (npu_cmdstream_refusal_text(NPU_CS_OK) != NULL) {
@@ -1267,6 +1502,7 @@ int main(void)
 	test_conv();
 	test_depthwise_pool();
 	test_elementwise();
+	test_ofm_block();
 	test_tiles();
 	test_formats();
 	test_arithmetic();

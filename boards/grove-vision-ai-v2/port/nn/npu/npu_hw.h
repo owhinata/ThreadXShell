@@ -67,6 +67,26 @@
 #define NPU_VELA_ACCELERATOR "ethos-u55-64"
 #define NPU_SHRAM_BYTES      (16u * 1024u)
 
+/*
+ * The same configuration's minimum output block, width x height x depth: TRM
+ * 4.9 Table 4-139, row "64" (1 x 1 x 8; Vela's ethos-u55-64 ofm_ublock
+ * Block(1, 1, 8) agrees).  The command stream walk refuses an OFM block size
+ * that is not a multiple of it (TRM 4.9).  No separate read-back: the SHRAM
+ * check in npu_hw_init() already tells this part from the 128 and 256
+ * configurations (24 and 48 KB), and the 32 one's minimum (1 x 1 x 4) divides
+ * this one, so a stream that passes here passes there.
+ */
+#define NPU_MIN_BLOCK_WIDTH  1u
+#define NPU_MIN_BLOCK_HEIGHT 1u
+#define NPU_MIN_BLOCK_DEPTH  8u
+
+/* The four above as a struct npu_cs_config initializer, in its field order
+ * (svc/nn/ethosu/npu_cmdstream.h): the board facts and the host gate both
+ * write this one. */
+#define NPU_CS_CONFIG_INIT \
+	{ NPU_SHRAM_BYTES, NPU_MIN_BLOCK_WIDTH, NPU_MIN_BLOCK_HEIGHT, \
+	  NPU_MIN_BLOCK_DEPTH }
+
 #ifdef __cplusplus
 extern "C" {
 #endif

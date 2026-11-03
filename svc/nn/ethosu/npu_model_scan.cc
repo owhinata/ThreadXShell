@@ -313,7 +313,7 @@ cs_region_of(const nn_tflm_tensor_vec *tensors, const nn_tflm_buffer_vec *buffer
 }  /* namespace */
 
 const char *npu_model_cmdstream_refusal(const tflite::Model *model,
-                                        uint32_t shram_bytes)
+                                        const struct npu_cs_config *config)
 {
 	const auto *subgraphs = model->subgraphs();
 
@@ -374,7 +374,7 @@ const char *npu_model_cmdstream_refusal(const tflite::Model *model,
 
 		const enum npu_cs_refusal r = npu_cmdstream_check(
 			reinterpret_cast<const uint32_t *>(data) + first, count,
-			regions, nreg, shram_bytes, nullptr);
+			regions, nreg, config, nullptr);
 
 		if (r != NPU_CS_OK)
 			return npu_cmdstream_refusal_text(r);

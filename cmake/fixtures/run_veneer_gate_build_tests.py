@@ -113,13 +113,28 @@ Cases:
                     (the walk sees it when told).  A documented limit for now:
                     step 3 of #165 derives the roots from the table and this
                     case turns into a refusal.
-  policy_decoy      (issue #165) the probe points at a correct read-only
-                    policy, while the code hands the parse entry a different
-                    read-only policy whose c is 1: the probe PASSES, because
-                    it reads what it points at, not what the parse entry is
-                    given.  A documented limit for now: step 2 of #165 binds
-                    the policy by a fixed name and this case turns into a
-                    refusal.
+  policy_decoy      (issue #165) the read-back's policy is right, while the
+                    code hands an entry that takes a policy a different
+                    read-only one whose c is 1.  Passed until step 2 of #165;
+                    now refused by check_policy_entry.py, naming the object
+                    that defines the entry, before the probe runs.
+  entry_clean       (issue #165) the plain tree: every input of the link read
+                    (objects and the static library's member), none takes a
+                    policy.
+  entry_map         the map edited to LOAD an object not on disk, to include
+                    a member its archive does not hold, and a member of an
+                    archive it did not LOAD: each refused.
+  entry_host_tu     the host's real entry (plugin_load_host.c) in the
+                    firmware's object library, and in its static library with
+                    a caller: refused, naming the definition (the archive
+                    member) and the reference.
+  entry_lto         the decoy under LTO: refused, the IR read through gcc-nm;
+                    the same map with a plain nm is refused, not read as the
+                    objects' empty wrappers.
+  policy_shape      (issue #165) plugin_board_policy twice (a second, local
+                    object of the name), weak, of another size, or a
+                    function: each refused by the read-back.
+  policy_none       no plugin_board_policy: the link fails naming it.
 """
 import argparse
 import importlib.util
@@ -136,6 +151,7 @@ COPIED = ("veneer_cost_gate.cmake", "check_veneer_base_cost.py",
           "thumb_stack_analysis.py", "check_plugin_image.py",
           "check_policy_probe.py", "plugin_stack_table.cmake",
           "check_delivery_gate.py", "add_plugin.cmake",
+          "check_policy_entry.py",
           "check_no_mutable_storage.py")
 # What add_plugin() compiles a plugin from (shared_analysis), copied so that
 # the helper's derived asset root (cmake/../asset) resolves inside the tree.
@@ -197,10 +213,12 @@ int main(void)
 #error "PLUGIN_VENEER_BASE_COST did not reach this compile"
 #endif
 __attribute__((used)) char policy_cost_probe[PLUGIN_VENEER_BASE_COST];
-/* A board's policy and its probe, as nn_svc_grove.c / nn_svc_wio.c write them:
- * the stamp waits for check_policy_probe.py to read this back from shell.elf.
- * The allowances arrive from plugin_stack_table(), and this TU maps each slot
- * to one of them on its own, as the boards' firmware does (issue #126). */
+/* A board's policy, as nn_svc_grove.c / nn_svc_wio.c write it: under the name
+ * the firmware's plugin_parse() reads (svc/plugin/plugin_load_board.c is linked
+ * here too), and the stamp waits for check_policy_probe.py to read it back
+ * from shell.elf by that name (issue #165).  The allowances arrive from
+ * plugin_stack_table(), and this TU maps each slot to one of them on its own,
+ * as the boards' firmware does (issue #126). */
 #if !defined(FIX_STACK_A) || !defined(FIX_STACK_B)
 #error "plugin_stack_table() did not define the allowances on this compile"
 #endif
@@ -216,12 +234,20 @@ __attribute__((used)) char policy_cost_probe[PLUGIN_VENEER_BASE_COST];
 #define FIX_BUMP_SLOT 99
 #endif
 #define FIX_B_(i) ((FIX_BUMP_SLOT) == (i) ? 1u : 0u)
-#ifdef FIX_POLICY_RW
-#define FIX_POLICY_QUAL               /* a writable policy, in .data */
+/* The shapes of the policy the read-back refuses (issue #165): one placed in a
+ * writable output section (the const declaration of plugin_load.h stays), one
+ * weak, and none at all here -- FIX_POLICY_NONE alone (the link must fail), or
+ * with twin.c supplying a global of another size (FIX_POLICY_ARRAY). */
+#if defined(FIX_POLICY_RW)
+#define FIX_POLICY_ATTR __attribute__((section(".data.fix_policy")))
+#elif defined(FIX_POLICY_WEAK)
+#define FIX_POLICY_ATTR __attribute__((weak))
 #else
-#define FIX_POLICY_QUAL const
+#define FIX_POLICY_ATTR
 #endif
-static FIX_POLICY_QUAL struct plugin_policy fix_policy = {
+#if !defined(FIX_POLICY_NONE) && !defined(FIX_POLICY_ARRAY) && \
+    !defined(FIX_POLICY_FUNC)
+FIX_POLICY_ATTR const struct plugin_policy plugin_board_policy = {
     .stack_limit      = { FIX_STACK_A + FIX_B_(0), FIX_STACK_A + FIX_B_(1),
                           FIX_STACK_A + FIX_B_(2), FIX_DRAW + FIX_B_(3),
                           FIX_STACK_A + FIX_B_(4), FIX_STACK_A + FIX_B_(5),
@@ -229,7 +255,7 @@ static FIX_POLICY_QUAL struct plugin_policy fix_policy = {
     .veneer_cost      = PLUGIN_VENEER_BASE_COST,
     .stack_accounting = PLUGIN_STACK_ACCOUNTING,
 };
-PLUGIN_POLICY_PROBE(fix_policy);
+#endif
 
 /* (issue #165, bind_decoy) The base table a board hands the plugin, as
  * nn_active.c / nn_svc_grove.c define nn_plugin_base -- with its log slot bound
@@ -254,31 +280,72 @@ __attribute__((noinline, used)) const struct plugin_base_api *fix_base(void)
 }
 #endif
 
-/* (issue #165, policy_decoy) The probe above points at fix_policy, which is
- * correct; the code hands the parse entry another read-only policy, with c = 1.
- * The entry is a stand-in under the real name and prototype (plugin_load.h). */
-#ifdef FIX_POLICY_DECOY
+/* (issue #165, policy_decoy) plugin_board_policy above is correct, and the
+ * read-back reads it; the code hands an entry that takes a policy another
+ * read-only one, with c = 1.  The entry is a stand-in under the host entry's
+ * real name and prototype (plugin_load_host.h); check_policy_entry.py refuses
+ * a firmware link that holds it.  FIX_CALL_HOST is the same call to the REAL
+ * host entry, which a case links in from elsewhere. */
+#if defined(FIX_POLICY_DECOY) || defined(FIX_CALL_HOST)
+#include "plugin_load_host.h"
 __attribute__((used)) const struct plugin_policy fix_policy_used = {
     .stack_limit      = { FIX_STACK_A, FIX_STACK_A, FIX_STACK_A, FIX_STACK_B,
                           FIX_STACK_A, FIX_STACK_A, FIX_STACK_A },
     .veneer_cost      = 1u,
     .stack_accounting = PLUGIN_STACK_ACCOUNTING,
 };
+#ifdef FIX_POLICY_DECOY
 __attribute__((noinline, used)) enum plugin_result
-plugin_parse(const void *buf, size_t len, const struct plugin_policy *pol,
-             struct plugin_view *out)
+plugin_parse_with_policy(const void *buf, size_t len,
+                         const struct plugin_policy *pol,
+                         struct plugin_view *out)
 {
     (void)buf;
     (void)len;
     (void)out;
     return pol->veneer_cost != 0u ? PLUGIN_OK : PLUGIN_ERR_SHORT;
 }
+#endif
 __attribute__((noinline, used)) enum plugin_result
 fix_load(const void *buf, size_t len, struct plugin_view *out)
 {
-    return plugin_parse(buf, len, &fix_policy_used, out);
+    return plugin_parse_with_policy(buf, len, &fix_policy_used, out);
 }
 #endif
+""",
+    # (issue #165) A second object under the policy's name, local, which does
+    # not include plugin_load.h (FIX_POLICY_TWIN); or the only definition, a
+    # global of another size (FIX_POLICY_ARRAY, with FIX_POLICY_NONE's absence
+    # in policy.c).
+    "twin.c": """
+#if defined(FIX_POLICY_TWIN)
+__attribute__((used)) static const unsigned plugin_board_policy[14] = { 1u };
+#elif defined(FIX_POLICY_ARRAY)
+const unsigned plugin_board_policy[20] = { 1u };
+#elif defined(FIX_POLICY_FUNC)
+void plugin_board_policy(void) {}
+#endif
+int fix_twin_unit(void) { return 0; }
+""",
+    # What svc/plugin/plugin_load_board.c needs from a C library this
+    # -nostdlib fixture does not link.  Never called: nothing runs the image.
+    "libc.c": """
+#include <stddef.h>
+void *memcpy(void *d, const void *s, size_t n)
+{
+    char *dp = d;
+    const char *sp = s;
+    while (n--)
+        *dp++ = *sp++;
+    return d;
+}
+void *memset(void *d, int c, size_t n)
+{
+    char *dp = d;
+    while (n--)
+        *dp++ = (char)c;
+    return d;
+}
 """,
     "record.py": """import sys
 open(sys.argv[2], "w").write(sys.argv[1] + "\\n")
@@ -321,10 +388,21 @@ set(FIX_PLUGIN OFF CACHE BOOL "")
 # (issue #165, bind_decoy) the function ROOTS names for the log slot.
 set(FIX_LOG_ROOT nn_plugin_log CACHE STRING "")
 
-add_library(fw_objs OBJECT objsrc.c policy.c)
+# (issue #165) FIX_HOST_TU puts the host's policy-taking entry where it must
+# never be: OBJ in the firmware's object library, LIB in its static library.
+set(FIX_HOST_TU "" CACHE STRING "")
+add_library(fw_objs OBJECT objsrc.c policy.c twin.c libc.c
+            "@SVC@/plugin/plugin_load_board.c" "@SVC@/crc32.c")
+if(FIX_HOST_TU STREQUAL "OBJ")
+    target_sources(fw_objs PRIVATE "@SVC@/plugin/plugin_load_host.c")
+endif()
 target_include_directories(fw_objs PRIVATE "@SVC@" "@SVC@/nn" "@SVC@/plugin" "@SVC@/camera")
 add_library(fw_objlink OBJECT objlink.c)
 add_library(fw_lib STATIC lib.c)
+if(FIX_HOST_TU STREQUAL "LIB")
+    target_sources(fw_lib PRIVATE "@SVC@/plugin/plugin_load_host.c")
+    target_include_directories(fw_lib PRIVATE "@SVC@" "@SVC@/plugin")
+endif()
 add_library(fw_iface INTERFACE)
 target_link_libraries(fw_iface INTERFACE fw_lib)
 
@@ -1220,33 +1298,187 @@ def decoy_tree(p, results):
                                   "naming it in ROOTS is refused"))
 
     # --- policy_decoy ------------------------------------------------------
+    # [!] TURNED AROUND BY STEP 2 OF #165.  Until then the probe pointed at a
+    # correct policy while the parse entry was handed this one, and passed.
+    # Now the firmware's parse takes no policy, and an entry that takes one in
+    # any input of the link is refused before the probe runs.
     p.rm("flashed")
     p.configure(DECLARED="4096", FIX_LOG_ROOT="nn_plugin_log",
                 CMAKE_C_FLAGS=p.c_init + " -DFIX_POLICY_DECOY")
     rc, out = p.ninja("flash")
     flat = " ".join(out.split())
-    # struct plugin_policy_probe: magic, size, off_veneer_cost,
-    # off_accounting, off_stack_limit, policy.
-    probe, addr = _image_words(p, "plugin_policy_probe", 6)
+    # The decoy is in the image: the read-back's object is right, the one the
+    # stand-in entry is handed holds c = 1.  struct plugin_policy_probe:
+    # magic, size, off_veneer_cost, off_accounting, off_stack_limit.
+    probe, addr = _image_words(p, "plugin_policy_probe", 5)
+    good, _ = _image_words(p, "plugin_board_policy", probe[1] // 4)
     used, _ = _image_words(p, "fix_policy_used", probe[1] // 4)
-    expect(probe[5] == addr["fix_policy"] and probe[5] != addr["fix_policy_used"]
-           and used[probe[2] // 4] == 1,
-           "policy_decoy: the probe should point at fix_policy and the "
-           "policy the code passes should hold c = 1 (probe -> 0x%08x, "
-           "fix_policy 0x%08x, fix_policy_used 0x%08x c = %d)"
-           % (probe[5], addr["fix_policy"], addr["fix_policy_used"],
-              used[probe[2] // 4]))
-    expect(rc == 0 and os.path.exists(p.path("flashed"))
-           and "check_policy_probe: OK" in flat
-           and "charges c = 4096 B (= DECLARED)" in flat,
-           "policy_decoy: expected to PASS (the probe reads the policy it "
-           "points at, not the one the parse entry is given), which is the "
-           "documented limit; if this now fails, #165 step 2 turned it "
-           "around -- update the case", out)
-    results.append(("policy_decoy", "the probe reads a correct policy while "
-                                    "the parse entry is handed one with c = "
-                                    "1: passes (documented limit, #165 "
-                                    "step 2)"))
+    expect(good[probe[2] // 4] == 4096 and used[probe[2] // 4] == 1,
+           "policy_decoy: the image should hold plugin_board_policy c = 4096 "
+           "and fix_policy_used c = 1 (got %d and %d)"
+           % (good[probe[2] // 4], used[probe[2] // 4]))
+    expect(rc != 0 and not os.path.exists(p.path("flashed"))
+           and not os.path.exists(p.stamp)
+           and "check_policy_entry: FAIL" in flat
+           and re.search(r"policy\.c\.o(bj)? defines "
+                         r"plugin_parse_with_policy \(T\)", flat)
+           and flat.count("plugin_parse_with_policy (") == 1
+           and "check_policy_probe: " not in flat,
+           "policy_decoy: the link holds an entry that takes a policy, and "
+           "check_policy_entry should refuse it -- naming policy.c, before "
+           "the probe runs", out)
+    results.append(("policy_decoy", "an entry handed another policy (c = 1) "
+                                    "while the read-back's is right: refused "
+                                    "by check_policy_entry, naming the "
+                                    "object that defines it"))
+
+
+def entry_fail(out):
+    return " ".join(out.split())
+
+
+def entry_tree(p, results):
+    """issue #165: no input of the firmware link takes a policy."""
+    entry = os.path.join(p.src, "cmake", "check_policy_entry.py")
+    nm = p.cc[:-len("gcc")] + "gcc-nm"
+
+    def run_entry(mapfile, use_nm=nm):
+        r = subprocess.run([sys.executable, entry, "--map", mapfile,
+                            "--link-dir", p.bld, "--nm", use_nm],
+                           capture_output=True, text=True)
+        return r.returncode, " ".join((r.stdout + r.stderr).split())
+
+    p.configure(DECLARED="4096", FIX_HOST_TU="", CMAKE_C_FLAGS=p.c_init)
+    rc, out = p.ninja("flash")
+    flat = entry_fail(out)
+    m = re.search(r"check_policy_entry: OK -- (\d+) inputs of the firmware "
+                  r"link \((\d+) objects, (\d+) archive members\)", flat)
+    expect(rc == 0 and m is not None and int(m.group(3)) >= 1,
+           "entry_clean: the plain tree should pass, reading at least the "
+           "static library's member", out)
+    results.append(("entry_clean", "the plain tree: %s inputs read (%s "
+                                   "objects, %s archive members), none takes "
+                                   "a policy" % m.groups()))
+
+    # The map, edited, against the same tree: what the map says and what is
+    # on disk must agree.
+    with open(p.path("shell.map")) as fh:
+        text = fh.read()
+    for name, edit, says in (
+            ("missing_object",
+             lambda t: t.replace("\nLOAD ", "\nLOAD CMakeFiles/gone.c.obj\nLOAD ",
+                                 1),
+             "the map LOADs CMakeFiles/gone.c.obj, which cannot be read"),
+            ("missing_member",
+             lambda t: t.replace("Archive member included to satisfy "
+                                 "reference by file (symbol)\n\n",
+                                 "Archive member included to satisfy "
+                                 "reference by file (symbol)\n\n"
+                                 "libfw_lib.a(nothere.c.obj)\n"
+                                 "                              x.o (y)\n", 1),
+             "libfw_lib.a(nothere.c.obj), and libfw_lib.a holds no such "
+             "member"),
+            ("unloaded_archive",
+             lambda t: t.replace("Archive member included to satisfy "
+                                 "reference by file (symbol)\n\n",
+                                 "Archive member included to satisfy "
+                                 "reference by file (symbol)\n\n"
+                                 "libother.a(a.c.obj)\n"
+                                 "                              x.o (y)\n", 1),
+             "LOADs no archive libother.a")):
+        edited = edit(text)
+        expect(edited != text, "entry_map_%s: the edit did not apply" % name)
+        mp = p.path("edited.map")
+        with open(mp, "w") as fh:
+            fh.write(edited)
+        rc, got = run_entry(mp)
+        expect(rc != 0 and "check_policy_entry: FAIL" in got and says in got,
+               "entry_map_%s: should refuse (%s)" % (name, says), got)
+    results.append(("entry_map", "a LOADed object that is not on disk, a "
+                                 "member its archive does not hold, a member "
+                                 "of an archive not LOADed: each refused"))
+
+    # The host's entry where it must never be.
+    for name, tu, flags, want in (
+            ("entry_host_obj", "OBJ", "",
+             [r"plugin_load_host\.c\.o(bj)? defines plugin_parse_with_policy "
+              r"\(T\)"]),
+            ("entry_host_lib", "LIB", " -DFIX_CALL_HOST",
+             [r"libfw_lib\.a\(plugin_load_host\.c\.o(bj)?\) defines "
+              r"plugin_parse_with_policy \(T\)",
+              r"policy\.c\.o(bj)? references plugin_parse_with_policy "
+              r"\(U\)"])):
+        p.rm("flashed")
+        p.configure(DECLARED="4096", FIX_HOST_TU=tu,
+                    CMAKE_C_FLAGS=p.c_init + flags)
+        rc, out = p.ninja("flash")
+        flat = entry_fail(out)
+        expect(rc != 0 and not os.path.exists(p.path("flashed"))
+               and not os.path.exists(p.stamp)
+               and "check_policy_entry: FAIL" in flat
+               and all(re.search(w, flat) for w in want)
+               and flat.count("plugin_parse_with_policy (") == len(want),
+               "%s: should be refused naming %s" % (name, " and ".join(want)),
+               out)
+    results.append(("entry_host_tu", "the host's entry in the firmware's "
+                                     "objects, and in its static library "
+                                     "with a caller: refused, naming the "
+                                     "member and the reference"))
+
+    # Under LTO the inputs are IR: read through gcc-nm, and refused with a
+    # plain nm rather than read as their empty wrappers.
+    p.rm("flashed")
+    p.configure(DECLARED="4096", FIX_HOST_TU="", FIX_LTO="max",
+                CMAKE_C_FLAGS=p.c_init + " -DFIX_POLICY_DECOY")
+    rc, out = p.ninja("flash")
+    flat = entry_fail(out)
+    expect(rc != 0 and not os.path.exists(p.path("flashed"))
+           and "check_policy_entry: FAIL" in flat
+           and re.search(r"policy\.c\.o(bj)? defines "
+                         r"plugin_parse_with_policy", flat),
+           "entry_lto: the LTO link should be refused, read as IR", out)
+    rc, got = run_entry(p.path("shell.map"), p.cc[:-len("gcc")] + "nm")
+    expect(rc != 0 and "check_policy_entry: FAIL" in got
+           and "plugin needed" in got,
+           "entry_lto: a plain nm should be refused", got)
+    results.append(("entry_lto", "an LTO link with the decoy: refused, read "
+                                 "through gcc-nm; with a plain nm the check "
+                                 "refuses rather than read wrappers"))
+
+
+def policy_shape_tree(p, results):
+    """issue #165: the one object the loader reads, by name."""
+    for name, flag, says in (
+            ("policy_twin", "-DFIX_POLICY_TWIN",
+             "2 symbols named plugin_board_policy"),
+            ("policy_weak", "-DFIX_POLICY_WEAK",
+             "plugin_board_policy is weak, not global"),
+            ("policy_size", "-DFIX_POLICY_ARRAY",
+             "plugin_board_policy is 80 B, but sizeof(struct plugin_policy) "
+             "is 56 B"),
+            ("policy_func", "-DFIX_POLICY_FUNC",
+             "plugin_board_policy is symbol type 2, not a data object")):
+        p.rm("flashed")
+        p.configure(DECLARED="4096", CMAKE_C_FLAGS=p.c_init + " " + flag)
+        rc, out = p.ninja("flash")
+        flat = probe_fail(out)
+        expect(rc != 0 and not os.path.exists(p.path("flashed"))
+               and not os.path.exists(p.stamp)
+               and "check_policy_probe: FAIL" in flat and says in flat,
+               "%s: the probe should refuse (%s)" % (name, says), out)
+    results.append(("policy_shape", "a second object of the name, a weak "
+                                    "one, one of another size, a function "
+                                    "of the name: each refused "
+                                    "by the read-back (a writable one is "
+                                    "stack_writable_policy)"))
+    p.rm("flashed")
+    p.configure(DECLARED="4096", CMAKE_C_FLAGS=p.c_init + " -DFIX_POLICY_NONE")
+    rc, out = p.ninja("shell")
+    expect(rc != 0 and "plugin_board_policy" in out,
+           "policy_none: with no plugin_board_policy the link should fail "
+           "naming it", out)
+    results.append(("policy_none", "no plugin_board_policy: the link fails "
+                                   "naming it"))
 
 
 def cost_tree(p, results):
@@ -1437,6 +1669,8 @@ def main():
         ("cost_wiring", lambda p: cost_tree(p, results)),
         ("stack_wiring", lambda p: stack_tree(p, results)),
         ("decoy", lambda p: decoy_tree(p, results)),
+        ("entry", lambda p: entry_tree(p, results)),
+        ("policy_shape", lambda p: policy_shape_tree(p, results)),
         ("delivery", lambda p: delivery_tree(p, results)),
         ("delivery_glued", lambda p: delivery_glued_tree(p, results)),
     ]

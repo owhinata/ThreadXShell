@@ -417,9 +417,11 @@ set(SHELL_SOURCES
     # BEFORE a plugin's first instruction is fetched -- and in Step 1a that is
     # all of it: nothing here yields a callable address, so the firmware
     # validates a container and never branches into one.  Board-independent
-    # (the policy is passed in) and host-tested, and the SAME file the host-side
-    # verify_container links, so the two cannot disagree.
+    # (the policy is the board's plugin_board_policy, read by name, issue #165)
+    # and host-tested, and the SAME body (plugin_load_body.h) the host-side
+    # verify_container compiles, so the two cannot disagree.
     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_board.c"
     # `nn info`'s plugin stack lines, shared with wio (issue #111).
     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"
     # ...and the open model's container claims around them, shared with wio
@@ -2179,10 +2181,14 @@ if(HOST_CC)
                 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
                 "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
                 "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"
                 "${CMAKE_SOURCE_DIR}/svc/crc32.c"
                 -o "${GROVE_CONTAINER_VERIFIER}"
         DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
                 "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.h"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_body.h"
                 "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.h"
                 "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
         COMMENT "host cc -> verify_container (the device's own validator)"

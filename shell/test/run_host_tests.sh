@@ -312,7 +312,7 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
 #
 # Pure svc layer, so the svc include dir is all it needs.
 gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
-    "$here/test_plugin_load.c" "$svc/plugin/plugin_load.c" "$svc/crc32.c" \
+    "$here/test_plugin_load.c" "$svc/plugin/plugin_load.c" "$svc/plugin/plugin_load_host.c" "$svc/crc32.c" \
     $LDFLAGS -o "$out/test_plugin_load"
 "$out/test_plugin_load"
 
@@ -515,7 +515,7 @@ gcc $CFLAGS -I "$svc/nn" \
 # check_lease_entries run holds this file's table against the objects.
 gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_plugin_run_lease.c" "$svc/plugin/plugin_run_core.c" \
-    "$svc/plugin/plugin_exec.c" "$svc/plugin/plugin_load.c" "$svc/crc32.c" \
+    "$svc/plugin/plugin_exec.c" "$svc/plugin/plugin_load.c" "$svc/plugin/plugin_load_host.c" "$svc/crc32.c" \
     "$svc/fmt.c" \
     $LDFLAGS -Wl,--wrap=plugin_exec_unload -o "$out/test_plugin_run_lease"
 "$out/test_plugin_run_lease"
@@ -758,7 +758,7 @@ done
 # its explanation (plugin_result_name, plugin_run_strerror).  They must not depend
 # on the `nn` contract, so they are enumerated here instead of wrapped.
 gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
-    "$here/test_nn_detail_tables.c" "$svc/plugin/plugin_load.c" "$svc/plugin/plugin_exec.c" \
+    "$here/test_nn_detail_tables.c" "$svc/plugin/plugin_load.c" "$svc/plugin/plugin_load_host.c" "$svc/plugin/plugin_exec.c" \
     "$svc/crc32.c" $LDFLAGS -o "$out/test_nn_detail_tables"
 "$out/test_nn_detail_tables"
 

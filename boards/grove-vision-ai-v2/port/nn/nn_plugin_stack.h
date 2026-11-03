@@ -8,7 +8,7 @@
  *
  * The per-slot stack allowances of this board's plugin policy, and the asserts
  * that keep every one of them below each thread its slot can be called on.
- * nn_svc_grove.c initialises nn_plugin_policy.stack_limit from
+ * nn_svc_grove.c initialises plugin_board_policy.stack_limit from
  * GROVE_PLUGIN_STACK_LIMITS.  The board's host test (test/test_plugin_stack.py)
  * compiles THIS header with numbers of its own, so what it watches refuse is
  * what the firmware refuses -- a copy of these comparisons in a test would go on
@@ -127,7 +127,7 @@ _Static_assert(PLUGIN_SLOT_COUNT == 7,
 #define GROVE_PLUGIN_LIMIT_PARAM_GET  GROVE_PLUGIN_STACK_SHELL
 
 /*
- * What nn_plugin_policy.stack_limit is initialised with.  The asserts below name
+ * What plugin_board_policy.stack_limit is initialised with.  The asserts below name
  * the same seven macros rather than the two allowances, so a slot moved to
  * another allowance is checked against its own threads without anybody having
  * to remember to add an assert for it.

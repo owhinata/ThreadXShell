@@ -119,7 +119,9 @@ gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
 # issue #159 (#78 Step 4a) -- `nn model load --path <container>` on the tflm
 # build: the same adapter compiled WITH CONFIG_NN_BACKEND_TFLM and this board's
 # policy macros (the values board.cmake gives a tflm build), over the real
-# plugin validator and CRC.  A container built byte by byte with this board's
+# plugin validator and CRC -- through the firmware's entry
+# (plugin_load_board.c), which reads this adapter's plugin_board_policy by
+# name, as the device does (issue #165).  A container built byte by byte with this board's
 # facts is accepted and its MODEL SECTION handed over in place; wio's target
 # word, a truncated file and a damaged plugin byte are refused before the
 # backend is touched; the CRC the reader prints and the one `nn info` prints
@@ -135,7 +137,7 @@ gcc $CFLAGS -DCONFIG_NN_BACKEND_TFLM=1 -DF746_PLUGIN_TARGET_ID=0x1101 \
     "$HOST_TEST_SVC/nn/nn.c" "$HOST_TEST_REPO/shell/test/nn_model_host.c" \
     "$HOST_TEST_SVC/nn/nn_core_model.c" "$HOST_TEST_SVC/nn/nn_svc_common.c" \
     "$HOST_TEST_SVC/nn/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \
-    "$HOST_TEST_SVC/plugin/plugin_load.c" "$HOST_TEST_SVC/plugin/plugin_info.c" \
+    "$HOST_TEST_SVC/plugin/plugin_load.c" "$HOST_TEST_SVC/plugin/plugin_load_board.c" "$HOST_TEST_SVC/plugin/plugin_info.c" \
     "$HOST_TEST_SVC/plugin/plugin_claims.c" \
     "$HOST_TEST_SVC/crc32.c" \
     $LDFLAGS -o "$out/test_nn_model_container"
@@ -220,7 +222,7 @@ gcc $CFLAGS -I "$board/src" \
     -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_fault_plugin.c" "$board/src/fault_plugin.c" \
     "$HOST_TEST_SVC/plugin/plugin_run_core.c" "$HOST_TEST_SVC/plugin/plugin_exec.c" \
-    "$HOST_TEST_SVC/plugin/plugin_load.c" "$HOST_TEST_SVC/crc32.c" "$HOST_TEST_SVC/fmt.c" \
+    "$HOST_TEST_SVC/plugin/plugin_load.c" "$HOST_TEST_SVC/plugin/plugin_load_host.c" "$HOST_TEST_SVC/crc32.c" "$HOST_TEST_SVC/fmt.c" \
     $LDFLAGS -o "$out/test_fault_plugin"
 "$out/test_fault_plugin"
 

@@ -109,14 +109,15 @@ _Static_assert(PLUGIN_MODEL_ALIGN % NN_MODEL_ALIGN == 0u,
 /*
  * c is PLUGIN_VENEER_BASE_COST, which veneer_cost_gate() derives and checks
  * against the shipped image and compiles in -- and the build reads the value
- * this policy ACTUALLY holds back out of shell.elf (PLUGIN_POLICY_PROBE below,
- * cmake/check_policy_probe.py), with the seven allowances.
+ * this policy ACTUALLY holds back out of shell.elf (cmake/check_policy_probe.py,
+ * by the name plugin_board_policy -- the one object plugin_parse() reads, issue
+ * #165), with the seven allowances.
  *
  * The slot -> allowance mapping is this board's (decode on the nn worker, draw
  * on the GUIX thread that draws the boxes, the rest on a console); the asserts
  * against each thread's stack are in nn_svc_f746.c and nn_camera.c.
  */
-static const struct plugin_policy nn_plugin_policy = {
+const struct plugin_policy plugin_board_policy = {
 	.target_id      = F746_PLUGIN_TARGET_ID,
 	.link_addr      = F746_PLUGIN_BASE,
 	.capacity       = F746_PLUGIN_MAX,
@@ -134,9 +135,6 @@ static const struct plugin_policy nn_plugin_policy = {
 	.veneer_cost    = PLUGIN_VENEER_BASE_COST,
 	.stack_accounting = PLUGIN_STACK_ACCOUNTING,
 };
-/* Where the build finds the policy this firmware REALLY holds, whatever -D
- * reached this compile (cmake/check_policy_probe.py, issue #111). */
-PLUGIN_POLICY_PROBE(nn_plugin_policy);
 
 /*
  * What the container of the OPEN model claimed, or nothing.
@@ -384,7 +382,6 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 
 	if (nn_container_crc(f->buf, f->len, &crc)) {
 		enum plugin_result pr = plugin_parse(f->buf, f->len,
-		                                     &nn_plugin_policy,
 		                                     &f->claims.view);
 		char path[NN_CLAIMS_PATH_MAX];
 		size_t n;
@@ -644,7 +641,7 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	plugin_claims_info(write, ctx, seen, &c, running,
 	                   (uint32_t)(uintptr_t)__plugin_start,
 	                   (uint32_t)(__plugin_end - __plugin_start),
-	                   nn_plugin_policy.veneer_cost);
+	                   plugin_board_policy.veneer_cost);
 }
 #else
 /* The other backends cannot take a container, so they have nothing to add.

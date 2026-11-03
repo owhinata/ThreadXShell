@@ -536,7 +536,10 @@ _Static_assert(GROVE_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
 #error "cmake/veneer_cost_gate.cmake defines PLUGIN_VENEER_BASE_COST; is veneer_cost_gate() registered?"
 #endif
 
-static const struct plugin_policy nn_plugin_policy = {
+/* The board's policy under the name the loader reads (plugin_load.h, issue
+ * #165): plugin_parse() takes no policy, so this is the one containers are
+ * admitted by and the one the build reads back (cmake/check_policy_probe.py). */
+const struct plugin_policy plugin_board_policy = {
 	.target_id      = GROVE_PLUGIN_TARGET_ID,
 	.link_addr      = GROVE_PLUGIN_BASE,
 	.capacity       = GROVE_PLUGIN_MAX,
@@ -546,10 +549,6 @@ static const struct plugin_policy nn_plugin_policy = {
 	.veneer_cost    = PLUGIN_VENEER_BASE_COST,     /* veneer_cost_gate() */
 	.stack_accounting = PLUGIN_STACK_ACCOUNTING,
 };
-/* What the build reads back from shell.elf: the c and accounting this policy
- * really holds, whatever -D reached this compile (cmake/check_policy_probe.py,
- * issue #111). */
-PLUGIN_POLICY_PROBE(nn_plugin_policy);
 
 /*
  * What this board offers a plugin (issue #103).
@@ -733,8 +732,7 @@ nn_resolve_blob(struct nn_op_result *res, uint32_t token, const char *name,
 		enum plugin_result pr;
 
 		pr = plugin_parse((const void *)(uintptr_t)(NOR_XIP_BASE + payload),
-		                  info.length, &nn_plugin_policy,
-		                  &nn_claims_next.view);
+		                  info.length, &nn_claims_next.view);
 		if (pr != PLUGIN_OK) {
 			nn_detail_set("slot %u ('%s') is a container this firmware "
 			              "refuses: %s", slot, name,
@@ -2369,7 +2367,7 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	plugin_claims_info(write, ctx, seen, &c, running,
 	                   (uint32_t)(uintptr_t)__plugin_start,
 	                   (uint32_t)(__plugin_end - __plugin_start),
-	                   nn_plugin_policy.veneer_cost);
+	                   plugin_board_policy.veneer_cost);
 }
 
 /* The active decoder's own report is no longer a call the shared command makes

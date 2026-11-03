@@ -52,8 +52,16 @@
 #  guarantee either -- a later -D or #define of the same name overrides it with
 #  a warning -- so the stamp also waits for cmake/check_policy_probe.py, which
 #  reads the veneer_cost the board's policy ACTUALLY HOLDS out of the shipped
-#  image (PLUGIN_POLICY_PROBE, svc/plugin/plugin_load.h) and refuses anything but the
-#  number that was checked.
+#  image (plugin_board_policy, svc/plugin/plugin_load.h) and refuses anything but
+#  the number that was checked.
+#
+#  [!] AND THE POLICY IT READS IS THE ONE THE LOADER READS (issue #165).  The
+#  firmware's plugin_parse() takes no policy: it reads plugin_board_policy by
+#  name, the symbol the read-back reads.  The argument-taking entry over the
+#  same body (plugin_parse_with_policy(), host only) must then be absent from
+#  the firmware, and cmake/check_policy_entry.py -- also before the stamp --
+#  reads every input the link's map loaded, LTO objects through the toolchain's
+#  plugin-aware nm, and refuses one that defines or references it.
 #
 #  [!] THE SAME READ-BACK HOLDS THE STACK ALLOWANCES TO THE BOARD'S TABLE
 #  (issue #126).  The policy's stack_limit[] reaches the firmware the same way
@@ -315,6 +323,22 @@ function(_veneer_cost_gate_finish)
     # the LTO plugin.
     target_link_options("${fw}" PRIVATE
         "-Wl,--require-defined=plugin_policy_probe")
+    # [!] AND THE POLICY ITSELF (issue #165): the read-back reads it by name,
+    # and under LTO an object every use of which was folded into code would
+    # otherwise not reach the image as a symbol.
+    target_link_options("${fw}" PRIVATE
+        "-Wl,--require-defined=plugin_board_policy")
+    # The plugin-aware nm the entry check reads LTO objects with: the gcc-nm
+    # beside the gcc-ar CMake found for this compiler (plain nm sees an IR
+    # object's wrapper and nothing in it).
+    string(REPLACE "gcc-ar" "gcc-nm" _gcc_nm "${CMAKE_C_COMPILER_AR}")
+    if(NOT CMAKE_C_COMPILER_AR OR _gcc_nm STREQUAL CMAKE_C_COMPILER_AR
+       OR NOT EXISTS "${_gcc_nm}")
+        message(FATAL_ERROR
+            "veneer_cost_gate(): no gcc-nm beside the compiler's archiver "
+            "'${CMAKE_C_COMPILER_AR}' (for ${CMAKE_C_COMPILER}).  The policy "
+            "entry check reads LTO objects through it.")
+    endif()
     add_custom_command(TARGET "${fw}" PRE_LINK
         COMMAND "${CMAKE_COMMAND}"
                 "-DVENEER_GATE_CLEAN_LTRANS=$<TARGET_FILE:${fw}>"
@@ -359,6 +383,11 @@ function(_veneer_cost_gate_finish)
                 --declared "${declared}"
                 --ltrans-prefix "$<TARGET_FILE:${fw}>"
                 ${_args}
+        # [!] NO ENTRY THAT TAKES A POLICY IN ANY INPUT OF THE LINK (#165).
+        COMMAND "${Python3_EXECUTABLE}"
+                "${_VENEER_GATE_DIR}/check_policy_entry.py"
+                --map "${map}" --link-dir "${CMAKE_BINARY_DIR}"
+                --nm "${_gcc_nm}"
         # [!] AND WHAT THE FIRMWARE WILL ACTUALLY CHARGE (issue #111): the -D
         # above can be overridden, so the value is read back from the image --
         # and with it the stack allowances, against the board's table (#126).
@@ -372,6 +401,7 @@ function(_veneer_cost_gate_finish)
                 "${_VENEER_GATE_DIR}/thumb_stack_analysis.py"
                 "${_VENEER_GATE_DIR}/check_plugin_image.py"
                 "${_VENEER_GATE_DIR}/check_policy_probe.py"
+                "${_VENEER_GATE_DIR}/check_policy_entry.py"
                 "${_VENEER_GATE_DIR}/plugin_stack_table.cmake"
                 "${_VENEER_GATE_SELF}"
         COMMENT "check_veneer_base_cost.py (VENEER_BASE_COST ${declared} B against the stack below each veneer of ${fw})"

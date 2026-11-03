@@ -81,12 +81,18 @@ struct plugin_policy {
  * board as a -D, and any later -D or #define of the same name overrides it with
  * a warning -- after which the device would charge a smaller c than the one the
  * build checked the firmware against, and every container it admitted would be
- * under-charged.  So the board exports, next to its policy, one record that
- * points AT that policy, and cmake/check_policy_probe.py reads the policy's
- * fields out of the shipped ELF by symbol, through this record, before the
- * veneer-cost stamp is written.  Everything in it is a constant expression, so
- * it survives LTO as written, and the offsets travel with it so the checker
- * transcribes no layout.
+ * under-charged.  So the firmware carries one constant record of the policy's
+ * layout, and cmake/check_policy_probe.py reads the policy's fields out of the
+ * shipped ELF by symbol before the veneer-cost stamp is written.  Everything in it is a constant expression, so it survives LTO as
+ * written, and the offsets travel with it so the checker transcribes no layout.
+ *
+ * [!] THE RECORD CARRIES THE LAYOUT, NOT A POINTER (issue #165).  The policy it
+ * describes is the one object named @ref plugin_board_policy -- the object the
+ * firmware's plugin_parse() reads by that name -- so the checker reads that
+ * symbol itself.  A pointer here was a second statement of "which policy",
+ * free to name a correct copy while the loader was handed another.  The record
+ * is defined once, by svc/plugin/plugin_load_board.c; a board does not export
+ * it.
  */
 struct plugin_policy_probe {
 	uint32_t magic;           /**< PLUGIN_POLICY_PROBE_MAGIC               */
@@ -94,25 +100,26 @@ struct plugin_policy_probe {
 	uint32_t off_veneer_cost; /**< offsetof(..., veneer_cost)              */
 	uint32_t off_accounting;  /**< offsetof(..., stack_accounting)         */
 	uint32_t off_stack_limit; /**< offsetof(..., stack_limit)              */
-	const struct plugin_policy *policy; /**< the policy plugin_parse() gets */
 };
 
-#define PLUGIN_POLICY_PROBE_MAGIC 0x4C4F5050u   /* "PPOL" */
+/* "PPO2": the record without the pointer (issue #165); "PPOL" had one. */
+#define PLUGIN_POLICY_PROBE_MAGIC 0x324F5050u
 
 /**
- * Export @p pol -- the board's plugin policy object, the one it passes to
- * plugin_parse() -- as the symbol `plugin_policy_probe`.  Once per firmware.
+ * The board's plugin policy, under the one name the firmware's loader reads.
+ *
+ * [!] BOUND BY NAME AT LINK TIME, NOT PASSED (issue #165).  Each board defines
+ * exactly one, `const` and not `static` or weak, and the firmware's
+ * plugin_parse() takes no policy argument: there is no call through which the
+ * loader could be handed a different one, so the object the build reads back
+ * (cmake/check_policy_probe.py, by this name) is the object every container is
+ * admitted by.  svc/ still holds no board address -- it names the object, the
+ * board fills it in.
  */
-#define PLUGIN_POLICY_PROBE(pol)                                              \
-	__attribute__((used)) const struct plugin_policy_probe                \
-	plugin_policy_probe = {                                               \
-		PLUGIN_POLICY_PROBE_MAGIC,                                    \
-		(uint32_t)sizeof(struct plugin_policy),                       \
-		(uint32_t)offsetof(struct plugin_policy, veneer_cost),        \
-		(uint32_t)offsetof(struct plugin_policy, stack_accounting),   \
-		(uint32_t)offsetof(struct plugin_policy, stack_limit),        \
-		&(pol),                                                       \
-	}
+extern const struct plugin_policy plugin_board_policy;
+
+/** The layout record above, defined by svc/plugin/plugin_load_board.c. */
+extern const struct plugin_policy_probe plugin_policy_probe;
 
 /* ---- what a caller gets back -------------------------------------------- */
 
@@ -251,15 +258,19 @@ enum plugin_kind plugin_probe(const void *buf, size_t len);
  *
  * @param buf  container start
  * @param len  bytes readable, which must equal the container's total_size
- * @param pol  the board's policy; must not be NULL
  * @param out  filled only on PLUGIN_OK, and zeroed first
+ *
+ * The policy is @ref plugin_board_policy, read by name (issue #165).  This is
+ * the firmware's entry, defined by svc/plugin/plugin_load_board.c.  The host
+ * (the container verifier and the host tests) runs the same checks through
+ * plugin_parse_with_policy(), svc/plugin/plugin_load_host.h, which a firmware
+ * link must not contain -- cmake/check_policy_entry.py refuses one that does.
  *
  * [!] A CONTAINER WITH NO PLUGIN IS VALID.  `out->has_plugin` is 0 and the model
  * (and any data section) is still usable: a label table travelling with a model
  * needs no code.  Callers must not treat "no plugin" as a failure.
  */
 enum plugin_result plugin_parse(const void *buf, size_t len,
-                                const struct plugin_policy *pol,
                                 struct plugin_view *out);
 
 /** Short name of a result, for a console line.  Never NULL. */

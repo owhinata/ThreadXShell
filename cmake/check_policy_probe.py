@@ -11,11 +11,23 @@ warning, and the loader would then add a SMALLER c than the one checked -- every
 container it admitted would be under-charged.  So this reads what the policy
 actually HOLDS, from the linked image:
 
-    symbol plugin_policy_probe (svc/plugin/plugin_load.h, PLUGIN_POLICY_PROBE)
-      -> magic, sizeof(struct plugin_policy), the field offsets, and a pointer
-      -> the policy object the board passes to plugin_parse()
+    symbol plugin_policy_probe (svc/plugin/plugin_load_board.c)
+      -> magic, sizeof(struct plugin_policy), the field offsets
+    symbol plugin_board_policy (the board's, svc/plugin/plugin_load.h)
+      -> the one object the firmware's plugin_parse() reads, by that name
       -> veneer_cost == --declared, stack_accounting == the ABI's
       -> stack_limit[slot] == --stack-limit slot=bytes, for EVERY slot (#126)
+
+[!] THE POLICY IS READ BY THE NAME THE LOADER READS (issue #165).  Until #165
+the probe held a pointer to "the policy the board passes to plugin_parse()",
+and nothing tied the two: a board could point the probe at a correct copy and
+pass the parse another.  Now the firmware's plugin_parse() takes no policy and
+reads plugin_board_policy, so this reads that symbol.  For the name to mean one
+object it must be exactly one symbol, global and not weak (a weak one can be
+replaced at link by a definition this did not read), a data object of exactly
+sizeof(struct plugin_policy), wholly inside one loadable read-only section.
+That no firmware link holds an entry that takes a policy is the other half,
+cmake/check_policy_entry.py.
 
 [!] THE STACK ALLOWANCES ARE THE SAME CLASS OF NUMBER (issue #126).  They reach
 the policy as board-named -D's from plugin_stack_table(), and a later -D wins
@@ -32,8 +44,11 @@ measured depths in the board README).
 see the macro's name, not what the compiler made of it.  And the probe carries
 the offsets, so no struct layout is transcribed here.
 
-[!] FAIL CLOSED.  No probe, two probes, a pointer into no loadable bytes, a
-wrong magic or size: each is a refusal, and the stamp is not written.
+[!] FAIL CLOSED.  No probe or policy, two of either, a policy outside loadable
+read-only bytes, a wrong magic or size: each is a refusal, and the stamp is not
+written.  What this does not see: a board that writes its const policy through
+a cast (Grove's .rodata is SRAM) -- trusted native code going around the rule,
+not a shape the build can refuse.
 """
 import argparse
 import os
@@ -47,9 +62,12 @@ from check_veneer_base_cost import Elf, InputError  # noqa: E402
 SHT_NOBITS = 8
 SHF_WRITE = 0x1
 SHF_ALLOC = 0x2
+STB_GLOBAL = 1
+STT_OBJECT = 1
 PROBE = "plugin_policy_probe"
-MAGIC = 0x4C4F5050          # svc/plugin/plugin_load.h PLUGIN_POLICY_PROBE_MAGIC
-PROBE_WORDS = 6
+POLICY = "plugin_board_policy"
+MAGIC = 0x324F5050          # svc/plugin/plugin_load.h PLUGIN_POLICY_PROBE_MAGIC
+PROBE_WORDS = 5
 
 
 def loaded_u32(elf, addr):
@@ -110,41 +128,62 @@ def main():
     hits = [s for s in elf.symbols if s[0] == PROBE]
     if len(hits) != 1:
         return fail(f"{len(hits)} symbols named {PROBE} in {args.elf}; the "
-                    "board must export its plugin policy exactly once "
-                    "(PLUGIN_POLICY_PROBE in svc/plugin/plugin_load.h)")
+                    "firmware links svc/plugin/plugin_load_board.c, which "
+                    "defines it once")
     _, addr, size, _, _ = hits[0]
     if size != 4 * PROBE_WORDS:
         return fail(f"{PROBE} is {size} B, not {4 * PROBE_WORDS}")
     w = [loaded_u32(elf, addr + 4 * i) for i in range(PROBE_WORDS)]
     if None in w:
         return fail(f"{PROBE} at 0x{addr:08x} is not in loadable bytes")
-    magic, psize, off_cost, off_acct, off_lim, ptr = w
+    magic, psize, off_cost, off_acct, off_lim = w
     if magic != MAGIC:
         return fail(f"{PROBE} magic 0x{magic:08x}, not 0x{MAGIC:08x}")
     for off in (off_cost, off_acct):
         if off + 4 > psize:
             return fail(f"offset {off} lies outside a {psize} B policy")
+    if off_lim + 4 * count > psize:
+        return fail(f"stack_limit[{count}] at offset {off_lim} lies outside a "
+                    f"{psize} B policy")
+
+    # [!] THE POLICY, BY THE NAME THE LOADER READS (issue #165).  Every symbol
+    # of that name is counted, local ones included: a second object answering
+    # to it is a question of which one is meant, and this does not guess.
+    pols = [(sym, bind) for sym, bind in zip(elf.symbols, elf.binds)
+            if sym[0] == POLICY]
+    if len(pols) != 1:
+        return fail(f"{len(pols)} symbols named {POLICY} in {args.elf}; the "
+                    "board defines exactly one -- the object the firmware's "
+                    "plugin_parse() reads by that name (svc/plugin/"
+                    "plugin_load.h)")
+    (_, ptr, size, stype, _), bind = pols[0]
+    if bind != STB_GLOBAL:
+        how = {0: "local", 2: "weak"}.get(bind, f"binding {bind}")
+        return fail(f"{POLICY} is {how}, not global: a weak definition can be replaced at link by one "
+                    "this check did not read, and a local one is not the "
+                    "object the loader names.  Define it const, not static, "
+                    "not weak.")
+    if stype != STT_OBJECT:
+        return fail(f"{POLICY} is symbol type {stype}, not a data object")
+    if size != psize:
+        return fail(f"{POLICY} is {size} B, but sizeof(struct plugin_policy) "
+                    f"is {psize} B (the layout record): it is not that struct")
     # [!] THE POLICY MUST BE DECLARED READ-ONLY (issue #126 review).  What is
     # read here is the object's INITIAL bytes; a policy in a writable section
     # (a non-const object in .data) can hold something else by the time
     # plugin_parse() reads it.  This sees only the section's flags: Grove's
     # .rodata is SRAM, writable by the CPU, so it catches a policy DECLARED
-    # writable, not one written through a cast.  Nor does anything here show
-    # that this object is the one the board passes to plugin_parse() -- the
-    # same root as parity P13.
+    # writable, not one written through a cast.
     home = [s for s in elf.sections
             if s.flags & SHF_ALLOC and s.type != SHT_NOBITS and s.size
             and s.addr <= ptr and ptr + psize <= s.addr + s.size]
     if len(home) != 1:
-        return fail(f"the policy at 0x{ptr:08x} ({psize} B) is not inside one "
+        return fail(f"{POLICY} at 0x{ptr:08x} ({psize} B) is not inside one "
                     "loadable section")
     if home[0].flags & SHF_WRITE:
-        return fail(f"the policy at 0x{ptr:08x} is in {home[0].name}, a "
+        return fail(f"{POLICY} at 0x{ptr:08x} is in {home[0].name}, a "
                     "writable section: what the image holds there is only its "
                     "initial value.  Declare the board's policy const.")
-    if off_lim + 4 * count > psize:
-        return fail(f"stack_limit[{count}] at offset {off_lim} lies outside a "
-                    f"{psize} B policy")
     cost = loaded_u32(elf, ptr + off_cost)
     acct = loaded_u32(elf, ptr + off_acct)
     lims = [loaded_u32(elf, ptr + off_lim + 4 * i) for i in range(count)]
@@ -170,11 +209,13 @@ def main():
                    "slot to another allowance, and the device would admit by "
                    "a limit the plugin gate and the host verifier did not use")
     if bad:
-        return fail(f"the plugin policy at 0x{ptr:08x} in {args.elf}: "
+        return fail(f"the plugin policy {POLICY} at 0x{ptr:08x} in "
+                    f"{args.elf}: "
                     + "; ".join(bad))
     table = ", ".join(f"{n} {lims[i]}" for n, i in
                       sorted(slots.items(), key=lambda kv: kv[1]))
-    print(f"check_policy_probe: OK -- the policy at 0x{ptr:08x} charges "
+    print(f"check_policy_probe: OK -- the policy {POLICY} at 0x{ptr:08x} "
+          f"charges "
           f"c = {cost} B (= DECLARED) under stack accounting {acct}, and its "
           f"stack limits are the board's table ({table} B)")
     return 0

@@ -765,6 +765,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
 
     target_sources(shell PRIVATE
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"   # the device's validator
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_board.c" # its firmware entry
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"   # `nn info`'s stack lines
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c" # ...and the claims around them
         "${CMAKE_SOURCE_DIR}/svc/crc32.c"                # the digest and the load CRC
@@ -943,10 +944,14 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
                     -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
                     "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"
                     "${CMAKE_SOURCE_DIR}/svc/crc32.c"
                     -o "${F746_CONTAINER_VERIFIER}"
             DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.h"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_body.h"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.h"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
             COMMENT "host cc -> verify_container (the device's own validator)"

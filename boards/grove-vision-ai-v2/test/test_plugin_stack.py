@@ -253,6 +253,8 @@ def run_probe(work, values):
     r = subprocess.run(["gcc"] + CFLAGS + INCLUDES + defines(values)
                        + [os.path.join(HERE, "test_plugin_stack.c"),
                           os.path.join(REPO, "svc", "plugin", "plugin_load.c"),
+                          os.path.join(REPO, "svc", "plugin",
+                                       "plugin_load_host.c"),
                           os.path.join(REPO, "svc", "crc32.c"),
                           "-o", exe], capture_output=True, text=True)
     if r.returncode != 0:

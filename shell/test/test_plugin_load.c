@@ -27,6 +27,7 @@
  */
 #include "plugin_abi.h"
 #include "plugin_load.h"
+#include "plugin_load_host.h"
 #include "crc32.h"
 
 #include <assert.h>
@@ -205,7 +206,7 @@ static struct plugin_view view;
 
 static enum plugin_result run(void)
 {
-	return plugin_parse(buf, sizeof buf, &pol, &view);
+	return plugin_parse_with_policy(buf, sizeof buf, &pol, &view);
 }
 
 static void expect(const char *what, enum plugin_result want)
@@ -540,7 +541,7 @@ static void test_policy_and_digest(void)
 	 * plugin declared it consistently. */
 	narrow = pol;
 	narrow.caps_supported = PLUGIN_CAP_DRAW;
-	assert(plugin_parse(buf, sizeof buf, &narrow, &view) ==
+	assert(plugin_parse_with_policy(buf, sizeof buf, &narrow, &view) ==
 	       PLUGIN_ERR_CAPABILITY);
 	printf("  %-46s -> %s\n", "base does not implement a declared capability",
 	       plugin_result_name(PLUGIN_ERR_CAPABILITY));
@@ -549,7 +550,7 @@ static void test_policy_and_digest(void)
 	 * nothing to spare is not a thread that will squeeze one call in. */
 	narrow = pol;
 	narrow.stack_limit[PLUGIN_SLOT_DRAW] = 0u;
-	assert(plugin_parse(buf, sizeof buf, &narrow, &view) == PLUGIN_ERR_STACK);
+	assert(plugin_parse_with_policy(buf, sizeof buf, &narrow, &view) == PLUGIN_ERR_STACK);
 	printf("  %-46s -> %s\n", "a thread that can spare nothing",
 	       plugin_result_name(PLUGIN_ERR_STACK));
 
@@ -562,9 +563,9 @@ static void test_policy_and_digest(void)
 	wr32(MF(stack_cross) + 4u * PLUGIN_SLOT_DRAW, 0u);
 	wr32(MF(stack_crossing), 1u << PLUGIN_SLOT_REPORT);
 	restamp();
-	assert(plugin_parse(buf, sizeof buf, &pol, &view) == PLUGIN_OK);
+	assert(plugin_parse_with_policy(buf, sizeof buf, &pol, &view) == PLUGIN_OK);
 	assert(view.stack[PLUGIN_SLOT_DRAW] == 0u);
-	assert(plugin_parse(buf, sizeof buf, &narrow, &view) == PLUGIN_ERR_STACK);
+	assert(plugin_parse_with_policy(buf, sizeof buf, &narrow, &view) == PLUGIN_ERR_STACK);
 	printf("  %-46s -> %s\n", "... even for a plugin that asks for nothing",
 	       plugin_result_name(PLUGIN_ERR_STACK));
 	build();
@@ -585,10 +586,10 @@ static void test_arguments(void)
 {
 	printf(" case: arguments and short buffers\n");
 	build();
-	assert(plugin_parse(NULL, sizeof buf, &pol, &view) == PLUGIN_ERR_ARG);
-	assert(plugin_parse(buf, sizeof buf, NULL, &view) == PLUGIN_ERR_ARG);
-	assert(plugin_parse(buf, sizeof buf, &pol, NULL) == PLUGIN_ERR_ARG);
-	assert(plugin_parse(buf, HDR_SZ - 1u, &pol, &view) == PLUGIN_ERR_SHORT);
+	assert(plugin_parse_with_policy(NULL, sizeof buf, &pol, &view) == PLUGIN_ERR_ARG);
+	assert(plugin_parse_with_policy(buf, sizeof buf, NULL, &view) == PLUGIN_ERR_ARG);
+	assert(plugin_parse_with_policy(buf, sizeof buf, &pol, NULL) == PLUGIN_ERR_ARG);
+	assert(plugin_parse_with_policy(buf, HDR_SZ - 1u, &pol, &view) == PLUGIN_ERR_SHORT);
 	printf("  NULLs and a buffer shorter than the header are refused\n");
 }
 
@@ -622,7 +623,7 @@ static void test_view_is_cleared_on_refusal(void)
 
 static enum plugin_result parse_with(const struct plugin_policy *p)
 {
-	return plugin_parse(buf, sizeof buf, p, &view);
+	return plugin_parse_with_policy(buf, sizeof buf, p, &view);
 }
 
 static void report(const char *what, enum plugin_result got,

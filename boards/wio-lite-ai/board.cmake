@@ -1420,6 +1420,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # the one FlashDB already provides (port/nn/crc32_fdb.c says why).
     target_sources(shell PRIVATE
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+        # Its firmware entry: the board's policy by name (issue #165).
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_board.c"
         # `nn info`'s plugin stack lines, shared with Grove (issue #111).
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"
         # ...and the open model's claims around them, shared with f746 (#159).
@@ -1657,10 +1659,14 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
                     -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
                     "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"
                     "${CMAKE_SOURCE_DIR}/svc/crc32.c"
                     -o "${WIO_CONTAINER_VERIFIER}"
             DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.h"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_body.h"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.h"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
             COMMENT "host cc -> verify_container (the device's own validator)"

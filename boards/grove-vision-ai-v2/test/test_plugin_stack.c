@@ -8,7 +8,7 @@
  *
  * It does two things with the table port/nn/nn_plugin_stack.h hands the
  * firmware -- the same GROVE_PLUGIN_STACK_LIMITS initialiser nn_svc_grove.c
- * builds nn_plugin_policy from, not a copy of it:
+ * builds plugin_board_policy from, not a copy of it:
  *
  *   - prints it, one `limit <slot> <bytes>` line per slot, so the driver can
  *     check WHICH allowance each slot got (and `runs <slot> <mask>`, the
@@ -27,6 +27,7 @@
  */
 #include "nn_plugin_stack.h"
 #include "plugin_load.h"
+#include "plugin_load_host.h"
 #include "crc32.h"
 
 #include <stdio.h>
@@ -133,7 +134,7 @@ static enum plugin_result parse_with(unsigned slot, uint32_t declared)
 	build();
 	wr32(MF(stack_own) + 4u * slot, declared);
 	wr32(HF(plugin_digest), crc32_update(0u, buf + SECT_OFF, SECT_LEN));
-	return plugin_parse(buf, sizeof buf, &pol, &view);
+	return plugin_parse_with_policy(buf, sizeof buf, &pol, &view);
 }
 
 static int failures;

@@ -28,6 +28,7 @@
  * default: a default is a second declaration of the board's number.
  */
 #include "plugin_load.h"
+#include "plugin_load_host.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -110,7 +111,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	rc = plugin_parse(buf, (size_t)len, &pol, &view);
+	rc = plugin_parse_with_policy(buf, (size_t)len, &pol, &view);
 	if (rc != PLUGIN_OK) {
 		fprintf(stderr, "verify_container: REFUSED -- %s\n",
 		        plugin_result_name(rc));

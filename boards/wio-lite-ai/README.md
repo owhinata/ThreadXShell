@@ -884,8 +884,10 @@ weights' channels against the output's, the depth multiplier (at least 1, and
 input channels x multiplier == filter channels), the input's element count
 (FULLY_CONNECTED), and a bias of exactly the channel count and of the type the
 kernel reads (INT32 under int8, FLOAT32 under float32, INT64, or INT32 for
-CONV_2D, under int16); a PAD's paddings must be INT32 and its input and
-output ranks equal, and an ADD with two inputs must have an output that is
+CONV_2D, under int16), no grouped CONV_2D under an int16 input or an INT4
+filter (those kernels read a filter row by the input's channels), and a
+DEPTHWISE_CONV_2D filter[0] of 1; a PAD's paddings must be INT32 and its input and
+output ranks equal, and an ADD with two inputs or more must have an output that is
 their broadcast (each input dimension 1 or the output's, at least one of the
 two the output's, aligned on the right) -- each `NN_MODEL_ERR_FORMAT` (-7).  The CMSIS-NN int8
 kernels read the filter / weights and the bias by the OUTPUT's channel count

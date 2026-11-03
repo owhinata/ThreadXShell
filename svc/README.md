@@ -246,8 +246,13 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185).  The walk 
    build:
    - R1 CONV_2D: input, filter, output rank 4; `filter[0] == output[3]`; a bias
      (input 2, not -1, data or not) of `output[3]` elements, its type the one the
-     kernel reads (FLOAT32 / FLOAT32, INT8 / INT32, INT16 / INT32 or INT64).
-   - R2 DEPTHWISE_CONV_2D: the three rank 4; `filter[3] == output[3]`;
+     kernel reads (FLOAT32 / FLOAT32, INT8 / INT32, INT16 / INT32 or INT64);
+     under an int16 input or an INT4 filter no grouping, `filter[3] ==
+     input[3]` (those CMSIS-NN kernels size a filter row by the input's
+     channels and read groups times past the filter; int8 with an INT8 filter
+     handles groups and stays allowed).
+   - R2 DEPTHWISE_CONV_2D: the three rank 4; `filter[0] == 1` (the reference
+     kernel's DCHECK); `filter[3] == output[3]`;
      `depth_multiplier >= 1` (an absent or other options table reads as 0) and
      `input[3] x depth_multiplier == filter[3]`; a bias of `filter[3]` elements
      (FLOAT32 / FLOAT32, INT8 / INT32, INT16 / INT64).
@@ -268,7 +273,9 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185).  The walk 
      [!] A size without data is not compared: `Prepare()`'s live "constant"
      check refuses it on a board (`NN_MODEL_ERR_ARENA`) and the gates, which do
      not plan, pass it -- an existing difference this does not change.
-   - R8 ADD / SUB / MUL (two inputs): the three ranks at most 6, each input's at
+   - R8 ADD / SUB / MUL (two inputs or more, inputs 0 and 1 judged -- the only
+     two the kernels read; ADD's and SUB's `Prepare()` do not count the inputs,
+     MUL's requires 2): the three ranks at most 6, each input's at
      most the output's; aligned on the right, each input dimension 1 or the
      output's and at least one of the two the output's -- the output is the
      broadcast (the loop runs over the output's dims and steps an input wherever

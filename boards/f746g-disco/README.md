@@ -530,7 +530,9 @@ is no built-in model) and after `nn model unload`.
   multiplier of at least 1 with input channels x multiplier == filter channels,
   FULLY_CONNECTED's output rank 2..4 and input element count, and a bias of
   exactly the channel count and of the type the kernel reads (INT32 under int8,
-  FLOAT32 under float32, INT64, or INT32 for CONV_2D, under int16) -- all
+  FLOAT32 under float32, INT64, or INT32 for CONV_2D, under int16), no grouped
+  CONV_2D under an int16 input or an INT4 filter (those kernels read a filter
+  row by the input's channels) and a DEPTHWISE_CONV_2D filter[0] of 1 -- all
   `NN_MODEL_ERR_FORMAT` (-7).  The CMSIS-NN int8 kernels read the filter /
   weights and the bias by the OUTPUT's channels and their `Prepare()` compares
   none of it (CMSIS-NN CONV_2D's bias check is dead code: it fetches the bias
@@ -542,7 +544,7 @@ is no built-in model) and after `nn model unload`.
   INT32 with the input's rank of elements each; TRANSPOSE's permutation INT32;
   RESIZE_BILINEAR / RESIZE_NEAREST_NEIGHBOR's size INT32, rank 1, 2 elements,
   an output of rank 4 and, when the size has data, its two values equal to the
-  output's height and width; an ADD / SUB / MUL (two inputs) output that is the
+  output's height and width; an ADD / SUB / MUL (inputs 0 and 1, however many there are) output that is the
   broadcast of its inputs; a CONCATENATION whose inputs have the output's rank
   and dims but the axis, and whose axis dims add up to the output's -- all
   FORMAT.  [!] A RESIZE size WITHOUT data is not compared: `Prepare()` refuses

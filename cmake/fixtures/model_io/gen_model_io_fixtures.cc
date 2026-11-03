@@ -289,6 +289,14 @@
  *                           graph I/O, weights [1, 1], input [0, 1]: the product
  *                           wraps to 0 in 32 bits), _out_last0 (output [1, 0],
  *                           weights [1, 4]) and _i16_i32 are refused
+ *   r1_i16_groups / _i4_groups  CONV_2D input [1, 4, 4, 4], filter [4, ., ., 2]
+ *                           (2 groups) under an int16 input / an INT4 filter:
+ *                           refused; _i8_groups (int8 + INT8, 2 groups), _i16_g1
+ *                           and _i4_g1 (no grouping) are controls
+ *   r2_filter0_2            DEPTHWISE_CONV_2D, filter [2, 1, 1, 2]: refused
+ *   r8_add3 / _sub3         three inputs, inputs 0 / 1 [2, 2] + [2, 3] -> [2, 3]:
+ *                           refused; _add3_ok (inputs 0 / 1 broadcast, input 2
+ *                           any shape) is the control
  *   r4_*                    PAD, input [1, 2, 2, 1], paddings INT32 [4, 2]: _ok;
  *                           _rank_ne (output rank 3), _pad_int8 refused
  *   r5_*                    STRIDED_SLICE, input rank 4, begin / end / strides
@@ -301,7 +309,8 @@
  *                           controls; _size_1, _size_3 ({4, 6, 0}), _size_int8,
  *                           _size_rank2 ([1, 2]),
  *                           _value_ne ({4, 7}) and _out_rank3 ([1, 4, 6]) refused
- *   r8_*                    ADD (SUB / MUL where named) with two inputs:
+ *   r8_*                    ADD (SUB / MUL where named) with two inputs (three
+ *                           where named; inputs 0 and 1 are judged):
  *                           _broadcast [1, 3] + [2, 1] -> [2, 3], _same, _const
  *                           ([3] with data) and _rank6 (not graph I/O) are
  *                           controls; _dim_2_of_3 (and _sub_ / _mul_), _same_out_ne,
@@ -1525,6 +1534,43 @@ int main(int argc, char **argv)
 			os.push_back(op("r3_i16_i32.tflite", FC, t, { 0, 1, 2 }));
 		}
 
+		/* Step 3 (the implementation review).  R1's grouping: refused under an
+		 * int16 input or an INT4 filter, allowed int8 + INT8; R2's filter[0]; R8
+		 * judges inputs 0 and 1 of three. */
+		{
+			const tflite::TensorType I4 = tflite::TensorType_INT4;
+			const std::vector<int32_t> c4 = { 1, 4, 4, 4 };
+
+			os.push_back(op("r1_i16_groups.tflite", CONV,
+			                { T(I16, c4, 0u), T(I8, { 4, 1, 1, 2 }, 8u), T(I64, { 4 }, 32u),
+			                  T(I16, c4, 0u) }, { 0, 1, 2 }));
+			os.push_back(op("r1_i4_groups.tflite", CONV,
+			                { T(I8, c4, 0u), T(I4, { 4, 3, 3, 2 }, 36u), T(I32, { 4 }, 16u),
+			                  T(I8, c4, 0u) }, { 0, 1, 2 }));
+			os.push_back(op("r1_i8_groups.tflite", CONV,
+			                { T(I8, c4, 0u), T(I8, { 4, 1, 1, 2 }, 8u), T(I32, { 4 }, 16u),
+			                  T(I8, c4, 0u) }, { 0, 1, 2 }));
+			os.push_back(op("r1_i16_g1.tflite", CONV,
+			                { T(I16, c4, 0u), T(I8, { 4, 1, 1, 4 }, 16u), T(I64, { 4 }, 32u),
+			                  T(I16, c4, 0u) }, { 0, 1, 2 }));
+			os.push_back(op("r1_i4_g1.tflite", CONV,
+			                { T(I8, c4, 0u), T(I4, { 4, 3, 3, 4 }, 72u), T(I32, { 4 }, 16u),
+			                  T(I8, c4, 0u) }, { 0, 1, 2 }));
+			std::vector<rtensor> t = dwt(I8, 2, 2, 2, I32, 2);
+
+			t[1] = T(I8, { 2, 1, 1, 2 }, 4u);
+			os.push_back(dw("r2_filter0_2.tflite", t, 1));
+			os.push_back(op("r8_add3.tflite", tflite::BuiltinOperator_ADD,
+			                { T(I8, { 2, 2 }, 0u), T(I8, { 2, 3 }, 0u), T(I8, { 2, 3 }, 0u),
+			                  T(I8, { 2, 3 }, 0u) }, { 0, 1, 2 }));
+			os.push_back(op("r8_sub3.tflite", tflite::BuiltinOperator_SUB,
+			                { T(I8, { 2, 2 }, 0u), T(I8, { 2, 3 }, 0u), T(I8, { 2, 3 }, 0u),
+			                  T(I8, { 2, 3 }, 0u) }, { 0, 1, 2 }));
+			os.push_back(op("r8_add3_ok.tflite", tflite::BuiltinOperator_ADD,
+			                { T(I8, { 2, 3 }, 0u), T(I8, { 1, 3 }, 0u), T(I8, { 2, 2 }, 0u),
+			                  T(I8, { 2, 3 }, 0u) }, { 0, 1, 2 }));
+		}
+
 		/* Step 2.  R4 PAD */
 		const tflite::BuiltinOperator PADK = tflite::BuiltinOperator_PAD;
 		const std::vector<int32_t> x4 = { 1, 2, 2, 1 };
@@ -1597,7 +1643,7 @@ int main(int argc, char **argv)
 			                  T(I8, oy, 0u) }, { 0, 1 }));
 		}
 
-		/* R8 ADD / SUB / MUL with two inputs. */
+		/* R8 ADD / SUB / MUL: inputs 0 and 1 of two or more. */
 		{
 			const tflite::BuiltinOperator AD = tflite::BuiltinOperator_ADD;
 			auto bin = [&](const char *file, tflite::BuiltinOperator k, std::vector<int32_t> a,

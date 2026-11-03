@@ -236,8 +236,16 @@
  *                         output[3]; a bias (input 2, not -1, with or without
  *                         data) of exactly output[3] elements, of the type the
  *                         kernel reads for the input's: FLOAT32 / FLOAT32,
- *                         INT8 / INT32, INT16 / INT32 or INT64.
- *   R2 DEPTHWISE_CONV_2D  the three rank 4; filter[3] == output[3];
+ *                         INT8 / INT32, INT16 / INT32 or INT64; and, under an
+ *                         INT16 input or an INT4 filter, no grouping:
+ *                         filter[3] == input[3] (those kernels size a filter
+ *                         row by the input's channels, arm_convolve_s16.c:79,
+ *                         arm_convolve_s4.c:89, and read groups times past the
+ *                         filter; int8 with an INT8 filter handles groups,
+ *                         arm_convolve_s8.c:92-99, and stays allowed).
+ *   R2 DEPTHWISE_CONV_2D  the three rank 4; filter[0] == 1 (the reference
+ *                         DCHECK; the kernels read only filter[1..3]);
+ *                         filter[3] == output[3];
  *                         depth_multiplier >= 1 (an absent or other options
  *                         table is 0, as TFLM reads it) and input[3] x
  *                         depth_multiplier == filter[3]; a bias of filter[3]
@@ -266,7 +274,9 @@
  *                         such a model on the board, as NN_MODEL_ERR_ARENA,
  *                         while the gates, which do not plan, pass it -- a
  *                         difference that predates this walk and stays.
- *   R8 ADD / SUB / MUL    (two inputs) the three ranks at most
+ *   R8 ADD / SUB / MUL    (two inputs or more: inputs 0 and 1, the only
+ *                         ones the kernels read; ADD's and SUB's Prepare()
+ *                         do not count the inputs) the three ranks at most
  *                         NN_TFLM_MAX_TENSOR_RANK, each input's at most the
  *                         output's; aligned on the right, each input dimension
  *                         1 or the output's, and at least one of the two the
@@ -1088,6 +1098,15 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_CONV_2D(const tflite::Operator *op,
 		return false;
 	if (nn_tflm_dim(f, 0u) != nn_tflm_dim(y, 3u))
 		return false;
+	/* Grouped convolution (filter[3] < input[3]) only on the int8 path that
+	 * handles groups: the int16 and INT4-filter kernels size one filter row by
+	 * the INPUT's channels (arm_convolve_s16.c:79, arm_convolve_s4.c:89), so
+	 * they read groups times past the filter; Prepare() checks only
+	 * input[3] % filter[3] == 0. */
+	if ((nn_tflm_tensor_type(x) == tflite::TensorType_INT16 ||
+	     nn_tflm_tensor_type(f) == tflite::TensorType_INT4) &&
+	    nn_tflm_dim(f, 3u) != nn_tflm_dim(x, 3u))
+		return false;
 	return nn_tflm_bias_ok(b, nn_tflm_dim(y, 3u), nn_tflm_tensor_type(x), true);
 }
 
@@ -1109,7 +1128,9 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_DEPTHWISE_CONV_2D(const tflite::Operato
 
 	const int32_t fc = nn_tflm_dim(f, 3u);
 
-	if (fc != nn_tflm_dim(y, 3u))
+	/* filter[0] is 1, as the reference kernel DCHECKs (the kernels read only
+	 * filter[1..3]; this holds the model to what they assume). */
+	if (nn_tflm_dim(f, 0u) != 1 || fc != nn_tflm_dim(y, 3u))
 		return false;
 
 	const flatbuffers::Table *o =
@@ -1302,7 +1323,10 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_RESIZE_NEAREST_NEIGHBOR(const tflite::O
 	return nn_tflm_resize_ok(op, tensors, buffers);
 }
 
-/* R8, ADD / SUB / MUL with two inputs (the file header): the three ranks at
+/* R8, ADD / SUB / MUL with two inputs or more -- inputs 0 and 1 judged, the
+ * only two the kernels read (CMSIS-NN ADD's and SUB's Prepare() do not count
+ * the inputs, cmsis_nn/add.cc:295-298, sub_common.cc; MUL's requires 2,
+ * mul_common.cc:52) -- (the file header): the three ranks at
  * most NN_TFLM_MAX_TENSOR_RANK, each input's at most the output's, and, aligned
  * on the right (a missing leading dimension is 1), each input dimension 1 or the
  * output's and at least one of the two the output's -- the output is the
@@ -1314,7 +1338,7 @@ NN_TFLM_RULE_HELPER bool nn_tflm_binary_ok(const tflite::Operator *op,
 	const tflite::Tensor *a, *b, *y;
 	bool apply;
 
-	if (in->size() != 2u)
+	if (in->size() < 2u)
 		return true;
 	if (!nn_tflm_op_in_out(op, 1u, tensors, &b, &y, &apply))
 		return false;

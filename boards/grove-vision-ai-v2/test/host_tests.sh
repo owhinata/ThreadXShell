@@ -138,6 +138,19 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_npu_payload"
 "$out/test_npu_payload"
 
+# issue #184 -- where the Ethos-U55 command stream makes the NPU read and write
+# (svc/nn/ethosu/npu_cmdstream.c, compiled from there).  Plain C over plain words
+# like the payload walk above.  The streams are built by hand from the TRM's
+# command tables, and every accepted shape has a boundary case worked out from
+# the TRM's formula: accepted with the region exactly that big, refused one byte
+# smaller.  The NPU's reads and writes are outside the CPU's MPU, so a range
+# this check gets wrong is not caught anywhere else.
+gcc $CFLAGS \
+    -I "$here" -I "$svc/nn/ethosu" \
+    "$here/test_npu_cmdstream.c" "$svc/nn/ethosu/npu_cmdstream.c" \
+    $LDFLAGS -o "$out/test_npu_cmdstream"
+"$out/test_npu_cmdstream"
+
 # issues #97, #104 -- the tensor -> tensor_desc translation.  Since issue #169
 # this board uses the shared one (svc/nn/nn_desc.c, walked by
 # shell/test/test_nn_desc.c) over svc/nn/nn.h's tensors, so its own test and

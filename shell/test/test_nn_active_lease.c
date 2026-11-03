@@ -189,9 +189,8 @@ static int sink(void *ctx, const char *s, size_t len)
 /* The board's table (issue #165): the printer's write comes from here. */
 const struct plugin_bindings plugin_board_bindings = { .write = sink };
 
-static const struct plugin_painter painter = {
-	PLUGIN_ABI_VERSION, sizeof(struct plugin_painter), NULL, NULL, NULL, NULL
-};
+/* The drawing target a board would hand (plugin_paint_target()). */
+static int canvas;
 
 enum entry_id {
 	E_SHAPES_OK, E_DECODE, E_DRAW, E_CAN_DRAW, E_CAN_REPORT, E_REPORT,
@@ -202,7 +201,7 @@ enum entry_id {
  * cmake/check_lease_entries.py run holds it against the objects it builds. */
 /* LEASE ENTRIES BEGIN */
 static const char *const entry_name[E_COUNT] = {
-	"nn_active_shapes_ok", "nn_active_decode", "nn_active_draw",
+	"nn_active_shapes_ok", "nn_active_decode", "nn_active_draw_on",
 	"nn_active_can_draw", "nn_active_can_report", "nn_active_report_to",
 	"nn_active_get_thresh_milli", "nn_active_set_thresh_milli",
 };
@@ -213,7 +212,7 @@ static int call_entry(enum entry_id e, unsigned *th)
 	switch (e) {
 	case E_SHAPES_OK:  return nn_active_shapes_ok(&model);
 	case E_DECODE:     return nn_active_decode(&model);
-	case E_DRAW:       return nn_active_draw(&painter);
+	case E_DRAW:       return nn_active_draw_on(&canvas);
 	case E_CAN_DRAW:   return nn_active_can_draw();
 	case E_CAN_REPORT: return nn_active_can_report();
 	case E_REPORT:     return nn_active_report_to(NULL);
@@ -297,7 +296,7 @@ static void test_held(void)
 	ok("decode returns the plugin's count", nn_active_decode(&model) == 3 &&
 	   calls[PLUGIN_SLOT_DECODE] == 1u);
 	reset();
-	ok("draw paints", nn_active_draw(&painter) == 0 &&
+	ok("draw paints", nn_active_draw_on(&canvas) == 0 &&
 	   calls[PLUGIN_SLOT_DRAW] == 1u);
 	ok("can_draw / can_report answer yes", nn_active_can_draw() == 1 &&
 	   nn_active_can_report() == 1);

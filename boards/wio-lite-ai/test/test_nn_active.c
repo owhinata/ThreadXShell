@@ -269,10 +269,9 @@ static void rec_blit(void *ctx, const struct plugin_rect *r,
 	rec_blits++;
 }
 
-static const struct plugin_painter rec_painter = {
-	PLUGIN_ABI_VERSION, sizeof(struct plugin_painter),
-	NULL, rec_rect, rec_fill, rec_blit
-};
+/* The drawing target handed to the draw; the painter around it is built by
+ * the shared draw from the board's table (issue #165). */
+static int rec_canvas;
 
 static void rec_reset(void)
 {
@@ -295,16 +294,17 @@ int nn_report_write(void *ctx, const char *s, size_t len)
 	return (int)len;
 }
 
-/* The painter's three, which the board's table also names: plugin_paint.c's,
- * not linked here (this test draws through its own recording painter). */
+/* The painter's three, which the board's table names: plugin_paint.c's, not
+ * linked here -- these stand in for them and record, so a draw through the
+ * painter the shared code builds from the real table is counted. */
 void paint_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565,
                 uint16_t stroke)
-{ (void)ctx; (void)r; (void)rgb565; (void)stroke; }
+{ rec_rect(ctx, r, rgb565, stroke); }
 void paint_fill_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565)
-{ (void)ctx; (void)r; (void)rgb565; }
+{ rec_fill(ctx, r, rgb565); }
 void paint_blit(void *ctx, const struct plugin_rect *r, const uint16_t *src,
                 uint32_t src_stride, int32_t key)
-{ (void)ctx; (void)r; (void)src; (void)src_stride; (void)key; }
+{ rec_blit(ctx, r, src, src_stride, key); }
 
 /* The threshold as a number, through the shim's status-and-out-parameter form
  * (issue #130); NN_SVC_THRESH_NONE for anything but OK. */
@@ -340,7 +340,7 @@ enum entry_id {
 
 /* LEASE ENTRIES BEGIN */
 static const char *const entry_name[E_COUNT] = {
-	"nn_active_shapes_ok", "nn_active_decode", "nn_active_draw",
+	"nn_active_shapes_ok", "nn_active_decode", "nn_active_draw_on",
 	"nn_active_can_draw", "nn_active_can_report", "nn_active_report_to",
 	"nn_active_get_thresh_milli", "nn_active_set_thresh_milli",
 };
@@ -364,7 +364,7 @@ static int call_entry(enum entry_id e, unsigned *thresh_out)
 	switch (e) {
 	case E_SHAPES_OK:   return nn_active_shapes_ok(&stub);
 	case E_DECODE:      return nn_active_decode(&stub);
-	case E_DRAW:        rec_reset(); return nn_active_draw(&rec_painter);
+	case E_DRAW:        rec_reset(); return nn_active_draw_on(&rec_canvas);
 	case E_CAN_DRAW:    return nn_active_can_draw();
 	case E_CAN_REPORT:  return nn_active_can_report();
 	case E_REPORT:      cap_len = 0u; return nn_active_report_to(NULL);
@@ -507,7 +507,7 @@ int main(void)
 	       "report", n != BF_ERR_MODEL, "got %d", n);
 
 	rec_reset();
-	nn_active_draw(&rec_painter);
+	nn_active_draw_on(&rec_canvas);
 	expect("nothing paints", rec_rects == 0u && rec_fills == 0u &&
 	       rec_blits == 0u, "%u rect(s), %u fill(s), %u blit(s)", rec_rects,
 	       rec_fills, rec_blits);
@@ -574,7 +574,7 @@ int main(void)
 	expect("which found the face", n == 1, "got %d", n);
 
 	rec_reset();
-	nn_active_draw(&rec_painter);
+	nn_active_draw_on(&rec_canvas);
 	expect("it paints", rec_rects + rec_fills + rec_blits > 0u,
 	       "nothing drawn");
 	expect("and says it would", nn_active_can_draw() != 0, "says it draws "
@@ -697,7 +697,7 @@ int main(void)
 		               depth_notes[NNCAM_SITE_SHELL] == 0u,
 		       "%u/%u/%u", depth_notes[0], depth_notes[1], depth_notes[2]);
 		memset(depth_notes, 0, sizeof depth_notes);
-		nn_active_draw(&rec_painter);
+		nn_active_draw_on(&rec_canvas);
 		expect("a draw on the preview's",
 		       depth_notes[NNCAM_SITE_DRAW] == 1u &&
 		               depth_notes[NNCAM_SITE_DECODE] == 0u &&
@@ -718,7 +718,7 @@ int main(void)
 		pl_loaded = 0;
 		memset(depth_notes, 0, sizeof depth_notes);
 		(void)nn_active_decode(&stub);
-		nn_active_draw(&rec_painter);
+		nn_active_draw_on(&rec_canvas);
 		(void)nn_active_shapes_ok(&stub);
 		(void)nn_active_report_to(NULL);
 		(void)get_thresh();

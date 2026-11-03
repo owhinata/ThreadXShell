@@ -166,11 +166,13 @@ int nn_active_shapes_ok(struct nn_model *m);
 int nn_active_decode(struct nn_model *m);
 
 /**
- * Let the active decoder paint its own result.  A no-op with no plugin.
- * Called on the panel's thread, under the plugin lease and then the frame lock.
+ * Let the active decoder paint its own result onto @p ctx, the board's drawing
+ * target; the painter is built inside from plugin_board_bindings (issue #165).
+ * A no-op with no plugin.  Called on the panel's thread, under the plugin lease
+ * and then the frame lock.
  * @return 0, or NN_ACTIVE_NOT_HELD when nothing was painted for that reason
  */
-int nn_active_draw(const struct plugin_painter *paint);
+int nn_active_draw_on(void *ctx);
 
 /**
  * @brief  Will the active decoder put anything on the panel?

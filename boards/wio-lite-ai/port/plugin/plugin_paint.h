@@ -46,20 +46,20 @@ extern "C" {
 #endif
 
 /**
- * @brief  Bind a painter to a back buffer for the duration of one draw().
+ * @brief  Set up the drawing target for the duration of one draw(), and return
+ *         it as the context the shared draw builds the painter around
+ *         (nn_active_draw_on(), issue #165).
  *
- * @param p     filled in; handed to the plugin
  * @param bud   reset by the caller to this frame's allowance
- * @param fb    the back buffer, in the panel's PORTRAIT layout
- * @param sw    the landscape surface width  (the panel's height)
- * @param sh    the landscape surface height (the panel's width)
+ * @param fb    the frame the primitives store into
  *
- * The painter is valid only until draw() returns.  Nothing here is stored
- * anywhere a later call could reach.
+ * The context is valid only until draw() returns.  The painter itself is not
+ * the board's: until #165 this was plugin_paint_bind(), which filled one the
+ * caller then handed on, and a painter in the board's hands could be edited
+ * after it was filled.
  */
-void plugin_paint_bind(struct plugin_painter *p,
-                       struct plugin_paint_budget *bud,
-                       uint16_t *fb, uint16_t sw, uint16_t sh);
+void *plugin_paint_target(struct plugin_paint_budget *bud,
+                          uint16_t *fb, uint16_t sw, uint16_t sh);
 
 /*
  * The three primitives, for the board's plugin_board_bindings (issue #165):

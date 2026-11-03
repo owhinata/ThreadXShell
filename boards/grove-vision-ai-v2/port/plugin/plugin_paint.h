@@ -52,19 +52,20 @@ extern "C" {
  * subtle should have one implementation. */
 
 /**
- * @brief  Bind a painter to a framebuffer for the duration of one draw().
+ * @brief  Set up the drawing target for the duration of one draw(), and return
+ *         it as the context the shared draw builds the painter around
+ *         (nn_active_draw_on(), issue #165).
  *
- * @param p        filled in; hands to the plugin
- * @param bud      reset by the caller to this frame's allowance
- * @param fb       the staged frame, in WIRE byte order
- * @param w, h     its geometry
+ * @param bud   reset by the caller to this frame's allowance
+ * @param fb    the frame the primitives store into
  *
- * The painter is valid only until draw() returns.  Nothing here is stored
- * anywhere a later call could reach.
+ * The context is valid only until draw() returns.  The painter itself is not
+ * the board's: until #165 this was plugin_paint_bind(), which filled one the
+ * caller then handed on, and a painter in the board's hands could be edited
+ * after it was filled.
  */
-void plugin_paint_bind(struct plugin_painter *p,
-                       struct plugin_paint_budget *bud,
-                       uint16_t *fb, uint16_t w, uint16_t h);
+void *plugin_paint_target(struct plugin_paint_budget *bud,
+                          uint16_t *fb, uint16_t w, uint16_t h);
 
 /*
  * The three primitives, for the board's plugin_board_bindings (issue #165):

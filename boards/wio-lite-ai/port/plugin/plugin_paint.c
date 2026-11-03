@@ -180,19 +180,16 @@ void paint_blit(void *ctx, const struct plugin_rect *r,
 
 /* ---- binding ------------------------------------------------------------- */
 
-void plugin_paint_bind(struct plugin_painter *p,
-                       struct plugin_paint_budget *bud,
-                       uint16_t *fb, uint16_t sw, uint16_t sh)
+void *plugin_paint_target(struct plugin_paint_budget *bud,
+                          uint16_t *fb, uint16_t sw, uint16_t sh)
 {
-	if (p == NULL)
-		return;
-
 	paint_ctx.bud = bud;
 	paint_ctx.fb  = fb;
 	paint_ctx.sw  = sw;
 	paint_ctx.sh  = sh;
 
-	/* The three primitives come from the board's table (plugin_bindings.h,
-	 * issue #165), whose members are the functions above. */
-	plugin_painter_init(p, &paint_ctx);
+	/* The context only (issue #165): the shared draw builds the painter
+	 * around it from the board's table, whose members are the functions
+	 * above.  A board that built the painter could edit it. */
+	return &paint_ctx;
 }

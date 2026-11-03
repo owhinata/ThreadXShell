@@ -131,7 +131,6 @@ static int panel_record(void *ctx, struct nn_det_snapshot *snap)
 static void panel_paint(void *ctx)
 {
 	const struct nn_panel_display *d = ctx;
-	struct plugin_painter paint;
 	struct plugin_paint_budget bud;
 	uint16_t w = 0u, h = 0u;
 	uint16_t *fb;
@@ -147,10 +146,11 @@ static void panel_paint(void *ctx)
 	bud.pixels  = full;
 	bud.ops     = NN_PANEL_DRAW_OPS;
 	bud.refused = 0u;
-	plugin_paint_bind(&paint, &bud, fb, w, h);
-	/* The depth is sampled inside, at the indirect call.  NN_ACTIVE_NOT_HELD
-	 * paints nothing and is counted by the entry check itself. */
-	(void)nn_active_draw(&paint);
+	/* The context only: the painter is built by the shared draw, from the
+	 * board's table (issue #165).  The depth is sampled inside, at the
+	 * indirect call.  NN_ACTIVE_NOT_HELD paints nothing and is counted by the
+	 * entry check itself. */
+	(void)nn_active_draw_on(plugin_paint_target(&bud, fb, w, h));
 	if (bud.pixels != full)
 		d->touched();               /* the strokes ride the view buffer */
 

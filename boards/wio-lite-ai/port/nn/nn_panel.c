@@ -136,7 +136,6 @@ static int preview_record(void *ctx, struct nn_det_snapshot *snap)
 static void preview_paint(void *ctx)
 {
 	const struct nn_panel_display *d = ctx;
-	struct plugin_painter paint;
 	struct plugin_paint_budget bud;
 	TX_INTERRUPT_SAVE_AREA
 
@@ -146,12 +145,14 @@ static void preview_paint(void *ctx)
 	/* [!] Under the frame lock: nn_core_draw() calls this only after
 	 * preview_frame_lock(), and the back buffer is valid only while it is
 	 * held (nn_panel.h). */
-	plugin_paint_bind(&paint, &bud, d->back_buffer(),
-	                  d->surface_w(), d->surface_h());
-	/* The depth is sampled inside, at the indirect call (issue #126).
-	 * NN_ACTIVE_NOT_HELD paints nothing and is counted by the entry check
-	 * itself (issue #130); there is nothing more to do with it here. */
-	(void)nn_active_draw(&paint);
+	/* The context only: the painter is built by the shared draw, from the
+	 * board's table (issue #165).  The depth is sampled inside, at the
+	 * indirect call (issue #126).  NN_ACTIVE_NOT_HELD paints nothing and is
+	 * counted by the entry check itself (issue #130); there is nothing more
+	 * to do with it here. */
+	(void)nn_active_draw_on(plugin_paint_target(&bud, d->back_buffer(),
+	                                            d->surface_w(),
+	                                            d->surface_h()));
 
 	TX_DISABLE
 	if (PREVIEW_PLUGIN_DRAW_PIXELS - bud.pixels > preview_draw_spent)

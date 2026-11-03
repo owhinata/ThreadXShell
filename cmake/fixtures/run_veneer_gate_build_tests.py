@@ -121,7 +121,18 @@ Cases:
   entry_old         an object defining one of the pre-#165 entries that took
                     a base or a vtable's functions (plugin_exec_load,
                     plugin_run_load, nn_active_report, nn_active_core_report,
-                    plugin_paint_vtable): refused by check_policy_entry.py.
+                    plugin_paint_vtable), or the draw's that took a painter
+                    the board built and so could edit (nn_active_draw,
+                    nn_active_core_draw, plugin_paint_bind; the review of
+                    #165): refused by check_policy_entry.py.
+  entry_rename      (review of #165) a -D on the one file that reads the
+                    policy or the table by name, renaming what it reads, with
+                    and without LTO: refused, the reader not referencing the
+                    object the build reads back.
+  body_twice        (review of #165) a second firmware file including the
+                    parse body: the link fails on the body's guard, with and
+                    without LTO (and so does the host file in the firmware's
+                    objects, entry_host_tu).
   policy_decoy      (issue #165) the read-back's policy is right, while the
                     code hands an entry that takes a policy a different
                     read-only one whose c is 1.  Passed until step 2 of #165;
@@ -385,8 +396,58 @@ int nn_active_report(void) { return 0; }
 int nn_active_core_report(void) { return 0; }
 #elif defined(FIX_OLD_PAINT)
 int plugin_paint_vtable(void) { return 0; }
+#elif defined(FIX_OLD_DRAW)
+int nn_active_draw(void) { return 0; }
+#elif defined(FIX_OLD_CORE_DRAW)
+int nn_active_core_draw(void) { return 0; }
+#elif defined(FIX_OLD_PAINT_BIND)
+int plugin_paint_bind(void) { return 0; }
+#elif defined(FIX_SECOND_PARSE)
+/* A second body under the firmware entry's name, local to this file: the
+ * entry that reads the policy by name must be defined exactly once. */
+__attribute__((used)) static int plugin_parse(void) { return 0; }
 #endif
 int fix_old_unit(void) { return 0; }
+""",
+    # (issue #165 review) The object a -D on the reader's own file renames
+    # the policy or the table to: the read-back finds the real one, the reader
+    # reads this.
+    "runtime.c": """
+#include "plugin_load.h"
+#include "plugin_bindings.h"
+#if defined(FIX_RUNTIME_POLICY)
+const struct plugin_policy runtime_policy = { 0 };
+#endif
+#if defined(FIX_RUNTIME_BINDINGS)
+const struct plugin_bindings runtime_bindings = { { 0 }, 0, 0, 0, 0 };
+#endif
+int fix_runtime_unit(void) { return 0; }
+""",
+    # (issue #165 review) The host entry's name and type, without the body,
+    # for a static-library member (FIX_HOST_TU=LIB).
+    "hostlike.c": """
+#include "plugin_load_host.h"
+enum plugin_result plugin_parse_with_policy(const void *buf, size_t len,
+                                            const struct plugin_policy *pol,
+                                            struct plugin_view *out)
+{
+    (void)buf; (void)len; (void)out;
+    return pol != NULL ? PLUGIN_OK : PLUGIN_ERR_ARG;
+}
+""",
+    # (issue #165 review) A second firmware file that includes the parse body
+    # to call it with a policy of its own: the link must refuse it.
+    "body2.c": """
+#if defined(FIX_BODY_TWICE)
+#include "plugin_load_body.h"
+static const struct plugin_policy my_policy = { 0 };
+enum plugin_result fix_own_parse(const void *buf, size_t len,
+                                 struct plugin_view *out)
+{
+    return parse_checked(buf, len, &my_policy, out);
+}
+#endif
+int fix_body2_unit(void) { return 0; }
 """,
     # What svc/plugin/plugin_load_board.c needs from a C library this
     # -nostdlib fixture does not link.  Never called: nothing runs the image.
@@ -451,8 +512,19 @@ set(FIX_PLUGIN OFF CACHE BOOL "")
 # never be: OBJ in the firmware's object library, LIB in its static library.
 set(FIX_HOST_TU "" CACHE STRING "")
 add_library(fw_objs OBJECT objsrc.c policy.c twin.c libc.c bind.c old.c
+            runtime.c body2.c
             "@SVC@/plugin/plugin_load_board.c" "@SVC@/crc32.c"
-            "@SVC@/plugin/plugin_bindings.c")
+            "@SVC@/plugin/plugin_bindings.c" "@SVC@/plugin/plugin_exec.c")
+# (issue #165 review) FIX_RENAME renames, on the reader's own file only, the
+# object it reads by name -- the shape check_policy_entry.py must refuse.
+set(FIX_RENAME "" CACHE STRING "")
+if(FIX_RENAME STREQUAL "policy")
+    set_source_files_properties("@SVC@/plugin/plugin_load_board.c" PROPERTIES
+        COMPILE_DEFINITIONS "plugin_board_policy=runtime_policy")
+elseif(FIX_RENAME STREQUAL "bindings")
+    set_source_files_properties("@SVC@/plugin/plugin_bindings.c" PROPERTIES
+        COMPILE_DEFINITIONS "plugin_board_bindings=runtime_bindings")
+endif()
 if(FIX_HOST_TU STREQUAL "OBJ")
     target_sources(fw_objs PRIVATE "@SVC@/plugin/plugin_load_host.c")
 endif()
@@ -460,7 +532,7 @@ target_include_directories(fw_objs PRIVATE "@SVC@" "@SVC@/nn" "@SVC@/plugin" "@S
 add_library(fw_objlink OBJECT objlink.c)
 add_library(fw_lib STATIC lib.c)
 if(FIX_HOST_TU STREQUAL "LIB")
-    target_sources(fw_lib PRIVATE "@SVC@/plugin/plugin_load_host.c")
+    target_sources(fw_lib PRIVATE hostlike.c)
     target_include_directories(fw_lib PRIVATE "@SVC@" "@SVC@/plugin")
 endif()
 add_library(fw_iface INTERFACE)
@@ -1454,32 +1526,39 @@ def entry_tree(p, results):
                                  "member its archive does not hold, a member "
                                  "of an archive not LOADed: each refused"))
 
-    # The host's entry where it must never be.
-    for name, tu, flags, want in (
-            ("entry_host_obj", "OBJ", "",
-             [r"plugin_load_host\.c\.o(bj)? defines plugin_parse_with_policy "
-              r"\(T\)"]),
-            ("entry_host_lib", "LIB", " -DFIX_CALL_HOST",
-             [r"libfw_lib\.a\(plugin_load_host\.c\.o(bj)?\) defines "
-              r"plugin_parse_with_policy \(T\)",
-              r"policy\.c\.o(bj)? references plugin_parse_with_policy "
-              r"\(U\)"])):
-        p.rm("flashed")
-        p.configure(DECLARED="4096", FIX_HOST_TU=tu,
-                    CMAKE_C_FLAGS=p.c_init + flags)
-        rc, out = p.ninja("flash")
-        flat = entry_fail(out)
-        expect(rc != 0 and not os.path.exists(p.path("flashed"))
-               and not os.path.exists(p.stamp)
-               and "check_policy_entry: FAIL" in flat
-               and all(re.search(w, flat) for w in want)
-               and flat.count("plugin_parse_with_policy (") == len(want),
-               "%s: should be refused naming %s" % (name, " and ".join(want)),
-               out)
-    results.append(("entry_host_tu", "the host's entry in the firmware's "
-                                     "objects, and in its static library "
-                                     "with a caller: refused, naming the "
-                                     "member and the reference"))
+    # The host's entry where it must never be.  The real host file in the
+    # firmware's objects is refused by the link itself since the review of
+    # #165: it includes the parse body, and so does plugin_load_board.c.
+    p.rm("flashed")
+    p.configure(DECLARED="4096", FIX_HOST_TU="OBJ", CMAKE_C_FLAGS=p.c_init)
+    rc, out = p.ninja("flash")
+    expect(rc != 0 and not os.path.exists(p.path("flashed"))
+           and "multiple definition" in out
+           and "plugin_load_body_once" in out,
+           "entry_host_obj: the host file in the firmware's objects should "
+           "fail the link on the parse body's guard", out)
+    # An entry under the host's name in the static library, with a caller:
+    # the check reads the archive member and the reference.
+    p.rm("flashed")
+    p.configure(DECLARED="4096", FIX_HOST_TU="LIB",
+                CMAKE_C_FLAGS=p.c_init + " -DFIX_CALL_HOST")
+    rc, out = p.ninja("flash")
+    flat = entry_fail(out)
+    want = [r"libfw_lib\.a\(hostlike\.c\.o(bj)?\) defines "
+            r"plugin_parse_with_policy \(T\)",
+            r"policy\.c\.o(bj)? references plugin_parse_with_policy \(U\)"]
+    expect(rc != 0 and not os.path.exists(p.path("flashed"))
+           and not os.path.exists(p.stamp)
+           and "check_policy_entry: FAIL" in flat
+           and all(re.search(w, flat) for w in want)
+           and flat.count("plugin_parse_with_policy (") == len(want),
+           "entry_host_lib: should be refused naming %s" % " and ".join(want),
+           out)
+    results.append(("entry_host_tu", "the host file in the firmware's "
+                                     "objects fails the link; an entry of "
+                                     "its name in the static library, with a "
+                                     "caller, is refused naming the member "
+                                     "and the reference"))
 
     # Under LTO the inputs are IR: read through gcc-nm, and refused with a
     # plain nm rather than read as their empty wrappers.
@@ -1542,7 +1621,10 @@ def bind_shape_tree(p, results):
                       ("FIX_OLD_RUN", "plugin_run_load"),
                       ("FIX_OLD_REPORT", "nn_active_report"),
                       ("FIX_OLD_CORE_REPORT", "nn_active_core_report"),
-                      ("FIX_OLD_PAINT", "plugin_paint_vtable")):
+                      ("FIX_OLD_PAINT", "plugin_paint_vtable"),
+                      ("FIX_OLD_DRAW", "nn_active_draw"),
+                      ("FIX_OLD_CORE_DRAW", "nn_active_core_draw"),
+                      ("FIX_OLD_PAINT_BIND", "plugin_paint_bind")):
         p.rm("flashed")
         p.configure(DECLARED="4096", CMAKE_C_FLAGS=p.c_init + " -D" + flag)
         rc, out = p.ninja("flash")
@@ -1554,8 +1636,69 @@ def bind_shape_tree(p, results):
                % (old, old), out)
     results.append(("entry_old", "an object defining plugin_exec_load, "
                                  "plugin_run_load, nn_active_report, "
-                                 "nn_active_core_report or plugin_paint_vtable "
-                                 "(the pre-#165 entries): each refused"))
+                                 "nn_active_core_report, plugin_paint_vtable, "
+                                 "nn_active_draw, nn_active_core_draw or "
+                                 "plugin_paint_bind (the pre-#165 entries, the "
+                                 "draw's since the review): each refused"))
+
+    # (issue #165 review) A -D on the reader's own file renames what it
+    # reads; the read-back still finds the real object.  Without LTO and with.
+    for lto in ("OFF", "max"):
+        for what, flag, says in (
+                ("policy", "-DFIX_RUNTIME_POLICY",
+                 [r"plugin_load_board\.c\.o(bj)? defines plugin_parse but "
+                  r"does not reference plugin_board_policy"]),
+                ("bindings", "-DFIX_RUNTIME_BINDINGS",
+                 [r"plugin_bindings\.c\.o(bj)? defines plugin_painter_init "
+                  r"but does not reference plugin_board_bindings",
+                  r"plugin_bindings\.c\.o(bj)? defines plugin_printer_init "
+                  r"but does not reference plugin_board_bindings"])):
+            p.rm("flashed")
+            p.configure(DECLARED="4096", FIX_LTO=lto, FIX_RENAME=what,
+                        CMAKE_C_FLAGS=p.c_init + " " + flag)
+            rc, out = p.ninja("flash")
+            flat = " ".join(out.split())
+            expect(rc != 0 and not os.path.exists(p.path("flashed"))
+                   and not os.path.exists(p.stamp)
+                   and "check_policy_entry: FAIL" in flat
+                   and all(re.search(x, flat) for x in says)
+                   and "check_policy_probe: " not in flat,
+                   "entry_rename_%s (LTO %s): renaming what the reader reads "
+                   "should be refused" % (what, lto), out)
+    p.configure(DECLARED="4096", FIX_LTO="OFF", FIX_RENAME="",
+                CMAKE_C_FLAGS=p.c_init + " -DFIX_SECOND_PARSE")
+    p.rm("flashed")
+    rc, out = p.ninja("flash")
+    flat = " ".join(out.split())
+    expect(rc != 0 and not os.path.exists(p.path("flashed"))
+           and "check_policy_entry: FAIL" in flat
+           and "2 inputs define plugin_parse" in flat,
+           "entry_second_parse: a second definition of plugin_parse should "
+           "be refused", out)
+    p.configure(DECLARED="4096", FIX_LTO="OFF", FIX_RENAME="",
+                CMAKE_C_FLAGS=p.c_init)
+    results.append(("entry_second_parse", "a second (local) plugin_parse in "
+                                          "another file: refused, the entry "
+                                          "must be defined once"))
+    results.append(("entry_rename", "a -D on the reader's own file renaming "
+                                    "the policy or the table it reads, with "
+                                    "and without LTO: refused, naming the "
+                                    "reader"))
+
+    # (issue #165 review) A second firmware file including the parse body.
+    for lto in ("OFF", "max"):
+        p.rm("flashed")
+        p.configure(DECLARED="4096", FIX_LTO=lto,
+                    CMAKE_C_FLAGS=p.c_init + " -DFIX_BODY_TWICE")
+        rc, out = p.ninja("shell")
+        expect(rc != 0 and "plugin_load_body_once" in out
+               and "multiple definition" in out,
+               "body_twice (LTO %s): a second file including "
+               "plugin_load_body.h should fail the link" % lto, out)
+    p.configure(DECLARED="4096", FIX_LTO="OFF", CMAKE_C_FLAGS=p.c_init)
+    results.append(("body_twice", "a second firmware file including "
+                                  "plugin_load_body.h, with and without "
+                                  "LTO: the link fails on its guard"))
 
 
 def policy_shape_tree(p, results):

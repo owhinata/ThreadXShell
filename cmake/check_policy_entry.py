@@ -36,12 +36,18 @@ read here, and is gone by the time this runs.
 archive does not hold, an archive member from an archive the map did not load,
 an nm without the LTO plugin: each is a refusal, and the stamp is not written.
 
+[!] AND WHAT EACH ENTRY READS BY NAME IS THAT NAME (issue #165 review).  The
+one input that defines plugin_parse() must reference plugin_board_policy, and
+the ones that define plugin_exec_start() / plugin_painter_init() /
+plugin_printer_init() plugin_board_bindings: a -D on that one file renames what
+it reads, and the read-back would go on finding the real object.
+
 [!] AND THE SAME FOR THE BINDINGS (issue #165).  The base a plugin is handed,
 and the functions its painter and printer carry, come from the board's
 plugin_board_bindings, which cmake/check_veneer_base_cost.py derives the stack
 roots from.  The entries that used to take them as arguments -- the loaders'
-base, the report's write, the painter's three -- are watched by their old names
-too: an object still defining or calling one is a firmware that can hand a
+base, the report's write, the painter's three and the draw's painter the board
+built -- are watched by their old names too: an object still defining or calling one is a firmware that can hand a
 plugin something the build did not read.
 
 What this does not see: a board that copies the parse body into a TU of its
@@ -71,6 +77,26 @@ WATCHED = (
     "nn_active_report",
     "nn_active_core_report",
     "plugin_paint_vtable",
+    # ...and the draw entries that took a painter the board had built (and so
+    # could edit after it was filled), and the board call that built it:
+    # nn_active_draw_on() / nn_active_core_draw_on() / plugin_paint_target()
+    # now hand a context only (issue #165 review)
+    "nn_active_draw",
+    "nn_active_core_draw",
+    "plugin_paint_bind",
+)
+
+# [!] AND EACH ENTRY THAT READS BY NAME MUST NAME THE OBJECT (issue #165
+# review).  A -D on the one file that defines an entry renames what it reads
+# (`-Dplugin_board_policy=runtime_policy`), while the check that reads the
+# object back still finds the real one, kept by --require-defined.  So the one
+# input that defines each entry below must reference the object by its name
+# (nm's U -- in an LTO object too).
+READS_BY_NAME = (
+    ("plugin_parse", "plugin_board_policy"),
+    ("plugin_exec_start", "plugin_board_bindings"),
+    ("plugin_painter_init", "plugin_board_bindings"),
+    ("plugin_printer_init", "plugin_board_bindings"),
 )
 
 # What an LTO link writes for itself and removes: its partitions and its early
@@ -249,9 +275,24 @@ def main():
             if name in WATCHED:
                 how = "references" if typ in ("U", "u") else "defines"
                 hits.append(f"{where} {how} {name} ({typ})")
+    for entry, obj in READS_BY_NAME:
+        defs = [where for where, table in tables
+                if any(n == entry and t not in ("U", "u", "w", "v")
+                       for n, t in table)]
+        if len(defs) != 1:
+            hits.append(f"{len(defs)} inputs define {entry} "
+                        f"({', '.join(defs) or 'none'}), where exactly one "
+                        f"must, and read {obj} by name")
+            continue
+        table = dict(tables)[defs[0]]
+        if not any(n == obj and t in ("U", "u") for n, t in table):
+            hits.append(f"{defs[0]} defines {entry} but does not reference "
+                        f"{obj} -- what it reads is not the object the build "
+                        "reads back (a -D renaming it, or a definition of its "
+                        "own)")
     if hits:
-        return fail("the firmware link holds an entry that takes what the "
-                    "firmware must read by name: "
+        return fail("the firmware link does not read by name what it "
+                    "must: "
                     + "; ".join(hits) + ".  The loader reads the board's "
                     "policy (plugin_board_policy) and its bindings "
                     "(plugin_board_bindings) by name; an entry that takes "
@@ -259,12 +300,14 @@ def main():
                     "build reads back.  plugin_parse_with_policy() is the "
                     "host's (svc/plugin/plugin_load_host.c); the others are "
                     "the pre-#165 forms of plugin_exec_start(), "
-                    "plugin_run_start(), nn_active_report_to() and "
-                    "plugin_painter_init()")
+                    "plugin_run_start(), nn_active_report_to(), "
+                    "nn_active_draw_on() and plugin_paint_target()")
     print(f"check_policy_entry: OK -- {read} inputs of the firmware link "
           f"({len(readable)} objects, {read - len(readable)} archive "
           f"members) read through {os.path.basename(args.nm)}; none defines "
-          f"or references {', '.join(WATCHED)}")
+          f"or references {', '.join(WATCHED)}; "
+          + ", ".join(f"{e} is defined once and reads {o}"
+                      for e, o in READS_BY_NAME))
     return 0
 
 

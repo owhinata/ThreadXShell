@@ -28,7 +28,8 @@
 #include "plugin_bindings.h"
 
 /* The board's table (issue #165), as far as the painter reads it: the painter
- * plugin_paint_bind() fills carries these three, which are this board's. */
+ * the shared draw builds around plugin_paint_target() carries these three,
+ * which are this board's.  The test builds that painter the same way. */
 const struct plugin_bindings plugin_board_bindings = {
 	.rect = paint_rect, .fill_rect = paint_fill_rect, .blit = paint_blit,
 };
@@ -70,7 +71,7 @@ static void arm(uint32_t pixels, uint32_t ops)
 	bud.ops     = ops;
 	bud.refused = 0u;
 	plugin_paint_stores = 0ul;
-	plugin_paint_bind(&paint, &bud, fb, SW, SH);
+	plugin_painter_init(&paint, plugin_paint_target(&bud, fb, SW, SH));
 }
 
 static uint32_t spent(uint32_t from)

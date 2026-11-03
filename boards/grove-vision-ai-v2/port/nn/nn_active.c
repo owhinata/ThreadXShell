@@ -169,11 +169,11 @@ int nn_active_decode(const struct nn_tensor *outs, unsigned n)
 	return nn_active_core_decode(&nn_active_board, d, n);
 }
 
-int nn_active_draw(const struct plugin_painter *paint)
+int nn_active_draw_on(void *ctx)
 {
 	if (!nn_active_held())
 		return NN_ACTIVE_NOT_HELD;
-	nn_active_core_draw(&nn_active_board, paint);
+	nn_active_core_draw_on(&nn_active_board, ctx);
 	return 0;
 }
 

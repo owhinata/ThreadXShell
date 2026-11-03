@@ -323,10 +323,9 @@ static void rec_blit_fn(void *ctx, const struct plugin_rect *r,
 	rec_blits++;
 }
 
-static struct plugin_painter rec_painter = {
-	PLUGIN_ABI_VERSION, sizeof(struct plugin_painter),
-	NULL, rec_rect_fn, rec_fill_fn, rec_blit_fn
-};
+/* The drawing target handed to the draw; the painter around it is built by
+ * the shared draw from the table below (issue #165). */
+static int rec_canvas;
 
 static void rec_reset(void)
 {
@@ -359,9 +358,13 @@ static int cap_write(void *ctx, const char *s, size_t len)
 	return (int)len;
 }
 
-/* The board's table (port/nn/nn_svc_grove.c, issue #165), as far as report
- * reads it: the printer's write is the table's, and here it is the capture. */
-const struct plugin_bindings plugin_board_bindings = { .write = cap_write };
+/* The board's table (port/nn/nn_svc_grove.c, issue #165), as far as draw and
+ * report read it: the painter's three are the recorders, the printer's write
+ * the capture. */
+const struct plugin_bindings plugin_board_bindings = {
+	.rect = rec_rect_fn, .fill_rect = rec_fill_fn, .blit = rec_blit_fn,
+	.write = cap_write,
+};
 
 static void cap_reset(void)
 {
@@ -559,7 +562,7 @@ static int call_entry(enum entry_id e, unsigned *thresh_out)
 	switch (e) {
 	case E_SHAPES_OK:   return nn_active_shapes_ok(tens, 4);
 	case E_DECODE:      return nn_active_decode(tens, 4);
-	case E_DRAW:        rec_reset(); return nn_active_draw(&rec_painter);
+	case E_DRAW:        rec_reset(); return nn_active_draw_on(&rec_canvas);
 	case E_CAN_DRAW:    return nn_active_can_draw();
 	case E_CAN_REPORT:  return nn_active_can_report();
 	case E_REPORT:      cap_reset(); return nn_active_report_to(NULL);
@@ -715,7 +718,7 @@ int main(void)
 	       "detector'", n == BF_ERR_UNINIT, "got %d", n);
 
 	rec_reset();
-	nn_active_draw(&rec_painter);
+	nn_active_draw_on(&rec_canvas);
 	expect("nothing paints",
 	       rec_n == 0u && rec_other == 0u && rec_blits == 0u,
 	       "%u rect(s), %u fill(s), %u blit(s)", rec_n, rec_other, rec_blits);
@@ -809,7 +812,7 @@ int main(void)
 	 * ================================================================ */
 	rec_reset();
 	probe_reset();
-	nn_active_draw(&rec_painter);
+	nn_active_draw_on(&rec_canvas);
 	expect("a draw took one stack sample, for draw",
 	       probe_only(PLUGIN_SLOT_DRAW), "%u sample(s)", probe_total());
 	/* [!] AND ONE SCORE CHIP PER DETECTION SINCE ISSUE #105.  The chip is
@@ -946,7 +949,7 @@ int main(void)
 	(void)nn_active_clear_geom();
 	(void)nn_active_decode(tens, 4);
 	rec_reset();
-	nn_active_draw(&rec_painter);
+	nn_active_draw_on(&rec_canvas);
 	expect("[!] with no published geometry a plugin draws nothing",
 	       rec_n == 0u, "%u rectangle(s) at unknown coordinates", rec_n);
 
@@ -1004,7 +1007,7 @@ int main(void)
 		       strstr(cap_buf, "decode refused") != NULL, "report was:\n%s",
 		       cap_buf);
 		rec_reset();
-		nn_active_draw(&rec_painter);
+		nn_active_draw_on(&rec_canvas);
 		expect("and draws nothing for it",
 		       rec_n == 0u, "%u rectangle(s) from a failed decode", rec_n);
 

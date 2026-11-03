@@ -36,7 +36,8 @@
 #include "plugin_bindings.h"
 
 /* The board's table (issue #165), as far as the painter reads it: the painter
- * plugin_paint_bind() fills carries these three, which are this board's. */
+ * the shared draw builds around plugin_paint_target() carries these three,
+ * which are this board's.  The test builds that painter the same way. */
 const struct plugin_bindings plugin_board_bindings = {
 	.rect = paint_rect, .fill_rect = paint_fill_rect, .blit = paint_blit,
 };
@@ -75,7 +76,7 @@ static void setup(uint32_t pixels, uint32_t ops)
 	bud.pixels = pixels;
 	bud.ops    = ops;
 	bud.refused = 0u;
-	plugin_paint_bind(&p, &bud, fb, (uint16_t)W, (uint16_t)H);
+	plugin_painter_init(&p, plugin_paint_target(&bud, fb, (uint16_t)W, (uint16_t)H));
 }
 
 static int fb_is_clear(void)
@@ -421,7 +422,7 @@ static void run_boxes(uint32_t w, uint32_t h)
 	wb.pixels  = DRAW_PIXELS;
 	wb.ops     = DRAW_OPS;
 	wb.refused = 0u;
-	plugin_paint_bind(&wp, &wb, big_fb, (uint16_t)FRAME_W, (uint16_t)FRAME_H);
+	plugin_painter_init(&wp, plugin_paint_target(&wb, big_fb, (uint16_t)FRAME_W, (uint16_t)FRAME_H));
 
 	for (i = 0u; i < WORST_BOXES; i++) {
 		struct plugin_rect box = { 0, 0, (int32_t)w, (int32_t)h };

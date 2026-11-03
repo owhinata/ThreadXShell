@@ -6701,7 +6701,11 @@ The two `(upper bound)`s:
 
 - **draw** is sampled inside `nn_active_core_draw()`, which tail-calls the
   plugin (`ldmia sp!, {r4, r5, r6, lr}` then `bx r3`) and so pops its own 16 B
-  first.  The plugin is entered at 200 B; the report says 216.  Since issue
+  first.  The plugin is entered at 200 B; the report says 216.  (Since the
+  review of issue #165 it is `nn_active_core_draw_on()`, which builds the
+  painter in its own frame and so calls the plugin rather than tail-calling
+  it: the sample is taken after that frame, and is the entry depth, not 16 B
+  over it -- see the #165 paragraph below.)  Since issue
   #126 **shapes_ok and decode** are tail calls too (the descriptor array is in
   the caller's frame now), so their numbers are 24 B over the entry depth.
 - **entry** is sampled in `pl_exec_ok()` after its own `push {r4, r5, r6, lr}`,
@@ -6816,8 +6820,16 @@ toward shallower, by the ELF and not measured on hardware: to entry,
 above is 1,008, not 1,016; to report, `nn_active_report_to` tail-calls
 `nn_active_core_report_to` as `nn_active_report` did, and the latter's frame is
 32 B where `nn_active_core_report`'s was 40, so the report path is 8 B
-shallower.  The draw path is unchanged.  The
-table above was not re-derived for these and stays an upper bound.
+shallower.  The draw path moved the other way in the review of #165, which made
+the shared code build the painter (the board hands only its drawing target):
+`nn_ov_paint` is 24 B where it was 56 (the painter left its frame), and
+`nn_active_core_draw_on` is 40 B and calls the plugin where
+`nn_active_core_draw` was 16 B and tail-called it, so the plugin is entered
+8 B deeper -- 208, not 200, in the table above, which leaves 1,632 B, still
+608 B over the 1,024 allowance -- while the draw sample, now taken in the frame
+the plugin is called from, reads 8 B less than it did (it is the entry depth,
+no longer 16 B over it).  The table above was not re-derived for these and,
+except for the draw row's 8 B, stays an upper bound.
 "real need" is the next section's.
 
 #### The veneer charge is derived from the image, and checked

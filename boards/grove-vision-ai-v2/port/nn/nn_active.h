@@ -134,11 +134,13 @@ int nn_active_decode(const struct nn_tensor *outs, unsigned n);
  * @brief  Let the active decoder paint its own result.
  *
  * Called on the panel thread with the panel guard held.  A no-op with no plugin
- * loaded, which a stream can no longer be running under.
+ * loaded, which a stream can no longer be running under.  @p ctx is the
+ * drawing target (plugin_paint_target()); the painter is built inside, from
+ * plugin_board_bindings (issue #165), and the board hands no function.
  *
  * @return 0, or NN_ACTIVE_NOT_HELD when nothing was painted for that reason
  */
-int nn_active_draw(const struct plugin_painter *paint);
+int nn_active_draw_on(void *ctx);
 
 /**
  * @brief  Will the active decoder describe its own result in words?
@@ -170,7 +172,7 @@ int nn_active_can_draw(void);
  * @return 0, negative when the writer refused, or NN_ACTIVE_NOT_HELD
  *
  * A no-op returning 0 with no plugin loaded, for the same reason as
- * @ref nn_active_draw.  The text goes into @p ctx through the board's write
+ * @ref nn_active_draw_on.  The text goes into @p ctx through the board's write
  * (plugin_board_bindings, issue #165).
  */
 int nn_active_report_to(void *ctx);

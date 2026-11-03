@@ -131,7 +131,17 @@ member its archive does not hold, a member of an archive the map did not load,
 and an `nm` without the LTO plugin are each a refusal. It also refuses the
 pre-#165 names of the entries that took a base or a vtable's functions
 (`plugin_exec_load`, `plugin_run_load`, `nn_active_report`,
-`nn_active_core_report`, `plugin_paint_vtable`; see the next paragraph).
+`nn_active_core_report`, `plugin_paint_vtable`, and the draw's
+`nn_active_draw`, `nn_active_core_draw`, `plugin_paint_bind`, which took a
+painter the board had built and so could edit; see the next paragraph). And it
+requires each entry that reads by name to name the object: the one input that
+defines `plugin_parse` must reference `plugin_board_policy`, and the ones that
+define `plugin_exec_start`, `plugin_painter_init` and `plugin_printer_init`
+must reference `plugin_board_bindings` -- a `-D` on that one file would rename
+what it reads while the read-back went on finding the real object (the review
+of #165). The parse body carries one definition with external linkage
+(`plugin_load_body_once`), so a second firmware file that includes it -- to
+call the static body with a policy of its own -- fails the link.
 
 The function behind each veneer is read out of the image too (#165), not
 stated. Each board defines one `const struct plugin_bindings
@@ -139,7 +149,9 @@ plugin_board_bindings` (`svc/plugin/plugin_bindings.h`): its head is the base
 the loader hands `entry()` (`plugin_exec_start()` / `plugin_run_start()` take
 no base argument), and the painter and the printer are filled from its other
 members by `plugin_painter_init()` / `plugin_printer_init()`, which take a
-context from the board and no function. So its six words in the shipped ELF are
+context from the board and no function -- and which only the shared code calls,
+inside `nn_active_core_draw_on()` / `nn_active_core_report_to()`, so no vtable
+the board holds reaches a plugin. So its six words in the shipped ELF are
 the six functions a plugin can reach. Which word is which veneer is the
 constant record `plugin_bind_probe` (`svc/plugin/plugin_bindings.c`): an offset
 taken from the struct and a veneer name per member. The check refuses a record

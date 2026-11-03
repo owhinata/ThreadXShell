@@ -707,7 +707,7 @@ relative to `svc/`.
 | `plugin/plugin_abi.h` | The wire ABI between the firmware and a plugin shipped with its model. |
 | `plugin/plugin_target.h` | The plugin target word this translation unit is compiled for. |
 | `plugin/plugin_load` | Probing a payload and naming a result: what the firmware and the host share besides the parse. |
-| `plugin/plugin_load_body.h` | Container and manifest validation, the one body (every function `static`); returns offsets, never a callable pointer. Included only by the two files below. |
+| `plugin/plugin_load_body.h` | Container and manifest validation, the one body (every function `static`); returns offsets, never a callable pointer. Included only by the two files below; its one external definition (`plugin_load_body_once`) makes a second includer in one link a multiple definition. |
 | `plugin/plugin_load_board.c` | The firmware's entry, `plugin_parse()`: the body over the board's `plugin_board_policy`, by name; and the `plugin_policy_probe` layout record the build reads the policy with. |
 | `plugin/plugin_load_host` (`.c` / `.h`) | The host's entry, `plugin_parse_with_policy()`: the same body with a policy argument, for the container verifier and the host tests. Never linked into a firmware (`cmake/check_policy_entry.py`). |
 | `plugin/plugin_bindings` (`.c` / `.h`) | The board's bindings table's type, the record of which word is which veneer (`plugin_bind_probe`), and the painter and printer filled from the table (`plugin_painter_init()`, `plugin_printer_init()`). |

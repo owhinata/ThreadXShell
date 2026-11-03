@@ -102,7 +102,7 @@ int           nn_ov_ndet;
 /*
  * [!] THE STACK PROBE THAT STOOD HERE MOVED TO THE PLUGIN'S ENTRY (issue #119).
  * It was taken at this file's two call sites -- before nn_active_decode() and
- * nn_active_draw() -- so the frame nn_active_decode() builds before it calls
+ * nn_active_draw_on() -- so the frame nn_active_decode() builds before it calls
  * through was never in it, and the number read as the depth a plugin is entered
  * at was short of it.  It also saw only the producer and the panel, while the
  * same decode runs on a shell thread for `nn run` and `nn dets`.  The probe is

@@ -71,10 +71,13 @@ static int s_decode(const struct tensor_desc *d, unsigned n)
 	return answer;
 }
 
+static struct plugin_painter seen_paint;
+
 static void s_draw(const struct plugin_painter *p)
 {
 	called(PLUGIN_SLOT_DRAW);
 	seen_p = p;
+	seen_paint = *p;         /* it lives in the shared draw's frame */
 }
 
 static int s_report(const struct plugin_printer *out)
@@ -177,12 +180,23 @@ static int w_write(void *ctx, const char *s, size_t len)
 	return (int)len;
 }
 
-/* The board's table (issue #165): the printer's write comes from here. */
-const struct plugin_bindings plugin_board_bindings = { .write = w_write };
+static void t_rect(void *c, const struct plugin_rect *r, uint16_t a,
+                   uint16_t b)
+{ (void)c; (void)r; (void)a; (void)b; }
+static void t_fill(void *c, const struct plugin_rect *r, uint16_t a)
+{ (void)c; (void)r; (void)a; }
+static void t_blit(void *c, const struct plugin_rect *r, const uint16_t *s,
+                   uint32_t st, int32_t k)
+{ (void)c; (void)r; (void)s; (void)st; (void)k; }
 
-static const struct plugin_painter painter = {
-	PLUGIN_ABI_VERSION, sizeof(struct plugin_painter), NULL, NULL, NULL, NULL
+/* The board's table (issue #165): the printer's write and the painter's three
+ * come from here. */
+const struct plugin_bindings plugin_board_bindings = {
+	.rect = t_rect, .fill_rect = t_fill, .blit = t_blit, .write = w_write,
 };
+
+/* The drawing target a board would hand (plugin_paint_target()). */
+static int canvas;
 
 static struct tensor_desc d[4];
 
@@ -212,7 +226,7 @@ static void test_nobody(const char *state)
 		         "'not a detector' (%s)", state, who);
 		ok(what, nn_active_core_decode(b, d, 4u) == BF_ERR_UNINIT);
 
-		nn_active_core_draw(b, &painter);
+		nn_active_core_draw_on(b, &canvas);
 		snprintf(what, sizeof what, "%s: nothing draws or reports, and says "
 		         "so first (%s)", state, who);
 		ok(what, nn_active_core_can_draw(b) == 0 &&
@@ -267,9 +281,14 @@ static void test_plugin(void)
 	   nn_active_core_decode(&accepts, d, 4u) == BF_ERR_MODEL);
 
 	reset();
-	nn_active_core_draw(&refuses, &painter);
-	ok("draw hands the painter through",
-	   seen_p == &painter && only(PLUGIN_SLOT_DRAW));
+	nn_active_core_draw_on(&refuses, &canvas);
+	ok("[!] draw builds the painter itself: versioned and sized, over the "
+	   "caller's context and the board table's three (issue #165)",
+	   seen_p != NULL && seen_paint.version == PLUGIN_ABI_VERSION &&
+	   seen_paint.size == sizeof(struct plugin_painter) &&
+	   seen_paint.ctx == &canvas && seen_paint.rect == t_rect &&
+	   seen_paint.fill_rect == t_fill && seen_paint.blit == t_blit &&
+	   only(PLUGIN_SLOT_DRAW));
 	reset();
 	ok("and asking whether it draws or reports calls nothing",
 	   nn_active_core_can_draw(&refuses) == 1 &&
@@ -313,7 +332,7 @@ static void test_plugin(void)
 	table[PLUGIN_SLOT_PARAM_SET] = NULL;
 	table[PLUGIN_SLOT_SHAPES_OK] = NULL;
 	reset();
-	nn_active_core_draw(&refuses, &painter);
+	nn_active_core_draw_on(&refuses, &canvas);
 	ok("no draw slot: nothing drawn, and it says so",
 	   nn_active_core_can_draw(&refuses) == 0 && total(calls) == 0u);
 	ok("no report slot: nothing reported, and it says so",
@@ -336,10 +355,10 @@ static void test_plugin(void)
 	   nn_active_core_shapes_ok(&accepts, NULL, 4u) == 0);
 	ok("and is an argument error to decode",
 	   nn_active_core_decode(&accepts, NULL, 4u) == BF_ERR_ARG);
-	nn_active_core_draw(&accepts, NULL);
+	nn_active_core_draw_on(&accepts, NULL);
 	/* No writer is no longer an argument: the write is the board table's,
 	 * and the build refuses a table with a NULL word (issue #165). */
-	ok("no painter, no draw", 1);
+	ok("no context, no draw", total(calls) == 0u);
 	ok("and none of them called or sampled anything",
 	   total(calls) == 0u && total(notes) == 0u);
 }

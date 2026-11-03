@@ -979,9 +979,13 @@ What runs where, and why each piece is this board's or shared:
   left); the console stays the shallowest.  Issue #165 made the report path
   8 B shallower by the ELF (`nn_active_report_to` tail-calls
   `nn_active_core_report_to` as `nn_active_report` did, and the latter's frame
-  is 32 B where `nn_active_core_report`'s was 40) and left entry and draw
-  unchanged; not re-measured, so the console figure above stays an upper
-  bound.
+  is 32 B where `nn_active_core_report`'s was 40) and left entry unchanged;
+  the review of #165 made the shared code build the painter, which puts the
+  draw 8 B deeper on the GUIX thread (`panel_paint` 32 B where it was 64, and
+  `nn_active_core_draw_on` 40 B calling the plugin where `nn_active_core_draw`
+  was 16 B and tail-called it) -- 412 + 8 is still far under the 1,024 B
+  allowance.  Not re-measured, so the console figure above stays an upper
+  bound and the GUIX one is 8 B short of it.
 
 #### The draw budget
 

@@ -92,11 +92,11 @@ int nn_active_decode(struct nn_model *m)
 	return nn_active_core_decode(nn_active_facts.core, d, n);
 }
 
-int nn_active_draw(const struct plugin_painter *paint)
+int nn_active_draw_on(void *ctx)
 {
 	if (!nn_active_held())
 		return NN_ACTIVE_NOT_HELD;
-	nn_active_core_draw(nn_active_facts.core, paint);
+	nn_active_core_draw_on(nn_active_facts.core, ctx);
 	return 0;
 }
 

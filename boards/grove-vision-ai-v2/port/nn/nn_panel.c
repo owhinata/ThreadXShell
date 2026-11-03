@@ -77,17 +77,17 @@ static void nn_ov_paint(void *ctx)
 {
 	TX_INTERRUPT_SAVE_AREA
 	const struct nn_ov_canvas *cv = ctx;
-	struct plugin_painter paint;
 	struct plugin_paint_budget bud;
 	uint32_t spent;
 
 	bud.pixels  = NN_OV_DRAW_PIXELS;
 	bud.ops     = NN_OV_DRAW_OPS;
 	bud.refused = 0u;
-	plugin_paint_bind(&paint, &bud, cv->fb, cv->w, cv->h);
-	/* NN_ACTIVE_NOT_HELD paints nothing and is counted by the entry check
-	 * itself; there is nothing more to do with it here. */
-	(void)nn_active_draw(&paint);
+	/* The context only: the painter is built by the shared draw, from the
+	 * board's table (issue #165).  NN_ACTIVE_NOT_HELD paints nothing and is
+	 * counted by the entry check itself; there is nothing more to do with it
+	 * here. */
+	(void)nn_active_draw_on(plugin_paint_target(&bud, cv->fb, cv->w, cv->h));
 
 	/*
 	 * What it actually spent, so the cap can be judged against something

@@ -98,9 +98,12 @@ int nn_active_core_shapes_ok(const struct nn_active_board *b,
 int nn_active_core_decode(const struct nn_active_board *b,
                           const struct tensor_desc *d, unsigned n);
 
-/** Let the plugin paint.  Nothing with no plugin, no draw slot or no painter. */
-void nn_active_core_draw(const struct nn_active_board *b,
-                         const struct plugin_painter *paint);
+/** Let the plugin paint onto @p ctx, the board's drawing target and budget.
+ *  The painter is built here, from the board's plugin_board_bindings (issue
+ *  #165): the board hands a context and no function, so no painter it built
+ *  or edited reaches a plugin.  Nothing with no plugin, no draw slot or no
+ *  context. */
+void nn_active_core_draw_on(const struct nn_active_board *b, void *ctx);
 
 /** Will it paint?  0 with no plugin. */
 int nn_active_core_can_draw(const struct nn_active_board *b);

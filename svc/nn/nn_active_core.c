@@ -63,14 +63,20 @@ int nn_active_core_decode(const struct nn_active_board *b,
 	return BF_ERR_UNINIT;
 }
 
-void nn_active_core_draw(const struct nn_active_board *b,
-                         const struct plugin_painter *paint)
+void nn_active_core_draw_on(const struct nn_active_board *b, void *ctx)
 {
 	plugin_draw_fn fn = (plugin_draw_fn)b->slot(PLUGIN_SLOT_DRAW);
+	struct plugin_painter paint;
 
-	if (nn_active_core_is_plugin(b) && fn != NULL && paint != NULL) {
+	if (nn_active_core_is_plugin(b) && fn != NULL && ctx != NULL) {
+		/* [!] BUILT HERE, NOT BY THE BOARD (issue #165).  The painter's
+		 * three primitives are the board table's, the words the build
+		 * derives the painter veneers' stack from; a painter the board
+		 * built could be edited between the two.  It lives in this frame,
+		 * so the plugin is called, not tail-called. */
+		plugin_painter_init(&paint, ctx);
 		b->note(PLUGIN_SLOT_DRAW, NN_ACTIVE_CORE_SP());
-		fn(paint);
+		fn(&paint);
 	}
 	/* Otherwise nothing: with no plugin there is no result to paint. */
 }

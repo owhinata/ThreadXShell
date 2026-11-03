@@ -6,9 +6,10 @@
  * @file    plugin_load_body.h
  * @brief   Container and manifest validation: the one body.  See plugin_load.h.
  *
- * [!] NOT A HEADER TO INCLUDE, AND NOTHING HERE HAS EXTERNAL LINKAGE (issue
- * #165).  Every function is static.  Exactly two TUs include it and each adds
- * ONE entry: svc/plugin/plugin_load_board.c, the firmware's plugin_parse(),
+ * [!] NOT A HEADER TO INCLUDE (issue #165).  Every function is static; the
+ * one object with external linkage is the guard below.  Exactly two TUs
+ * include it and each adds ONE entry: svc/plugin/plugin_load_board.c, the
+ * firmware's plugin_parse(),
  * which reads the board's policy by name (plugin_board_policy), and
  * svc/plugin/plugin_load_host.c, the host's plugin_parse_with_policy(), which
  * takes a policy argument for the container verifier and the host tests.  One
@@ -42,6 +43,18 @@
 #include <string.h>
 
 #include "crc32.h"
+
+/*
+ * [!] ONE FILE PER LINK MAY INCLUDE THIS (issue #165 review).  "Not a header
+ * to include" was a sentence: a board file could include it and call the
+ * static body with a policy of its own, and no name the build watches would
+ * appear.  So it carries one definition with external linkage, and a second
+ * file that includes it in the same link is a multiple definition, refused by
+ * the linker (LTO or not).  The firmware's one includer is plugin_load_board.c;
+ * the host's is plugin_load_host.c, and no link takes both.  Read by nothing.
+ */
+extern const unsigned char plugin_load_body_once;
+__attribute__((used)) const unsigned char plugin_load_body_once = 1u;
 
 /* ---- little-endian field reads ------------------------------------------- */
 

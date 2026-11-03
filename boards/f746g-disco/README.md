@@ -536,14 +536,23 @@ is no built-in model) and after `nn model unload`.
   none of it (CMSIS-NN CONV_2D's bias check is dead code: it fetches the bias
   as output 2, always null; the reference kernels' `TFLITE_DCHECK`s are
   compiled out by `NDEBUG`), so a constant exactly its own shape's bytes was
-  still read past the model in `.sdram.ai`.  The other operators of `extended`
-  have empty rules in this step (ADD / SUB / MUL, PAD, STRIDED_SLICE,
-  TRANSPOSE, RESIZE_* and CONCATENATION follow in the second step of the
-  issue).  TFLM's person_detect and the 44 models found that pass the verifier
-  keep their verdict.  Cost: +576 B of Flash on `build/f746-tflm` (`.text`
-  542,544 -> 543,112 B, `.rodata` unchanged; `shell.bin` 618,004 -> 618,580 B; the
-  rules' helpers are out of line, the header's one exception to forced inline);
-  the `null` tree is byte-identical.
+  still read past the model in `.sdram.ai`.  The same holds for the operators
+  whose index tensors or shapes size a kernel's reads: PAD's paddings INT32 and
+  its input rank equal to the output's; STRIDED_SLICE's begin / end / strides
+  INT32 with the input's rank of elements each; TRANSPOSE's permutation INT32;
+  RESIZE_BILINEAR / RESIZE_NEAREST_NEIGHBOR's size INT32, rank 1, 2 elements,
+  an output of rank 4 and, when the size has data, its two values equal to the
+  output's height and width; an ADD / SUB / MUL (two inputs) output that is the
+  broadcast of its inputs; a CONCATENATION whose inputs have the output's rank
+  and dims but the axis, and whose axis dims add up to the output's -- all
+  FORMAT.  [!] A RESIZE size WITHOUT data is not compared: `Prepare()` refuses
+  it on the board (`NN_MODEL_ERR_ARENA`, it must be a constant) while
+  `verify_tflite`, which does not plan, passes it -- a difference that predates
+  the rule.  TFLM's person_detect and the 44 models found that pass the
+  verifier keep their verdict.  Cost: +1,344 B of Flash on `build/f746-tflm`
+  (`.text` 542,544 -> 543,880 B, `.rodata` unchanged; `shell.bin` 618,004 ->
+  619,348 B; the rules' helpers are out of line, the header's one exception to
+  forced inline); the `null` tree is byte-identical.
 - `stedgeai_reloc` is the same: it starts empty, and `builtin` used to mean
   "unload" there before #131 (use `nn model unload`).
 - `stedgeai_reloc` refuses the same dimension with the same `-13` (issue
@@ -985,8 +994,9 @@ tensors, quantization vectors too long or inconsistent, a buffer index past the
 buffer vector, an offline plan that does not match the graph, no
 operator-code vector, a tensor type without a size, a constant whose data is not
 exactly its shape's bytes, data on a tensor the graph writes, an operator code
-index past the code vector, or a CONV_2D / DEPTHWISE_CONV_2D / FULLY_CONNECTED
-whose tensors do not fit together (#185), is
+index past the code vector, or an operator whose tensors do not fit together
+(conv / depthwise / FC channels and bias, PAD / STRIDED_SLICE / TRANSPOSE /
+RESIZE index tensors, ADD / SUB / MUL broadcast, CONCATENATION shapes, #185), is
 `NN_MODEL_ERR_FORMAT`, a tensor above rank 6 (an I/O tensor above
 4) `NN_MODEL_ERR_TENSOR`, an I/O dimension outside 0..65535 `NN_MODEL_ERR_DIMS`), and the operators the firmware registers -- read from
 `svc/nn/tflm/nn_tflm_ops.h` under the `extended` profile, the same list

@@ -2590,6 +2590,9 @@ Vela models keep their verdict.  Cost: ITCM 0 B (`.text` 234,524 B as before,
 `check_placement_budget` used 240,640 B, the same 41 veneers and no new symbol),
 `.text_cold` +24 B (16,352 -> 16,376 B), `.rodata` unchanged; `opcode_index` is
 read through `Table::GetField<int32_t>` (`nn_tflm_op_opcode_index()`), as above.
+The second step's rules (PAD, STRIDED_SLICE, TRANSPOSE, RESIZE_*, ADD / SUB /
+MUL, CONCATENATION) are not compiled here either: every loaded section of
+`shell.elf` is byte-identical to the first step's.
 
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 

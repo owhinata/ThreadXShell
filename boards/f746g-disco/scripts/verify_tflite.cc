@@ -29,7 +29,8 @@
  *      every tensor's type, every constant's data length against its shape, no
  *      data on a tensor the graph writes, every operator's code index, and
  *      the operator rules this profile's operators have: CONV_2D,
- *      DEPTHWISE_CONV_2D and FULLY_CONNECTED's tensors fitting together),
+ *      DEPTHWISE_CONV_2D, FULLY_CONNECTED, PAD, STRIDED_SLICE, TRANSPOSE,
+ *      RESIZE_*, ADD / SUB / MUL and CONCATENATION's tensors fitting together),
  *      every tensor's rank, and that every
  *      DECLARED dimension of subgraph 0's I/O tensors fits a descriptor
  *      (0..65535) -- the FIRMWARE'S OWN check, svc/nn/tflm/nn_tflm_model_check.h,
@@ -226,11 +227,15 @@ int main(int argc, char **argv)
 		       "          bytes (or it has a negative dimension or more than %u),\n"
 		       "          a graph input / output or an operator output has data,\n"
 		       "          an operator names an operator code that does not exist,\n"
-		       "          or a CONV_2D / DEPTHWISE_CONV_2D / FULLY_CONNECTED\n"
-		       "          operator's tensors do not fit together (their ranks,\n"
+		       "          or an operator's tensors do not fit together: a\n"
+		       "          CONV_2D / DEPTHWISE_CONV_2D / FULLY_CONNECTED's ranks,\n"
 		       "          the filter's or weights' channels against the output's,\n"
-		       "          the depth multiplier, the bias's length and type).  The\n"
-		       "          board refuses it as NN_MODEL_ERR_FORMAT (%d).\n",
+		       "          the depth multiplier, the bias's length and type; a\n"
+		       "          PAD / STRIDED_SLICE / TRANSPOSE / RESIZE index tensor's\n"
+		       "          type, length or values; an ADD / SUB / MUL output that\n"
+		       "          is not the broadcast of its inputs; a CONCATENATION\n"
+		       "          whose inputs do not add up to its output.  The board\n"
+		       "          refuses it as NN_MODEL_ERR_FORMAT (%d).\n",
 		       NN_TFLM_MAX_OP_TENSORS, NN_TFLM_MAX_QUANT_CHANNELS,
 		       NN_TFLM_MAX_TENSOR_RANK - 1u, NN_TFLM_MAX_QUANT_REFS,
 		       NN_TFLM_MAX_TENSOR_RANK, NN_MODEL_ERR_FORMAT);
@@ -284,8 +289,9 @@ int main(int argc, char **argv)
 	 * ones, which a kernel's Prepare() could change, are not seen here), and every
 	 * BUILTIN OPERATOR CODE it references is in the registered set; of the kernels'
 	 * shape / type constraints, the walk's operator rules (issue #185) hold only
-	 * CONV_2D / DEPTHWISE_CONV_2D / FULLY_CONNECTED's filter, weights, bias and
-	 * output together.  What was NOT established, and cannot be from here, is that
+	 * those by which a kernel reads a constant or sizes its loops by another
+	 * tensor: conv / depthwise / FC filter, weights, bias and output, the index
+	 * tensors' types and lengths, broadcast and concatenation shapes.  What was NOT established, and cannot be from here, is that
 	 * each kernel's Prepare() accepts the rest of this model's tensor shapes and
 	 * types, that the operator VERSIONS are
 	 * ones these kernels implement, or that the activations fit the arena -- all three
@@ -296,8 +302,9 @@ int main(int argc, char **argv)
 	 * than it earned.
 	 */
 	printf("RESULT  : PASS -- structurally valid, schema version %d, declared I/O\n"
-	       "          shapes fit 0..65535, convolution / fully connected tensors\n"
-	       "          fit together, and no unregistered builtin operators.\n"
+	       "          shapes fit 0..65535, the operators' tensors fit together\n"
+	       "          as the walk's rules check, and no unregistered builtin\n"
+	       "          operators.\n"
 	       "          Remaining checks happen on the board when `nn model load`\n"
 	       "          calls AllocateTensors(): the planned I/O shapes, operator\n"
 	       "          versions, each kernel's other shape/type constraints, and\n"

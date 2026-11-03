@@ -256,10 +256,29 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185).  The walk 
      other dimensions multiplied, times `weights[1]` (no division; a product
      past 32 bits is refused before it wraps); a bias of `weights[0]` elements
      (FLOAT32 / FLOAT32, INT8 / INT32, INT16 / INT64).
-   - Every other registered operator's rule is empty, its reason beside it
-     (ADD / SUB / MUL, PAD, STRIDED_SLICE, TRANSPOSE, RESIZE_* and CONCATENATION
-     get theirs in the second step of issue #185); the ethos-u profile has only
-     CUSTOM's, which is empty, so on grove-vision-ai-v2 R0 is all that runs.
+   - R4 PAD: the paddings INT32 (read as int32 whatever their type) and the
+     input's rank equal to the output's (TFLM counts the paddings against the
+     output's rank but reads 2 x the input's, inside `AllocateTensors()`).
+   - R5 STRIDED_SLICE: begin, end and strides INT32, each with the input's rank
+     of elements (read so, no count check).
+   - R6 TRANSPOSE: the permutation INT32 (its count and values are checked live).
+   - R7 RESIZE_BILINEAR / RESIZE_NEAREST_NEIGHBOR: the size INT32, rank 1, 2
+     elements, the output rank 4; when the size has data, its two values equal
+     `output[1]` and `output[2]` (the kernels write the output by those values).
+     [!] A size without data is not compared: `Prepare()`'s live "constant"
+     check refuses it on a board (`NN_MODEL_ERR_ARENA`) and the gates, which do
+     not plan, pass it -- an existing difference this does not change.
+   - R8 ADD / SUB / MUL (two inputs): the three ranks at most 6, each input's at
+     most the output's; aligned on the right, each input dimension 1 or the
+     output's and at least one of the two the output's -- the output is the
+     broadcast (the loop runs over the output's dims and steps an input wherever
+     its dimension is not 1, so anything else is read past).
+   - R9 CONCATENATION: every input of the output's rank, the axis (absent: 0,
+     negative: from the end) in range, every other dimension the output's, the
+     axis dimensions (none negative) adding up to the output's.
+   - Every other registered operator's rule is empty, its reason beside it; the
+     ethos-u profile has only CUSTOM's, which is empty, so on grove-vision-ai-v2
+     R0 is all that runs.
    A list shorter than the kernel needs, or a required tensor that is -1, is
    left to `Prepare()`'s live check; every rule judges its tensors' ranks before
    any dimension (so a rank-7 convolution input is FORMAT, not TENSOR) and

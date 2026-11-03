@@ -197,6 +197,23 @@
  *                      output's last dimension (cmsis_nn/fully_connected.cc),
  *                      reference (float) by weights[0], and no Prepare() check
  *                      relates the three; int16 reads the bias as int64.
+ *   PAD / STRIDED_SLICE  the index tensors are read as int32 whatever their
+ *   / TRANSPOSE        type, PAD's paddings 2 x the INPUT's rank of them while
+ *                      Prepare() counts them against the OUTPUT's rank
+ *                      (pad_common.cc), STRIDED_SLICE's begin / end / strides
+ *                      the input's rank each with no count check
+ *                      (strided_slice_common.cc) -- both inside
+ *                      AllocateTensors().
+ *   RESIZE_*           the size read as 2 int32 (bilinear's count unchecked)
+ *                      and the output written by the size's VALUES
+ *                      (reference/resize_bilinear.h, resize_nearest_neighbor.h).
+ *   ADD / SUB / MUL    the broadcast loop runs over the OUTPUT's dims and steps
+ *                      an input only where its dimension is not 1
+ *                      (reference/broadcast_loop.h), so an input dimension that
+ *                      is neither 1 nor the output's is read past; same shapes
+ *                      write the input's element count (DCHECK only).
+ *   CONCATENATION      each input read by its axis dimension x the output's
+ *                      inner size (reference/concatenation.h; DCHECKs only).
  *
  * Every rule is FORMAT and runs in the operator loop after the operator's lists,
  * quantization and output data are proven.  R0 first, for every profile: the
@@ -234,6 +251,31 @@
  *                         elements, FLOAT32 / FLOAT32, INT8 / INT32 or
  *                         INT16 / INT64.  keep_num_dims is not read (the read
  *                         sizes follow from the shapes alone).
+ *   R4 PAD                the paddings INT32; input rank == output rank (the
+ *                         count, 2 x the output's rank, and the input rank <= 4
+ *                         are Prepare()'s live checks).
+ *   R5 STRIDED_SLICE      begin, end and strides INT32, each with the input's
+ *                         rank of elements.
+ *   R6 TRANSPOSE          the permutation INT32 (its count and values are
+ *                         Prepare()'s live checks).
+ *   R7 RESIZE_BILINEAR /  the size INT32, rank 1, 2 elements, the output rank
+ *      _NEAREST_NEIGHBOR  4; when the size has data (#183 has proven it is the
+ *                         8 bytes), its two values equal output[1] and
+ *                         output[2].  [!] Without data the values are not
+ *                         compared: Prepare()'s live "constant" check refuses
+ *                         such a model on the board, as NN_MODEL_ERR_ARENA,
+ *                         while the gates, which do not plan, pass it -- a
+ *                         difference that predates this walk and stays.
+ *   R8 ADD / SUB / MUL    (two inputs) the three ranks at most
+ *                         NN_TFLM_MAX_TENSOR_RANK, each input's at most the
+ *                         output's; aligned on the right, each input dimension
+ *                         1 or the output's, and at least one of the two the
+ *                         output's (the output is their broadcast).
+ *   R9 CONCATENATION      every input of the output's rank (at most
+ *                         NN_TFLM_MAX_TENSOR_RANK); the axis (absent options:
+ *                         0, negative: from the end) in range; every other
+ *                         dimension the output's; the axis dimensions, none
+ *                         negative, adding up (64 bits) to the output's.
  *
  * Every other registered operator's rule is empty, with its reason beside it.
  * How they read: a tensor through one helper (-1 is "none", a null table entry
@@ -243,7 +285,9 @@
  * rule, TENSOR, runs later, so a rank-7 convolution input is FORMAT here); an
  * options table's type before its field.  What is NOT added: what Prepare()
  * already refuses with a live TF_LITE_ENSURE (conv's batch, the input-channel
- * division).  The rules compare dimension values and never size work by them.
+ * division, PAD's count, TRANSPOSE's count and values).  The rules compare
+ * dimension values and never size work by them (CONCATENATION's at most
+ * NN_TFLM_MAX_OP_TENSORS x NN_TFLM_MAX_TENSOR_RANK, the most any rule reads).
  *
  * Structure is checked BEFORE anything else, so a model
  * broken in two ways is FORMAT; then the count (SHAPE), the rank (TENSOR) and the
@@ -286,10 +330,12 @@
  *   per operator entry  for each output index, one tensor, one buffer and its
  *                       data length (issue #183)
  *   per operator entry  one opcode_index compare, one operator code's two
- *                       fields, and its rule: at most 4 tensors, their ranks
- *                       compared before any dimension, at most 3 x
- *                       NN_TFLM_MAX_TENSOR_RANK dimension values and one
- *                       options field (issue #185)
+ *                       fields, and its rule: at most NN_TFLM_MAX_OP_TENSORS
+ *                       tensors (4 but for CONCATENATION), their ranks
+ *                       compared before any dimension, at most
+ *                       (NN_TFLM_MAX_OP_TENSORS + 1) x NN_TFLM_MAX_TENSOR_RANK
+ *                       dimension values, one options field and, for RESIZE,
+ *                       two data words (issue #185)
  *
  * Every tensor and operator entry is one table visit of the verifier (a shared
  * subgraph's are visited once per entry naming it), so behind the 16 / 4096
@@ -418,7 +464,7 @@
  * them reaches grove-vision-ai-v2's ITCM; forced inline, each rule got its own
  * copy of them and wio-lite-ai's Flash paid 1.2 KB more.  Kept out of line
  * (noinline): left to the inliner they still cost 272 B more there.  The rules
- * step 2 adds are spelled the same way. */
+ * R4 .. R9 (step 2) are spelled the same way. */
 #define NN_TFLM_RULE_HELPER static inline __attribute__((noinline))
 
 /** Verifier limits: nesting levels (schema-bounded at 6, see the file header) and
@@ -1027,8 +1073,10 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_xfby(const tflite::Operator *op,
 
 /* R1 (the file header). */
 NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_CONV_2D(const tflite::Operator *op,
-                                                  const nn_tflm_tensor_vec *tensors)
+                                                  const nn_tflm_tensor_vec *tensors,
+                                                  const nn_tflm_buffer_vec *buffers)
 {
+	(void)buffers;
 	const tflite::Tensor *x, *f, *b, *y;
 	bool apply;
 
@@ -1045,8 +1093,10 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_CONV_2D(const tflite::Operator *op,
 
 /* R2 (the file header). */
 NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_DEPTHWISE_CONV_2D(const tflite::Operator *op,
-                                                            const nn_tflm_tensor_vec *tensors)
+                                                            const nn_tflm_tensor_vec *tensors,
+                                                            const nn_tflm_buffer_vec *buffers)
 {
+	(void)buffers;
 	const tflite::Tensor *x, *f, *b, *y;
 	bool apply;
 
@@ -1078,8 +1128,10 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_DEPTHWISE_CONV_2D(const tflite::Operato
 
 /* R3 (the file header). */
 NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_FULLY_CONNECTED(const tflite::Operator *op,
-                                                          const nn_tflm_tensor_vec *tensors)
+                                                          const nn_tflm_tensor_vec *tensors,
+                                                          const nn_tflm_buffer_vec *buffers)
 {
+	(void)buffers;
 	const tflite::Tensor *x, *w, *b, *y;
 	bool apply;
 
@@ -1106,15 +1158,285 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_FULLY_CONNECTED(const tflite::Operator 
 	return nn_tflm_bias_ok(b, nn_tflm_dim(w, 0u), nn_tflm_tensor_type(x), false);
 }
 
+/* The tensors an operator's input @p j and output 0 name: false for a null
+ * table entry (FORMAT); *@p apply false when the rule does not apply -- the
+ * inputs list no longer than @p j or no output, or either one -1 (Prepare()'s
+ * live TF_LITE_ENSURE refuses those).  Lengths before elements. */
+NN_TFLM_RULE_HELPER bool nn_tflm_op_in_out(const tflite::Operator *op, uint32_t j,
+                                           const nn_tflm_tensor_vec *tensors,
+                                           const tflite::Tensor **x, const tflite::Tensor **y,
+                                           bool *apply)
+{
+	const flatbuffers::Vector<int32_t> *in = op->inputs();
+	const flatbuffers::Vector<int32_t> *out = op->outputs();
+
+	*apply = false;
+	if (in->size() <= j || out->size() < 1u)
+		return true;
+	if (!nn_tflm_op_tensor(in, j, tensors, x) || !nn_tflm_op_tensor(out, 0u, tensors, y))
+		return false;
+	*apply = *x && *y;
+	return true;
+}
+
+/* An index tensor (paddings, begin / end / strides, a permutation, a size) is
+ * INT32 -- the kernels read it as int32 whatever its declared type -- and, when
+ * @p want is not negative, has exactly @p want elements (rank judged first). */
+NN_TFLM_RULE_HELPER bool nn_tflm_index_tensor_ok(const tflite::Tensor *t, int32_t want)
+{
+	if (nn_tflm_tensor_type(t) != tflite::TensorType_INT32)
+		return false;
+	if (want < 0)
+		return true;
+
+	const uint32_t r = nn_tflm_rank(t);
+	uint32_t n;
+
+	if (r > NN_TFLM_MAX_TENSOR_RANK)
+		return false;
+	return nn_tflm_dims_count(t, 0u, r, &n) && n == (uint32_t)want;
+}
+
+/* R4 (the file header). */
+NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_PAD(const tflite::Operator *op,
+                                             const nn_tflm_tensor_vec *tensors,
+                                             const nn_tflm_buffer_vec *buffers)
+{
+	const tflite::Tensor *x, *p, *y;
+	bool apply;
+
+	(void)buffers;
+	if (!nn_tflm_op_in_out(op, 1u, tensors, &p, &y, &apply))
+		return false;
+	if (!apply)
+		return true;
+	if (!nn_tflm_op_tensor(op->inputs(), 0u, tensors, &x))
+		return false;
+	if (!x)
+		return true;
+	return nn_tflm_index_tensor_ok(p, -1) && nn_tflm_rank(x) == nn_tflm_rank(y);
+}
+
+/* R5 (the file header). */
+NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_STRIDED_SLICE(const tflite::Operator *op,
+                                                       const nn_tflm_tensor_vec *tensors,
+                                                       const nn_tflm_buffer_vec *buffers)
+{
+	const flatbuffers::Vector<int32_t> *in = op->inputs();
+	const tflite::Tensor *x, *t[3];
+
+	(void)buffers;
+	if (in->size() < 4u)
+		return true;
+	if (!nn_tflm_op_tensor(in, 0u, tensors, &x))
+		return false;
+	for (uint32_t j = 0; j < 3u; j++)
+		if (!nn_tflm_op_tensor(in, 1u + j, tensors, &t[j]))
+			return false;
+	if (!x || !t[0] || !t[1] || !t[2])
+		return true;
+
+	const uint32_t rx = nn_tflm_rank(x);
+
+	if (rx > NN_TFLM_MAX_TENSOR_RANK)
+		return false;
+	for (uint32_t j = 0; j < 3u; j++)
+		if (!nn_tflm_index_tensor_ok(t[j], (int32_t)rx))
+			return false;
+	return true;
+}
+
+/* R6 (the file header). */
+NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_TRANSPOSE(const tflite::Operator *op,
+                                                   const nn_tflm_tensor_vec *tensors,
+                                                   const nn_tflm_buffer_vec *buffers)
+{
+	const tflite::Tensor *p, *y;
+	bool apply;
+
+	(void)buffers;
+	if (!nn_tflm_op_in_out(op, 1u, tensors, &p, &y, &apply))
+		return false;
+	return !apply || nn_tflm_index_tensor_ok(p, -1);
+}
+
+/* R7, both RESIZE operators (the file header).  The size's two values are read
+ * only when it has data, which #183 has proven is exactly 8 bytes here (INT32,
+ * 2 elements); without data the values are not compared (Prepare()'s live
+ * "constant" check refuses such a model on the board as NN_MODEL_ERR_ARENA, and
+ * the gates, which do not plan, pass it). */
+NN_TFLM_RULE_HELPER bool nn_tflm_resize_ok(const tflite::Operator *op,
+                                           const nn_tflm_tensor_vec *tensors,
+                                           const nn_tflm_buffer_vec *buffers)
+{
+	const tflite::Tensor *sz, *y;
+	bool apply;
+
+	if (!nn_tflm_op_in_out(op, 1u, tensors, &sz, &y, &apply))
+		return false;
+	if (!apply)
+		return true;
+	if (!nn_tflm_index_tensor_ok(sz, 2) || nn_tflm_rank(sz) != 1u || nn_tflm_rank(y) != 4u)
+		return false;
+
+	const flatbuffers::Vector<uint8_t> *d =
+		nn_tflm_buffer_data(buffers, nn_tflm_tensor_buffer(sz));
+
+	if (!d)
+		return true;
+	return flatbuffers::ReadScalar<int32_t>(d->data()) == nn_tflm_dim(y, 1u) &&
+	       flatbuffers::ReadScalar<int32_t>(d->data() + 4) == nn_tflm_dim(y, 2u);
+}
+
+NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_RESIZE_BILINEAR(const tflite::Operator *op,
+                                                         const nn_tflm_tensor_vec *tensors,
+                                                         const nn_tflm_buffer_vec *buffers)
+{
+	return nn_tflm_resize_ok(op, tensors, buffers);
+}
+
+NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_RESIZE_NEAREST_NEIGHBOR(const tflite::Operator *op,
+                                                                 const nn_tflm_tensor_vec *tensors,
+                                                                 const nn_tflm_buffer_vec *buffers)
+{
+	return nn_tflm_resize_ok(op, tensors, buffers);
+}
+
+/* R8, ADD / SUB / MUL with two inputs (the file header): the three ranks at
+ * most NN_TFLM_MAX_TENSOR_RANK, each input's at most the output's, and, aligned
+ * on the right (a missing leading dimension is 1), each input dimension 1 or the
+ * output's and at least one of the two the output's -- the output is the
+ * broadcast of the two, which is what the kernels loop over. */
+NN_TFLM_RULE_HELPER bool nn_tflm_binary_ok(const tflite::Operator *op,
+                                           const nn_tflm_tensor_vec *tensors)
+{
+	const flatbuffers::Vector<int32_t> *in = op->inputs();
+	const tflite::Tensor *a, *b, *y;
+	bool apply;
+
+	if (in->size() != 2u)
+		return true;
+	if (!nn_tflm_op_in_out(op, 1u, tensors, &b, &y, &apply))
+		return false;
+	if (!apply)
+		return true;
+	if (!nn_tflm_op_tensor(in, 0u, tensors, &a))
+		return false;
+	if (!a)
+		return true;
+
+	const uint32_t ra = nn_tflm_rank(a), rb = nn_tflm_rank(b), ry = nn_tflm_rank(y);
+
+	if (ry > NN_TFLM_MAX_TENSOR_RANK || ra > ry || rb > ry)
+		return false;
+	for (uint32_t i = 0; i < ry; i++) {
+		const int32_t o = nn_tflm_dim(y, i);
+		const int32_t da = i >= ry - ra ? nn_tflm_dim(a, i - (ry - ra)) : 1;
+		const int32_t db = i >= ry - rb ? nn_tflm_dim(b, i - (ry - rb)) : 1;
+
+		if ((da != o && da != 1) || (db != o && db != 1))
+			return false;
+		if (da != o && db != o)
+			return false;
+	}
+	return true;
+}
+
+NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_ADD(const tflite::Operator *op,
+                                             const nn_tflm_tensor_vec *tensors,
+                                             const nn_tflm_buffer_vec *buffers)
+{
+	(void)buffers;
+	return nn_tflm_binary_ok(op, tensors);
+}
+
+NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_SUB(const tflite::Operator *op,
+                                             const nn_tflm_tensor_vec *tensors,
+                                             const nn_tflm_buffer_vec *buffers)
+{
+	(void)buffers;
+	return nn_tflm_binary_ok(op, tensors);
+}
+
+NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_MUL(const tflite::Operator *op,
+                                             const nn_tflm_tensor_vec *tensors,
+                                             const nn_tflm_buffer_vec *buffers)
+{
+	(void)buffers;
+	return nn_tflm_binary_ok(op, tensors);
+}
+
+/* R9 (the file header): every input (a -1 among them leaves the rule to
+ * Prepare()) of the output's rank, at most NN_TFLM_MAX_TENSOR_RANK; the axis
+ * (ConcatenationOptions, 0 when absent; a negative one counts from the end) in
+ * range; every other dimension the output's; the inputs' axis dimensions, none
+ * negative, adding up (64 bits, at most NN_TFLM_MAX_OP_TENSORS addends) to the
+ * output's. */
+NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_CONCATENATION(const tflite::Operator *op,
+                                                       const nn_tflm_tensor_vec *tensors,
+                                                       const nn_tflm_buffer_vec *buffers)
+{
+	const flatbuffers::Vector<int32_t> *in = op->inputs();
+	const tflite::Tensor *x, *y;
+	bool apply;
+
+	(void)buffers;
+	if (!nn_tflm_op_in_out(op, 0u, tensors, &x, &y, &apply))
+		return false;
+	if (!apply)
+		return true;
+	for (uint32_t j = 1; j < in->size(); j++) {
+		if (!nn_tflm_op_tensor(in, j, tensors, &x))
+			return false;
+		if (!x)
+			return true;
+	}
+
+	const uint32_t ry = nn_tflm_rank(y);
+
+	if (ry > NN_TFLM_MAX_TENSOR_RANK)
+		return false;
+
+	const flatbuffers::Table *o =
+		nn_tflm_op_options(op, tflite::BuiltinOptions_ConcatenationOptions);
+	int32_t axis = o ? o->GetField<int32_t>(tflite::ConcatenationOptions::VT_AXIS, 0) : 0;
+
+	if (axis < 0)
+		axis += (int32_t)ry;
+	if (axis < 0 || (uint32_t)axis >= ry)
+		return false;
+
+	int64_t sum = 0;
+
+	for (uint32_t j = 0; j < in->size(); j++) {
+		nn_tflm_op_tensor(in, j, tensors, &x);   /* proven above */
+		if (nn_tflm_rank(x) != ry)
+			return false;
+		for (uint32_t d = 0; d < ry; d++) {
+			const int32_t v = nn_tflm_dim(x, d);
+
+			if (d == (uint32_t)axis) {
+				if (v < 0)
+					return false;
+				sum += v;
+			} else if (v != nn_tflm_dim(y, d)) {
+				return false;
+			}
+		}
+	}
+	return sum == (int64_t)nn_tflm_dim(y, (uint32_t)axis);
+}
+
 /* The empty rules: each kernel reads its constants by their own shape (proven
- * above, issue #183) or reads none.  One line each says why.  The rules of
- * issue #185's second step (PAD .. CONCATENATION) are empty here until it. */
+ * above, issue #183) or reads none.  One line each says why. */
 #define NN_TFLM_OP_RULE_NONE(e)                                                       \
 	NN_TFLM_CHECK_INLINE bool nn_tflm_op_rule_##e(const tflite::Operator *op,      \
-	                                              const nn_tflm_tensor_vec *tensors) \
+	                                              const nn_tflm_tensor_vec *tensors, \
+	                                              const nn_tflm_buffer_vec *buffers) \
 	{                                                                             \
 		(void)op;                                                             \
 		(void)tensors;                                                        \
+		(void)buffers;                                                        \
 		return true;                                                          \
 	}
 NN_TFLM_OP_RULE_NONE(QUANTIZE)         /* no constant; elementwise over its own input */
@@ -1129,27 +1451,19 @@ NN_TFLM_OP_RULE_NONE(AVERAGE_POOL_2D)  /* likewise */
 NN_TFLM_OP_RULE_NONE(MEAN)             /* the axis constant by its own shape (INT32 live-checked) */
 NN_TFLM_OP_RULE_NONE(RESHAPE)          /* the shape constant is not read (element count live-checked) */
 NN_TFLM_OP_RULE_NONE(CUSTOM)           /* ethos-u: the NPU reads what the command stream says (issue #184) */
-NN_TFLM_OP_RULE_NONE(ADD)              /* step 2 of issue #185: the broadcast shapes */
-NN_TFLM_OP_RULE_NONE(SUB)              /* step 2 of issue #185: the broadcast shapes */
-NN_TFLM_OP_RULE_NONE(MUL)              /* step 2 of issue #185: the broadcast shapes */
-NN_TFLM_OP_RULE_NONE(PAD)              /* step 2 of issue #185: the paddings' type and the ranks */
-NN_TFLM_OP_RULE_NONE(STRIDED_SLICE)    /* step 2 of issue #185: begin / end / strides */
-NN_TFLM_OP_RULE_NONE(TRANSPOSE)        /* step 2 of issue #185: the permutation's type */
-NN_TFLM_OP_RULE_NONE(RESIZE_BILINEAR)  /* step 2 of issue #185: the size constant */
-NN_TFLM_OP_RULE_NONE(RESIZE_NEAREST_NEIGHBOR) /* step 2 of issue #185: the size constant */
-NN_TFLM_OP_RULE_NONE(CONCATENATION)    /* step 2 of issue #185: the inputs' shapes */
 #undef NN_TFLM_OP_RULE_NONE
 
 /* The rule of the operator whose kind is @p kind, chosen among the registered
  * operators only (nn_tflm_ops.h's selected list, one case each); any other kind
  * passes here and is refused by the resolver and the gates' operator list. */
 NN_TFLM_CHECK_INLINE bool nn_tflm_op_rule_ok(int32_t kind, const tflite::Operator *op,
-                                             const nn_tflm_tensor_vec *tensors)
+                                             const nn_tflm_tensor_vec *tensors,
+                                             const nn_tflm_buffer_vec *buffers)
 {
 	switch (kind) {
 #define NN_TFLM_OP_RULE_CASE(e, m)               \
 	case tflite::BuiltinOperator_##e:        \
-		return nn_tflm_op_rule_##e(op, tensors);
+		return nn_tflm_op_rule_##e(op, tensors, buffers);
 	NN_TFLM_OPS_ALL(NN_TFLM_OP_RULE_CASE)
 #undef NN_TFLM_OP_RULE_CASE
 	default:
@@ -1239,7 +1553,7 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg,
 
 		const tflite::OperatorCode *code = nn_tflm_vec_table(codes, ci);
 
-		if (!code || !nn_tflm_op_rule_ok(nn_tflm_opcode_kind(code), op, tensors))
+		if (!code || !nn_tflm_op_rule_ok(nn_tflm_opcode_kind(code), op, tensors, buffers))
 			return false;
 	}
 	return true;

@@ -884,24 +884,30 @@ weights' channels against the output's, the depth multiplier (at least 1, and
 input channels x multiplier == filter channels), the input's element count
 (FULLY_CONNECTED), and a bias of exactly the channel count and of the type the
 kernel reads (INT32 under int8, FLOAT32 under float32, INT64, or INT32 for
-CONV_2D, under int16) -- each `NN_MODEL_ERR_FORMAT` (-7).  The CMSIS-NN int8
+CONV_2D, under int16); a PAD's paddings must be INT32 and its input and
+output ranks equal, and an ADD with two inputs must have an output that is
+their broadcast (each input dimension 1 or the output's, at least one of the
+two the output's, aligned on the right) -- each `NN_MODEL_ERR_FORMAT` (-7).  The CMSIS-NN int8
 kernels read the filter / weights and the bias by the OUTPUT's channel count
 and their `Prepare()` compares nothing of it (the reference kernels'
 `TFLITE_DCHECK`s are compiled out by `NDEBUG`), so a constant exactly its own
 shape's bytes was still read past the staging copy.  The rules are compiled
-from `nn_tflm_ops.h`'s selected list, so `blazeface` has CONV_2D's and
-DEPTHWISE_CONV_2D's only: a FULLY_CONNECTED is the gate's "did not register"
-REJECT there and FORMAT only on `mlperf` (the board and its gate always agree,
-being built with the same define).  [!] **`blazeface` is a define too now**
+from `nn_tflm_ops.h`'s selected list, so `blazeface` has CONV_2D's,
+DEPTHWISE_CONV_2D's, PAD's and ADD's only: a FULLY_CONNECTED that breaks its
+rule is the gate's "did not register" REJECT there and FORMAT only on `mlperf`,
+and SUB / MUL / STRIDED_SLICE / TRANSPOSE / RESIZE_* / CONCATENATION are
+unregistered on both (the board and its gate always agree, being built with
+the same define).  [!] **`blazeface` is a define too now**
 (`NN_TFLM_OPS_BLAZEFACE_PROFILE=1`): `nn_tflm_ops.h` has no default and does
 not build without exactly one profile, so a translation unit that misses the
 board's define fails instead of compiling another profile's list.  All 44
 models found that pass the verifier pass the rules (the pinned blazeface int8
-included).  Cost: +1,072 B of Flash on `blazeface` (`shell.elf` `.text` 285,216
--> 286,288 B, `.rodata` unchanged, `shell.bin` 374,392 -> 375,464 B), +1,296 B on
-`mlperf` (`CONFIG_MLPERF_TINY=OFF`; that tree already overflows FLASH by 4,736 B
-before the change, so it was measured linked with `--noinhibit-exec`: FLASH
-397,952 -> 399,248 B); the `null` tree is byte-identical.  The rules' helpers
+included).  Cost: +1,776 B of Flash on `blazeface` (`shell.elf` `.text` 285,216
+-> 286,992 B, `.rodata` unchanged, `shell.bin` 374,392 -> 376,168 B; PAD's and
+ADD's rules 704 of it), +2,136 B on `mlperf` (`CONFIG_MLPERF_TINY=OFF`; that tree
+already overflows FLASH by 4,736 B before the change, so it was measured linked
+with `--noinhibit-exec`: FLASH 397,952 -> 400,088 B); the `null` tree is
+byte-identical.  The rules' helpers
 are out of line (`NN_TFLM_RULE_HELPER`, the one exception to the header's forced
 inline): forced inline, each rule copied them and `blazeface` cost +2,248 B.
 

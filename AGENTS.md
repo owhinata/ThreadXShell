@@ -245,7 +245,7 @@ board README が正。
   データパス設定を書かない**（境界は**消費のされ方**）。
 - **op resolver は 1 個のまま**（**CMSIS-NN を持ち込まない**）。**境界の型変換はファイル側で剥がす。
   [!] Ethos-U backend の reload（`svc/nn/ethosu/nn_ethosu.cc`）は長さを取り `GetModel()` の前に境界付き verifier を通す**（**窓 → 長さ →
-  整列 → identifier → verifier → 走査**。**長さには下限も要り生アドレス形にも必須**、**limits と load の walk は全ボード共通の `nn_tflm_model_check.h`（walk は長さを要素より先に見て data の無いテンソルの値は読まない、#178。量子化の長さ（scale ≤ 4096・zp は無し/1/同長・per-channel の qd は rank 内（rank 0/1 は < 6）・op 参照の総和 ≤ 65536）も、#180。buffer index は範囲内・offline plan は件数語を全 subgraph のテンソル総数と照合し offset は -1 か 0 以上、#181。全テンソルの型は大きさのある型・data 付き定数は shape の積 x 要素サイズと buffer 長の等号・書かれるテンソル（op 出力・subgraph 0 の I/O）に data 不可、#183）、
+  整列 → identifier → verifier → 走査**。**長さには下限も要り生アドレス形にも必須**、**limits と load の walk は全ボード共通の `nn_tflm_model_check.h`（walk は長さを要素より先に見て data の無いテンソルの値は op 規則の比較でしか読まない、#178。量子化の長さ（scale ≤ 4096・zp は無し/1/同長・per-channel の qd は rank 内（rank 0/1 は < 6）・op 参照の総和 ≤ 65536）も、#180。buffer index は範囲内・offline plan は件数語を全 subgraph のテンソル総数と照合し offset は -1 か 0 以上、#181。全テンソルの型は大きさのある型・data 付き定数は shape の積 x 要素サイズと buffer 長の等号・書かれるテンソル（op 出力・subgraph 0 の I/O）に data 不可、#183。登録 op は定数を自分の形の内側で読む: conv / dw / FC の filter・bias の数と型、索引テンソル、broadcast / concat の形。規則は op 表から、#185）、
   I/O 規則は `nn_ethosu_io.h` の 1 箇所でホストゲートと共有**）。**ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ
   最後 / 対象は**入力テンソル 0** / `is_variable()` は拒否 / payload の総和 <= モデル長を歩く前に課金・入力 1..n の -1 拒否、#179。入力 2..n に data 不可、#183）。
 - **[!] `nn model load --name` はリースを切らさない**（`npu_hw_init()` 先 → 走査 → CRC → `nn_model_reload()` → plugin、**残らない失敗は必ず backend の release の後に `npu_hw_deinit()`**）。

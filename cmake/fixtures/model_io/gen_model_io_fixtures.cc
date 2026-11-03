@@ -110,7 +110,8 @@
  *                           rule applies to per-channel tensors only
  *   q_refs_65536.tflite     control: t2 (scale 4096) named twice by each of 8
  *                           ADD entries -- the sum exactly 65536 -- and one ADD
- *                           {t0} -> {t1} (t0 unquantized); t3 has scale 1
+ *                           {t0} -> {t1} (t0 unquantized); t3 has scale 1; the
+ *                           output t1 is [1, 4096], the broadcast of {t2, t2}
  *   q_refs_65537.tflite     the last ADD is {t3} -> {t1}: one more  -> FORMAT
  *
  * And two witnesses of the per-channel work bound, built the way that defeated the
@@ -288,6 +289,28 @@
  *                           graph I/O, weights [1, 1], input [0, 1]: the product
  *                           wraps to 0 in 32 bits), _out_last0 (output [1, 0],
  *                           weights [1, 4]) and _i16_i32 are refused
+ *   r4_*                    PAD, input [1, 2, 2, 1], paddings INT32 [4, 2]: _ok;
+ *                           _rank_ne (output rank 3), _pad_int8 refused
+ *   r5_*                    STRIDED_SLICE, input rank 4, begin / end / strides
+ *                           INT32 [4]: _ok; _begin_3, _strides_int8 refused
+ *   r6_*                    TRANSPOSE, perm INT32 [4]: _ok; _perm_int8 refused
+ *   r7_*                    RESIZE_BILINEAR (and _nn_ok NEAREST_NEIGHBOR), input
+ *                           [1, 2, 2, 1], size INT32 [2] = {4, 6}, output
+ *                           [1, 4, 6, 1]: _ok, _nn_ok and _nodata (the size
+ *                           without data: its values are not compared) are
+ *                           controls; _size_1, _size_3 ({4, 6, 0}), _size_int8,
+ *                           _size_rank2 ([1, 2]),
+ *                           _value_ne ({4, 7}) and _out_rank3 ([1, 4, 6]) refused
+ *   r8_*                    ADD (SUB / MUL where named) with two inputs:
+ *                           _broadcast [1, 3] + [2, 1] -> [2, 3], _same, _const
+ *                           ([3] with data) and _rank6 (not graph I/O) are
+ *                           controls; _dim_2_of_3 (and _sub_ / _mul_), _same_out_ne,
+ *                           _ones_to_2 ([1, 1] + [1, 1] -> [2, 2]), _in_rank_gt and
+ *                           _rank7 (FORMAT, not TENSOR) refused
+ *   r9_*                    CONCATENATION [1, 2, 2, 1] + [1, 2, 2, 3] -> [1, 2, 2, 4]:
+ *                           _axis3, _axis_neg1 are controls; _other_dim_ne,
+ *                           _sum_ne, _rank_ne (an input of rank 5), _axis_oob (4)
+ *                           refused
  *
  * Every file stays under 512 KB (checked here) and within the 4096 visits.
  *
@@ -840,11 +863,13 @@ bool write_payload_model(const std::string &dir, const pl_spec &sp)
 }
 
 /* issue #185: one tensor of an operator-rule model: data_len > 0 puts it on a
- * Buffer of its own with that many bytes, else on buffer 0 (no data). */
+ * Buffer of its own with that many bytes (`words`, little-endian int32, when
+ * given, else 0x11), else on buffer 0 (no data). */
 struct rtensor {
 	tflite::TensorType   type;
 	std::vector<int32_t> shape;
 	uint32_t             data_len;
+	std::vector<int32_t> words;
 };
 
 /* issue #185: one operator (named by one entry) over its own tensors. */
@@ -857,7 +882,8 @@ struct opr_spec {
 	std::vector<int32_t>    g_in;          /* subgraph 0's inputs / outputs */
 	std::vector<int32_t>    g_out;
 	int                     opts;          /* 0 none, 1 DepthwiseConv2DOptions
-	                                        * {dm}, 2 Conv2DOptions */
+	                                        * {dm}, 2 Conv2DOptions, 3
+	                                        * ConcatenationOptions {axis: dm} */
 	int32_t                 dm;
 	uint32_t                codes;         /* operator codes, all `kind` (0: 1) */
 	uint32_t                opcode_index;
@@ -889,7 +915,17 @@ bool write_op_model(const std::string &dir, const opr_spec &sp)
 
 		if (t.data_len) {
 			bi = (uint32_t)bv.size();
-			bv.push_back(tflite::CreateBuffer(fbb, const_data(fbb, t.data_len)));
+			if (t.words.empty()) {
+				bv.push_back(tflite::CreateBuffer(fbb, const_data(fbb, t.data_len)));
+			} else {
+				std::vector<uint8_t> b(t.data_len, 0u);
+
+				for (size_t k = 0; k < t.words.size() && 4u * k + 4u <= b.size(); k++)
+					for (int i = 0; i < 4; i++)
+						b[4u * k + (size_t)i] = (uint8_t)((uint32_t)t.words[k] >> (8 * i));
+				fbb.ForceVectorAlignment(b.size(), 1, 16);
+				bv.push_back(tflite::CreateBuffer(fbb, fbb.CreateVector(b)));
+			}
 		}
 		tv.push_back(tflite::CreateTensor(fbb, fbb.CreateVector(t.shape), t.type, bi,
 		                                  fbb.CreateString("t")));
@@ -905,6 +941,9 @@ bool write_op_model(const std::string &dir, const opr_spec &sp)
 	} else if (sp.opts == 2) {
 		ot = tflite::BuiltinOptions_Conv2DOptions;
 		ov = tflite::CreateConv2DOptions(fbb, tflite::Padding_VALID, 1, 1).Union();
+	} else if (sp.opts == 3) {
+		ot = tflite::BuiltinOptions_ConcatenationOptions;
+		ov = tflite::CreateConcatenationOptions(fbb, sp.dm).Union();
 	}
 	const auto op = tflite::CreateOperator(fbb, sp.opcode_index, fbb.CreateVector(sp.in),
 	                                       fbb.CreateVector(sp.out), ot, ov);
@@ -1031,6 +1070,9 @@ int main(int argc, char **argv)
 	 * t0's nothing. */
 	auto refs = [&](const char *file, int32_t last_in) {
 		spec sp = graph(file);
+		/* The output [1, 4096] (unquantized): the broadcast of {t2, t2}, so
+		 * the ADD's shapes hold together (issue #185's ADD rule). */
+		sp.out_shape = { 1, (int32_t)qcap };
 		sp.qt = { { { (int32_t)qcap }, qcap, 1u, 0, 1u },
 		          { { 1 }, 1u, 1u, 0, 1u } };
 		sp.more_ops = { { { 2, 2 }, { 1 }, qrefs / (2u * qcap) },
@@ -1481,6 +1523,160 @@ int main(int argc, char **argv)
 			std::vector<rtensor> t = fct(I16, { 1, 4 }, { 3, 4 }, 12u, 3, { 1, 3 });
 
 			os.push_back(op("r3_i16_i32.tflite", FC, t, { 0, 1, 2 }));
+		}
+
+		/* Step 2.  R4 PAD */
+		const tflite::BuiltinOperator PADK = tflite::BuiltinOperator_PAD;
+		const std::vector<int32_t> x4 = { 1, 2, 2, 1 };
+		os.push_back(op("r4_ok.tflite", PADK,
+		                { T(I8, x4, 0u), T(I32, { 4, 2 }, 32u), T(I8, { 1, 4, 4, 1 }, 0u) },
+		                { 0, 1 }));
+		os.push_back(op("r4_rank_ne.tflite", PADK,
+		                { T(I8, x4, 0u), T(I32, { 4, 2 }, 32u), T(I8, { 4, 4, 1 }, 0u) },
+		                { 0, 1 }));
+		os.push_back(op("r4_pad_int8.tflite", PADK,
+		                { T(I8, x4, 0u), T(I8, { 4, 2 }, 8u), T(I8, { 1, 4, 4, 1 }, 0u) },
+		                { 0, 1 }));
+
+		/* R5 STRIDED_SLICE: input rank 4, begin / end / strides. */
+		{
+			const tflite::BuiltinOperator SS = tflite::BuiltinOperator_STRIDED_SLICE;
+			const rtensor i4 = T(I32, { 4 }, 16u);
+			const std::vector<int32_t> io = { 1, 4, 4, 2 };
+
+			os.push_back(op("r5_ok.tflite", SS,
+			                { T(I8, io, 0u), i4, i4, i4, T(I8, io, 0u) }, { 0, 1, 2, 3 }));
+			os.push_back(op("r5_begin_3.tflite", SS,
+			                { T(I8, io, 0u), T(I32, { 3 }, 12u), i4, i4, T(I8, io, 0u) },
+			                { 0, 1, 2, 3 }));
+			os.push_back(op("r5_strides_int8.tflite", SS,
+			                { T(I8, io, 0u), i4, i4, T(I8, { 4 }, 4u), T(I8, io, 0u) },
+			                { 0, 1, 2, 3 }));
+		}
+
+		/* R6 TRANSPOSE */
+		{
+			const tflite::BuiltinOperator TR = tflite::BuiltinOperator_TRANSPOSE;
+			const std::vector<int32_t> io = { 1, 4, 4, 2 };
+
+			os.push_back(op("r6_ok.tflite", TR,
+			                { T(I8, io, 0u), T(I32, { 4 }, 16u), T(I8, io, 0u) }, { 0, 1 }));
+			os.push_back(op("r6_perm_int8.tflite", TR,
+			                { T(I8, io, 0u), T(I8, { 4 }, 4u), T(I8, io, 0u) }, { 0, 1 }));
+		}
+
+		/* R7 RESIZE_*: input [1, 2, 2, 1], size {4, 6}, output [1, 4, 6, 1]. */
+		{
+			const tflite::BuiltinOperator RB = tflite::BuiltinOperator_RESIZE_BILINEAR;
+			const tflite::BuiltinOperator RN = tflite::BuiltinOperator_RESIZE_NEAREST_NEIGHBOR;
+			const rtensor sz = { I32, { 2 }, 8u, { 4, 6 } };
+			const std::vector<int32_t> oy = { 1, 4, 6, 1 };
+
+			os.push_back(op("r7_ok.tflite", RB, { T(I8, x4, 0u), sz, T(I8, oy, 0u) }, { 0, 1 }));
+			os.push_back(op("r7_nn_ok.tflite", RN, { T(I8, x4, 0u), sz, T(I8, oy, 0u) },
+			                { 0, 1 }));
+			os.push_back(op("r7_nodata.tflite", RB,
+			                { T(I8, x4, 0u), T(I32, { 2 }, 0u), T(I8, oy, 0u) }, { 0, 1 }));
+			os.push_back(op("r7_size_1.tflite", RB,
+			                { T(I8, x4, 0u), rtensor{ I32, { 1 }, 4u, { 4 } }, T(I8, oy, 0u) },
+			                { 0, 1 }));
+			/* 3 elements whose first two are right: only the count refuses it. */
+			os.push_back(op("r7_size_3.tflite", RB,
+			                { T(I8, x4, 0u), rtensor{ I32, { 3 }, 12u, { 4, 6, 0 } },
+			                  T(I8, oy, 0u) }, { 0, 1 }));
+			os.push_back(op("r7_size_int8.tflite", RB,
+			                { T(I8, x4, 0u), T(I8, { 2 }, 2u), T(I8, oy, 0u) }, { 0, 1 }));
+			os.push_back(op("r7_value_ne.tflite", RB,
+			                { T(I8, x4, 0u), rtensor{ I32, { 2 }, 8u, { 4, 7 } }, T(I8, oy, 0u) },
+			                { 0, 1 }));
+			/* [1, 4, 6]: its dims 1 and 2 match the size, only the rank is wrong. */
+			os.push_back(op("r7_out_rank3.tflite", RB,
+			                { T(I8, x4, 0u), sz, T(I8, { 1, 4, 6 }, 0u) }, { 0, 1 }));
+			os.push_back(op("r7_size_rank2.tflite", RB,
+			                { T(I8, x4, 0u), rtensor{ I32, { 1, 2 }, 8u, { 4, 6 } },
+			                  T(I8, oy, 0u) }, { 0, 1 }));
+		}
+
+		/* R8 ADD / SUB / MUL with two inputs. */
+		{
+			const tflite::BuiltinOperator AD = tflite::BuiltinOperator_ADD;
+			auto bin = [&](const char *file, tflite::BuiltinOperator k, std::vector<int32_t> a,
+			               std::vector<int32_t> b, std::vector<int32_t> y, uint32_t bdata) {
+				uint32_t n = 1;
+
+				for (int32_t v : b)
+					n *= (uint32_t)v;
+				return op(file, k, { T(I8, a, 0u), T(I8, b, bdata ? n : 0u), T(I8, y, 0u) },
+				          { 0, 1 });
+			};
+			const std::vector<int32_t> r6a = { 1, 2, 1, 2, 1, 2 };
+			const std::vector<int32_t> r6b = { 2, 1, 2, 1, 2, 1 };
+			const std::vector<int32_t> r6y = { 2, 2, 2, 2, 2, 2 };
+
+			os.push_back(bin("r8_broadcast.tflite", AD, { 1, 3 }, { 2, 1 }, { 2, 3 }, 0u));
+			os.push_back(bin("r8_same.tflite", AD, { 2, 3 }, { 2, 3 }, { 2, 3 }, 0u));
+			os.push_back(bin("r8_const.tflite", AD, { 2, 3 }, { 3 }, { 2, 3 }, 1u));
+			/* rank 6 input / output: not graph I/O (rank > 4 is TENSOR there). */
+			{
+				opr_spec sp = bin("r8_rank6.tflite", AD, r6a, r6b, r6y, 0u);
+
+				sp.t.push_back(T(I8, { 1, 4 }, 0u));
+				sp.t.push_back(T(I8, { 1, 4 }, 0u));
+				sp.g_in = { 3 };
+				sp.g_out = { 4 };
+				os.push_back(sp);
+			}
+			os.push_back(bin("r8_dim_2_of_3.tflite", AD, { 2, 2 }, { 2, 3 }, { 2, 3 }, 0u));
+			os.push_back(bin("r8_sub_dim_2_of_3.tflite", tflite::BuiltinOperator_SUB,
+			                 { 2, 2 }, { 2, 3 }, { 2, 3 }, 0u));
+			os.push_back(bin("r8_mul_dim_2_of_3.tflite", tflite::BuiltinOperator_MUL,
+			                 { 2, 2 }, { 2, 3 }, { 2, 3 }, 0u));
+			os.push_back(bin("r8_same_out_ne.tflite", AD, { 2, 3 }, { 2, 3 }, { 2, 4 }, 0u));
+			os.push_back(bin("r8_ones_to_2.tflite", AD, { 1, 1 }, { 1, 1 }, { 2, 2 }, 0u));
+			os.push_back(bin("r8_in_rank_gt.tflite", AD, { 1, 2, 3 }, { 2, 3 }, { 2, 3 }, 0u));
+			{
+				opr_spec sp = bin("r8_rank7.tflite", AD, { 1, 1, 1, 1, 1, 2, 3 }, { 2, 3 },
+				                  { 1, 1, 1, 1, 1, 2, 3 }, 0u);
+
+				sp.t.push_back(T(I8, { 1, 4 }, 0u));
+				sp.t.push_back(T(I8, { 1, 4 }, 0u));
+				sp.g_in = { 3 };
+				sp.g_out = { 4 };
+				os.push_back(sp);
+			}
+		}
+
+		/* R9 CONCATENATION: [1, 2, 2, 1] + [1, 2, 2, 3] -> [1, 2, 2, 4]. */
+		{
+			const tflite::BuiltinOperator CC = tflite::BuiltinOperator_CONCATENATION;
+			auto cat = [&](const char *file, std::vector<int32_t> a, std::vector<int32_t> b,
+			               std::vector<int32_t> y, int32_t axis) {
+				opr_spec sp = op(file, CC, { T(I8, a, 0u), T(I8, b, 0u), T(I8, y, 0u) },
+				                 { 0, 1 });
+				sp.opts = 3;
+				sp.dm = axis;
+				return sp;
+			};
+			os.push_back(cat("r9_axis3.tflite", { 1, 2, 2, 1 }, { 1, 2, 2, 3 }, { 1, 2, 2, 4 }, 3));
+			os.push_back(cat("r9_axis_neg1.tflite", { 1, 2, 2, 1 }, { 1, 2, 2, 3 },
+			                 { 1, 2, 2, 4 }, -1));
+			os.push_back(cat("r9_other_dim_ne.tflite", { 1, 2, 3, 1 }, { 1, 2, 2, 3 },
+			                 { 1, 2, 2, 4 }, 3));
+			os.push_back(cat("r9_sum_ne.tflite", { 1, 2, 2, 1 }, { 1, 2, 2, 3 },
+			                 { 1, 2, 2, 5 }, 3));
+			/* Rank 5 over a rank-4 output: its first four dims match, so only the
+			 * rank compare refuses it.  Not graph I/O (rank 5 is TENSOR there): an
+			 * extra [1, 4] tensor 3 is the graph's input. */
+			{
+				opr_spec sp = cat("r9_rank_ne.tflite", { 1, 2, 2, 1, 1 }, { 1, 2, 2, 3 },
+				                  { 1, 2, 2, 4 }, 3);
+
+				sp.t.push_back(T(I8, { 1, 4 }, 0u));
+				sp.g_in = { 3 };
+				os.push_back(sp);
+			}
+			os.push_back(cat("r9_axis_oob.tflite", { 1, 2, 2, 1 }, { 1, 2, 2, 3 },
+			                 { 1, 2, 2, 4 }, 4));
 		}
 
 		for (const opr_spec &sp : os) {

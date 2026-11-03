@@ -169,14 +169,17 @@ the walk compiles only the rules of the operators the profile registers:
   r0_index_oob           opcode_index == its length: FORMAT on every profile (on
                          the vela gate with --board-order the payload scan's own
                          sentence, which runs first there)
-  r1_* / r2_* / r3_*     CONV_2D / DEPTHWISE_CONV_2D / FULLY_CONNECTED: the
+  r1_* .. r9_*           CONV_2D / DEPTHWISE_CONV_2D / FULLY_CONNECTED / PAD /
+                         STRIDED_SLICE / TRANSPOSE / RESIZE_* / ADD, SUB, MUL /
+                         CONCATENATION: the
                          case's own answer (None or FORMAT) where the profile
                          registers the operator; the gate's "did not register"
                          REJECT (rc 1, the walk's ok line, no code) where it
-                         does not (FULLY_CONNECTED on blazeface); on the ethos-u
-                         profile, which has no CPU rule, the walk's answer
-                         without the rule (its ok line, or TENSOR for
-                         r1_in_rank7) and then the payload scan's "builtin"
+                         does not (on blazeface: FULLY_CONNECTED, SUB, MUL,
+                         STRIDED_SLICE, TRANSPOSE, RESIZE_*, CONCATENATION); on
+                         the ethos-u profile, which has no CPU rule, the walk's
+                         answer without the rule (its ok line, or TENSOR for
+                         r1_in_rank7 / r8_rank7) and then the payload scan's "builtin"
                          sentence, and with --board-order that sentence alone
 
 And the depth half of the header's claim: schema_table_depth.py runs on the
@@ -426,6 +429,42 @@ OP_CASES = [
     ("r3_saturate.tflite", FORMAT, "FULLY_CONNECTED", None),
     ("r3_out_last0.tflite", FORMAT, "FULLY_CONNECTED", None),
     ("r3_i16_i32.tflite", FORMAT, "FULLY_CONNECTED", None),
+    ("r4_ok.tflite", None, "PAD", None),
+    ("r4_rank_ne.tflite", FORMAT, "PAD", None),
+    ("r4_pad_int8.tflite", FORMAT, "PAD", None),
+    ("r5_ok.tflite", None, "STRIDED_SLICE", None),
+    ("r5_begin_3.tflite", FORMAT, "STRIDED_SLICE", None),
+    ("r5_strides_int8.tflite", FORMAT, "STRIDED_SLICE", None),
+    ("r6_ok.tflite", None, "TRANSPOSE", None),
+    ("r6_perm_int8.tflite", FORMAT, "TRANSPOSE", None),
+    ("r7_ok.tflite", None, "RESIZE_BILINEAR", None),
+    ("r7_nn_ok.tflite", None, "RESIZE_NEAREST_NEIGHBOR", None),
+    # A size without data: the walk does not compare values (the board's
+    # Prepare() refuses it as ARENA, the gates pass it -- a known difference).
+    ("r7_nodata.tflite", None, "RESIZE_BILINEAR", None),
+    ("r7_size_1.tflite", FORMAT, "RESIZE_BILINEAR", None),
+    ("r7_size_3.tflite", FORMAT, "RESIZE_BILINEAR", None),
+    ("r7_size_int8.tflite", FORMAT, "RESIZE_BILINEAR", None),
+    ("r7_value_ne.tflite", FORMAT, "RESIZE_BILINEAR", None),
+    ("r7_out_rank3.tflite", FORMAT, "RESIZE_BILINEAR", None),
+    ("r7_size_rank2.tflite", FORMAT, "RESIZE_BILINEAR", None),
+    ("r8_broadcast.tflite", None, "ADD", None),
+    ("r8_same.tflite", None, "ADD", None),
+    ("r8_const.tflite", None, "ADD", None),
+    ("r8_rank6.tflite", None, "ADD", None),
+    ("r8_dim_2_of_3.tflite", FORMAT, "ADD", None),
+    ("r8_sub_dim_2_of_3.tflite", FORMAT, "SUB", None),
+    ("r8_mul_dim_2_of_3.tflite", FORMAT, "MUL", None),
+    ("r8_same_out_ne.tflite", FORMAT, "ADD", None),
+    ("r8_ones_to_2.tflite", FORMAT, "ADD", None),
+    ("r8_in_rank_gt.tflite", FORMAT, "ADD", None),
+    ("r8_rank7.tflite", FORMAT, "ADD", TENSOR),
+    ("r9_axis3.tflite", None, "CONCATENATION", None),
+    ("r9_axis_neg1.tflite", None, "CONCATENATION", None),
+    ("r9_other_dim_ne.tflite", FORMAT, "CONCATENATION", None),
+    ("r9_sum_ne.tflite", FORMAT, "CONCATENATION", None),
+    ("r9_rank_ne.tflite", FORMAT, "CONCATENATION", None),
+    ("r9_axis_oob.tflite", FORMAT, "CONCATENATION", None),
 ]
 # What each profile registers of the operators above (svc/nn/tflm/nn_tflm_ops.h;
 # a profile changing there must change here, or these cases fail).
@@ -435,10 +474,13 @@ PROFILE_DEFINES = {
     "NN_TFLM_OPS_EXTENDED": "extended",
     "NN_TFLM_OPS_ETHOSU_PROFILE": "ethosu",
 }
+_BASE_OPS = {"ADD", "CONV_2D", "DEPTHWISE_CONV_2D", "PAD"}
 PROFILE_OPS = {
-    "blazeface": {"ADD", "CONV_2D", "DEPTHWISE_CONV_2D"},
-    "mlperf": {"ADD", "CONV_2D", "DEPTHWISE_CONV_2D", "FULLY_CONNECTED"},
-    "extended": {"ADD", "CONV_2D", "DEPTHWISE_CONV_2D", "FULLY_CONNECTED"},
+    "blazeface": _BASE_OPS,
+    "mlperf": _BASE_OPS | {"FULLY_CONNECTED"},
+    "extended": _BASE_OPS | {"FULLY_CONNECTED", "SUB", "MUL", "STRIDED_SLICE",
+                             "TRANSPOSE", "RESIZE_BILINEAR",
+                             "RESIZE_NEAREST_NEIGHBOR", "CONCATENATION"},
     "ethosu": set(),
 }
 # The tflite gates' refusal of an operator the profile does not register.

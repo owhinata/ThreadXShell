@@ -346,7 +346,9 @@ void ltdc_unlock_frame(void);
  * LTDC_ERR_DRAW (issue #113): a DMA2D draw into this back buffer failed since
  * the last flip, and the engine was confirmed stopped.  Nothing is staged, the
  * display stays up, and the mark is consumed -- the next flip presents again.
- * Only a flip lowers it, never a later successful draw.  [!] This guarantees
+ * Only a flip lowers it, never a later successful draw, and a flip lowers it
+ * even while scan-out is off (it is asked before that check), so the mark
+ * never outlives its own transaction.  [!] This guarantees
  * that the FAILED TRANSACTION does not show its half-drawn buffer, not that the
  * buffer is never shown: a preview flip waiting on the frame lock, or preview
  * bands landing in the same back buffer afterwards, can still present it --

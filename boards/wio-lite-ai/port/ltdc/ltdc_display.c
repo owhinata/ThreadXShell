@@ -1377,15 +1377,11 @@ int ltdc_flip(void)
 		return LTDC_ERR_STATE;
 	ltdc_lock_frame();
 
-	if (ltdc_fault || ltdc_disabled) {
-		/* Scanout off: no VBR reload would ever come, and waiting for one
-		   would latch a spurious fault. */
-		ltdc_unlock_frame();
-		return LTDC_ERR_STATE;
-	}
-
 	/* A DMA2D draw into this back buffer failed since the last flip (issue
-	   #113): do not show it.  The mark is consumed here and only here. */
+	   #113): do not show it.  The mark is consumed here and only here -- and
+	   BEFORE the scan-out check, so a draw that ran while another console
+	   turned scan-out off is still consumed by its own transaction's flip
+	   instead of refusing an unrelated flip after `lcd on`. */
 	switch (dma2d_q_present(&dma2d_marks)) {
 	case DMA2D_Q_OK:
 		break;
@@ -1393,6 +1389,13 @@ int ltdc_flip(void)
 		ltdc_unlock_frame();
 		return LTDC_ERR_DRAW;
 	default:       /* not confirmed stopped: latched down with it already */
+		ltdc_unlock_frame();
+		return LTDC_ERR_STATE;
+	}
+
+	if (ltdc_fault || ltdc_disabled) {
+		/* Scanout off: no VBR reload would ever come, and waiting for one
+		   would latch a spurious fault. */
 		ltdc_unlock_frame();
 		return LTDC_ERR_STATE;
 	}

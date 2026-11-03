@@ -528,6 +528,8 @@ fake clock):
   nothing, returns `LTDC_ERR_DRAW` and lowers the mark; the display stays up and
   the flip after that presents again.  A later successful draw does not lower
   it (a failed background under a successful rectangle is still half drawn).
+  The flip consumes it even with scan-out off (`lcd off` from another console
+  mid-command), so it never refuses an unrelated later flip.
   The command prints `lcd: draw failed, frame not presented`.
 - **Not confirmed -- permanent.**  The display is latched down as for a stuck
   reload (backlight and LTDCEN off), `ltdc_dma2d_unconfirmed()` turns true for

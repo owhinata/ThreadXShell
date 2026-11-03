@@ -70,7 +70,7 @@
 #include "nn_ethosu_io.h"
 
 /* And the graph walk both backends apply to the model before planning it
- * (svc/nn/tflm/nn_tflm_model_check.h, issues #175 .. #181, #183, #185): a graph
+ * (svc/nn/tflm/nn_tflm_model_check.h, issues #175 .. #181, #183, #185, #188): a graph
  * that does not hold together -- an I/O list, a subgraph's tensors or an
  * operator's tensor list missing, an operator list longer than
  * NN_TFLM_MAX_OP_TENSORS, an index naming a tensor that does not exist, a
@@ -78,7 +78,9 @@
  * per-channel quantization, so that part never bites a Vela model), a buffer
  * index past the buffer vector, an OfflineMemoryAllocation plan that does not
  * match the graph (every Vela model carries one, so that part runs on each), no
- * operator-code vector, a tensor type with no size, a constant whose data is
+ * operator-code vector, a tensor type with no size, a negative dimension or a
+ * planned size past an int, or all of them together past 2^30 (issue #188;
+ * every Vela model's tensors are far inside), a constant whose data is
  * not exactly its shape's bytes (the command stream and the weights of every
  * Vela model are exact), data on a graph input / output or an operator output,
  * an operator naming an operator code that does not exist (the operator rules
@@ -490,8 +492,10 @@ int main(int argc, char **argv)
 		       "adding up past %u), a tensor or metadata entry names a buffer "
 		       "that does not exist, an OfflineMemoryAllocation plan has no "
 		       "data, no 12-byte header, a tensor count other than the graph's, "
-		       "fewer offsets than it claims or an offset below -1, there is "
-		       "no operator-code vector, a tensor has a type with no size, a "
+		       "fewer offsets than it claims or an offset below -1 or at or past "
+		       "2^30, there is no operator-code vector, a tensor has a type with "
+		       "no size, a negative dimension or a size past an int (or all "
+		       "tensors together are past 2^30 bytes), a "
 		       "constant's data is not exactly its shape's bytes (or it has a "
 		       "negative dimension or more than %u), a graph input / output "
 		       "or an operator output has data, or an operator names an operator "

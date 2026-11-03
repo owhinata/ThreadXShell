@@ -497,7 +497,8 @@ is no built-in model) and after `nn model unload`.
   `AllocateTensors()` (`NN_MODEL_ERR_ARENA`) and pass `verify_tflite`, which
   does not plan.  Every plan offset must be -1 (plan online) or >= 0: TFLM's
   planner keeps any other negative value, and its arena check (offset + size)
-  let -size < offset < -1 place a tensor before the arena.  Of the header only
+  let -size < offset < -1 place a tensor before the arena; and below 2^30
+  (issue #188, so that `int` sum cannot wrap).  Of the header only
   word [2] is read; buffer 0 need not be empty.  TFLM's person_detect and the 43 models found that parse keep their
   verdict.  Cost: +256 B of Flash on `build/f746-tflm` (`.text` 542,048 ->
   542,240 B, `.rodata` +64 B; `shell.bin` 617,412 -> 617,668 B); the `null`
@@ -555,6 +556,40 @@ is no built-in model) and after `nn model unload`.
   (`.text` 542,544 -> 543,880 B, `.rodata` unchanged; `shell.bin` 618,004 ->
   619,348 B; the rules' helpers are out of line, the header's one exception to
   forced inline); the `null` tree is byte-identical.
+- [!] **The walk checks what a kernel WRITES against the output's frame** (issue
+  #188, step 1): the planner sizes each tensor's frame from its declared shape,
+  and some kernels size their writes from something else, compared with the
+  output in a `TFLITE_DCHECK` only.  So, all `NN_MODEL_ERR_FORMAT` (-7): every
+  tensor of every subgraph has no negative dimension (-1 included, so a
+  RESHAPE's -1 is no longer resolved: TFLM's `int` size of such a shape becomes
+  a 0-byte frame), a size (elements x TFLM's element size, INT4 1 byte) of at
+  most `INT32_MAX - 15` with no partial product past `INT32_MAX` (TFLM's planner
+  multiplies in `int`: `[1, 65536, 65537, 1]` int8 is a 64 KB frame), and all
+  sizes rounded up to 16 adding up to at most 2^30, with every offline-plan
+  offset below 2^30 (the greedy planner adds them in `int`; a rank-7 tensor is
+  left to the rank rule, TENSOR).  And: QUANTIZE / DEQUANTIZE / RELU / RELU6 /
+  LOGISTIC / LEAKY_RELU / SOFTMAX with an output of the input's element count;
+  MAX_POOL_2D / AVERAGE_POOL_2D with input and output rank 4 (below that the
+  kernel's loop counts come from past the shape); a PAD's paddings with data
+  counted (2 x the input's rank) before they are read, none negative (CMSIS-NN
+  moves the write before the output by a negative one), input + before + after
+  == output in 64 bits (`Prepare()` adds them in `int`); a TRANSPOSE's
+  permutation with data of the input's rank, each in range, and the output
+  `output[i] == input[perm[i]]` (the int8 kernel writes by the output's
+  strides over the input's dims); a MEAN's axis INT32 WITH data, at most 4 of
+  them (the float kernel's stack `axis[4]`), each in range, and the output the
+  input reduced over them (`keep_dims` or not).  Pool and RESIZE batch /
+  channel mismatches do not write past the output (the kernels loop over the
+  minimum) and are not refused in this step.  NOT bounded: the scratch a
+  kernel requests in its `Prepare()`, sized by the kernel (the arena check
+  stops it).  TFLM's person_detect and the 44 models found that pass the
+  verifier keep their verdict (no negative dimension; all of a model's
+  tensors together at most 15,114,544 B, the mobilenet_v2 224 of TFLM's xtensa
+  example).  A model
+  whose input or output declares -1 is now FORMAT rather than DIMS.  Cost:
+  +768 B of Flash on `build/f746-tflm` (`.text` 543,904 -> 544,632 B,
+  `.rodata` unchanged; `shell.bin` 619,348 -> 620,116 B); the `null` tree is
+  byte-identical.
 - `stedgeai_reloc` is the same: it starts empty, and `builtin` used to mean
   "unload" there before #131 (use `nn model unload`).
 - `stedgeai_reloc` refuses the same dimension with the same `-13` (issue
@@ -990,15 +1025,18 @@ firmware's on-board verifier (`NN_TFLM_VERIFY=1`) and grove-vision-ai-v2 use --
 depth 16, 4,096 table visits, `nn_tflm_verify_model_buffer()` in
 `svc/nn/tflm/nn_tflm_model_check.h` (issue #175; a model the board would refuse
 as malformed is refused here first) -- the staging capacity (512 KB), the I/O check the backend runs before planning (issue
-#175, #178, #180, #181, #183, #185: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing,
+#175, #178, #180, #181, #183, #185, #188: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing,
 too long (> 64) or out-of-range I/O or operator list, a subgraph without
 tensors, quantization vectors too long or inconsistent, a buffer index past the
 buffer vector, an offline plan that does not match the graph, no
-operator-code vector, a tensor type without a size, a constant whose data is not
+operator-code vector, a tensor type without a size, a negative dimension or a
+tensor size past an `int` (or all of them past 2^30, #188), a constant whose data is not
 exactly its shape's bytes, data on a tensor the graph writes, an operator code
 index past the code vector, or an operator whose tensors do not fit together
 (conv / depthwise / FC channels and bias, PAD / STRIDED_SLICE / TRANSPOSE /
-RESIZE index tensors, ADD / SUB / MUL broadcast, CONCATENATION shapes, #185), is
+RESIZE index tensors, ADD / SUB / MUL broadcast, CONCATENATION shapes, #185;
+elementwise element counts, pool ranks, PAD / TRANSPOSE / MEAN output shapes,
+#188), is
 `NN_MODEL_ERR_FORMAT`, a tensor above rank 6 (an I/O tensor above
 4) `NN_MODEL_ERR_TENSOR`, an I/O dimension outside 0..65535 `NN_MODEL_ERR_DIMS`), and the operators the firmware registers -- read from
 `svc/nn/tflm/nn_tflm_ops.h` under the `extended` profile, the same list

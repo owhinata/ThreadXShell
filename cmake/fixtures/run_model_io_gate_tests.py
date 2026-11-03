@@ -15,7 +15,8 @@ exactly one way, and asserts the verdict AND which check gave it:
   io_ok_65535       control: the walk passes (the bound itself fits)
   io_in_dim_65536   NN_MODEL_ERR_DIMS (one past the bound)
   io_in_dim_70000   NN_MODEL_ERR_DIMS
-  io_out_dim_neg1   NN_MODEL_ERR_DIMS
+  io_out_dim_neg1   NN_MODEL_ERR_FORMAT (issue #188: a negative dimension is R10's,
+                    judged before the I/O values; it was DIMS)
   io_out_index_oob  NN_MODEL_ERR_FORMAT, never DIMS
   io_no_inputs      NN_MODEL_ERR_FORMAT, never DIMS
   io_same_70000     NN_MODEL_ERR_DIMS (the device fixture: input == output)
@@ -182,6 +183,16 @@ the walk compiles only the rules of the operators the profile registers:
                          r1_in_rank7 / r8_rank7) and then the payload scan's "builtin"
                          sentence, and with --board-order that sentence alone
 
+And the output frames (issue #188).  On every profile, so in CASES: R10, every
+tensor's planned size an int (no negative dimension, no partial product past
+INT32_MAX, elements x TfLiteTypeSizeOf() at most INT32_MAX - 15) and R10b, those
+sizes rounded up to 16 adding up to at most 2^30 and every offline-plan offset
+below 2^30 -- r10_* / r10b_* / md_offline_off_2e30*, all FORMAT but the controls
+and r10_rank7_big (TENSOR: the rank rule's).  By profile, in OP_CASES: r11_*
+(elementwise element counts), r12_* (pool ranks), r4_* / r6_* (PAD's and
+TRANSPOSE's values), r13_* (MEAN's reduced shape); r11_neg is R10's FORMAT on
+every profile.
+
 And the depth half of the header's claim: schema_table_depth.py runs on the
 schema.fbs the gate was built from (the first -I directory holding one, else the
 repo's lib/tflite-micro, the tree a tflm build generates from) and fails on a
@@ -227,7 +238,8 @@ CASES = [
     ("io_ok_65535.tflite", None),
     ("io_in_dim_65536.tflite", DIMS),
     ("io_in_dim_70000.tflite", DIMS),
-    ("io_out_dim_neg1.tflite", DIMS),
+    # Issue #188: a negative dimension is R10's FORMAT, before the I/O values.
+    ("io_out_dim_neg1.tflite", FORMAT),
     ("io_out_index_oob.tflite", FORMAT),
     ("io_no_inputs.tflite", FORMAT),
     # The device fixture: the very file f746g-disco loads from its card to see the
@@ -341,6 +353,31 @@ CASES = [
     ("c_var_eq.tflite", None),
     ("c_sg1_short.tflite", FORMAT),
     ("c_empty_data.tflite", None),
+    # The output frames (issue #188), on every profile: R10, every tensor's size
+    # as TFLM's planner computes it fits an int (no negative dimension, no
+    # partial product past INT32_MAX, elements x TfLiteTypeSizeOf() at most
+    # INT32_MAX - 15), and R10b, the sizes rounded up to 16 add up to at most
+    # 2^30 and every offline-plan offset is below 2^30.
+    ("r10_zero_ok.tflite", None),
+    ("r10_rank7_big.tflite", TENSOR),
+    ("r10_wrap_int8.tflite", FORMAT),
+    ("r10_f32_2e29.tflite", FORMAT),
+    ("r10_f32_2e30.tflite", FORMAT),
+    ("r10_int4_2e31.tflite", FORMAT),
+    ("r10_int4_2e30.tflite", FORMAT),
+    ("r10_int8_max_m14.tflite", FORMAT),
+    ("r10_mid_wrap.tflite", FORMAT),
+    ("r10_neg_first.tflite", FORMAT),
+    ("r10_neg_mid.tflite", FORMAT),
+    ("r10_neg_last.tflite", FORMAT),
+    ("r10_neg_after_zero.tflite", FORMAT),
+    ("r10b_eq.tflite", None),
+    ("r10b_over16.tflite", FORMAT),
+    ("r10b_two.tflite", FORMAT),
+    ("r10b_shared.tflite", FORMAT),
+    ("r10b_sg1.tflite", FORMAT),
+    ("md_offline_off_2e30m1.tflite", None),
+    ("md_offline_off_2e30.tflite", FORMAT),
 ]
 
 # Grove's payload scan (issue #179): vela style only, judged by the scan's sentence.
@@ -474,6 +511,50 @@ OP_CASES = [
     ("r9_sum_ne.tflite", FORMAT, "CONCATENATION", None),
     ("r9_rank_ne.tflite", FORMAT, "CONCATENATION", None),
     ("r9_axis_oob.tflite", FORMAT, "CONCATENATION", None),
+    # Issue #188 (the output frames): R11 elementwise element counts, R12a pool
+    # ranks, PAD's / TRANSPOSE's values, R13 MEAN's reduced shape.
+    ("r11_quantize_ok.tflite", None, "QUANTIZE", None),
+    ("r11_dequantize_ok.tflite", None, "DEQUANTIZE", None),
+    ("r11_relu_ok.tflite", None, "RELU", None),
+    ("r11_relu6_ok.tflite", None, "RELU6", None),
+    ("r11_logistic_ok.tflite", None, "LOGISTIC", None),
+    ("r11_leaky_relu_ok.tflite", None, "LEAKY_RELU", None),
+    ("r11_softmax_ok.tflite", None, "SOFTMAX", None),
+    ("r11_reshape_ok.tflite", None, "QUANTIZE", None),
+    ("r11_quantize_ne.tflite", FORMAT, "QUANTIZE", None),
+    ("r11_dequantize_ne.tflite", FORMAT, "DEQUANTIZE", None),
+    ("r11_logistic_ne.tflite", FORMAT, "LOGISTIC", None),
+    ("r11_softmax_ne.tflite", FORMAT, "SOFTMAX", None),
+    ("r11_quantize_1000.tflite", FORMAT, "QUANTIZE", None),
+    # A negative dimension is R10's, on every profile.
+    ("r11_neg.tflite", FORMAT, "QUANTIZE", FORMAT),
+    ("r12_max_ok.tflite", None, "MAX_POOL_2D", None),
+    ("r12_avg_ok.tflite", None, "AVERAGE_POOL_2D", None),
+    ("r12_in_rank3.tflite", FORMAT, "MAX_POOL_2D", None),
+    ("r12_out_rank2.tflite", FORMAT, "MAX_POOL_2D", None),
+    ("r12_avg_out_rank2.tflite", FORMAT, "AVERAGE_POOL_2D", None),
+    ("r12_rank7.tflite", FORMAT, "MAX_POOL_2D", TENSOR),
+    ("r4_neg_before.tflite", FORMAT, "PAD", None),
+    ("r4_wrap.tflite", FORMAT, "PAD", None),
+    ("r4_count6.tflite", FORMAT, "PAD", None),
+    ("r4_out_ne.tflite", FORMAT, "PAD", None),
+    ("r6_perm_ok.tflite", None, "TRANSPOSE", None),
+    ("r6_out_ne.tflite", FORMAT, "TRANSPOSE", None),
+    ("r6_perm_4.tflite", FORMAT, "TRANSPOSE", None),
+    ("r6_perm_3.tflite", FORMAT, "TRANSPOSE", None),
+    ("r6_out_rank.tflite", FORMAT, "TRANSPOSE", None),
+    ("r13_keep_ok.tflite", None, "MEAN", None),
+    ("r13_nokeep_ok.tflite", None, "MEAN", None),
+    ("r13_noopts_ok.tflite", None, "MEAN", None),
+    ("r13_neg_ok.tflite", None, "MEAN", None),
+    ("r13_dup_ok.tflite", None, "MEAN", None),
+    ("r13_out_big.tflite", FORMAT, "MEAN", None),
+    ("r13_out_small.tflite", FORMAT, "MEAN", None),
+    ("r13_keep_rank.tflite", FORMAT, "MEAN", None),
+    ("r13_axes_5.tflite", FORMAT, "MEAN", None),
+    ("r13_axis_oob.tflite", FORMAT, "MEAN", None),
+    ("r13_axis_nodata.tflite", FORMAT, "MEAN", None),
+    ("r13_axis_int8.tflite", FORMAT, "MEAN", None),
 ]
 # What each profile registers of the operators above (svc/nn/tflm/nn_tflm_ops.h;
 # a profile changing there must change here, or these cases fail).
@@ -483,13 +564,16 @@ PROFILE_DEFINES = {
     "NN_TFLM_OPS_EXTENDED": "extended",
     "NN_TFLM_OPS_ETHOSU_PROFILE": "ethosu",
 }
-_BASE_OPS = {"ADD", "CONV_2D", "DEPTHWISE_CONV_2D", "PAD"}
+_BASE_OPS = {"ADD", "CONV_2D", "DEPTHWISE_CONV_2D", "PAD", "QUANTIZE", "DEQUANTIZE",
+             "MAX_POOL_2D"}
+_MLPERF_OPS = _BASE_OPS | {"FULLY_CONNECTED", "AVERAGE_POOL_2D", "SOFTMAX"}
 PROFILE_OPS = {
     "blazeface": _BASE_OPS,
-    "mlperf": _BASE_OPS | {"FULLY_CONNECTED"},
-    "extended": _BASE_OPS | {"FULLY_CONNECTED", "SUB", "MUL", "STRIDED_SLICE",
-                             "TRANSPOSE", "RESIZE_BILINEAR",
-                             "RESIZE_NEAREST_NEIGHBOR", "CONCATENATION"},
+    "mlperf": _MLPERF_OPS,
+    "extended": _MLPERF_OPS | {"SUB", "MUL", "STRIDED_SLICE", "TRANSPOSE",
+                               "RESIZE_BILINEAR", "RESIZE_NEAREST_NEIGHBOR",
+                               "CONCATENATION", "LOGISTIC", "RELU", "RELU6",
+                               "LEAKY_RELU", "MEAN"},
     "ethosu": set(),
 }
 # The tflite gates' refusal of an operator the profile does not register.

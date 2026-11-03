@@ -158,7 +158,7 @@ part-way through it would otherwise leave entries the destructor calls as functi
 pointers.  What a model's I/O must satisfy before it is planned is in
 `nn_tflm_model_check.h`, which both backends and the three host gates
 (`verify_tflite` on wio-lite-ai and f746g-disco, `verify_vela_model` on
-grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185).  The walk runs in a fixed order:
+grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185, #188).  The walk runs in a fixed order:
 
 1. Structure (`NN_MODEL_ERR_FORMAT`): subgraph 0's input / output lists present
    and naming tensors that exist; every subgraph has a tensor vector; every
@@ -194,7 +194,8 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185).  The walk 
    passed it -- and room for that many offsets, each -1 (plan online) or >= 0
    (TFLM's greedy planner keeps any other negative value as a fixed offset and
    its arena check adds offset + size, so -size < offset < -1 placed a tensor
-   before the arena); every such entry is checked (TFLM reads each and keeps the
+   before the arena) and below 2^30 (issue #188: that int sum must not wrap,
+   see the output frames below); every such entry is checked (TFLM reads each and keeps the
    last).  Of the 12-byte header only word [2] is read (words [0] / [1] are read
    by no one); an offset's alignment and the arena fit stay the planner's.
    Buffer 0 need not be empty (TFLM does not rely on it;
@@ -263,10 +264,15 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185).  The walk 
      (FLOAT32 / FLOAT32, INT8 / INT32, INT16 / INT64).
    - R4 PAD: the paddings INT32 (read as int32 whatever their type) and the
      input's rank equal to the output's (TFLM counts the paddings against the
-     output's rank but reads 2 x the input's, inside `AllocateTensors()`).
+     output's rank but reads 2 x the input's, inside `AllocateTensors()`); with
+     data (issue #188), 2 x the input's rank of them before any value is read,
+     each >= 0, and `input + before + after == output` in every dimension, in
+     64 bits.
    - R5 STRIDED_SLICE: begin, end and strides INT32, each with the input's rank
      of elements (read so, no count check).
-   - R6 TRANSPOSE: the permutation INT32 (its count and values are checked live).
+   - R6 TRANSPOSE: the permutation INT32; with data (issue #188), the input's
+     rank (at most 6) of elements before any value, each in [0, rank), the
+     output of that rank, and `output[i] == input[perm[i]]`.
    - R7 RESIZE_BILINEAR / RESIZE_NEAREST_NEIGHBOR: the size INT32, rank 1, 2
      elements, the output rank 4; when the size has data, its two values equal
      `output[1]` and `output[2]` (the kernels write the output by those values).
@@ -283,9 +289,10 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185).  The walk 
    - R9 CONCATENATION: every input of the output's rank, the axis (absent: 0,
      negative: from the end) in range, every other dimension the output's, the
      axis dimensions (none negative) adding up to the output's.
-   - Every other registered operator's rule is empty, its reason beside it; the
-     ethos-u profile has only CUSTOM's, which is empty, so on grove-vision-ai-v2
-     R0 is all that runs.
+   - R11 .. R13 (issue #188), below.  RESHAPE's and CUSTOM's rules are empty,
+     the reason beside them; the ethos-u profile has only CUSTOM's, so on
+     grove-vision-ai-v2 R0 (and R10 / R10b, which are not operator rules) is
+     all that runs.
    A list shorter than the kernel needs, or a required tensor that is -1, is
    left to `Prepare()`'s live check; every rule judges its tensors' ranks before
    any dimension (so a rank-7 convolution input is FORMAT, not TENSOR) and
@@ -294,16 +301,69 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185).  The walk 
    FULLY_CONNECTED that breaks R3 is FORMAT on f746g-disco and an unregistered
    operator on wio-lite-ai's `blazeface` gate).  Every rule passes all 44 models
    found that pass the verifier.
+   And the output frames (issue #188): the planner gives each tensor a frame of
+   its declared shape x TFLM's element size, and some kernels decide how much
+   they WRITE by something else -- the input's shape, the options, a tensor's
+   values -- with only a `TFLITE_DCHECK` or `MatchingFlatSize()` against the
+   output (compiled out by `NDEBUG`).  Past the frame lies the next planned
+   tensor and then the allocator's persistent records (the eval tensors' data
+   pointers); before it, the model's slot.  Read in the pinned tree, against what
+   the issue assumed: a pool or RESIZE with another batch or channel count does
+   NOT write past (`MatchingDim()` returns the minimum and the kernels loop over
+   it); a pool below rank 4 does (its loop counts come from past the shape); a
+   kernel that loops over the output's H and W is not safe under CMSIS-NN
+   (CONV_2D's 1x1 fast path sizes its rows by the input, the depthwise opt path
+   memsets the scratch by an output H past the formula and keeps its bases in
+   int16 -- the window rules, a later step); a size past `int` is every
+   tensor's problem, not RESHAPE's (the planner multiplies every shape in
+   `int`: `[1, 65536, 65537, 1]` int8 is planned as 64 KB); and, found here, a
+   negative PAD padding moves CMSIS-NN's write BEFORE the output, MEAN's float
+   kernel writes one stack entry per axis into `axis[4]`, and the int8
+   TRANSPOSE writes by the output's strides over the input's dims.  So:
+   - R10, every tensor of every subgraph, every profile (grove-vision-ai-v2
+     included), in the tensor loop after the type and before the constant's
+     length: no dimension negative (-1 too: TFLM's `int` size of such a shape,
+     rounded up to 16 in `size_t`, is a 0-byte buffer the planner does not
+     refuse -- so RESHAPE's -1 is no longer available), the product read in
+     TFLM's order and refused before a multiplication would pass `INT32_MAX`,
+     and elements x `TfLiteTypeSizeOf()` (INT4 is 1 byte there) at most
+     `INT32_MAX - 15`, so the size rounded up to 16 is an `int` too.  A rank
+     above 6 is left to the rank rule (TENSOR).
+   - R10b: those sizes rounded up to 16, summed in 64 bits over every tensor
+     entry of every subgraph (a shared table counted per entry), at most 2^30,
+     and every offline-plan offset below 2^30 (above): the greedy planner adds
+     offsets and sizes in `int`, and with both bounds offset + size stays below
+     2^31.  A bound for the arithmetic, not an arena size (every board's arena
+     is 512 KB or less; the planner still judges the fit).
+   - R11 QUANTIZE / DEQUANTIZE / RELU / RELU6 / LOGISTIC / LEAKY_RELU / SOFTMAX:
+     input 0 and output 0 (neither -1) of rank at most 6 with equal element
+     counts (the shapes may differ).
+   - R12a MAX_POOL_2D / AVERAGE_POOL_2D: input and output rank 4.
+   - R13 MEAN: the axis INT32 and with data (without, refused), at most 4
+     elements before any value (the float kernel's `axis[4]`; every type), the
+     input's rank at most 6, each axis in [-rank, rank) (negative from the end),
+     a repeated one once; the output the input with each axis 1 under
+     `keep_dims` (ReducerOptions; absent: false), else with the axes removed.
+   - RESHAPE needs no rule: under R10 its live element-count compare and the
+     copy of the input's bytes are exact.
+   NOT bounded -- what remains: the scratch a kernel requests in its `Prepare()`
+   is sized by the kernel from the dims, so its size and sum are not in R10b;
+   the planner's arena check is what stops it.  The dimension values are read
+   by the size bound and the operator rules' compares only; no work is sized by
+   them.  All 44 models pass (no negative dimension, the largest non-constant
+   tensor 1,247,616 B, the largest sum of sizes 15,114,544 B, against 2^30).
 2. The count of each I/O list (1..`NN_MAX_IO`, `NN_MODEL_ERR_SHAPE`).
 3. Rank (`NN_MODEL_ERR_TENSOR`): every tensor of every subgraph at most
    `NN_TFLM_MAX_TENSOR_RANK` (6, TFLM's `RuntimeShape::kMaxSmallSize`, which
    TFLM only DCHECKs), each I/O tensor at most `NN_MAX_DIMS`.  Only the length of
    a shape is read here; the values of a tensor without data are read only by
-   the operator rules, which compare them (Vela's internal tensors reach 2.2 M,
-   and the ethos-u profile has no rule), a constant's are read in step 1.
+   the size bound (R10) and the operator rules, which compare them (Vela's
+   internal tensors reach 2.2 M elements, far inside R10, and the ethos-u
+   profile has no operator rule), a constant's are read in step 1.
 4. The I/O values: every dimension inside 0..65535, the range of `struct
    nn_tensor`'s 16-bit dims (`NN_MODEL_ERR_DIMS`, the predicate
-   `nn_tensor_dim_fits()` in `nn.h`, tied to the field's width at compile time).
+   `nn_tensor_dim_fits()` in `nn.h`, tied to the field's width at compile time;
+   a negative one has already been refused by R10 as `NN_MODEL_ERR_FORMAT`).
 
 All of it runs on the model, before `AllocateTensors()`; the SHAPE / TENSOR /
 DIMS checks on the planned tensors stay as the backstop and give the same codes.
@@ -371,7 +431,9 @@ that backend rather than by `nn_model_strerror()`.  `NN_MODEL_ERR_DIMS` (issue
 status and ending do not depend on which code refused, so it needed no table
 change.  [!] It judges the DECLARED shapes, so a model whose
 input or output declares `-1` (a dimension a RESHAPE used to resolve at
-`Prepare()`, loading as before) is now refused as `NN_MODEL_ERR_DIMS`.
+`Prepare()`, loading as before) was refused as `NN_MODEL_ERR_DIMS`; since issue
+#188 any negative dimension of any tensor is refused before that, as
+`NN_MODEL_ERR_FORMAT`, by the size bound R10.
 
 ### The Ethos-U backend (issue #169)
 

@@ -844,7 +844,8 @@ it.  A plan count that disagrees with the graph used to fail only inside
 `verify_tflite`, which does not plan.  Every plan offset must be -1 (plan
 online) or >= 0: TFLM's planner keeps any other negative value as a fixed
 offset, and its arena check (offset + size) let -size < offset < -1 place a
-tensor before the arena.  Of the header only word [2] is read; buffer 0 need
+tensor before the arena; and below 2^30 (issue #188, so that `int` sum cannot
+wrap).  Of the header only word [2] is read; buffer 0 need
 not be empty.  One compare per tensor
 entry, a constant per metadata entry.  The pinned blazeface int8 (no plan,
 every index in range) passes unchanged.  Cost: +496 B of Flash (`shell.elf`
@@ -912,6 +913,40 @@ with `--noinhibit-exec`: FLASH 397,952 -> 400,088 B); the `null` tree is
 byte-identical.  The rules' helpers
 are out of line (`NN_TFLM_RULE_HELPER`, the one exception to the header's forced
 inline): forced inline, each rule copied them and `blazeface` cost +2,248 B.
+
+[!] **The walk checks what a kernel WRITES against the output's frame** (issue
+#188, step 1): TFLM's planner sizes each tensor's frame in the arena from its
+declared shape, and some kernels size their writes from something else (the
+input's shape, a tensor's values), compared with the output in a
+`TFLITE_DCHECK` only -- past the frame lie the next tensor and the allocator's
+own pointers, before it the model's staging copy.  So, each
+`NN_MODEL_ERR_FORMAT` (-7), on every profile: no tensor of any subgraph has a
+negative dimension (-1 included, so a RESHAPE's -1 is no longer resolved:
+TFLM's `int` size of such a shape becomes a 0-byte frame), or a size
+(elements x TFLM's element size, INT4 1 byte) past `INT32_MAX - 15` or a partial
+product past `INT32_MAX` (the planner multiplies in `int`: `[1, 65536, 65537,
+1]` int8 is a 64 KB frame), and all sizes rounded up to 16 add up to at most
+2^30, with every offline-plan offset below 2^30 (the greedy planner adds them in
+`int`); a rank-7 tensor stays the rank rule's TENSOR.  And, by profile:
+QUANTIZE / DEQUANTIZE (and on `mlperf` SOFTMAX) with an output of the input's
+element count; MAX_POOL_2D (and on `mlperf` AVERAGE_POOL_2D) with input and
+output rank 4 (below that the kernel's loop counts come from past the shape);
+a PAD's paddings with data counted before they are read, none negative
+(CMSIS-NN moves the write before the output by a negative one), input + before
++ after == output in 64 bits (`Prepare()` adds them in `int`).  TRANSPOSE,
+MEAN and the other elementwise operators are not registered here (their rules
+are f746g-disco's `extended` profile).  Pool and RESIZE batch / channel
+mismatches do not write past the output (the kernels loop over the minimum)
+and are not refused in this step.  NOT bounded: the scratch a kernel requests
+in its `Prepare()`, sized by the kernel (the arena check stops it).  All 44
+models found that pass the verifier pass (no negative dimension; all of a
+model's tensors together at most 15,114,544 B, the mobilenet_v2 224 of
+TFLM's xtensa example); the
+pinned blazeface int8 passes unchanged.  A model whose input or output declares
+-1 is now FORMAT rather than DIMS.  Cost: +672 B of Flash on `blazeface`
+(`shell.elf` `.text` 287,072 -> 287,744 B, `.rodata` unchanged, `shell.bin`
+376,248 -> 376,920 B), +608 B on `mlperf` (linked with `--noinhibit-exec`, as
+above: FLASH 400,168 -> 400,776 B); the `null` tree is byte-identical.
 
 **[!] The order matters and is not an implementation detail.**  Loading the
 plugin first would destroy the previous one's state at the fixed reservation

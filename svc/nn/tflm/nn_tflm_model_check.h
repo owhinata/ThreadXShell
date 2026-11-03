@@ -7,9 +7,9 @@
  * @brief   What a TFLM model must satisfy before it is planned -- the bounded
  *          flatbuffer verifier and the graph walk (structure, lengths, ranks,
  *          quantization lengths, buffer indices and the offline plan's
- *          header, constant buffers, the operator rules, I/O dims) -- shared
- *          by both interpreting backends and by the three host gates (issues
- *          #175, #178, #180, #181, #183, #185).
+ *          header, constant buffers, every tensor's planned size, the operator
+ *          rules, I/O dims) -- shared by both interpreting backends and by the
+ *          three host gates (issues #175, #178, #180, #181, #183, #185, #188).
  *
  * TWO CHECKS, in the order a loader runs them:
  *
@@ -25,6 +25,8 @@
  *                                  exists, an offline plan that matches the
  *                                  graph, an operator-code vector, every
  *                                  tensor's type one with a size, every
+ *                                  tensor's planned size an int and all of
+ *                                  them together at most 2^30, every
  *                                  constant's data exactly its shape's bytes,
  *                                  no data on a tensor the graph writes, every
  *                                  operator naming an operator code that
@@ -59,8 +61,9 @@
  * both backends keep with the same code.  And the host gates differ here:
  * wio-lite-ai's and f746g-disco's verify_tflite do not plan the model, so they
  * check the declared shapes only (grove-vision-ai-v2's verify_vela_model plans
- * and runs the backstop as well).  A declared -1 (a dimension a RESHAPE would
- * resolve at Prepare()) is refused here as DIMS.
+ * and runs the backstop as well).  A declared negative dimension, -1 included (a
+ * dimension a RESHAPE would resolve at Prepare()), is refused before this check,
+ * as FORMAT, by R10 (issue #188, "OUTPUT FRAMES" below).
  *
  * [!] IT INDEXES NOTHING UNCHECKED.  A verifier proves offsets, not tensor
  * indices, and wio-lite-ai runs no on-board verifier at all: subgraph 0, its
@@ -110,7 +113,8 @@
  * info_.tensor_count; TFLM refuses a mismatch only inside AllocateTensors(),
  * which the board reports as NN_MODEL_ERR_ARENA and the wio-lite-ai /
  * f746g-disco gates, which never plan, would have passed), and room for that many
- * offsets after the header, each of them -1 or >= 0.  Every matching entry is
+ * offsets after the header, each of them -1 or >= 0 and below
+ * NN_TFLM_MAX_PLANNED_BYTES (2^30, issue #188).  Every matching entry is
  * checked: TFLM reads each and keeps the last.  Of the header only word [2] is
  * read (words [0] / [1], the version and the subgraph count, are read by no
  * one, TFLM included).  [!] THE OFFSET VALUES: TFLM's greedy planner takes only
@@ -118,8 +122,9 @@
  * fixed offset (greedy_memory_planner.cc), and GetMaximumMemorySize() adds
  * offset + size in int (micro_allocator.cc), so an offset between -size and -1
  * passes the arena check and CommitPlan() places the tensor BEFORE the arena;
- * the walk refuses any offset below -1 (one compare per offset, nbr of them,
- * and nbr is the tensor count, so the work stays visits x a constant).  An
+ * the walk refuses any offset below -1, and one at or past 2^30, which with a
+ * tensor's size could wrap that int sum (issue #188; one compare per offset, nbr
+ * of them, and nbr is the tensor count, so the work stays visits x a constant).  An
  * offset's alignment and whether the tensor fits the arena stay the planner's
  * (it checks the fit).  Buffer 0 is NOT required to be empty:
  * TFLM does not rely on it (a tensor whose buffer has no data is simply not
@@ -165,10 +170,11 @@
  * one type, one buffer table, one data length and at most
  * NN_TFLM_MAX_TENSOR_RANK dimension values; per operator entry at most
  * NN_TFLM_MAX_OP_TENSORS output tensors' buffers -- a constant per visit, so the
- * bound below holds.  The dimension VALUES of a tensor without data are read by
- * no rule but the operator rules below, which compare them and never size
- * anything by them (Vela's internal tensors reach 2.2 M elements, and the
- * ethos-u profile has no rule).
+ * bound below holds.  The dimension VALUES of a tensor without data are read
+ * only by the size bound (R10, "OUTPUT FRAMES" below) and the operator rules,
+ * which compare them with bounds and with each other and never size any work by
+ * them (Vela's internal tensors reach 2.2 M elements, far inside R10, and the
+ * ethos-u profile has no operator rule).
  *
  * [!] OPERATOR RULES (issue #185).  Some registered kernels read a constant not
  * by its own shape but by ANOTHER tensor's dims (the output's channel count, the
@@ -261,11 +267,18 @@
  *                         sizes follow from the shapes alone).
  *   R4 PAD                the paddings INT32; input rank == output rank (the
  *                         count, 2 x the output's rank, and the input rank <= 4
- *                         are Prepare()'s live checks).
+ *                         are Prepare()'s live checks); and, when the paddings
+ *                         have data (issue #188), 2 x the input's rank of them
+ *                         (counted before any value is read), each >= 0, and
+ *                         input + before + after == output in every dimension,
+ *                         added in 64 bits.
  *   R5 STRIDED_SLICE      begin, end and strides INT32, each with the input's
  *                         rank of elements.
- *   R6 TRANSPOSE          the permutation INT32 (its count and values are
- *                         Prepare()'s live checks).
+ *   R6 TRANSPOSE          the permutation INT32; and, when it has data (issue
+ *                         #188), the input's rank (at most
+ *                         NN_TFLM_MAX_TENSOR_RANK) of elements before any value,
+ *                         each value in [0, rank), the output of that rank, and
+ *                         output[i] == input[perm[i]].
  *   R7 RESIZE_BILINEAR /  the size INT32, rank 1, 2 elements, the output rank
  *      _NEAREST_NEIGHBOR  4; when the size has data (#183 has proven it is the
  *                         8 bytes), its two values equal output[1] and
@@ -287,7 +300,8 @@
  *                         dimension the output's; the axis dimensions, none
  *                         negative, adding up (64 bits) to the output's.
  *
- * Every other registered operator's rule is empty, with its reason beside it.
+ * R10 .. R13 are issue #188's, "OUTPUT FRAMES" below.  RESHAPE's and CUSTOM's
+ * rules are empty, with the reason beside them.
  * How they read: a tensor through one helper (-1 is "none", a null table entry
  * FORMAT); a list's length before its elements -- a list shorter than the kernel
  * needs, or a required tensor that is -1, is left to Prepare()'s live check;
@@ -295,9 +309,91 @@
  * rule, TENSOR, runs later, so a rank-7 convolution input is FORMAT here); an
  * options table's type before its field.  What is NOT added: what Prepare()
  * already refuses with a live TF_LITE_ENSURE (conv's batch, the input-channel
- * division, PAD's count, TRANSPOSE's count and values).  The rules compare
- * dimension values and never size work by them (CONCATENATION's at most
- * NN_TFLM_MAX_OP_TENSORS x NN_TFLM_MAX_TENSOR_RANK, the most any rule reads).
+ * division) -- except the counts and values PAD's and TRANSPOSE's rules read
+ * (issue #188): a rule that reads values judges their count first, even where
+ * Prepare() would too.  The rules compare dimension values and never size work
+ * by them (CONCATENATION's at most NN_TFLM_MAX_OP_TENSORS x
+ * NN_TFLM_MAX_TENSOR_RANK, the most any rule reads).
+ *
+ * [!] OUTPUT FRAMES (issue #188).  The planner gives each tensor a frame in the
+ * arena of its declared shape x TFLM's element size, and some kernels decide how
+ * much they WRITE by something else -- the input's shape, the options, a
+ * tensor's values -- comparing it with the output's shape in a TFLITE_DCHECK or
+ * MatchingFlatSize() only (NDEBUG on both boards).  Past the frame lies another
+ * tensor of the plan, then the allocator's own persistent records (the eval
+ * tensors' data / dims pointers, the next kernel writes through them); before
+ * it, at the arena's start, the model's slot.  What was read in lib/tflite-micro
+ * (CMSIS-NN on), against what the issue assumed:
+ *
+ *   1. Pool and RESIZE with a batch or channel count other than the output's do
+ *      NOT write past it: MatchingDim() returns min(a, b) after its DCHECK
+ *      (kernels/internal/types.h), and the reference, integer and CMSIS-NN pools
+ *      and both RESIZE kernels loop over that minimum.  A pool writes past its
+ *      frame below rank 4, where its loop counts come from past the shape.
+ *   2. "A kernel that loops over the output's H and W stays inside it" is false
+ *      under CMSIS-NN: CONV_2D's 1x1 fast path sizes its rows by the INPUT's
+ *      n x h x w (arm_convolve_1x1_s8_fast.c), and the depthwise opt path
+ *      memsets the scratch by an output H past the formula, with its row and
+ *      column bases held in int16 (arm_depthwise_conv_s8_opt.c).  Those are
+ *      the next step's window rules.
+ *   3. A size past int is not RESHAPE's alone: the planner multiplies every
+ *      tensor's shape in int (memory_helpers.cc), so [1, 65536, 65537, 1] int8
+ *      is planned as 64 KB and a pool / conv / pad over its dims writes 4 GB.
+ *      Every shape equality below rests on R10.
+ *   4. Found here: PAD with a negative padding moves CMSIS-NN arm_pad_s8()'s
+ *      write BEFORE the output (Prepare()'s live output == input + before +
+ *      after is int: a negative value or a wrapped sum passes); MEAN's float
+ *      ResolveAxis() writes one MeanParams::axis[4] entry per axis, unchecked,
+ *      on the stack; TRANSPOSE's int8 kernel loops over the input's dims and
+ *      writes by the output's strides, and Prepare() never compares the two.
+ *
+ *   R10 every tensor     no dimension negative (-1 included: TFLM's int size of
+ *                        such a shape, rounded up to 16 in size_t, is a 0-byte
+ *                        buffer, so the planner would not refuse it), the
+ *                        product read in TFLM's order and refused before a
+ *                        multiplication would pass INT32_MAX, and elements x
+ *                        TfLiteTypeSizeOf() (INT4 1 byte) at most
+ *                        NN_TFLM_MAX_TENSOR_BYTES (INT32_MAX - 15, so the size
+ *                        rounded up to 16 is an int too).  Every subgraph, every
+ *                        profile (grove-vision-ai-v2 included), in the tensor
+ *                        loop after the type and before the constant's length.
+ *                        A rank above NN_TFLM_MAX_TENSOR_RANK is left to the rank
+ *                        rule (TENSOR), neither judged nor counted.
+ *   R10b the sum         each tensor entry's size rounded up to 16, in one
+ *                        64-bit sum over every subgraph (a shared table counted
+ *                        per entry, the larger side), at most
+ *                        NN_TFLM_MAX_PLANNED_BYTES (2^30); and every offline-plan
+ *                        offset below 2^30 (above).  The greedy planner adds
+ *                        offsets and sizes in int, so with both, offset + size
+ *                        stays below 2^31.
+ *   R11 QUANTIZE /       input 0 and output 0 (neither -1) of at most
+ *       DEQUANTIZE /     NN_TFLM_MAX_TENSOR_RANK, with equal element counts (the
+ *       RELU / RELU6 /   reference kernels write the INPUT's count; SOFTMAX's
+ *       LOGISTIC /       CMSIS-NN kernel writes the input's outer x min(last),
+ *       LEAKY_RELU /     inside the output when the counts are equal).  The
+ *       SOFTMAX          shapes may differ.
+ *   R12a MAX_POOL_2D /   input and output rank 4.
+ *        AVERAGE_POOL_2D
+ *   R13 MEAN             the axis (input 1) INT32 and WITH data (without, the
+ *                        walk cannot know which dims are reduced: refused), at
+ *                        most NN_TFLM_MAX_MEAN_AXES elements counted before any
+ *                        value (applied to every type), the input's rank at most
+ *                        NN_TFLM_MAX_TENSOR_RANK, each value in [-rank, rank)
+ *                        (negative from the end), a repeated axis once; the
+ *                        output the input with each axis 1 under keep_dims
+ *                        (ReducerOptions; absent or another table: false), else
+ *                        the input with the axes removed, ranks equal.  The
+ *                        reference kernel adds into positions it builds from the
+ *                        input's dims outside the axes.
+ *   R4 / R6 (above)      PAD's and TRANSPOSE's values.
+ *
+ * RESHAPE needs no rule: under R10 Prepare()'s live element-count compare and
+ * the memcpy of the input's bytes are exact (the -1 it would resolve is R10's).
+ * NOT bounded here -- what remains: the scratch buffers a kernel requests in its
+ * Prepare() (RequestScratchBufferInArena()) are sized by the kernel from the
+ * dims, so neither their sizes nor their sum is in R10b; the planner's arena
+ * check is what stops them.  [!] The dimension values are read by the size bound
+ * and the operator rules' compares only, and no work is sized by them.
  *
  * Structure is checked BEFORE anything else, so a model
  * broken in two ways is FORMAT; then the count (SHAPE), the rank (TENSOR) and the
@@ -315,10 +411,12 @@
  * verifier's table count bounded none of it.  So this walk reads each scalar
  * vector's LENGTH before any element and refuses one that is too long:
  *
- *   per tensor entry    one rank compare (shape()->size(); the dimension VALUES
- *                       of a tensor without data are read only by the operator
- *                       rules, which compare them -- Vela's internal tensors
- *                       reach 2.2 M, a value rule would refuse them)
+ *   per tensor entry    one rank compare (shape()->size()) and, at rank
+ *                       NN_TFLM_MAX_TENSOR_RANK or less, at most that many
+ *                       dimension values, one multiply-and-compare each, one
+ *                       element-size compare and a 64-bit add (R10 / R10b,
+ *                       issue #188; Vela's internal tensors reach 2.2 M
+ *                       elements, far inside the bound)
  *   per operator entry  three length compares, then at most
  *                       3 x NN_TFLM_MAX_OP_TENSORS index reads, and as many
  *                       scale-vector length reads (issue #180)
@@ -345,7 +443,9 @@
  *                       compared before any dimension, at most
  *                       (NN_TFLM_MAX_OP_TENSORS + 1) x NN_TFLM_MAX_TENSOR_RANK
  *                       dimension values, one options field and, for RESIZE,
- *                       two data words (issue #185)
+ *                       two data words (issue #185); for PAD, TRANSPOSE and MEAN
+ *                       at most 2 x NN_TFLM_MAX_TENSOR_RANK data words, counted
+ *                       before they are read (issue #188)
  *
  * Every tensor and operator entry is one table visit of the verifier (a shared
  * subgraph's are visited once per entry naming it), so behind the 16 / 4096
@@ -474,7 +574,9 @@
  * them reaches grove-vision-ai-v2's ITCM; forced inline, each rule got its own
  * copy of them and wio-lite-ai's Flash paid 1.2 KB more.  Kept out of line
  * (noinline): left to the inliner they still cost 272 B more there.  The rules
- * R4 .. R9 (step 2) are spelled the same way. */
+ * R4 .. R9 (step 2) and R11 .. R13 (issue #188) are spelled the same way; R10 /
+ * R10b run in the tensor loop, which grove-vision-ai-v2 compiles, and stay
+ * forced inline. */
 #define NN_TFLM_RULE_HELPER static inline __attribute__((noinline))
 
 /** Verifier limits: nesting levels (schema-bounded at 6, see the file header) and
@@ -500,11 +602,12 @@
  * RuntimeShape::kMaxSmallSize (tensorflow/lite/kernels/internal/runtime_shape.h),
  * the size of the fixed dims_[] array kernels copy a shape into.  TFLM checks it
  * with TFLITE_DCHECK only, which a release build compiles out, so a rank-7 tensor
- * would overrun that array.  Only the rank is read: the dimension values of a
- * tensor without data are never judged here (a constant's are multiplied out
+ * would overrun that array.  Only the rank is read by this rule: the dimension values
+ * of a tensor without data are not judged by it (a constant's are multiplied out
  * against its buffer, issue #183, and a constant of a higher rank is FORMAT; the
- * operator rules compare some operators' tensors' values after checking their
- * ranks themselves, issue #185).
+ * size bound multiplies them at this rank or less, issue #188; the operator
+ * rules compare some operators' tensors' values after checking their ranks
+ * themselves, issue #185).
  * Subgraph 0's I/O keeps the tighter NN_MAX_DIMS, the descriptor's.
  */
 #define NN_TFLM_MAX_TENSOR_RANK    6u
@@ -545,6 +648,39 @@
  */
 #define NN_TFLM_MAX_QUANT_REFS     65536u
 
+/*
+ * The largest tensor, in bytes, TFLM's planner can be handed (issue #188, R10):
+ * INT32_MAX - 15.  The planner computes a tensor's bytes as an int product
+ * (memory_helpers.cc, TfLiteEvalTensorByteLength() / BytesRequiredForTensor()),
+ * rounds it up to 16 (micro_allocator.cc, AlignSizeUp(), the 16 of
+ * MicroArenaBufferAlignment()) and passes the result to AddBuffer(int size), so
+ * a tensor past this wraps somewhere on that way -- [1, 65536, 65537, 1] int8
+ * is a 64 KB buffer to the planner, and a kernel that loops over the dimensions
+ * writes 4 GB into it.
+ */
+#define NN_TFLM_MAX_TENSOR_BYTES   0x7FFFFFF0u
+
+/*
+ * The sum, over every tensor entry of every subgraph, of those sizes rounded up
+ * to 16, and the bound on an offline plan's offsets (issue #188, R10b): 2^30.
+ * The greedy planner adds offsets and sizes in int (greedy_memory_planner.cc,
+ * GetMaximumMemorySize()), so one tensor's bound alone lets the sum wrap; with
+ * every size at most 2^30 in all, every online offset is at most that sum and
+ * every offline one below 2^30, offset + size stays below 2^31.  A bound for
+ * int arithmetic, not an arena size: no board's arena is above 512 KB and the
+ * planner still judges the fit.
+ */
+#define NN_TFLM_MAX_PLANNED_BYTES  0x40000000u
+
+/*
+ * The most axes MEAN may name (issue #188, R13): the float kernel's
+ * ResolveAxis() writes each one into MeanParams::axis[4] (reduce_common.cc,
+ * types.h) with no count check, on the stack.
+ */
+#define NN_TFLM_MAX_MEAN_AXES      4u
+
+static_assert(NN_TFLM_MAX_PLANNED_BYTES <= NN_TFLM_MAX_TENSOR_BYTES,
+              "the sum's bound cannot exceed one tensor's");
 static_assert(NN_TFLM_MAX_QUANT_CHANNELS <= NN_TFLM_MAX_QUANT_REFS,
               "one tensor's channels must fit the per-load sum");
 static_assert(NN_TFLM_MAX_TENSOR_RANK == (unsigned)tflite::RuntimeShape::kMaxSmallSize,
@@ -881,6 +1017,52 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_const_len_ok(const tflite::Tensor *t, uint32_t
 		n *= (uint32_t)v;
 	}
 	return ((uint64_t)n * eb2 + 1u) / 2u == size;
+}
+
+/*
+ * R10 and R10b (issue #188; the file header, "OUTPUT FRAMES"): the size TFLM's
+ * planner gives tensor @p t fits an int, and the sum @p *planned of every size
+ * so far stays at most NN_TFLM_MAX_PLANNED_BYTES.  The dimensions are read in
+ * TFLM's order, from the first; a negative one is refused (TFLM's int product
+ * of a shape with a -1 is negative, which the 16-byte rounding in size_t turns
+ * into a buffer of 0 bytes, so the planner would not refuse it), and the product
+ * is refused BEFORE a multiplication would pass INT32_MAX, so no partial
+ * product wraps either ([65536, 65536, 0] is refused although it ends at 0).
+ * Then the elements times TFLM's own element size -- TfLiteTypeSizeOf(): INT4
+ * is 1 byte here, not the half byte of a packed constant -- at most
+ * NN_TFLM_MAX_TENSOR_BYTES, so the size rounded up to 16 is an int too.  A rank
+ * above NN_TFLM_MAX_TENSOR_RANK is left to the rank rule (TENSOR, later) and
+ * neither judged nor counted.  At most NN_TFLM_MAX_TENSOR_RANK values read, two
+ * 32-bit divisions; @p eb2 is nn_tflm_elem_bytes2() of the tensor's type, not 0.
+ * Forced inline like the rest of the tensor loop: grove-vision-ai-v2 compiles it.
+ */
+NN_TFLM_CHECK_INLINE bool nn_tflm_tensor_size_ok(const tflite::Tensor *t, uint32_t eb2,
+                                             uint64_t *planned)
+{
+	const flatbuffers::Vector<int32_t> *shape = nn_tflm_tensor_shape(t);
+	const uint32_t rank = shape ? shape->size() : 0u;
+
+	if (rank > NN_TFLM_MAX_TENSOR_RANK)
+		return true;
+
+	uint32_t n = 1u;
+
+	for (uint32_t d = 0; d < rank; d++) {
+		const int32_t v = shape->Get(d);
+
+		if (v < 0)
+			return false;
+		if (v != 0 && n > 0x7FFFFFFFu / (uint32_t)v)
+			return false;
+		n *= (uint32_t)v;
+	}
+
+	const uint32_t ps = (eb2 + 1u) / 2u;   /* TfLiteTypeSizeOf(): INT4 is 1 */
+
+	if (n > NN_TFLM_MAX_TENSOR_BYTES / ps)
+		return false;
+	*planned += (n * ps + 15u) & ~15u;
+	return *planned <= NN_TFLM_MAX_PLANNED_BYTES;
 }
 
 /* Does tensor @p ti of @p tensors (both checked) have data -- a tensor TFLM
@@ -1226,7 +1408,6 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_PAD(const tflite::Operator *op,
 	const tflite::Tensor *x, *p, *y;
 	bool apply;
 
-	(void)buffers;
 	if (!nn_tflm_op_in_out(op, 1u, tensors, &p, &y, &apply))
 		return false;
 	if (!apply)
@@ -1235,7 +1416,30 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_PAD(const tflite::Operator *op,
 		return false;
 	if (!x)
 		return true;
-	return nn_tflm_index_tensor_ok(p, -1) && nn_tflm_rank(x) == nn_tflm_rank(y);
+	if (!nn_tflm_index_tensor_ok(p, -1) || nn_tflm_rank(x) != nn_tflm_rank(y))
+		return false;
+
+	/* Issue #188: with data, the paddings' count (2 x the input's rank) before
+	 * any value, each value >= 0, and input + before + after == output per
+	 * dimension in 64 bits (Prepare()'s live check adds them in int). */
+	const flatbuffers::Vector<uint8_t> *d =
+		nn_tflm_buffer_data(buffers, nn_tflm_tensor_buffer(p));
+	const uint32_t r = nn_tflm_rank(x);
+
+	if (!d)
+		return true;
+	if (r > NN_TFLM_MAX_TENSOR_RANK || !nn_tflm_index_tensor_ok(p, (int32_t)(2u * r)))
+		return false;
+	for (uint32_t i = 0; i < r; i++) {
+		const int32_t before = flatbuffers::ReadScalar<int32_t>(d->data() + 8u * i);
+		const int32_t after = flatbuffers::ReadScalar<int32_t>(d->data() + 8u * i + 4u);
+
+		if (before < 0 || after < 0)
+			return false;
+		if ((int64_t)nn_tflm_dim(x, i) + before + after != (int64_t)nn_tflm_dim(y, i))
+			return false;
+	}
+	return true;
 }
 
 /* R5 (the file header). */
@@ -1272,13 +1476,42 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_TRANSPOSE(const tflite::Operator *op,
                                                    const nn_tflm_tensor_vec *tensors,
                                                    const nn_tflm_buffer_vec *buffers)
 {
-	const tflite::Tensor *p, *y;
+	const tflite::Tensor *x, *p, *y;
 	bool apply;
 
-	(void)buffers;
 	if (!nn_tflm_op_in_out(op, 1u, tensors, &p, &y, &apply))
 		return false;
-	return !apply || nn_tflm_index_tensor_ok(p, -1);
+	if (!apply)
+		return true;
+	if (!nn_tflm_index_tensor_ok(p, -1))
+		return false;
+	if (!nn_tflm_op_tensor(op->inputs(), 0u, tensors, &x))
+		return false;
+	if (!x)
+		return true;
+
+	/* Issue #188: with data, the permutation's count (the input's rank) before
+	 * any value, each value in [0, rank), and output[i] == input[perm[i]] (the
+	 * int8 kernel loops over the input's dims and writes by the output's
+	 * strides). */
+	const flatbuffers::Vector<uint8_t> *d =
+		nn_tflm_buffer_data(buffers, nn_tflm_tensor_buffer(p));
+	const uint32_t r = nn_tflm_rank(x);
+
+	if (!d)
+		return true;
+	if (r > NN_TFLM_MAX_TENSOR_RANK || !nn_tflm_index_tensor_ok(p, (int32_t)r) ||
+	    nn_tflm_rank(y) != r)
+		return false;
+	for (uint32_t i = 0; i < r; i++) {
+		const int32_t v = flatbuffers::ReadScalar<int32_t>(d->data() + 4u * i);
+
+		if (v < 0 || (uint32_t)v >= r)
+			return false;
+		if (nn_tflm_dim(y, i) != nn_tflm_dim(x, (uint32_t)v))
+			return false;
+	}
+	return true;
 }
 
 /* R7, both RESIZE operators (the file header).  The size's two values are read
@@ -1451,8 +1684,130 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_CONCATENATION(const tflite::Operator *o
 	return sum == (int64_t)nn_tflm_dim(y, (uint32_t)axis);
 }
 
-/* The empty rules: each kernel reads its constants by their own shape (proven
- * above, issue #183) or reads none.  One line each says why. */
+/* R11 (issue #188; the file header, "OUTPUT FRAMES"): an elementwise operator
+ * (input 0 and output 0, neither -1) writes the INPUT's element count into its
+ * output -- the reference kernels loop over ElementCount(input) or
+ * MatchingFlatSize(input, output), whose comparison is a DCHECK -- so the two
+ * element counts are equal (ranks at most NN_TFLM_MAX_TENSOR_RANK first; the
+ * shapes may differ). */
+NN_TFLM_RULE_HELPER bool nn_tflm_unary_ok(const tflite::Operator *op,
+                                          const nn_tflm_tensor_vec *tensors)
+{
+	const tflite::Tensor *x, *y;
+	bool apply;
+
+	if (!nn_tflm_op_in_out(op, 0u, tensors, &x, &y, &apply))
+		return false;
+	if (!apply)
+		return true;
+
+	const uint32_t rx = nn_tflm_rank(x), ry = nn_tflm_rank(y);
+	uint32_t nx, ny;
+
+	if (rx > NN_TFLM_MAX_TENSOR_RANK || ry > NN_TFLM_MAX_TENSOR_RANK)
+		return false;
+	return nn_tflm_dims_count(x, 0u, rx, &nx) && nn_tflm_dims_count(y, 0u, ry, &ny) &&
+	       nx == ny;
+}
+
+/* R12a (issue #188): a pool's input and output are rank 4 -- its Prepare()
+ * checks neither, and below rank 4 RuntimeShape::Dims(3) reads past the shape
+ * (an uninitialized stack word), which sets the kernel's loop counts. */
+NN_TFLM_RULE_HELPER bool nn_tflm_pool_ok(const tflite::Operator *op,
+                                         const nn_tflm_tensor_vec *tensors)
+{
+	const tflite::Tensor *x, *y;
+	bool apply;
+
+	if (!nn_tflm_op_in_out(op, 0u, tensors, &x, &y, &apply))
+		return false;
+	return !apply || (nn_tflm_rank(x) == 4u && nn_tflm_rank(y) == 4u);
+}
+
+/* The rules that are one helper over the operator and its subgraph's tensors. */
+#define NN_TFLM_OP_RULE_AS(e, helper)                                                 \
+	NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_##e(const tflite::Operator *op,      \
+	                                             const nn_tflm_tensor_vec *tensors, \
+	                                             const nn_tflm_buffer_vec *buffers) \
+	{                                                                             \
+		(void)buffers;                                                        \
+		return helper(op, tensors);                                           \
+	}
+NN_TFLM_OP_RULE_AS(QUANTIZE, nn_tflm_unary_ok)
+NN_TFLM_OP_RULE_AS(DEQUANTIZE, nn_tflm_unary_ok)
+NN_TFLM_OP_RULE_AS(RELU, nn_tflm_unary_ok)
+NN_TFLM_OP_RULE_AS(RELU6, nn_tflm_unary_ok)
+NN_TFLM_OP_RULE_AS(LOGISTIC, nn_tflm_unary_ok)
+NN_TFLM_OP_RULE_AS(LEAKY_RELU, nn_tflm_unary_ok)
+NN_TFLM_OP_RULE_AS(SOFTMAX, nn_tflm_unary_ok)
+NN_TFLM_OP_RULE_AS(MAX_POOL_2D, nn_tflm_pool_ok)
+NN_TFLM_OP_RULE_AS(AVERAGE_POOL_2D, nn_tflm_pool_ok)
+#undef NN_TFLM_OP_RULE_AS
+
+/* R13 MEAN (issue #188; the file header): the axis INT32 and WITH data (the
+ * reference kernel builds the output's positions from the input's dims outside
+ * the axes and adds into them, so an axis the walk cannot read is refused), at
+ * most NN_TFLM_MAX_MEAN_AXES elements (the count before any value), each in
+ * [-rank, rank) of the input (rank at most NN_TFLM_MAX_TENSOR_RANK; negative
+ * counts from the end), a repeated axis counted once; and the output's shape the
+ * reduced input's: with keep_dims (ReducerOptions; absent or another table:
+ * false) the input's with 1 at each axis, without it the input's with the axes
+ * removed, the rank included. */
+NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_MEAN(const tflite::Operator *op,
+                                              const nn_tflm_tensor_vec *tensors,
+                                              const nn_tflm_buffer_vec *buffers)
+{
+	const tflite::Tensor *x, *a, *y;
+	bool apply;
+
+	if (!nn_tflm_op_in_out(op, 1u, tensors, &a, &y, &apply))
+		return false;
+	if (!apply)
+		return true;
+	if (!nn_tflm_op_tensor(op->inputs(), 0u, tensors, &x))
+		return false;
+	if (!x)
+		return true;
+	if (nn_tflm_tensor_type(a) != tflite::TensorType_INT32)
+		return false;
+
+	const flatbuffers::Vector<uint8_t> *d =
+		nn_tflm_buffer_data(buffers, nn_tflm_tensor_buffer(a));
+	const uint32_t ra = nn_tflm_rank(a), rx = nn_tflm_rank(x), ry = nn_tflm_rank(y);
+	uint32_t na, mask = 0;
+
+	if (!d)
+		return false;
+	if (ra > NN_TFLM_MAX_TENSOR_RANK || !nn_tflm_dims_count(a, 0u, ra, &na) ||
+	    na > NN_TFLM_MAX_MEAN_AXES || rx > NN_TFLM_MAX_TENSOR_RANK)
+		return false;
+	for (uint32_t j = 0; j < na; j++) {
+		int32_t v = flatbuffers::ReadScalar<int32_t>(d->data() + 4u * j);
+
+		if (v < 0)
+			v += (int32_t)rx;
+		if (v < 0 || (uint32_t)v >= rx)
+			return false;
+		mask |= 1u << (uint32_t)v;
+	}
+
+	const flatbuffers::Table *o = nn_tflm_op_options(op, tflite::BuiltinOptions_ReducerOptions);
+	const bool keep = o && o->GetField<uint8_t>(tflite::ReducerOptions::VT_KEEP_DIMS, 0) != 0;
+	uint32_t j = 0;
+
+	for (uint32_t i = 0; i < rx; i++) {
+		const bool reduced = (mask >> i) & 1u;
+
+		if (reduced && !keep)
+			continue;
+		if (j >= ry || nn_tflm_dim(y, j) != (reduced ? 1 : nn_tflm_dim(x, i)))
+			return false;
+		j++;
+	}
+	return j == ry;
+}
+
+/* The empty rules, one line each saying why. */
 #define NN_TFLM_OP_RULE_NONE(e)                                                       \
 	NN_TFLM_CHECK_INLINE bool nn_tflm_op_rule_##e(const tflite::Operator *op,      \
 	                                              const nn_tflm_tensor_vec *tensors, \
@@ -1463,17 +1818,7 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_CONCATENATION(const tflite::Operator *o
 		(void)buffers;                                                        \
 		return true;                                                          \
 	}
-NN_TFLM_OP_RULE_NONE(QUANTIZE)         /* no constant; elementwise over its own input */
-NN_TFLM_OP_RULE_NONE(DEQUANTIZE)       /* likewise */
-NN_TFLM_OP_RULE_NONE(RELU)             /* likewise */
-NN_TFLM_OP_RULE_NONE(RELU6)            /* likewise */
-NN_TFLM_OP_RULE_NONE(LOGISTIC)         /* likewise */
-NN_TFLM_OP_RULE_NONE(LEAKY_RELU)       /* likewise */
-NN_TFLM_OP_RULE_NONE(SOFTMAX)          /* likewise */
-NN_TFLM_OP_RULE_NONE(MAX_POOL_2D)      /* no constant; reads its input by its own dims */
-NN_TFLM_OP_RULE_NONE(AVERAGE_POOL_2D)  /* likewise */
-NN_TFLM_OP_RULE_NONE(MEAN)             /* the axis constant by its own shape (INT32 live-checked) */
-NN_TFLM_OP_RULE_NONE(RESHAPE)          /* the shape constant is not read (element count live-checked) */
+NN_TFLM_OP_RULE_NONE(RESHAPE)          /* under R10 Prepare()'s live element-count compare and the memcpy's size are exact */
 NN_TFLM_OP_RULE_NONE(CUSTOM)           /* ethos-u: the NPU reads what the command stream says (issue #184) */
 #undef NN_TFLM_OP_RULE_NONE
 
@@ -1497,7 +1842,9 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_op_rule_ok(int32_t kind, const tflite::Operato
 
 /*
  * One subgraph holds together: a tensor vector, every tensor naming a buffer
- * below the model's buffer count (issue #181), of a type with a size and, when
+ * below the model's buffer count (issue #181), of a type with a size, of a
+ * planned size that fits an int and keeps @p *planned, every earlier subgraph's
+ * sizes with it, at most NN_TFLM_MAX_PLANNED_BYTES (issue #188) and, when
  * its buffer has data, exactly as long as its shape says (issue #183), and every operator present with
  * an inputs and an outputs list, each of its three lists at most
  * NN_TFLM_MAX_OP_TENSORS long -- all three LENGTHS judged before any element is
@@ -1514,7 +1861,7 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_op_rule_ok(int32_t kind, const tflite::Operato
 NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg,
                                          const nn_tflm_buffer_vec *buffers,
                                          const nn_tflm_opcode_vec *codes,
-                                         uint32_t *qrefs)
+                                         uint32_t *qrefs, uint64_t *planned)
 {
 	const nn_tflm_tensor_vec *tensors = sg ? sg->tensors() : nullptr;
 
@@ -1540,6 +1887,9 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg,
 			const flatbuffers::Vector<uint8_t> *d;
 
 			if (eb2 == 0u)
+				return false;
+			/* R10 / R10b, before the constant's length (issue #188). */
+			if (!nn_tflm_tensor_size_ok(t, eb2, planned))
 				return false;
 			d = nn_tflm_buffer_data(buffers, bi);
 			if (d && !nn_tflm_const_len_ok(t, eb2, d->size()))
@@ -1632,7 +1982,8 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_md_is_offline_plan(const tflite::Metadata *md)
  * below @p nb, and every entry TFLM takes for the offline plan names one whose
  * data has the 12-byte header, a tensor count (word [2], a signed int32) equal
  * to @p total_tensors -- every subgraph's, as TFLM counts -- and room for that
- * many int32 offsets after the header, each -1 (plan online) or >= 0.  Per
+ * many int32 offsets after the header, each -1 (plan online) or >= 0 and below
+ * NN_TFLM_MAX_PLANNED_BYTES (issue #188).  Per
  * entry: two compares and, for the plan, a 23-byte compare, one length, one
  * header word and then one compare per offset (the count already equals the
  * model's tensors, so a plan costs a constant per tensor entry).
@@ -1667,10 +2018,15 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_metadata_ok(const tflite::Model *model, uint32
 		if ((d->size() - 12u) / 4u < (uint32_t)nbr)
 			return false;
 		/* Only -1 is "plan online"; any other negative offset would be
-		 * placed before the arena (the file header). */
-		for (uint32_t j = 0; j < (uint32_t)nbr; j++)
-			if (flatbuffers::ReadScalar<int32_t>(d->data() + 12u + 4u * j) < -1)
+		 * placed before the arena, and one at or past
+		 * NN_TFLM_MAX_PLANNED_BYTES could wrap the planner's int sum
+		 * (the file header, issue #188). */
+		for (uint32_t j = 0; j < (uint32_t)nbr; j++) {
+			const int32_t off = flatbuffers::ReadScalar<int32_t>(d->data() + 12u + 4u * j);
+
+			if (off < -1 || off >= (int32_t)NN_TFLM_MAX_PLANNED_BYTES)
 				return false;
+		}
 	}
 	return true;
 }
@@ -1751,18 +2107,24 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_io_list_dims_fit(const flatbuffers::Vector<int
  *                        "OfflineMemoryAllocation" entry whose buffer has no
  *                        data, no 12-byte header, a tensor count other than
  *                        every subgraph's tensors together, fewer offsets
- *                        than that count, or an offset below -1 (issue #181);
- *                        a tensor of a type TFLM gives no size; a tensor with
+ *                        than that count, or an offset below -1 (issue #181)
+ *                        or at or past 2^30 (issue #188);
+ *                        a tensor of a type TFLM gives no size; a tensor of a
+ *                        rank at most NN_TFLM_MAX_TENSOR_RANK with a negative
+ *                        dimension or a planned size past
+ *                        NN_TFLM_MAX_TENSOR_BYTES, or all of them together past
+ *                        NN_TFLM_MAX_PLANNED_BYTES (issue #188); a tensor with
  *                        data whose length is not its shape's bytes, with a
  *                        negative dimension or of a rank above
  *                        NN_TFLM_MAX_TENSOR_RANK; data on an operator output or
  *                        on subgraph 0's I/O (issue #183); an operator naming
  *                        an operator code past the vector, or breaking its
- *                        kind's rule (issue #185) (structure)
+ *                        kind's rule (issues #185, #188) (structure)
  *   NN_MODEL_ERR_SHAPE   an I/O list naming outside 1..NN_MAX_IO tensors (count)
  *   NN_MODEL_ERR_TENSOR  any tensor declaring more than NN_TFLM_MAX_TENSOR_RANK
  *                        dimensions, or an I/O tensor more than NN_MAX_DIMS (rank)
- *   NN_MODEL_ERR_DIMS    an I/O dimension outside 0..NN_TENSOR_DIM_MAX (value)
+ *   NN_MODEL_ERR_DIMS    an I/O dimension above NN_TENSOR_DIM_MAX (value; a
+ *                        negative one is R10's FORMAT, issue #188)
  * SHAPE and TENSOR are the codes the backends give the same failures after
  * planning (they keep those checks as the backstop); judged here they only come
  * sooner.  The order is also what bounds the work (the file header, "LENGTHS
@@ -1803,11 +2165,12 @@ NN_TFLM_CHECK_INLINE int nn_tflm_model_io_check(const tflite::Model *model)
 	const uint32_t nb = buffers ? buffers->size() : 0u;
 	uint32_t qrefs = 0;
 	uint64_t total_tensors = 0;
+	uint64_t planned = 0;   /* R10b: every subgraph's sizes, as TFLM plans them all */
 
 	for (uint32_t i = 0; i < subgraphs->size(); i++) {
 		const tflite::SubGraph *s = subgraphs->Get(i);
 
-		if (!nn_tflm_subgraph_ok(s, buffers, codes, &qrefs))
+		if (!nn_tflm_subgraph_ok(s, buffers, codes, &qrefs, &planned))
 			return NN_MODEL_ERR_FORMAT;
 		total_tensors += s->tensors()->size();
 	}

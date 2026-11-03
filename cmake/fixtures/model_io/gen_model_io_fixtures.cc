@@ -21,7 +21,7 @@
  *   io_ok_65535.tflite      control: input [1, 65535] -- the bound itself fits
  *   io_in_dim_65536.tflite  input  [1, 65536], one past the bound   -> DIMS
  *   io_in_dim_70000.tflite  input  [1, 70000]                       -> DIMS
- *   io_out_dim_neg1.tflite  output [1, -1]                          -> DIMS
+ *   io_out_dim_neg1.tflite  output [1, -1]  -> FORMAT (R10, issue #188; DIMS before)
  *   io_out_index_oob.tflite outputs = [2], past the tensor vector   -> FORMAT
  *   io_no_inputs.tflite     no inputs vector at all                 -> FORMAT
  *   io_same_70000.tflite    one tensor [1, 70000], input == output  -> DIMS
@@ -285,9 +285,11 @@
  *                           _issue (input [1, 1], weights [2, 1], bias [1],
  *                           output [1, 2]), _w0_ne, _w_rank3, _out_rank1,
  *                           _out_rank5 (not graph I/O), _in_count_ne (input
- *                           [1, 5]), _saturate (output [65536, 65536, 1], not
- *                           graph I/O, weights [1, 1], input [0, 1]: the product
- *                           wraps to 0 in 32 bits), _out_last0 (output [1, 0],
+ *                           [1, 5]), _saturate (output [65536, 8192, 1], not
+ *                           graph I/O, weights [1, 8] without data, input [0, 1]:
+ *                           outer x weights[1] wraps to 0 in 32 bits; the output
+ *                           2^29 elements, inside R10 / R10b, issue #188),
+ *                           _out_last0 (output [1, 0],
  *                           weights [1, 4]) and _i16_i32 are refused
  *   r1_i16_groups / _i4_groups  CONV_2D input [1, 4, 4, 4], filter [4, ., ., 2]
  *                           (2 groups) under an int16 input / an INT4 filter:
@@ -297,11 +299,13 @@
  *   r8_add3 / _sub3         three inputs, inputs 0 / 1 [2, 2] + [2, 3] -> [2, 3]:
  *                           refused; _add3_ok (inputs 0 / 1 broadcast, input 2
  *                           any shape) is the control
- *   r4_*                    PAD, input [1, 2, 2, 1], paddings INT32 [4, 2]: _ok;
+ *   r4_*                    PAD, input [1, 2, 2, 1], paddings INT32 [4, 2]: _ok
+ *                           (values {0, 0, 1, 1, 1, 1, 0, 0}, output [1, 4, 4, 1]);
  *                           _rank_ne (output rank 3), _pad_int8 refused
  *   r5_*                    STRIDED_SLICE, input rank 4, begin / end / strides
  *                           INT32 [4]: _ok; _begin_3, _strides_int8 refused
- *   r6_*                    TRANSPOSE, perm INT32 [4]: _ok; _perm_int8 refused
+ *   r6_*                    TRANSPOSE, perm INT32 [4]: _ok ({0, 2, 1, 3} over
+ *                           [1, 4, 4, 2]); _perm_int8 refused
  *   r7_*                    RESIZE_BILINEAR (and _nn_ok NEAREST_NEIGHBOR), input
  *                           [1, 2, 2, 1], size INT32 [2] = {4, 6}, output
  *                           [1, 4, 6, 1]: _ok, _nn_ok and _nodata (the size
@@ -320,6 +324,56 @@
  *                           _axis3, _axis_neg1 are controls; _other_dim_ne,
  *                           _sum_ne, _rank_ne (an input of rank 5), _axis_oob (4)
  *                           refused
+ *
+ * And the output frames (issue #188).  R10 / R10b on tensors no operator names
+ * (an added tensor without data after t0 / t1, int8 unless named), so no rule
+ * can refuse them first:
+ *
+ *   r10_zero_ok             control: [65536, 0]
+ *   r10_rank7_big           [65536, 65536, -1, 1, 1, 1, 1]: rank 7 is the rank
+ *                           rule's                            -> TENSOR
+ *   r10_wrap_int8           [1, 65536, 65537, 1] (65536 as an int product)
+ *   r10_f32_2e29 / _2e30    FLOAT32 of 2^29 / 2^30 elements (2^31 bytes; 2^32,
+ *                           0 in 32 bits)
+ *   r10_int4_2e31 / _2e30   INT4 of 2^31 / 2^30 elements (INT4 is 1 byte to the
+ *                           planner: 2^30 bytes is the sum's)
+ *   r10_int8_max_m14        [INT32_MAX - 14]: one byte past INT32_MAX - 15
+ *   r10_mid_wrap            [65536, 65536, 0]: the partial product is refused
+ *   r10_neg_first / _mid / _last  [-1, 4] / [1, -1, 4] / [1, 4, -2]
+ *   r10_neg_after_zero      [0, -1]: past a 0 only the sign refuses it
+ *   r10b_eq                 control: [2^30 - 32], the sum exactly 2^30 with t0 / t1
+ *   r10b_over16             [2^30 - 31]: rounded up, the sum 2^30 + 16
+ *   r10b_two / _shared / _sg1  two [2^29 + 16] tensors: two tables / one table
+ *                           named by two entries / one in a second subgraph
+ *   md_offline_off_2e30m1   control: plan(2, 2) with offset 0 = 2^30 - 1
+ *   md_offline_off_2e30     the same with 2^30
+ *                                                             all -> FORMAT
+ *   r11_*                   QUANTIZE / DEQUANTIZE / RELU / RELU6 / LOGISTIC /
+ *                           LEAKY_RELU / SOFTMAX [1, 4] -> [1, 4] (_ok), and
+ *                           _reshape_ok ([1, 4] -> [2, 2]) are controls; _ne
+ *                           ([1, 8] -> [1, 4]), _quantize_1000 ([1, 1000] ->
+ *                           [1, 10]) and _neg (output [-1, 4], not graph I/O:
+ *                           R10's on every profile) refused
+ *   r12_*                   MAX_POOL_2D / AVERAGE_POOL_2D [1, 4, 4, 2] ->
+ *                           [1, 2, 2, 2]: _max_ok / _avg_ok; _in_rank3,
+ *                           _out_rank2, _avg_out_rank2 and _rank7 (not graph
+ *                           I/O: FORMAT, not TENSOR) refused
+ *   r4_neg_before / _wrap / _count6 / _out_ne  PAD values {.., -1, 3, ..} (the
+ *                           sum right) / {.., INT32_MAX, INT32_MAX, ..} with the
+ *                           output's dim the 32-bit sum, 0 / paddings [3, 2] /
+ *                           an output dim one off: refused
+ *   r6_perm_ok              control: [1, 2, 3, 4], perm {0, 2, 1, 3} ->
+ *                           [1, 3, 2, 4]; _out_ne (output the input's shape),
+ *                           _perm_4 (a value 4), _perm_3 (3 elements), _out_rank
+ *                           (output rank 3) refused
+ *   r13_*                   MEAN [1, 4, 4, 8], axis INT32 with data:
+ *                           _keep_ok ({1, 2} keep -> [1, 1, 1, 8]), _nokeep_ok
+ *                           (-> [1, 8]), _noopts_ok (no options: keep false),
+ *                           _neg_ok ({-1} -> [1, 4, 4]), _dup_ok ({1, 1} ->
+ *                           [1, 4, 8]) are controls; _out_big ([1, 16]),
+ *                           _out_small ([1, 4]), _keep_rank (keep, [1, 8]),
+ *                           _axes_5 (5 values, all in range), _axis_oob ({4}),
+ *                           _axis_nodata, _axis_int8 refused
  *
  * Every file stays under 512 KB (checked here) and within the 4096 visits.
  *
@@ -441,6 +495,8 @@ struct spec {
 	uint32_t             t0_data;       /* t0 / t1 / the sg1_ok tensor on a */
 	uint32_t             t1_data;       /* Buffer of their own with this */
 	uint32_t             sg1_data;      /* many bytes (0: buffer 0) */
+	/* issue #188 -- empty: the sg1_ok tensor is [1, 4]. */
+	std::vector<int32_t> sg1_shape;
 };
 
 /* issue #183: the index of the first added constant. */
@@ -650,9 +706,10 @@ bool write_model(const std::string &dir, const spec &sp)
 	if (sp.sg1_ok) {
 		const uint32_t b1 = sp.sg1_buffer == UINT32_MAX ? nb_all
 		                    : sp.sg1_data ? sg1_buf : sp.sg1_buffer;
-		const auto t = tflite::CreateTensor(fbb, fbb.CreateVector(std::vector<int32_t>{ 1, 4 }),
-		                                    tflite::TensorType_INT8, b1,
-		                                    fbb.CreateString("sg1"));
+		const auto t = tflite::CreateTensor(
+			fbb, fbb.CreateVector(sp.sg1_shape.empty() ? std::vector<int32_t>{ 1, 4 }
+			                                           : sp.sg1_shape),
+			tflite::TensorType_INT8, b1, fbb.CreateString("sg1"));
 
 		sgv.push_back(tflite::CreateSubGraph(
 			fbb, fbb.CreateVector(std::vector<flatbuffers::Offset<tflite::Tensor>>{ t }),
@@ -892,7 +949,8 @@ struct opr_spec {
 	std::vector<int32_t>    g_out;
 	int                     opts;          /* 0 none, 1 DepthwiseConv2DOptions
 	                                        * {dm}, 2 Conv2DOptions, 3
-	                                        * ConcatenationOptions {axis: dm} */
+	                                        * ConcatenationOptions {axis: dm}, 4
+	                                        * ReducerOptions {keep_dims: dm != 0} */
 	int32_t                 dm;
 	uint32_t                codes;         /* operator codes, all `kind` (0: 1) */
 	uint32_t                opcode_index;
@@ -953,6 +1011,9 @@ bool write_op_model(const std::string &dir, const opr_spec &sp)
 	} else if (sp.opts == 3) {
 		ot = tflite::BuiltinOptions_ConcatenationOptions;
 		ov = tflite::CreateConcatenationOptions(fbb, sp.dm).Union();
+	} else if (sp.opts == 4) {
+		ot = tflite::BuiltinOptions_ReducerOptions;
+		ov = tflite::CreateReducerOptions(fbb, sp.dm != 0).Union();
 	}
 	const auto op = tflite::CreateOperator(fbb, sp.opcode_index, fbb.CreateVector(sp.in),
 	                                       fbb.CreateVector(sp.out), ot, ov);
@@ -1314,6 +1375,73 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* issue #188: R10 / R10b, tensors no operator names (so no operator rule can
+	 * refuse them first) and the offline plan's offset bound. */
+	{
+		auto big = [](const char *file, tflite::TensorType type, std::vector<int32_t> shape) {
+			spec sp = { file, { 1, 4 }, { 1, 4 }, { 0 }, { 1 }, false };
+			ctensor t = { type, shape, false, 0u, false, false, false, false, false,
+			              false };
+
+			sp.ct = { t };
+			return sp;
+		};
+		const tflite::TensorType I8 = tflite::TensorType_INT8;
+		const tflite::TensorType I4 = tflite::TensorType_INT4;
+		const tflite::TensorType F32 = tflite::TensorType_FLOAT32;
+		const int32_t lim30 = (int32_t)NN_TFLM_MAX_PLANNED_BYTES;
+		/* t0 and t1 are int8 [1, 4]: 16 bytes each once rounded up. */
+		const int32_t io_bytes = 32;
+
+		graph_specs.push_back(big("r10_zero_ok.tflite", I8, { 65536, 0 }));
+		graph_specs.push_back(big("r10_rank7_big.tflite", I8,
+		                          { 65536, 65536, -1, 1, 1, 1, 1 }));
+		graph_specs.push_back(big("r10_wrap_int8.tflite", I8, { 1, 65536, 65537, 1 }));
+		static_assert((uint32_t)(65536u * 65537u) == 65536u,
+		              "r10_wrap_int8: the int product is 65536");
+		graph_specs.push_back(big("r10_f32_2e29.tflite", F32, { 16384, 32768 }));
+		graph_specs.push_back(big("r10_f32_2e30.tflite", F32, { 32768, 32768 }));
+		graph_specs.push_back(big("r10_int4_2e31.tflite", I4, { 65536, 32768 }));
+		graph_specs.push_back(big("r10_int4_2e30.tflite", I4, { 32768, 32768 }));
+		graph_specs.push_back(big("r10_int8_max_m14.tflite", I8, { 0x7FFFFFFF - 14 }));
+		static_assert(NN_TFLM_MAX_TENSOR_BYTES == 0x7FFFFFFFu - 15u,
+		              "r10_int8_max_m14 is one past the bound");
+		graph_specs.push_back(big("r10_mid_wrap.tflite", I8, { 65536, 65536, 0 }));
+		graph_specs.push_back(big("r10_neg_first.tflite", I8, { -1, 4 }));
+		graph_specs.push_back(big("r10_neg_mid.tflite", I8, { 1, -1, 4 }));
+		graph_specs.push_back(big("r10_neg_last.tflite", I8, { 1, 4, -2 }));
+		/* After a 0 the product cannot pass any bound: only the sign refuses
+		 * it (TFLM's size of [0, -1] is 0). */
+		graph_specs.push_back(big("r10_neg_after_zero.tflite", I8, { 0, -1 }));
+
+		static_assert(NN_TFLM_MAX_PLANNED_BYTES == 0x40000000u,
+		              "r10b_* and md_offline_off_2e30* are named for 2^30");
+		graph_specs.push_back(big("r10b_eq.tflite", I8, { lim30 - io_bytes }));
+		graph_specs.push_back(big("r10b_over16.tflite", I8, { lim30 - io_bytes + 1 }));
+		{
+			spec sp = big("r10b_two.tflite", I8, { lim30 / 2 + 16 });
+
+			sp.ct.push_back(sp.ct[0]);
+			graph_specs.push_back(sp);
+		}
+		/* ONE tensor table named by two entries: counted per entry. */
+		graph_specs.push_back(with_tensor("r10b_shared.tflite", { lim30 / 2 + 16 }, 2u));
+		{
+			spec sp = with_tensor("r10b_sg1.tflite", { lim30 / 2 + 16 }, 1u);
+
+			sp.sg1_shape = { lim30 / 2 + 16 };
+			graph_specs.push_back(sp);
+		}
+		const std::string off = "OfflineMemoryAllocation";
+		spec sp = graph("md_offline_off_2e30m1.tflite");
+
+		sp.md = { { off, plan(2, 2u, { lim30 - 1 }), false, false } };
+		graph_specs.push_back(sp);
+		sp = graph("md_offline_off_2e30.tflite");
+		sp.md = { { off, plan(2, 2u, { lim30 }), false, false } };
+		graph_specs.push_back(sp);
+	}
+
 	/* The flags the constructors above do not take, set by name. */
 	for (spec &sp : graph_specs) {
 		const std::string f = sp.file;
@@ -1323,7 +1451,7 @@ int main(int argc, char **argv)
 		sp.sg1_ok         = f == "sg1_ok.tflite" || f == "t_buffer_oob_sg1.tflite" ||
 		                    f == "md_offline_total_3.tflite" ||
 		                    f == "md_offline_sg0_only.tflite" ||
-		                    f == "c_sg1_short.tflite";
+		                    f == "c_sg1_short.tflite" || f == "r10b_sg1.tflite";
 		sp.sg1_no_tensors = f == "sg1_no_tensors.tflite";
 		if (f == "op_in_65000_shared.tflite")
 			sp.op_entries = witness_entries;
@@ -1401,6 +1529,14 @@ int main(int argc, char **argv)
 		auto off_io = [&](opr_spec sp, bool outputs) {
 			sp.t.push_back(T(I8, { 1, 4 }, 0u));
 			(outputs ? sp.g_out : sp.g_in) = { 4 };
+			return sp;
+		};
+		/* The same for an operator of any tensor count: the extra tensor is
+		 * the last one. */
+		auto off_io_n = [&](opr_spec sp, bool outputs) {
+			sp.t.push_back(T(I8, { 1, 4 }, 0u));
+			(outputs ? sp.g_out : sp.g_in) =
+				std::vector<int32_t>{ (int32_t)sp.t.size() - 1 };
 			return sp;
 		};
 		auto dw = [&](const char *file, std::vector<rtensor> t, int32_t dm) {
@@ -1521,11 +1657,13 @@ int main(int argc, char **argv)
 		                       { 0, 1, 2 }), true));
 		os.push_back(op("r3_in_count_ne.tflite", FC,
 		                fct(I8, { 1, 5 }, { 3, 4 }, 12u, 3, { 1, 3 }), { 0, 1, 2 }));
+		/* Issue #188: the output 2^29 elements, inside R10 / R10b, so only R3's
+		 * own 32-bit bound refuses it (an output of 2^32 elements is R10's). */
 		os.push_back(off_io(op("r3_saturate.tflite", FC,
-		                       fct(I8, { 0, 1 }, { 1, 1 }, 1u, 1, { 65536, 65536, 1 }),
+		                       fct(I8, { 0, 1 }, { 1, 8 }, 0u, 1, { 65536, 8192, 1 }),
 		                       { 0, 1, -1 }), true));
-		static_assert((uint32_t)(65536ull * 65536ull) == 0u,
-		              "r3_saturate: the 32-bit product of the output's outer dims is 0");
+		static_assert((uint32_t)(65536ull * 8192ull * 8ull) == 0u,
+		              "r3_saturate: outer dims x weights[1] is 0 in 32 bits");
 		os.push_back(op("r3_out_last0.tflite", FC, fct(I8, { 1, 4 }, { 1, 4 }, 4u, 1, { 1, 0 }),
 		                { 0, 1, 2 }));
 		{
@@ -1574,9 +1712,11 @@ int main(int argc, char **argv)
 		/* Step 2.  R4 PAD */
 		const tflite::BuiltinOperator PADK = tflite::BuiltinOperator_PAD;
 		const std::vector<int32_t> x4 = { 1, 2, 2, 1 };
+		/* Issue #188: the values are read, so they are {0, 0, 1, 1, 1, 1, 0, 0}. */
+		const rtensor pad_ok = { I32, { 4, 2 }, 32u, { 0, 0, 1, 1, 1, 1, 0, 0 } };
+
 		os.push_back(op("r4_ok.tflite", PADK,
-		                { T(I8, x4, 0u), T(I32, { 4, 2 }, 32u), T(I8, { 1, 4, 4, 1 }, 0u) },
-		                { 0, 1 }));
+		                { T(I8, x4, 0u), pad_ok, T(I8, { 1, 4, 4, 1 }, 0u) }, { 0, 1 }));
 		os.push_back(op("r4_rank_ne.tflite", PADK,
 		                { T(I8, x4, 0u), T(I32, { 4, 2 }, 32u), T(I8, { 4, 4, 1 }, 0u) },
 		                { 0, 1 }));
@@ -1605,8 +1745,10 @@ int main(int argc, char **argv)
 			const tflite::BuiltinOperator TR = tflite::BuiltinOperator_TRANSPOSE;
 			const std::vector<int32_t> io = { 1, 4, 4, 2 };
 
+			/* Issue #188: the values are read; {0, 2, 1, 3} over [1, 4, 4, 2]. */
 			os.push_back(op("r6_ok.tflite", TR,
-			                { T(I8, io, 0u), T(I32, { 4 }, 16u), T(I8, io, 0u) }, { 0, 1 }));
+			                { T(I8, io, 0u), rtensor{ I32, { 4 }, 16u, { 0, 2, 1, 3 } },
+			                  T(I8, io, 0u) }, { 0, 1 }));
 			os.push_back(op("r6_perm_int8.tflite", TR,
 			                { T(I8, io, 0u), T(I8, { 4 }, 4u), T(I8, io, 0u) }, { 0, 1 }));
 		}
@@ -1723,6 +1865,136 @@ int main(int argc, char **argv)
 			}
 			os.push_back(cat("r9_axis_oob.tflite", { 1, 2, 2, 1 }, { 1, 2, 2, 3 },
 			                 { 1, 2, 2, 4 }, 4));
+		}
+
+		/* Issue #188 (the output frames).  R11: an elementwise operator, input 0
+		 * -> output 0, element counts equal. */
+		{
+			const struct { const char *ok, *ne; tflite::BuiltinOperator k; } un[] = {
+				{ "r11_quantize_ok.tflite", "r11_quantize_ne.tflite",
+				  tflite::BuiltinOperator_QUANTIZE },
+				{ "r11_dequantize_ok.tflite", "r11_dequantize_ne.tflite",
+				  tflite::BuiltinOperator_DEQUANTIZE },
+				{ "r11_relu_ok.tflite", nullptr, tflite::BuiltinOperator_RELU },
+				{ "r11_relu6_ok.tflite", nullptr, tflite::BuiltinOperator_RELU6 },
+				{ "r11_logistic_ok.tflite", "r11_logistic_ne.tflite",
+				  tflite::BuiltinOperator_LOGISTIC },
+				{ "r11_leaky_relu_ok.tflite", nullptr, tflite::BuiltinOperator_LEAKY_RELU },
+				{ "r11_softmax_ok.tflite", "r11_softmax_ne.tflite",
+				  tflite::BuiltinOperator_SOFTMAX },
+			};
+
+			for (const auto &u : un) {
+				os.push_back(op(u.ok, u.k, { T(I8, { 1, 4 }, 0u), T(I8, { 1, 4 }, 0u) },
+				                { 0 }));
+				if (u.ne)
+					os.push_back(op(u.ne, u.k,
+					                { T(I8, { 1, 8 }, 0u), T(I8, { 1, 4 }, 0u) }, { 0 }));
+			}
+			const tflite::BuiltinOperator QZ = tflite::BuiltinOperator_QUANTIZE;
+
+			os.push_back(op("r11_reshape_ok.tflite", QZ,
+			                { T(F32, { 1, 4 }, 0u), T(I8, { 2, 2 }, 0u) }, { 0 }));
+			os.push_back(op("r11_quantize_1000.tflite", QZ,
+			                { T(F32, { 1, 1000 }, 0u), T(I8, { 1, 10 }, 0u) }, { 0 }));
+			os.push_back(off_io_n(op("r11_neg.tflite", QZ,
+			                       { T(F32, { 1, 4 }, 0u), T(I8, { -1, 4 }, 0u) }, { 0 }),
+			                    true));
+		}
+
+		/* R12a: MAX_POOL_2D / AVERAGE_POOL_2D, input and output rank 4. */
+		{
+			const tflite::BuiltinOperator MP = tflite::BuiltinOperator_MAX_POOL_2D;
+			const tflite::BuiltinOperator AP = tflite::BuiltinOperator_AVERAGE_POOL_2D;
+			const std::vector<int32_t> px = { 1, 4, 4, 2 }, py = { 1, 2, 2, 2 };
+
+			os.push_back(op("r12_max_ok.tflite", MP, { T(I8, px, 0u), T(I8, py, 0u) }, { 0 }));
+			os.push_back(op("r12_avg_ok.tflite", AP, { T(I8, px, 0u), T(I8, py, 0u) }, { 0 }));
+			os.push_back(op("r12_in_rank3.tflite", MP,
+			                { T(I8, { 4, 4, 2 }, 0u), T(I8, py, 0u) }, { 0 }));
+			os.push_back(op("r12_out_rank2.tflite", MP,
+			                { T(I8, px, 0u), T(I8, { 4, 2 }, 0u) }, { 0 }));
+			os.push_back(op("r12_avg_out_rank2.tflite", AP,
+			                { T(I8, px, 0u), T(I8, { 4, 2 }, 0u) }, { 0 }));
+			os.push_back(off_io_n(op("r12_rank7.tflite", MP,
+			                       { T(I8, { 1, 1, 1, 1, 4, 4, 2 }, 0u), T(I8, py, 0u) },
+			                       { 0 }), false));
+		}
+
+		/* R4 PAD with data: values >= 0, input + before + after == output in 64
+		 * bits, 2 x the input's rank of them. */
+		{
+			auto pad = [&](const char *file, std::vector<int32_t> shape,
+			               std::vector<int32_t> words, std::vector<int32_t> y) {
+				return op(file, PADK,
+				          { T(I8, x4, 0u),
+				            rtensor{ I32, shape, 4u * (uint32_t)words.size(), words },
+				            T(I8, y, 0u) }, { 0, 1 });
+			};
+			const int32_t big = 0x7FFFFFFF;
+
+			os.push_back(pad("r4_neg_before.tflite", { 4, 2 }, { 0, 0, -1, 3, 1, 1, 0, 0 },
+			                 { 1, 4, 4, 1 }));
+			/* 2 + INT32_MAX + INT32_MAX is 0 in 32 bits: Prepare()'s int compare
+			 * passes it. */
+			os.push_back(pad("r4_wrap.tflite", { 4, 2 }, { 0, 0, big, big, 1, 1, 0, 0 },
+			                 { 1, 0, 4, 1 }));
+			static_assert((uint32_t)(2u + 0x7FFFFFFFu + 0x7FFFFFFFu) == 0u,
+			              "r4_wrap: the 32-bit sum is 0");
+			os.push_back(pad("r4_count6.tflite", { 3, 2 }, { 0, 0, 1, 1, 1, 1 },
+			                 { 1, 4, 4, 1 }));
+			os.push_back(pad("r4_out_ne.tflite", { 4, 2 }, { 0, 0, 1, 1, 1, 1, 0, 0 },
+			                 { 1, 4, 5, 1 }));
+		}
+
+		/* R6 TRANSPOSE with data: values in [0, rank), rank of them, output[i]
+		 * == input[perm[i]]. */
+		{
+			const tflite::BuiltinOperator TR = tflite::BuiltinOperator_TRANSPOSE;
+			auto tr = [&](const char *file, std::vector<int32_t> perm, std::vector<int32_t> y) {
+				return op(file, TR,
+				          { T(I8, { 1, 2, 3, 4 }, 0u),
+				            rtensor{ I32, { (int32_t)perm.size() },
+				                     4u * (uint32_t)perm.size(), perm },
+				            T(I8, y, 0u) }, { 0, 1 });
+			};
+
+			os.push_back(tr("r6_perm_ok.tflite", { 0, 2, 1, 3 }, { 1, 3, 2, 4 }));
+			os.push_back(tr("r6_out_ne.tflite", { 0, 2, 1, 3 }, { 1, 2, 3, 4 }));
+			os.push_back(tr("r6_perm_4.tflite", { 0, 2, 1, 4 }, { 1, 3, 2, 4 }));
+			os.push_back(tr("r6_perm_3.tflite", { 0, 2, 1 }, { 1, 3, 2, 4 }));
+			os.push_back(tr("r6_out_rank.tflite", { 0, 2, 1, 3 }, { 1, 3, 2 }));
+		}
+
+		/* R13 MEAN: input [1, 4, 4, 8], the axis INT32 with data. */
+		{
+			const tflite::BuiltinOperator MN = tflite::BuiltinOperator_MEAN;
+			auto mean = [&](const char *file, rtensor axis, std::vector<int32_t> y, int keep) {
+				opr_spec sp = op(file, MN, { T(I8, { 1, 4, 4, 8 }, 0u), axis, T(I8, y, 0u) },
+				                 { 0, 1 });
+				sp.opts = keep < 0 ? 0 : 4;
+				sp.dm = keep > 0;
+				return sp;
+			};
+			auto ax = [](std::vector<int32_t> v) {
+				return rtensor{ tflite::TensorType_INT32, { (int32_t)v.size() },
+				                4u * (uint32_t)v.size(), v };
+			};
+
+			os.push_back(mean("r13_keep_ok.tflite", ax({ 1, 2 }), { 1, 1, 1, 8 }, 1));
+			os.push_back(mean("r13_nokeep_ok.tflite", ax({ 1, 2 }), { 1, 8 }, 0));
+			os.push_back(mean("r13_noopts_ok.tflite", ax({ 1, 2 }), { 1, 8 }, -1));
+			os.push_back(mean("r13_neg_ok.tflite", ax({ -1 }), { 1, 4, 4 }, 0));
+			os.push_back(mean("r13_dup_ok.tflite", ax({ 1, 1 }), { 1, 4, 8 }, 0));
+			os.push_back(mean("r13_out_big.tflite", ax({ 1, 2 }), { 1, 16 }, 0));
+			os.push_back(mean("r13_out_small.tflite", ax({ 1, 2 }), { 1, 4 }, 0));
+			os.push_back(mean("r13_keep_rank.tflite", ax({ 1, 2 }), { 1, 8 }, 1));
+			os.push_back(mean("r13_axes_5.tflite", ax({ 1, 2, 1, 2, 1 }), { 1, 8 }, 0));
+			static_assert(NN_TFLM_MAX_MEAN_AXES == 4u, "r13_axes_5 is one over");
+			os.push_back(mean("r13_axis_oob.tflite", ax({ 4 }), { 1, 4, 4 }, 0));
+			os.push_back(mean("r13_axis_nodata.tflite", T(I32, { 2 }, 0u), { 1, 8 }, 0));
+			os.push_back(mean("r13_axis_int8.tflite",
+			                  rtensor{ I8, { 2 }, 2u, {} }, { 1, 8 }, 0));
 		}
 
 		for (const opr_spec &sp : os) {

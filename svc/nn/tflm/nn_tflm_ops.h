@@ -36,8 +36,10 @@
  * switch from the selected list, calling nn_tflm_op_rule_<SUFFIX>() for each
  * entry, so the build fails until that function exists.  Write the rule the
  * kernel needs -- how it reads its constants against the other tensors' dims and
- * types, checked or not by its Prepare() -- or a function that returns true with
- * one line saying why the kernel needs none.
+ * types, and what decides how much it WRITES into its output (the output's own
+ * shape, or the input's, the options, a tensor's values: issue #188, "OUTPUT
+ * FRAMES"), checked or not by its Prepare() -- or a function that returns true
+ * with one line saying why the kernel needs none.
  */
 #ifndef NN_TFLM_OPS_H
 #define NN_TFLM_OPS_H

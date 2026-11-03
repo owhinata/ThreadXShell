@@ -2480,7 +2480,8 @@ every input after 0 to `GetEvalTensor()` unchecked -- so the `-1` this walk
 allows, TFLM's optional tensor, would read `eval_tensors[-1]` there; the payload
 scan refuses it for an `ethos-u` operator, issue #179), and any tensor of rank
 above 6, TFLM's `RuntimeShape::kMaxSmallSize` (`NN_MODEL_ERR_TENSOR`, -4).  An
-internal tensor's dimension VALUES are still not read (Vela's reach 2.2 M).  The
+internal tensor's dimension VALUES are read only by the size bound of issue
+#188 (below; Vela's reach 2.2 M elements, far inside it).  The
 one exception to lengths-first: subgraph 0's two I/O lists are walked once, one
 compare per entry, before their count is judged (at most ~128K entries in a 512
 KB file), so that a model broken in two ways stays `NN_MODEL_ERR_FORMAT`.
@@ -2531,7 +2532,8 @@ mismatched count used to surface as `NN_MODEL_ERR_ARENA` from inside
 `AllocateTensors()`.  Every offset must be -1 (plan online) or >= 0: TFLM's
 greedy planner keeps any other negative value as a fixed offset and its arena
 check adds offset + size, so -size < offset < -1 placed a tensor before the
-arena (every pinned and SDK Vela plan's smallest offset is -1).  Of the header
+arena (every pinned and SDK Vela plan's smallest offset is -1); and below 2^30
+(issue #188, below).  Of the header
 only word [2] is read (Vela points its non-constant tensors at buffer 0, which
 need not be empty).  Cost: ITCM 0 B (`check_placement_budget`: used 240,640 B, free 21,504
 B, as before), `.text_cold` +240 B, `.rodata` +24 B (the name).  [!] Keeping
@@ -2593,6 +2595,28 @@ read through `Table::GetField<int32_t>` (`nn_tflm_op_opcode_index()`), as above.
 The second step's rules (PAD, STRIDED_SLICE, TRANSPOSE, RESIZE_*, ADD / SUB /
 MUL, CONCATENATION) are not compiled here either: every loaded section of
 `shell.elf` is byte-identical to the first step's.
+
+**And the planned sizes (issue #188): R10 and R10b run here, the rest does
+not.**  The shared walk's output-frame rules for the CPU kernels (elementwise
+element counts, pool ranks, PAD / TRANSPOSE / MEAN shapes) are operator rules
+and are not compiled under the ethos-u profile, but two checks in the tensor
+loop are not operator rules and run on every profile: no tensor of any
+subgraph has a negative dimension or a planned size (elements x TFLM's element
+size, INT4 1 byte) past `INT32_MAX - 15` or a partial product past `INT32_MAX`
+(R10: TFLM's planner computes the size as an `int` product and hands it to
+`AddBuffer(int)`; a shape with -1 rounds to a 0-byte buffer), and all sizes
+rounded up to 16, summed over every tensor entry, are at most 2^30, with every
+offline-plan offset below 2^30 (R10b: the greedy planner adds offsets and sizes
+in `int`) -- each `NN_MODEL_ERR_FORMAT` (-7); a rank-7 tensor stays TENSOR.  The
+board runs the payload scan first, so a model the scan refuses keeps
+`NN_MODEL_ERR_PAYLOAD`.  The pinned and SDK Vela models keep their verdict
+(the largest sum 5,143,376 B, the SDK's yolo11n 192 batch_matmul).  A model
+whose input or output declares -1 is now FORMAT rather than DIMS.  Cost: ITCM
+0 B (`.text` 234,524 B as before, `check_placement_budget` used 240,640 B, the
+same 41 veneers and no new symbol; only the compiler's `CSWTCH.*` tables are
+renumbered), `.text_cold` +184 B (16,376 -> 16,560 B), `.rodata` unchanged in
+size; R10 reads the shape through `nn_tflm_tensor_shape()`
+(`Table::GetPointer`), as above, and is forced inline into the load path.
 
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 

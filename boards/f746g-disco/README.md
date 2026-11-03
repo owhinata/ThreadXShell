@@ -606,6 +606,17 @@ is no built-in model) and after `nn model unload`.
   output is the formula's, dilation 1).  Cost: +896 B of Flash on
   `build/f746-tflm` (`.text` 544,632 -> 545,584 B, `.rodata` unchanged;
   `shell.bin` 620,116 -> 621,012 B); the `null` tree is byte-identical.
+- [!] **Step 3 of #188** (two gaps the review found): DEPTHWISE_CONV_2D also
+  keeps the padding `Prepare()` derives (half the window's total) at most 32768
+  in H and W, since its int16 bases are `output x stride - padding` (SAME with
+  a filter of 65539 over an input of 1 pads 32769 and wrapped them).  A
+  TRANSPOSE permutation with a repeated value is refused: CMSIS-NN's int8
+  rank-2 path ignores the permutation and writes the input's n x h, so `{0, 0}`
+  over [4, 64] into [4, 4] wrote 256 B into a 16 B frame.  Both
+  `NN_MODEL_ERR_FORMAT` (-7); person_detect and the 44 models keep their
+  verdict.  Cost: +128 B of Flash on `build/f746-tflm` (`.text` 545,584 ->
+  545,688 B, `.rodata` unchanged; `shell.bin` 621,012 -> 621,140 B); the `null`
+  tree is byte-identical.
 - `stedgeai_reloc` is the same: it starts empty, and `builtin` used to mean
   "unload" there before #131 (use `nn model unload`).
 - `stedgeai_reloc` refuses the same dimension with the same `-13` (issue

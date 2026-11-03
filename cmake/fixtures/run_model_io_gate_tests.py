@@ -194,7 +194,9 @@ TRANSPOSE's values), r13_* (MEAN's reduced shape); r11_neg is R10's FORMAT on
 every profile.  Step 2: r1w_* / r2w_* / r12b_* / r7_batch, _ch, _in_rank3 --
 the window formula, CONV_2D's 65535 bounds, the depthwise int16 bases, and the
 pools' / RESIZE's batch and channels; the earlier CONV_2D and pool cases carry
-the options the formula reads, so they keep their answers.
+the options the formula reads, so they keep their answers.  Step 3: r2w_pad_*
+(the depthwise padding at most 32768, H and W) and r6_dup2 / _dup4 (a repeated
+TRANSPOSE value).
 
 And the depth half of the header's claim: schema_table_depth.py runs on the
 schema.fbs the gate was built from (the first -I directory holding one, else the
@@ -546,6 +548,8 @@ OP_CASES = [
     ("r6_perm_4.tflite", FORMAT, "TRANSPOSE", None),
     ("r6_perm_3.tflite", FORMAT, "TRANSPOSE", None),
     ("r6_out_rank.tflite", FORMAT, "TRANSPOSE", None),
+    ("r6_dup2.tflite", FORMAT, "TRANSPOSE", None),
+    ("r6_dup4.tflite", FORMAT, "TRANSPOSE", None),
     ("r13_keep_ok.tflite", None, "MEAN", None),
     ("r13_nokeep_ok.tflite", None, "MEAN", None),
     ("r13_noopts_ok.tflite", None, "MEAN", None),
@@ -580,6 +584,10 @@ OP_CASES = [
     ("r2w_h_big.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
     ("r2w_int16_32768.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
     ("r2w_batch.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
+    ("r2w_pad_h_32768.tflite", None, "DEPTHWISE_CONV_2D", None),
+    ("r2w_pad_w_32768.tflite", None, "DEPTHWISE_CONV_2D", None),
+    ("r2w_pad_h_32769.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
+    ("r2w_pad_w_32769.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
     ("r12b_same_ok.tflite", None, "MAX_POOL_2D", None),
     ("r12b_valid_ok.tflite", None, "MAX_POOL_2D", None),
     ("r12b_avg_s2_ok.tflite", None, "AVERAGE_POOL_2D", None),

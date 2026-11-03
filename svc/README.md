@@ -272,7 +272,10 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185, #188).  The
      of elements (read so, no count check).
    - R6 TRANSPOSE: the permutation INT32; with data (issue #188), the input's
      rank (at most 6) of elements before any value, each in [0, rank), the
-     output of that rank, and `output[i] == input[perm[i]]`.
+     output of that rank, and `output[i] == input[perm[i]]`; a repeated value is
+     refused (step 3: CMSIS-NN's int8 rank-2 path ignores the permutation and
+     writes the input's n x h, so `{0, 0}` over [4, 64] into [4, 4] wrote 256 B
+     into a 16 B frame).
    - R7 RESIZE_BILINEAR / RESIZE_NEAREST_NEIGHBOR: the size INT32, rank 1, 2
      elements, the output rank 4; when the size has data, its two values equal
      `output[1]` and `output[2]` (the kernels write the output by those values).
@@ -354,7 +357,10 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185, #188).  The
      keeps H, W and C of its three tensors and its strides at most 65535 (the
      general path holds them in uint16); DEPTHWISE_CONV_2D keeps `(output - 1)
      x stride` at most 32767 in H and W (its int16 row / column bases) and its
-     batch the input's.  The pools (R12b; `filter_height` / `_width`, dilation
+     batch the input's; and (step 3) the padding `Prepare()` derives, the total
+     above (0 when negative) halved, at most 32768 in H and W, since the base
+     is `output x stride - padding` (SAME with filter 65539 over 1 pads 32769
+     and wrapped it).  The pools (R12b; `filter_height` / `_width`, dilation
      1) and RESIZE keep batch and channels the input's -- a policy, since those
      kernels loop over the smaller.
    - RESHAPE needs no rule: under R10 its live element-count compare and the

@@ -966,6 +966,17 @@ blazeface int8 passes unchanged.  Cost: +1,016 B of Flash on `blazeface`
 376,920 -> 377,936 B), +1,016 B on `mlperf` (`--noinhibit-exec`: FLASH 400,776
 -> 401,792 B); the `null` tree is byte-identical.
 
+[!] **Step 3 of #188** (two gaps the review found): DEPTHWISE_CONV_2D also keeps
+the padding `Prepare()` derives (half the window's total) at most 32768 in H
+and W, since its int16 bases are `output x stride - padding` (SAME with a filter
+of 65539 over an input of 1 pads 32769 and wrapped them).  A TRANSPOSE
+permutation with a repeated value is refused in the shared walk (not registered
+here; f746g-disco's README).  Both `NN_MODEL_ERR_FORMAT` (-7); the 44 models
+and the pinned blazeface int8 keep their verdict.  Cost: +128 B of Flash on
+`blazeface` (`.text` 288,760 -> 288,888 B, `shell.bin` 377,936 -> 378,064 B),
++128 B on `mlperf` (`--noinhibit-exec`: FLASH 401,792 -> 401,920 B); the `null`
+tree is byte-identical.
+
 **[!] The order matters and is not an implementation detail.**  Loading the
 plugin first would destroy the previous one's state at the fixed reservation
 before knowing whether the model that needs it can be built, and a backend that

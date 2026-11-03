@@ -365,7 +365,8 @@
  *   r6_perm_ok              control: [1, 2, 3, 4], perm {0, 2, 1, 3} ->
  *                           [1, 3, 2, 4]; _out_ne (output the input's shape),
  *                           _perm_4 (a value 4), _perm_3 (3 elements), _out_rank
- *                           (output rank 3) refused
+ *                           (output rank 3), _dup2 / _dup4 (a repeated value,
+ *                           rank 2 [4, 64] -> [4, 4] / rank 4) refused
  *   r13_*                   MEAN [1, 4, 4, 8], axis INT32 with data:
  *                           _keep_ok ({1, 2} keep -> [1, 1, 1, 8]), _nokeep_ok
  *                           (-> [1, 8]), _noopts_ok (no options: keep false),
@@ -391,8 +392,11 @@
  *                           _stride_65536 (the formula holds), _dim_65536 (W
  *                           65536, not graph I/O) refused
  *   r2w_*                   DEPTHWISE_CONV_2D dm 1: _3x3_ok, _opt_ok (5x1
- *                           VALID) and _int16_32767 ((2 - 1) x 32767) are
- *                           controls; _h_big, _int16_32768, _batch refused
+ *                           VALID), _int16_32767 ((2 - 1) x 32767) and
+ *                           _pad_h_32768 / _pad_w_32768 (SAME, filter 65537
+ *                           over 1: padding 32768) are controls; _h_big,
+ *                           _int16_32768, _batch, _pad_h_32769 / _pad_w_32769
+ *                           (filter 65539: padding 32769) refused
  *   r12b_*                  pools: _same_ok, _valid_ok, _avg_s2_ok; _h_ne,
  *                           _batch, _ch, _stride0, _filter0, _no_opts refused
  *   r7_batch / _ch / _in_rank3  RESIZE_BILINEAR: refused
@@ -2000,6 +2004,13 @@ int main(int argc, char **argv)
 			os.push_back(tr("r6_perm_4.tflite", { 0, 2, 1, 4 }, { 1, 3, 2, 4 }));
 			os.push_back(tr("r6_perm_3.tflite", { 0, 2, 1 }, { 1, 3, 2, 4 }));
 			os.push_back(tr("r6_out_rank.tflite", { 0, 2, 1, 3 }, { 1, 3, 2 }));
+			/* A repeated value, the output input[perm] all the same: rank 2
+			 * (CMSIS-NN's int8 path ignores perm and writes [4, 64]'s 256 B
+			 * into [4, 4]'s 16) and rank 4. */
+			os.push_back(op("r6_dup2.tflite", TR,
+			                { T(I8, { 4, 64 }, 0u), rtensor{ I32, { 2 }, 8u, { 0, 0 } },
+			                  T(I8, { 4, 4 }, 0u) }, { 0, 1 }));
+			os.push_back(tr("r6_dup4.tflite", { 0, 0, 2, 3 }, { 1, 1, 3, 4 }));
 		}
 
 		/* R13 MEAN: input [1, 4, 4, 8], the axis INT32 with data. */
@@ -2138,6 +2149,17 @@ int main(int argc, char **argv)
 			os.push_back(dww("r2w_int16_32768.tflite", { 1, 32769, 1, 2 }, 1, 1, { 1, 2, 1, 2 },
 			                 SM, 32768, 1));
 			os.push_back(dww("r2w_batch.tflite", { 2, 4, 4, 2 }, 3, 3, { 1, 4, 4, 2 }, SM, 1, 1));
+			/* SAME over an input of 1, stride 1: Prepare()'s padding is
+			 * (filter - 1) / 2, so filter 65537 pads 32768 (the int16 base
+			 * -32768, a control) and 65539 pads 32769 (it wraps); H, then W. */
+			os.push_back(dww("r2w_pad_h_32768.tflite", { 1, 1, 1, 2 }, 65537, 1, { 1, 1, 1, 2 },
+			                 SM, 1, 1));
+			os.push_back(dww("r2w_pad_h_32769.tflite", { 1, 1, 1, 2 }, 65539, 1, { 1, 1, 1, 2 },
+			                 SM, 1, 1));
+			os.push_back(dww("r2w_pad_w_32768.tflite", { 1, 1, 1, 2 }, 1, 65537, { 1, 1, 1, 2 },
+			                 SM, 1, 1));
+			os.push_back(dww("r2w_pad_w_32769.tflite", { 1, 1, 1, 2 }, 1, 65539, { 1, 1, 1, 2 },
+			                 SM, 1, 1));
 		}
 
 		/* R12b MAX_POOL_2D / AVERAGE_POOL_2D. */

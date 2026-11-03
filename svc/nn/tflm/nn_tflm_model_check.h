@@ -262,8 +262,11 @@
  *                         elements, FLOAT32 / FLOAT32, INT8 / INT32 or
  *                         INT16 / INT64; and (issue #188) output[1] / [2] the
  *                         window formula's, the batch the input's (a policy),
- *                         and (output - 1) x stride at most 32767 in H and W
- *                         (the kernels' int16 bases; an output of 0 is 0).
+ *                         and, in H and W, (output - 1) x stride at most
+ *                         32767 and the padding Prepare() derives (the
+ *                         window's total, 0 when negative, halved) at most
+ *                         32768 (the kernels' int16 bases, output x stride -
+ *                         padding; an output of 0 is 0).
  *   R3 FULLY_CONNECTED    weights rank 2, output rank 2..4; weights[0] == the
  *                         output's last dimension; the input's elements ==
  *                         (the output's other dimensions multiplied) x
@@ -284,8 +287,11 @@
  *   R6 TRANSPOSE          the permutation INT32; and, when it has data (issue
  *                         #188), the input's rank (at most
  *                         NN_TFLM_MAX_TENSOR_RANK) of elements before any value,
- *                         each value in [0, rank), the output of that rank, and
- *                         output[i] == input[perm[i]].
+ *                         each value in [0, rank) and none repeated (a
+ *                         permutation: CMSIS-NN's int8 rank-2 path ignores the
+ *                         values and writes the input's n x h), the output of
+ *                         that rank, and output[i] == input[perm[i]] (so its
+ *                         elements are the input's).
  *   R7 RESIZE_BILINEAR /  the size INT32, rank 1, 2 elements, the output rank
  *      _NEAREST_NEIGHBOR  4; when the size has data (#183 has proven it is the
  *                         8 bytes), its two values equal output[1] and
@@ -344,8 +350,9 @@
  *      under CMSIS-NN: CONV_2D's 1x1 fast path sizes its rows by the INPUT's
  *      n x h x w (arm_convolve_1x1_s8_fast.c), and the depthwise opt path
  *      memsets the scratch by an output H past the formula, with its row and
- *      column bases held in int16 (arm_depthwise_conv_s8_opt.c).  Hence the
- *      window rule below.
+ *      column bases held in int16 (arm_depthwise_conv_s8_opt.c): output x
+ *      stride - padding, so a padding past 32768 wraps them as surely as a
+ *      stride does.  Hence the window rule below, and R2's two int16 bounds.
  *   3. A size past int is not RESHAPE's alone: the planner multiplies every
  *      tensor's shape in int (memory_helpers.cc), so [1, 65536, 65537, 1] int8
  *      is planned as 64 KB and a pool / conv / pad over its dims writes 4 GB.
@@ -1306,10 +1313,14 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_xfby(const tflite::Operator *op,
  * stride + eff - in, computed in 64 bits (additions and multiplications only)
  * and refused outside int32; then a 32-bit division, truncating toward 0 as
  * TFLM's does, a negative result refused and the result equal to @p want.
+ * @p total gets that padding's total as ComputePaddingWithOffset() keeps it (0
+ * when negative; Prepare() pads by total / 2), set whatever the answer.
  */
 NN_TFLM_RULE_HELPER bool nn_tflm_window_ok(int32_t in, int32_t filter, int32_t stride,
-                                           int32_t dilation, int padding, int32_t want)
+                                           int32_t dilation, int padding, int32_t want,
+                                           int64_t *total)
 {
+	*total = 0;
 	if (stride < 1 || dilation < 1 || filter < 1 || in < 0 || want < 0)
 		return false;
 	if (padding != tflite::Padding_SAME && padding != tflite::Padding_VALID)
@@ -1323,6 +1334,7 @@ NN_TFLM_RULE_HELPER bool nn_tflm_window_ok(int32_t in, int32_t filter, int32_t s
 	if (eff > INT32_MAX || num < INT32_MIN || num > INT32_MAX ||
 	    pad < INT32_MIN || pad > INT32_MAX)
 		return false;
+	*total = pad > 0 ? pad : 0;
 
 	const int32_t out = (int32_t)num / stride;
 
@@ -1331,20 +1343,24 @@ NN_TFLM_RULE_HELPER bool nn_tflm_window_ok(int32_t in, int32_t filter, int32_t s
 
 /* The H and W of a convolution or a pool: input [1] / [2], filter height /
  * width @p fh / @p fw, the options' strides and dilations, output [1] / [2]
- * (all three tensors rank 4, checked by the caller). */
+ * (all three tensors rank 4, checked by the caller).  @p total gets the H and
+ * the W padding totals (nn_tflm_window_ok()). */
 NN_TFLM_RULE_HELPER bool nn_tflm_window_hw_ok(const tflite::Tensor *x, const tflite::Tensor *y,
                                               int32_t fh, int32_t fw, const flatbuffers::Table *o,
                                               flatbuffers::voffset_t vt_padding,
                                               flatbuffers::voffset_t vt_stride_h,
                                               flatbuffers::voffset_t vt_stride_w,
-                                              int32_t dil_h, int32_t dil_w)
+                                              int32_t dil_h, int32_t dil_w,
+                                              int64_t total[2])
 {
 	const int padding = o->GetField<int8_t>(vt_padding, 0);
 	const int32_t sh = o->GetField<int32_t>(vt_stride_h, 0);
 	const int32_t sw = o->GetField<int32_t>(vt_stride_w, 0);
 
-	return nn_tflm_window_ok(nn_tflm_dim(x, 1u), fh, sh, dil_h, padding, nn_tflm_dim(y, 1u)) &&
-	       nn_tflm_window_ok(nn_tflm_dim(x, 2u), fw, sw, dil_w, padding, nn_tflm_dim(y, 2u));
+	return nn_tflm_window_ok(nn_tflm_dim(x, 1u), fh, sh, dil_h, padding, nn_tflm_dim(y, 1u),
+	                         &total[0]) &&
+	       nn_tflm_window_ok(nn_tflm_dim(x, 2u), fw, sw, dil_w, padding, nn_tflm_dim(y, 2u),
+	                         &total[1]);
 }
 
 /* R1 (the file header). */
@@ -1379,6 +1395,7 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_CONV_2D(const tflite::Operator *op,
 	 * output's H and W the window formula's (the 1x1 fast path sizes its
 	 * rows by the INPUT's n x h x w). */
 	const flatbuffers::Table *o = nn_tflm_op_options(op, tflite::BuiltinOptions_Conv2DOptions);
+	int64_t pad[2];
 
 	if (!o)
 		return false;
@@ -1394,7 +1411,8 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_CONV_2D(const tflite::Operator *op,
 	                          tflite::Conv2DOptions::VT_STRIDE_H,
 	                          tflite::Conv2DOptions::VT_STRIDE_W,
 	                          o->GetField<int32_t>(tflite::Conv2DOptions::VT_DILATION_H_FACTOR, 1),
-	                          o->GetField<int32_t>(tflite::Conv2DOptions::VT_DILATION_W_FACTOR, 1)))
+	                          o->GetField<int32_t>(tflite::Conv2DOptions::VT_DILATION_W_FACTOR, 1),
+	                          pad))
 		return false;
 	return nn_tflm_bias_ok(b, nn_tflm_dim(y, 3u), nn_tflm_tensor_type(x), true);
 }
@@ -1427,6 +1445,7 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_DEPTHWISE_CONV_2D(const tflite::Operato
 	const int32_t dm = o ? o->GetField<int32_t>(
 		tflite::DepthwiseConv2DOptions::VT_DEPTH_MULTIPLIER, 0) : 0;
 	uint32_t n = 1u;
+	int64_t pad[2];
 
 	if (dm < 1)
 		return false;
@@ -1436,9 +1455,11 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_DEPTHWISE_CONV_2D(const tflite::Operato
 
 	/* Issue #188: the output's H and W the window formula's (the opt path
 	 * memsets the scratch by an output H past it), the batch the input's
-	 * (a policy: the kernels loop over the smaller), and (output - 1) x
-	 * stride within int16 in H and W (the kernels' row / column bases,
-	 * arm_depthwise_conv_s8_opt.c; an output of 0 counts as 0). */
+	 * (a policy: the kernels loop over the smaller), and in H and W the
+	 * kernels' int16 row / column bases, output x stride - padding
+	 * (arm_depthwise_conv_s8_opt.c), inside int16: (output - 1) x stride at
+	 * most 32767 (an output of 0 counts as 0) and Prepare()'s padding, the
+	 * total halved, at most 32768. */
 	if (!nn_tflm_window_hw_ok(x, y, nn_tflm_dim(f, 1u), nn_tflm_dim(f, 2u), o,
 	                          tflite::DepthwiseConv2DOptions::VT_PADDING,
 	                          tflite::DepthwiseConv2DOptions::VT_STRIDE_H,
@@ -1446,7 +1467,8 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_DEPTHWISE_CONV_2D(const tflite::Operato
 	                          o->GetField<int32_t>(
 	                                  tflite::DepthwiseConv2DOptions::VT_DILATION_H_FACTOR, 1),
 	                          o->GetField<int32_t>(
-	                                  tflite::DepthwiseConv2DOptions::VT_DILATION_W_FACTOR, 1)))
+	                                  tflite::DepthwiseConv2DOptions::VT_DILATION_W_FACTOR, 1),
+	                          pad))
 		return false;
 	if (nn_tflm_dim(x, 0u) != nn_tflm_dim(y, 0u))
 		return false;
@@ -1457,6 +1479,8 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_DEPTHWISE_CONV_2D(const tflite::Operato
 			tflite::DepthwiseConv2DOptions::VT_STRIDE_W, 0);
 
 		if (od > 0 && ((int64_t)od - 1) * st > 32767)
+			return false;
+		if (pad[d - 1u] / 2 > 32768)
 			return false;
 	}
 	return nn_tflm_bias_ok(b, fc, nn_tflm_tensor_type(x), false);
@@ -1624,12 +1648,15 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_TRANSPOSE(const tflite::Operator *op,
 		return true;
 
 	/* Issue #188: with data, the permutation's count (the input's rank) before
-	 * any value, each value in [0, rank), and output[i] == input[perm[i]] (the
-	 * int8 kernel loops over the input's dims and writes by the output's
-	 * strides). */
+	 * any value, each value in [0, rank) and none repeated, and output[i] ==
+	 * input[perm[i]] (the int8 kernel loops over the input's dims and writes
+	 * by the output's strides; its rank-2 path ignores the values and writes
+	 * the input's n x h, so a repeated value is refused, not counted once as
+	 * MEAN's axes are: the output is then the input's elements reordered). */
 	const flatbuffers::Vector<uint8_t> *d =
 		nn_tflm_buffer_data(buffers, nn_tflm_tensor_buffer(p));
 	const uint32_t r = nn_tflm_rank(x);
+	uint32_t seen = 0;
 
 	if (!d)
 		return true;
@@ -1639,8 +1666,9 @@ NN_TFLM_RULE_HELPER bool nn_tflm_op_rule_TRANSPOSE(const tflite::Operator *op,
 	for (uint32_t i = 0; i < r; i++) {
 		const int32_t v = flatbuffers::ReadScalar<int32_t>(d->data() + 4u * i);
 
-		if (v < 0 || (uint32_t)v >= r)
+		if (v < 0 || (uint32_t)v >= r || ((seen >> (uint32_t)v) & 1u))
 			return false;
+		seen |= 1u << (uint32_t)v;
 		if (nn_tflm_dim(y, i) != nn_tflm_dim(x, (uint32_t)v))
 			return false;
 	}
@@ -1875,6 +1903,7 @@ NN_TFLM_RULE_HELPER bool nn_tflm_pool_ok(const tflite::Operator *op,
 		return false;
 
 	const flatbuffers::Table *o = nn_tflm_op_options(op, tflite::BuiltinOptions_Pool2DOptions);
+	int64_t pad[2];
 
 	if (!o)
 		return false;
@@ -1883,7 +1912,7 @@ NN_TFLM_RULE_HELPER bool nn_tflm_pool_ok(const tflite::Operator *op,
 	                          o->GetField<int32_t>(tflite::Pool2DOptions::VT_FILTER_WIDTH, 0), o,
 	                          tflite::Pool2DOptions::VT_PADDING,
 	                          tflite::Pool2DOptions::VT_STRIDE_H,
-	                          tflite::Pool2DOptions::VT_STRIDE_W, 1, 1))
+	                          tflite::Pool2DOptions::VT_STRIDE_W, 1, 1, pad))
 		return false;
 	return nn_tflm_dim(x, 0u) == nn_tflm_dim(y, 0u) && nn_tflm_dim(x, 3u) == nn_tflm_dim(y, 3u);
 }

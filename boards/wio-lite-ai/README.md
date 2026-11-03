@@ -582,7 +582,12 @@ display down until a reset.
 
 | Date | Firmware | Command | `START` before | Result | Console |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-11-03 | 08aa6f8 + `LTDC_DMA2D_FAULT_INJECT=1` | `lcd fill red` (1 interrupt-path transfer) | 1 | 1, `CR=0x00030000` after (START and ABORT 0, MODE still R2M) | `lcd: draw failed, frame not presented` |
+| 2026-11-03 | same | `lcd bar` (8 polled fills) | 1 on all 8 | 1 on all 8 | `lcd: draw failed, frame not presented` |
+
+After both, `lcd grad` drew and `lcd info` reported `state: up, scanout active`:
+an abort of a running transfer brought START and ABORT down every time, and
+no transfer reached the permanent outcome.
 
 ### Measured after issue #142
 

@@ -114,6 +114,15 @@ int dma2d_q_admit(struct dma2d_q *s, const struct dma2d_q_io *io);
  * passes.  Confirmed: TC / TE / CE are cleared, the frame mark raised,
  * DMA2D_Q_FRAME.  Not confirmed: the permanent mark raised, flags left as the
  * hardware has them, DMA2D_Q_DEAD.  Never returns DMA2D_Q_OK.
+ *
+ * [!] A RACE THAT ENDS PERMANENT, ACCEPTED.  If the transfer finishes between
+ * the read that saw START = 1 and the ABORT write, ABORT lands on an idle
+ * engine.  RM0468 sec 18.5.1 has the hardware clear ABORT "when the START bit
+ * is reset" -- an event that has then already happened -- so ABORT may read
+ * 1 until the deadline and this returns DMA2D_Q_DEAD for an engine that had in
+ * fact stopped.  The window is one register read wide and the error is in the
+ * safe direction (the display goes down, OCTOSPI1 reconfiguration is refused);
+ * recovery is a reset.
  */
 int dma2d_q_quiesce(struct dma2d_q *s, const struct dma2d_q_io *io);
 

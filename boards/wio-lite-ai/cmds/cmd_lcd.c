@@ -171,12 +171,28 @@ static int cmd_lcd_info(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
+/* What a failed ltdc_flip() means, for the user.  LTDC_ERR_DRAW: a DMA2D draw
+   failed and was stopped, so the half-drawn frame was not shown and the display
+   is still up (issue #113).  Anything that left the display down -- a stuck
+   reload, or a DMA2D that could not be confirmed stopped -- says so, since only
+   a reset brings it back. */
+static const char *lcd_present_error(int rc)
+{
+	if (rc == LTDC_ERR_DRAW)
+		return "lcd: draw failed, frame not presented\r\n";
+	if (!ltdc_is_up())
+		return "lcd: present failed, display down (reset to recover)\r\n";
+	return "lcd: present failed\r\n";
+}
+
 /* Draw-then-present helper: the caller drew into the back buffer; flip it and
    warn (but do not fail the command) if the tear-free swap did not land. */
 static void lcd_present(struct cli_instance *sh)
 {
-	if (ltdc_flip() != LTDC_OK)
-		cli_warn(sh, "lcd: present failed\r\n");
+	int rc = ltdc_flip();
+
+	if (rc != LTDC_OK)
+		cli_warn(sh, "%s", lcd_present_error(rc));
 }
 
 static int cmd_lcd_fill(struct cli_instance *sh, int argc, char **argv)
@@ -271,7 +287,7 @@ static int cmd_lcd_anim(struct cli_instance *sh, int argc, char **argv)
 		rc = ltdc_flip();
 		ltdc_unlock_frame();
 		if (rc != LTDC_OK) {
-			cli_error(sh, "lcd: present failed\r\n");
+			cli_error(sh, "%s", lcd_present_error(rc));
 			lcd_end();
 			return 1;
 		}
@@ -308,7 +324,7 @@ static int cmd_lcd_blit(struct cli_instance *sh, int argc, char **argv)
 	ltdc_unlock_frame();
 	lcd_end();
 	if (rc != LTDC_OK) {
-		cli_error(sh, "lcd: present failed\r\n");
+		cli_error(sh, "%s", lcd_present_error(rc));
 		return 1;
 	}
 	return 0;

@@ -35,7 +35,9 @@ int dma2d_q_quiesce(struct dma2d_q *s, const struct dma2d_q_io *io)
 
 	/* ABORT only while a transfer runs; START is written back as 0, which
 	 * does not affect it (only the hardware clears it, only software can
-	 * set it). */
+	 * set it).  A transfer that ends between this read and the write can
+	 * leave ABORT set on an idle engine, which then reads as DEAD below --
+	 * accepted, see dma2d_q_quiesce() in the header. */
 	if ((cr & DMA2D_Q_CR_START) != 0u)
 		io->cr_write(io->ctx, (cr & ~DMA2D_Q_CR_START) | DMA2D_Q_CR_ABORT);
 

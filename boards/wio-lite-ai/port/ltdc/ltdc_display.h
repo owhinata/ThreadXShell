@@ -129,6 +129,9 @@ extern "C" {
 #define LTDC_OK          0
 #define LTDC_ERR_HAL    -1   /* a HAL init step (LTDC/layer) failed            */
 #define LTDC_ERR_STATE  -2   /* wrong state: clock down, init failed, faulted  */
+#define LTDC_ERR_DRAW   -3   /* a DMA2D draw into this back buffer failed and
+                                was stopped; the frame was not presented
+                                (issue #113, ltdc_flip())                      */
 
 /* Frame-buffer capacity, in pixels, per buffer.  Two are allocated:
  * 2 * 76800 * 2 B = 300 KB of PSRAM. */
@@ -249,6 +252,15 @@ bool ltdc_scanout_active(void);
 /** True when the LTDC is up but scanout is currently stopped (`lcd off`). */
 bool ltdc_scanout_off(void);
 
+/** True once a DMA2D transfer could not be confirmed stopped (issue #113,
+ *  port/ltdc/dma2d_quiesce.h), and forever after -- nothing lowers it; recovery
+ *  is a reset.  **app/psram.c refuses its OCTOSPI1 guard on this too**: the
+ *  display is latched down at the same moment, so ltdc_scanout_active() is
+ *  false, and without this question a DMA2D that may still be writing the frame
+ *  buffer would be hidden behind "scan-out is off" -- the same shape as the
+ *  disabled-not-fault note above (issue #145). */
+bool ltdc_dma2d_unconfirmed(void);
+
 /**
  * Stop (false) / start (true) scanout: clears/sets LTDC_GCR.LTDCEN so the
  * controller stops/resumes fetching from PSRAM, and parks/raises the backlight.
@@ -330,6 +342,17 @@ void ltdc_unlock_frame(void);
  * timeout -- in which case the display is latched faulted (front unchanged,
  * ltdc_is_up() false; backlight and LTDCEN off, so ltdc_scanout_active() is
  * false too -- issue #145; recovery is a reset).  Thread-context only.
+ *
+ * LTDC_ERR_DRAW (issue #113): a DMA2D draw into this back buffer failed since
+ * the last flip, and the engine was confirmed stopped.  Nothing is staged, the
+ * display stays up, and the mark is consumed -- the next flip presents again.
+ * Only a flip lowers it, never a later successful draw.  [!] This guarantees
+ * that the FAILED TRANSACTION does not show its half-drawn buffer, not that the
+ * buffer is never shown: a preview flip waiting on the frame lock, or preview
+ * bands landing in the same back buffer afterwards, can still present it --
+ * after the DMA2D has stopped, i.e. the same tearing src/cam_preview.c already
+ * accepts.  A draw whose engine could NOT be confirmed stopped latches the
+ * display down instead (ltdc_is_up() false, ltdc_dma2d_unconfirmed() true).
  */
 int ltdc_flip(void);
 

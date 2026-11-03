@@ -40,7 +40,8 @@
 #define LOG_TAG "psram"
 #include "log.h"
 #if BSP_ENABLE_LCD
-#include "ltdc_display.h"   /* ltdc_scanout_active(): see psram_acquire() (issue #7) */
+#include "ltdc_display.h"   /* ltdc_scanout_active() (issue #7) and
+                               ltdc_dma2d_unconfirmed() (#113): see psram_acquire() */
 #endif
 #include "camera.h"         /* camera_streaming(): see psram_acquire() (issue #8) */
 
@@ -729,6 +730,25 @@ int psram_acquire(void)
 	if (ltdc_scanout_active()) {    /* LTDC is reading this bus right now */
 		psram_release();
 		return 0;
+	}
+	/* A DMA2D transfer that was never confirmed stopped may still be writing
+	   the frame buffer (issue #113).  The display was latched down with it, so
+	   the scan-out question above says "free" -- this one must not.  The mark
+	   is permanent and is raised inside the drawing command, before that
+	   command gives its PSRAM user place back, so a reconfigurer that got the
+	   mark above with no user holding is guaranteed to see it.  Read with
+	   PRIMASK set, as the guard word is. */
+	{
+		uint32_t primask = __get_PRIMASK();
+		bool dma2d_unconfirmed;
+
+		__disable_irq();
+		dma2d_unconfirmed = ltdc_dma2d_unconfirmed();
+		__set_PRIMASK(primask);
+		if (dma2d_unconfirmed) {
+			psram_release();
+			return 0;
+		}
 	}
 #endif
 	/* A frame stream has the DCMI's DMA writing the PSRAM ring; a band stream

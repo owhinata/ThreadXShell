@@ -98,32 +98,88 @@ that gets `-fstack-usage`), and to the asset rules through
 `--veneer-cost` comes from. A board restates it nowhere.
 
 A `-D` is not a guarantee: a later `-D` (CMAKE_C_FLAGS, add_compile_definitions)
-or a `#define` overrides it with only a warning. So the board exports its policy
-with `PLUGIN_POLICY_PROBE()` (`svc/plugin/plugin_load.h`) -- a constant record holding a
-pointer to the policy `plugin_parse()` gets and the offsets of its fields -- and
-`check_policy_probe.py` reads, from the shipped ELF, the `veneer_cost` and
-`stack_accounting` that policy actually holds. Anything but DECLARED and the
-ABI's accounting version refuses the stamp. The helper links with
-`--require-defined=plugin_policy_probe`, which keeps the record past
-`--gc-sections` (and LTO) and fails the link of a board that exports none.
+or a `#define` overrides it with only a warning. So `check_policy_probe.py`
+reads, from the shipped ELF, the `veneer_cost` and `stack_accounting` the
+board's policy actually holds. Anything but DECLARED and the ABI's accounting
+version refuses the stamp.
+
+The policy it reads is the one the loader reads, by name (#165). Each board
+defines exactly one `const struct plugin_policy plugin_board_policy`, and the
+firmware's `plugin_parse()` (`svc/plugin/plugin_load_board.c`) takes no policy
+argument: it reads that object. The check reads the same symbol, and requires
+it to be one symbol, global (not weak, not local), a data object of exactly
+`sizeof(struct plugin_policy)`, inside one loadable read-only section. The
+offsets of its fields come from the constant record `plugin_policy_probe`,
+defined once by `plugin_load_board.c`, so the check transcribes no layout.
+Until #165 that record held a pointer "to the policy `plugin_parse()` gets",
+and nothing tied the two: a board could point it at a correct copy and hand the
+parse another. The helper links with `--require-defined` for the record and
+for `plugin_board_policy`, which keeps both past `--gc-sections` and LTO and
+fails the link of a board that defines neither.
+
+The parse has one body, `svc/plugin/plugin_load_body.h` (every function in it
+`static`), and two entries over it in two files with no switch between them:
+the firmware's `plugin_parse()` above, and the host's
+`plugin_parse_with_policy()` (`plugin_load_host.c`), which takes a policy for
+the container verifier and the host tests. A firmware must not link the second,
+and `check_policy_entry.py`, also before the stamp, reads every input the
+link's map loaded -- the objects, and the archive members the map says it
+included -- and refuses one that defines or references it. LTO objects are read
+as IR through the toolchain's `gcc-nm` (beside the compiler's `gcc-ar`), since
+an inlined entry leaves no symbol in the image; an input that cannot be read, a
+member its archive does not hold, a member of an archive the map did not load,
+and an `nm` without the LTO plugin are each a refusal. It also refuses the
+pre-#165 names of the entries that took a base or a vtable's functions
+(`plugin_exec_load`, `plugin_run_load`, `nn_active_report`,
+`nn_active_core_report`, `plugin_paint_vtable`; see the next paragraph).
+
+The function behind each veneer is read out of the image too (#165), not
+stated. Each board defines one `const struct plugin_bindings
+plugin_board_bindings` (`svc/plugin/plugin_bindings.h`): its head is the base
+the loader hands `entry()` (`plugin_exec_start()` / `plugin_run_start()` take
+no base argument), and the painter and the printer are filled from its other
+members by `plugin_painter_init()` / `plugin_printer_init()`, which take a
+context from the board and no function. So its six words in the shipped ELF are
+the six functions a plugin can reach. Which word is which veneer is the
+constant record `plugin_bind_probe` (`svc/plugin/plugin_bindings.c`): an offset
+taken from the struct and a veneer name per member. The check refuses a record
+that is missing, doubled, of another magic or size, with an unterminated,
+unknown, repeated or missing veneer name, or with an offset that is not a word
+inside the table or is shared; a table that is not exactly one global,
+non-weak data object of the record's size in a loadable read-only section; and
+a word that is NULL, has the Thumb bit clear, or is not a function's entry
+(inside a body, or no body at all) -- by the same rule a linker veneer's literal
+is read with (`thumb_stack_analysis.Image.thumb_entry()`). Aliases at one
+address are one body; symbols at one address that disagree about its size are
+refused when the body is analysed. `veneer_cost_gate()` refuses a `ROOTS`
+argument: until #165 the board named the six by hand, and a table binding a deep
+function passed while the list named a shallow one.
+
+An offset taken from the struct is right whatever name is written beside it, so
+the record's pairs are held against a second source:
+`shell/test/test_plugin_bindings.c` calls the plugin's own veneers
+(`asset/common/plugin_base.c`) through the vtables the firmware hands a plugin,
+with a distinct marker in each member, and requires each veneer to reach
+exactly one member, the one at the record's offset for its name. The fixtures
+state the veneer of each member themselves rather than reading the record.
 
 The derivation walks the linked ELF, not the sources: for each veneer it starts
-at the firmware function the board binds behind it, decodes Thumb-2 instructions
+at the firmware function the table binds behind it, decodes Thumb-2 instructions
 to sum each body's stack decrements, follows direct calls and branches, and
 takes frame + max(callee). Every step fails closed -- an encoding it does not
 model, an SP change it cannot evaluate as a constant, an SP change on a cycle,
 an indirect transfer, a return not proven to use the return address, a body
 that leaves with sp somewhere other than where it found it (see **Returns and
-the stack pointer** below), recursion, and a root that resolves to two bodies
-are each a refusal rather than a guess.
-The set of veneers is imported from `check_plugin_image.py`, and the board's
-roots must cover it exactly, so adding a veneer there fails every board that has
-not bound a function to it.
+the stack pointer** below) and recursion are each a refusal rather than a
+guess. The set of veneers is imported from `check_plugin_image.py`, and the
+record's names must be it exactly, so adding a veneer there fails every board
+until the table binds a function to it.
 
 The decoder, the analysis of one body, the walk and the lookup of each body's
 `-fstack-usage` record live in `thumb_stack_analysis.py` (#124), and the plugin
 image gate calls the same code (see **Plugin image gate: the stack bound**
-below); the roots, which bodies may have no record and the budget stay in
+below); reading the roots from the table, which bodies may have no record and
+the budget stay in
 `check_veneer_base_cost.py`. The module is an input of both gate commands --
 this check and `add_plugin()`'s link + gate -- so editing it alone re-runs both.
 
@@ -138,9 +194,10 @@ that feeds the image -- discovered by walking the firmware target's link inputs,
 including object libraries and interface libraries, never a board-maintained
 list -- and deletes that target's stale LTO partition records before each link.
 
-What the board states is only what the board knows: the function behind each
-veneer, the declaration (the same variable every `add_plugin()` is given), where
-its vendor's prebuilt archives live, and what flashes it. `add_plugin()` refuses
+What the board states is only what the board knows: the declaration (the same
+variable every `add_plugin()` is given), where its vendor's prebuilt archives
+live, and what flashes it. The functions behind the veneers are its
+`plugin_board_bindings`, read out of the image. `add_plugin()` refuses
 to configure on a board that has not registered the gate, and the registration
 is a target and a stamp rather than a flag; a plugin charged a cost that nothing
 checks is the state this exists to end. At the end of configure the value being
@@ -174,16 +231,26 @@ It also covers the c the firmware compiles in: `cost_wiring` changes DECLARED an
 reads the value back from a policy TU in a `$<TARGET_OBJECTS:>` library and from
 an asset's command line, and `cost_override` adds `-DPLUGIN_VENEER_BASE_COST=1u`
 through CMAKE_C_FLAGS -- the image links, and flash and the asset stop in
-`check_policy_probe.py`.
+`check_policy_probe.py`. Since #165: `bind_decoy` / `bind_deep_each` (a member
+of the table bound to a function deeper than DECLARED is refused for that
+veneer alone), `bind_shape` / `bind_none`, `policy_decoy` (an entry handed a
+policy other than the one read back), `policy_shape` / `policy_none`,
+`entry_clean` / `entry_map` / `entry_host_tu` / `entry_lto` / `entry_old` (the
+inputs of the link, read, and the host entry or a pre-#165 entry in any of
+them refused). `run_veneer_cost_tests.py` binds each case's functions into a
+copy of its image's table and covers the word, record and table refusals.
 `fixtures/run_add_plugin_arg_tests.py` covers the configure-time refusals and
 that the declared value, the printer bounds and the stack table reach the
 check's command line.
 
-What this does NOT prove: that the declared bindings are the real ones (binding
-a different callback without updating the declaration is invisible here);
-anything about exception entry, whose stacking is a separate reserve; anything
-about the plugin side, which is `check_plugin_image.py`'s; and anything about a
-container already on a device, which no build can reach.
+What this does NOT prove: trusted firmware code going around the shared code on
+purpose -- writing the const table or policy through a cast (Grove's `.rodata`
+is SRAM), calling a plugin slot with a vtable it built itself instead of
+through `plugin_painter_init()` / `plugin_printer_init()`, or copying the parse
+body into an entry of its own under another name (the checks watch the shared
+entries' names); anything about exception entry, whose stacking is a separate
+reserve; anything about the plugin side, which is `check_plugin_image.py`'s; and
+anything about a container already on a device, which no build can reach.
 
 # Delivery targets: declared, and checked against the build graph (P14)
 
@@ -575,9 +642,9 @@ header by `run_plugin_gate_tests.py`.
 
 The read-back is `check_policy_probe.py`, in the veneer-cost stamp's command:
 it is handed the table as `--stack-limit <slot>=<bytes>` (every slot required)
-and compares it with the seven numbers the shipped policy holds, through the
-same `PLUGIN_POLICY_PROBE` record. The probe already carried the offset of
-`stack_limit`, so no firmware byte changed to add this.
+and compares it with the seven numbers the shipped policy
+(`plugin_board_policy`) holds, at the offset of `stack_limit` the
+`plugin_policy_probe` record carries.
 
 What it CATCHES: a later `-D` or `#define` of an allowance (CMAKE_C_FLAGS wins
 over the definition the table makes, with only a warning), lowering or raising
@@ -589,10 +656,13 @@ the asserts that hold each allowance under the threads its slot runs on
 What it does NOT catch: a mapping disagreement between two allowances of EQUAL
 value -- today every allowance on both boards is 1,024 B, so the device enforces
 the table's numbers either way and the disagreement stays invisible (and
-harmless) until the values differ; that the object the probe points at is the
-one the board passes to `plugin_parse()` -- a copy, or a second policy, passed
-at run time is invisible (the same root as parity P13, unchanged since #111);
-and whether the table itself is right. The read-back also refuses a policy in a
+harmless) until the values differ; trusted firmware code going around the
+shared code on purpose (a cast write to the const policy, a parse body copied
+under another name -- see the veneer gate above); and whether the table itself
+is right. Which policy is read is no longer a limit (#165): the loader takes
+none and reads `plugin_board_policy`, the symbol read back, and
+`check_policy_entry.py` refuses a firmware link holding the host's
+policy-taking entry. The read-back also refuses a policy in a
 WRITABLE section (`stack_writable_policy`), since only its initial value is in
 the image -- by the section's flags, so it catches a policy declared writable,
 not Grove's `.rodata`, which is SRAM and writable by the CPU. The

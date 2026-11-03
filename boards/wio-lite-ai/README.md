@@ -1221,7 +1221,7 @@ inside the plugin, so there is nothing to copy.
   thread owns the mutex.  Every wrapper in `port/nn/nn_active.c` that reaches a
   plugin callback or the slot table a holder is about to call through
   (`shapes_ok`, `decode`, `draw`, `can_draw`, `can_report`, `report`, both
-  threshold calls), and the loader's three ways in (`plugin_run_load()` before
+  threshold calls), and the loader's three ways in (`plugin_run_start()` before
   the shared loader touches anything, its exec_ok hook immediately before
   `entry()`, and `plugin_run_unload()`), refuse a caller without it.  The answer
   is one of its own -- `NN_ACTIVE_NOT_HELD` / `PLUGIN_RUN_NOT_HELD`, never "no
@@ -1433,7 +1433,13 @@ There are **two quantities**, and Step 3a only had one of them:
 The second was Grove's 256 B, carried over as an admitted placeholder.  **Since
 issue #112 the build derives it from the firmware this board ships** -- the
 linked LTO image, after the link -- and refuses a declaration that does not
-cover it:
+cover it.  The firmware function behind each veneer is not stated anywhere
+(issue #165): it is a word of `plugin_board_bindings` in `port/nn/nn_active.c`
+-- the table whose head is the base the loader hands `entry()` and from which
+the painter and the printer are filled -- and the check reads that word out of
+`shell.elf` (see `cmake/README.md`).  The table survives LTO as a global,
+non-weak, 36 B object in `.rodata` (internal flash), because the link names it
+with `--require-defined`:
 
 | veneer | firmware function | derived | deepest chain |
 |---|---|---:|---|
@@ -1444,8 +1450,9 @@ cover it:
 | `pl_print_write` | `nn_report_write` | 24 B | `nn_report_write` 16 > `memcpy` 8 |
 | `pl_base_to_frame` | `nn_active_to_frame` | 0 B | leaf, no frame |
 
-(The chains carry the names the LINK produced -- LTO privatises the two log
-bodies, and inlines the shared clip-and-charge of svc/plugin/plugin_paint_span.c into
+(The chains carry the names the LINK produced -- LTO privatises the log body's
+callees (the painter's three are global since #165, so they keep their names),
+and inlines the shared clip-and-charge of svc/plugin/plugin_paint_span.c into
 each primitive -- because the check reads the image, not the sources.)
 
 **640 >= 176, with 464 B of headroom.**  This used to be a hand sum, and it came

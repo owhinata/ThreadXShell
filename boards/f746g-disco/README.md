@@ -896,7 +896,13 @@ operator copies to the microSD card with a PC card reader, and loads with
 **Step 4a's provisional c (640 B, `F746_PLUGIN_VENEER_COST_4A`) is gone.**  The
 policy's c is `PLUGIN_VENEER_BASE_COST`, which `veneer_cost_gate()` derives and
 checks against the shipped image and compiles in; the build reads the policy
-back out of `shell.elf` (`cmake/check_policy_probe.py`).  The adapter refuses
+back out of `shell.elf` (`cmake/check_policy_probe.py`).  Since issue #165 the
+policy is `plugin_board_policy` in `port/nn/nn_svc_f746_model.c`, read by that
+name by both the loader (which takes no policy argument) and the check, and the
+function behind each plugin veneer is a word of `plugin_board_bindings` in
+`port/nn/nn_active.c` -- the base handed to `entry()` at its head, then the
+painter's three and the printer's write -- which the veneer check reads out of
+the image instead of a list in `board.cmake` (`cmake/README.md`).  The adapter refuses
 to compile if the provisional macro reappears.
 
 ### Running one (Step 4b, `tflm` only)
@@ -970,7 +976,12 @@ What runs where, and why each piece is this board's or shared:
 
   `thread` peaks over the same run: `cli` 2,748 B, `nn-worker` 1,504 B, GUIX
   776 B.  At issue #161 the nn-worker's `at call` high-water is 432 B (2,432 B
-  left); the console stays the shallowest.
+  left); the console stays the shallowest.  Issue #165 made the report path
+  8 B shallower by the ELF (`nn_active_report_to` tail-calls
+  `nn_active_core_report_to` as `nn_active_report` did, and the latter's frame
+  is 32 B where `nn_active_core_report`'s was 40) and left entry and draw
+  unchanged; not re-measured, so the console figure above stays an upper
+  bound.
 
 #### The draw budget
 

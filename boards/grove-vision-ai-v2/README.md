@@ -6486,7 +6486,7 @@ out of the XIP window, and the window can be taken down -- but `enable_XIP()` is
 called from two places in `port/nor/nor_flash.c`, a writer's reservation is
 granted only when no reader lease is live, and `npu_hw_init()` holds
 `NOR_LEASE_NPU` for as long as a model is open.  A plugin is only ever loaded
-while a model is open, so the window is already pinned; `plugin_run_load()`
+while a model is open, so the window is already pinned; `plugin_run_start()`
 asserts that with `nor_lease_held()` rather than building a second lock.
 
 **One place turns an offset into an address.**  `svc/plugin/plugin_load.c` deliberately
@@ -6808,6 +6808,16 @@ entry() is entered at 1,016, equal to the ELF; and stack - depth - 208 = 3,064 +
 less the same 88 B as before, not measured (`bg --`).  The other slots printed
 unchanged: shapes_ok con 1568, decode work 816, draw panel 272, param_get con
 792.
+
+Issue #165 (the loader and the report stopped taking the base and the write as
+arguments, and read the board's table instead) moved two of these paths, both
+toward shallower, by the ELF and not measured on hardware: to entry,
+`plugin_run_start` is 48 B where `plugin_run_load` was 56, so the console path
+above is 1,008, not 1,016; to report, `nn_active_report_to` tail-calls
+`nn_active_core_report_to` as `nn_active_report` did, and the latter's frame is
+32 B where `nn_active_core_report`'s was 40, so the report path is 8 B
+shallower.  The draw path is unchanged.  The
+table above was not re-derived for these and stays an upper bound.
 "real need" is the next section's.
 
 #### The veneer charge is derived from the image, and checked
@@ -6816,7 +6826,11 @@ unchanged: shapes_ok con 1568, decode work 816, draw panel 272, param_get con
 every crossing into the base, because it cannot see across a veneer.  Since
 issue #112 the build derives the other side of that charge from the firmware it
 ships -- `shell.elf`, after the link -- and refuses a declaration that does not
-cover it:
+cover it.  The firmware function behind each veneer is not stated anywhere
+(issue #165): it is a word of `plugin_board_bindings` in `port/nn/nn_svc_grove.c`
+-- the table whose head is the base the loader hands `entry()` and from which
+the painter and the printer are filled -- and the check reads that word out of
+`shell.elf` (see `cmake/README.md`):
 
 | veneer | firmware function | derived | deepest chain |
 |---|---|---:|---|
@@ -6964,12 +6978,13 @@ confirmed by reading the final ELF and neither is enforced by anything:
    call, after popping their own registers -- with no push or `sp` arithmetic in
    between.
 2. **The loader calls the `exec_ok` hook and entry() from the same frame.**  In
-   `plugin_exec_load` (`stmdb sp!, {r4-r11, lr}`, 36 B, then `sub sp, #20`) the
+   `plugin_exec_start` (`plugin_exec_load` until issue #165; `stmdb sp!,
+   {r4-r11, lr}`, 36 B, then `sub sp, #20`) the
    third `blx r3` is the hook and the fourth is entry(), with no `sp` change
    between them; `pl_exec_ok` pushes its 16 B before its `mov r2, sp`.
 
 To check after a change, read `<nn_active_core_*>`, `<pl_exec_ok>` and
-`<plugin_exec_load>` in
+`<plugin_exec_start>` in
 `arm-none-eabi-objdump -d --no-show-raw-insn build/grove-vision-ai-v2/shell.elf`.
 A second hook call in one load shows up as `inv`.  What does NOT show up is
 `svc/plugin/plugin_exec.c` putting a helper between the hook's frame and entry(), a
@@ -7613,7 +7628,7 @@ trusted at the call sites:
   that write the geometry its `to_frame()` reads, returns `NN_ACTIVE_NOT_HELD`
   when the calling thread does not own the lease. That is an answer of its own:
   never the no-plugin answer, never a `BF_ERR_*`;
-- `plugin_run_load()` refuses an unheld caller before the shared loader
+- `plugin_run_start()` refuses an unheld caller before the shared loader
   unpublishes or copies anything, and the `exec_ok` hook asks again at the
   branch to `entry()`. Both report `PLUGIN_RUN_NOT_HELD`, not the MPU refusal
   the shared loader would make of a hook's "no".

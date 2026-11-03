@@ -493,7 +493,9 @@ adapter -- what `nn_svc_*()` answers -- not the board's hardware layer.  Below
 the adapter, what a board hands the shared code is declared in these headers;
 every object is the board's (state as zero-initialised static storage, hooks
 and facts as `const` objects in its `.rodata`), and the shared files keep no
-storage of their own.
+storage of their own.  Since issue #165 the plugin policy and the bindings
+table are among them, bound by fixed name rather than passed, so the object the
+build reads back is the one the loader uses.
 
 | Header | What the board gives | What it decides |
 |---|---|---|
@@ -509,6 +511,8 @@ storage of their own.
 | `nn/nn_refusal.h` | nothing new: the board's existing `struct nn_core_board` (its `gate_held` picks the BUSY sentence), and for a `nn run` that ended without a result its teardown clause as a `NN_REFUSAL_RUN_UNFINISHED()` literal | what its teardown did not release; the words and status of every refusal are the table's |
 | `nn/nn_svc_common.h` | a const `struct nn_svc_thresh_ops` (the plugin lease, the decoder's threshold entries and its `NN_ACTIVE_NOT_HELD`, and on grove-vision-ai-v2 the count's way in and out), and for `nn info` on wio-lite-ai and f746g-disco its read of the load order's transition counter | which protections a threshold call takes on this board; the order and the answers are the shared file's |
 | `plugin/plugin_lease_api.h` | the plugin lease itself (`plugin_lease_try` / `_take` / `_give` / `_held` and the miss counters), in the board's `port/plugin/plugin_lease.c` -- all three boards | who may be inside the loaded plugin; the wait and the lock order are the board's `plugin_lease.h` |
+| `plugin/plugin_load.h` | `plugin_board_policy`, the one `const struct plugin_policy`, under that fixed name (issue #165) -- all three boards | what a container must be to be admitted; the loader takes no policy argument and reads this object, the one the build reads back |
+| `plugin/plugin_bindings.h` | `plugin_board_bindings`, the one `const struct plugin_bindings`: the base handed to a plugin's entry at its head, then the painter's three primitives and the printer's write (issue #165) -- all three boards | which firmware function sits behind each plugin veneer; the loader, the painter and the printer are filled from it, and the build derives the veneer stack roots from its words |
 
 Why the locks and the threads behind these hooks are the board's is
 [below](#why-the-lock-and-the-threads-are-the-boards).
@@ -702,8 +706,12 @@ relative to `svc/`.
 | `nn/nn_bench` | The one `nn bench` procedure on every board (issue #163): acquire -> fill every input with `0x5A` -> N timed runs, each after a cancel question -> release, in one hold. The board passes its hold (acquire / release) and its clock as hooks in a const `struct nn_bench_ops`; the shared side never waits, takes no lock and has no mutable storage. Host-tested (`shell/test/test_nn_bench.c`). |
 | `plugin/plugin_abi.h` | The wire ABI between the firmware and a plugin shipped with its model. |
 | `plugin/plugin_target.h` | The plugin target word this translation unit is compiled for. |
-| `plugin/plugin_load` | Container and manifest validation; returns offsets, never a callable pointer. |
-| `plugin/plugin_exec` | Copies a validated image into the board's reservation and calls its entry. |
+| `plugin/plugin_load` | Probing a payload and naming a result: what the firmware and the host share besides the parse. |
+| `plugin/plugin_load_body.h` | Container and manifest validation, the one body (every function `static`); returns offsets, never a callable pointer. Included only by the two files below. |
+| `plugin/plugin_load_board.c` | The firmware's entry, `plugin_parse()`: the body over the board's `plugin_board_policy`, by name; and the `plugin_policy_probe` layout record the build reads the policy with. |
+| `plugin/plugin_load_host` (`.c` / `.h`) | The host's entry, `plugin_parse_with_policy()`: the same body with a policy argument, for the container verifier and the host tests. Never linked into a firmware (`cmake/check_policy_entry.py`). |
+| `plugin/plugin_bindings` (`.c` / `.h`) | The board's bindings table's type, the record of which word is which veneer (`plugin_bind_probe`), and the painter and printer filled from the table (`plugin_painter_init()`, `plugin_printer_init()`). |
+| `plugin/plugin_exec` | Copies a validated image into the board's reservation and calls its entry with the head of `plugin_board_bindings` (no base argument). |
 | `plugin/plugin_run_core` | Above that loader, for an Armv7-M board staging in RAM (wio-lite-ai, f746g-disco): the lease checked before a load or unload and again at the branch into entry, the load's log lines and the staging-region check; the board keeps its MPU read-back and cache maintenance. |
 | `plugin/plugin_mpu` | Armv8-M MPU verdict: is the plugin reservation executable (pure function). |
 | `plugin/plugin_mpu_v7m` | The same question for an Armv7-M PMSA, answered by its own rules. |

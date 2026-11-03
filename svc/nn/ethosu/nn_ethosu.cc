@@ -30,7 +30,8 @@
  * Ethos-U payload walk (npu_model_scan / npu_payload: exactly one COMMAND_STREAM,
  * last, in input tensor 0, never a variable tensor), then the model's I/O
  * (nn_tflm_model_check.h, shared with the tflm backend and the host gate), then
- * the op resolver (one operator), then AllocateTensors.  Each refusal is its own
+ * the command streams' reach (npu_cmdstream.h, issue #184), then the op
+ * resolver (one operator), then AllocateTensors.  Each refusal is its own
  * code and none is folded into another (nn.h); a refusal before AllocateTensors
  * changes nothing.
  *
@@ -177,6 +178,20 @@ int build_interp(const void *data, uint32_t len)
 	rc = nn_tflm_model_io_check(model);
 	if (rc != 0)
 		return rc;
+
+	/* [!] WHERE EACH COMMAND STREAM MAKES THE NPU READ AND WRITE (issue #184).  A
+	 * base pointer is an address the NPU adds an offset to, not a limit, and its
+	 * accesses are outside the MPU: the stream's DMA and operation descriptors
+	 * alone decide what it touches.  Every range they can reach must lie inside
+	 * the tensor its base pointer stands for, and a write only where that tensor
+	 * has no data (npu_model_scan.h / npu_cmdstream.h; the host gate runs the
+	 * same function at the same point).  After the walk on purpose: the sizes it
+	 * reads are the ones the walk has just proven, and its tensor and buffer
+	 * indices are in range.  PAYLOAD, like the scan: this payload is not
+	 * launched. */
+	if (npu_model_cmdstream_refusal(model, nn_ethosu_board_facts.npu_shram_bytes) !=
+	    nullptr)
+		return NN_MODEL_ERR_PAYLOAD;
 
 	nn_ethosu_op_resolver *resolver = nn_tflm_get_resolver();
 	if (!resolver)
@@ -423,8 +438,11 @@ const char *nn_ethosu_strerror(int rc)
 	switch (rc) {
 	case NN_MODEL_ERR_WINDOW:  return NN_SVC_DETAIL_LIT("model address outside the flash window");
 	case NN_MODEL_ERR_IDENT:   return NN_SVC_DETAIL_LIT("no TFL3 model at that address");
-	case NN_MODEL_ERR_PAYLOAD: return NN_SVC_DETAIL_LIT("model payload has actions after the "
-	                                                    "command stream");
+	/* One sentence for every PAYLOAD refusal: the payload scan's (issues #46,
+	 * #179, #183) and the command stream walk's (issue #184); the walk's own
+	 * reason reaches only the host gate. */
+	case NN_MODEL_ERR_PAYLOAD: return NN_SVC_DETAIL_LIT("model payload is not a command stream "
+	                                                    "this firmware will launch");
 	default:                   return nn_model_strerror(rc);
 	}
 }

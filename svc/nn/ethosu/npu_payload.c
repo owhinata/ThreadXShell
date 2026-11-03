@@ -35,11 +35,15 @@
 #define OPT_CFG_WORDS         2u
 
 bool npu_payload_is_single_final_command_stream(const uint8_t *data,
-                                               size_t bytes)
+                                               size_t bytes,
+                                               uint32_t *stream_first,
+                                               uint32_t *stream_words)
 {
 	uint32_t total;
 	uint32_t i;
 	uint32_t streams = 0u;
+	uint32_t first = 0u;
+	uint32_t count = 0u;
 
 	if (data == NULL)
 		return false;
@@ -78,6 +82,8 @@ bool npu_payload_is_single_final_command_stream(const uint8_t *data,
 				if (len > total - i - ACTION_WORDS)
 					return false;     /* the stream runs off the end */
 				step = ACTION_WORDS + len;
+				first = i + ACTION_WORDS;
+				count = len;
 				streams++;
 				break;
 			}
@@ -98,5 +104,11 @@ bool npu_payload_is_single_final_command_stream(const uint8_t *data,
 				return false;
 		}
 	}
-	return streams == 1u && i == total;
+	if (streams != 1u || i != total)
+		return false;
+	if (stream_first != NULL)
+		*stream_first = first;
+	if (stream_words != NULL)
+		*stream_words = count;
+	return true;
 }

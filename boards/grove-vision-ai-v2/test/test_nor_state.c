@@ -21,8 +21,8 @@
  * hardware bring-up on purpose.
  *
  * [!] THE LEAK THIS FILE IS REALLY FOR is one level up and is checked at the
- * end: npu_hw_init() acquires, then can still fail three ways (SCU bring-up,
- * ethosu_init, the EPK wrap), and its caller does NOT call npu_hw_deinit() when
+ * end: npu_hw_init() acquires, then can still fail four ways (SCU bring-up,
+ * the SHRAM read-back of issue #184, ethosu_init, the EPK wrap), and its caller does NOT call npu_hw_deinit() when
  * it fails.  A table test of acquire/release alone would pass while that leaks
  * on every failed bring-up, so the last section walks the integration sequence
  * against the same functions the port uses.
@@ -527,11 +527,11 @@ int main(void)
 	}
 
 	/* ---- the integration leak this file is really for ---------------- */
-	/* npu_hw_init() acquires, and can then fail three more ways; its caller
+	/* npu_hw_init() acquires, and can then fail four more ways; its caller
 	 * does not tear down on failure.  So every post-acquire failure has to
 	 * release the LOCAL token before returning, and the token may only be
 	 * committed once the whole transaction succeeded. */
-	for (int fail_stage = 0; fail_stage < 4; fail_stage++) {
+	for (int fail_stage = 0; fail_stage < 5; fail_stage++) {
 		struct port p = { NOR_ST_OFF, 0u, 0u };
 		uint32_t committed = 0u;         /* what npu_hw_deinit would see */
 		uint32_t local = port_acquire(&p, NOR_LEASE_NPU, 1);
@@ -540,9 +540,10 @@ int main(void)
 		CHECK(local != 0u, "stage %d: the NOR lease was not granted",
 		      fail_stage);
 
-		/* stages: 0 = SCU bring-up, 1 = ethosu_init, 2 = EPK wrap,
-		 *         3 = nothing fails -- the commit boundary itself */
-		if (fail_stage < 3) {
+		/* stages: 0 = SCU bring-up, 1 = the SHRAM read-back (issue #184),
+		 *         2 = ethosu_init, 3 = EPK wrap,
+		 *         4 = nothing fails -- the commit boundary itself */
+		if (fail_stage < 4) {
 			CHECK(port_release(&p, local) == NOR_REL_DROP,
 			      "stage %d: the local token was not released on failure",
 			      fail_stage);

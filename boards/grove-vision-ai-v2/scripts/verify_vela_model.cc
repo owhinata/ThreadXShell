@@ -21,6 +21,11 @@
  *     the arena still owned by the NPU.  So this tool runs THE FIRMWARE'S OWN
  *     walk -- svc/nn/ethosu/npu_payload.c is compiled in, not reimplemented -- over
  *     the same bytes the driver will parse.
+ *   - the firmware refuses a command stream that makes the NPU read or write
+ *     outside the tensors behind its base pointers (issue #184): the NPU adds an
+ *     offset to an address and checks nothing.  So this tool runs the firmware's
+ *     own walk of every stream (svc/nn/ethosu/npu_cmdstream.c), at the same
+ *     point and with the same SHRAM size (port/nn/npu/npu_hw.h).
  *   - AllocateTensors() has to fit the model in the arena the board reserves.
  *     So this tool compiles THE BOARD'S OWN reservation -- port/nn/npu/npu_arena.c
  *     -- and plans into it.  "384.86 KiB" from Vela's summary is the NPU's SRAM
@@ -58,6 +63,8 @@
 #include "npu_verify.h"
 
 #include "npu_arena.h"     /* npu_arena_base() / npu_arena_bytes() */
+#include "npu_hw.h"        /* NPU_SHRAM_BYTES: the firmware's, read back from
+                              * the NPU by npu_hw_init() (issue #184) */
 
 /* The op list the firmware's backend registers (svc/nn/tflm/nn_tflm_ops.h, its
  * ethosu profile -- issue #169).  The resolver below is built from it, so the two
@@ -450,6 +457,29 @@ int main(int argc, char **argv)
 		return true;
 	};
 
+	/*
+	 * [!] AND THE FIRMWARE'S COMMAND STREAM WALK, THE SAME FUNCTION AT THE SAME
+	 * POINT (issue #184).  npu_model_cmdstream_refusal() is what nn_ethosu.cc
+	 * calls right after the graph walk, with the SHRAM size the board states
+	 * once (npu_hw.h); its sentence is the firmware's.  It runs after the graph
+	 * walk AND the payload scan in either order, because it reads the tensor
+	 * sizes the walk proves and the streams the scan located.  A refusal stops
+	 * the run, as it stops the firmware's load.
+	 */
+	auto cmdstream_scan = [&]() -> bool {
+		const char *refusal = npu_model_cmdstream_refusal(model, NPU_SHRAM_BYTES);
+
+		if (refusal != nullptr) {
+			fail("the firmware would refuse this model (NN_MODEL_ERR_PAYLOAD): %s\n",
+			     refusal);
+			printf("RESULT   : REJECT\n");
+			return false;
+		}
+		printf("  ok     the firmware's command stream walk keeps every "
+		       "operator's NPU accesses inside its tensors\n");
+		return true;
+	};
+
 	if (board_order && !payload_scan())
 		return 1;
 
@@ -506,6 +536,10 @@ int main(int argc, char **argv)
 		printf("RESULT   : REJECT\n");
 		return 1;
 	}
+
+	/* The board's order: right after the walk, before the resolver. */
+	if (board_order && !cmdstream_scan())
+		return 1;
 
 	/* Everything past here needs a subgraph, so a bad shape stops the run
 	 * rather than being reported alongside checks that could not be made. */
@@ -582,6 +616,9 @@ int main(int argc, char **argv)
 
 	/* Already run under --board-order (and a refusal returned there). */
 	if (!board_order && !payload_scan())
+		return 1;
+	/* And here, after both the walk and the scan, in the default order. */
+	if (!board_order && !cmdstream_scan())
 		return 1;
 
 	/* Reporting only, and it uses the same locator, so what is printed is what

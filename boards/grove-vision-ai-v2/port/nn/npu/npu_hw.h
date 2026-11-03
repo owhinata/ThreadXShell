@@ -43,6 +43,30 @@
  */
 #define NPU_INFERENCE_TIMEOUT_TICKS 1000u
 
+/*
+ * The Ethos-U55 configuration every model for this board is compiled for, and
+ * the size of the NPU's internal SHRAM that configuration has (issue #184).
+ *
+ * [!] NPU_VELA_ACCELERATOR IS THE BUILD'S SOURCE OF TRUTH TOO.  board.cmake
+ * PARSES it and hands it to vela as --accelerator-config, the way it parses
+ * NPU_INFERENCE_TIMEOUT_TICKS above; configure fails if the line cannot be
+ * found.  So the SHRAM size below and the models it is applied to name one
+ * configuration in one place.
+ *
+ * NPU_SHRAM_BYTES is that configuration's SHRAM: Vela's ethos-u55-64 has 16
+ * banks of 1 KB (ethosu/vela/architecture_features.py, ArchitectureConfig
+ * shram_banks 16 and shram_bank_size 1024).  Two readers:
+ *   - the command stream walk (svc/nn/ethosu/npu_cmdstream.h) bounds the one
+ *     NPU-internal DMA it accepts, a lookup table load into the last 2 KB of
+ *     the SHRAM, by it -- the firmware through nn_ethosu_board_facts, the host
+ *     gate (scripts/verify_vela_model.cc) by including this header;
+ *   - npu_hw_init() reads the NPU's own CONFIG register (TRM 4.2.11, shram_size
+ *     in KB at bits 15:8) and refuses the bring-up when the hardware differs,
+ *     so the walk's bound is the part's, not only the compiler's.
+ */
+#define NPU_VELA_ACCELERATOR "ethos-u55-64"
+#define NPU_SHRAM_BYTES      (16u * 1024u)
+
 #ifdef __cplusplus
 extern "C" {
 #endif

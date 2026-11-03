@@ -15,6 +15,7 @@
  */
 #include "npu_model_scan.h"
 #include "npu_payload.h"
+#include "npu_cmdstream.h"   /* the command stream walk (issue #184) */
 
 #include <string.h>
 
@@ -232,10 +233,151 @@ const char *npu_model_payload_refusal(const tflite::Model *model,
 			       "model, so a command stream is shared or overlaps";
 		charged += bytes;
 
-		if (!npu_payload_is_single_final_command_stream(data, bytes))
+		if (!npu_payload_is_single_final_command_stream(data, bytes,
+		                                                nullptr, nullptr))
 			return "the payload is not exactly one COMMAND_STREAM as its last "
 			       "action, so a launch could be abandoned with the arena "
 			       "still owned by the NPU";
+	}
+	return nullptr;
+}
+
+namespace {
+
+/*
+ * Region @p ti of the table npu_model_cmdstream_refusal() builds (issue #184):
+ * the byte size of tensor @p ti and whether the NPU may write it.  Read through
+ * the walk's forced-inline helpers (nn_tflm_model_check.h) and Buffer::data()
+ * spelled as Table::GetPointer, for the reason the input-2 loop above gives:
+ * the generated accessors called from this file are outlined into .text, ITCM
+ * on grove-vision-ai-v2.  Anything the walk would have refused -- an index out
+ * of range, a rank above NN_TFLM_MAX_TENSOR_RANK, a negative dimension, a size
+ * past 32 bits, a type with no size -- gives 0 bytes and not writable, so a
+ * stream touching it is refused rather than a bound guessed.
+ */
+__attribute__((always_inline)) inline npu_cs_region
+cs_region_of(const nn_tflm_tensor_vec *tensors, const nn_tflm_buffer_vec *buffers,
+             int32_t ti)
+{
+	npu_cs_region r = { 0u, false };
+
+	if (ti < 0 || static_cast<uint32_t>(ti) >= tensors->size())
+		return r;
+
+	const tflite::Tensor *t = nn_tflm_vec_table(tensors, static_cast<uint32_t>(ti));
+	const uint32_t eb2 = t != nullptr ? nn_tflm_elem_bytes2(nn_tflm_tensor_type(t)) : 0u;
+
+	if (eb2 == 0u)
+		return r;
+
+	const uint32_t bi = nn_tflm_tensor_buffer(t);
+
+	if (bi >= buffers->size())
+		return r;
+
+	const auto *b = nn_tflm_vec_table(buffers, bi);
+	const auto *d = b == nullptr ? nullptr
+	                : static_cast<const flatbuffers::Vector<uint8_t> *>(
+	                          reinterpret_cast<const flatbuffers::Table *>(b)
+	                                  ->GetPointer<const void *>(tflite::Buffer::VT_DATA));
+	const flatbuffers::Vector<int32_t> *shape = nn_tflm_tensor_shape(t);
+	const uint32_t rank = shape != nullptr ? shape->size() : 0u;
+
+	if (rank > NN_TFLM_MAX_TENSOR_RANK)
+		return r;
+
+	/* Elements, then bytes: eb2 is the size in HALF bytes (INT4 1), so
+	 * ceil(n * eb2 / 2) -- a constant's exact length (the walk's equality) and
+	 * at most TFLM's allocation (TfLiteTypeSizeOf(), INT4 1 byte).  Every
+	 * product bounded before it is formed; 32-bit divisions only. */
+	uint32_t n = 1u;
+
+	for (uint32_t k = 0; k < rank; k++) {
+		const int32_t v = shape->Get(k);
+
+		if (v < 0 || (v != 0 && n > UINT32_MAX / static_cast<uint32_t>(v)))
+			return r;
+		n *= static_cast<uint32_t>(v);
+	}
+	if (eb2 == 1u) {
+		r.bytes = n / 2u + (n & 1u);
+	} else {
+		if (n > UINT32_MAX / (eb2 / 2u))
+			return r;
+		r.bytes = n * (eb2 / 2u);
+	}
+	r.writable = d == nullptr || d->size() == 0u;
+	return r;
+}
+
+}  /* namespace */
+
+const char *npu_model_cmdstream_refusal(const tflite::Model *model,
+                                        uint32_t shram_bytes)
+{
+	const auto *subgraphs = model->subgraphs();
+
+	if (subgraphs == nullptr || subgraphs->size() != 1u)
+		return "the model does not have exactly one subgraph";
+
+	const auto *sub = subgraphs->Get(0);
+	/* nn_tflm_sg_operators(), not SubGraph::operators(): called from here the
+	 * generated accessor was outlined into .text (ITCM, +20 B). */
+	const nn_tflm_op_vec *ops = sub != nullptr ? nn_tflm_sg_operators(sub) : nullptr;
+	const auto *tensors = sub != nullptr ? sub->tensors() : nullptr;
+	const nn_tflm_buffer_vec *buffers = static_cast<const nn_tflm_buffer_vec *>(
+		nn_tflm_model_field(model, tflite::Model::VT_BUFFERS));
+
+	if (ops == nullptr || tensors == nullptr || buffers == nullptr)
+		return "the subgraph has no operators, tensors or buffers";
+
+	for (uint32_t n = 0; n < ops->size(); n++) {
+		const auto *op = ops->Get(n);
+
+		if (op == nullptr)
+			return "an operator is missing";
+
+		size_t bytes = 0;
+		const char *why = nullptr;
+		const uint8_t *data =
+			npu_model_command_stream(model, sub, op, &bytes, &why);
+
+		if (data == nullptr)
+			return why;
+
+		uint32_t first = 0u;
+		uint32_t count = 0u;
+
+		if (!npu_payload_is_single_final_command_stream(data, bytes, &first,
+		                                                &count))
+			return "the payload is not exactly one COMMAND_STREAM as its last "
+			       "action, so a launch could be abandoned with the arena "
+			       "still owned by the NPU";
+
+		/* The base pointers, in the kernel's order: inputs 1.. then
+		 * outputs, at most NPU_CS_MAX_REGIONS (ethosu.cc Eval(): num_tensors
+		 * = min(num_tensors, 8)). */
+		npu_cs_region regions[NPU_CS_MAX_REGIONS];
+		uint32_t nreg = 0u;
+		const auto *inputs = op->inputs();   /* non-empty: located above */
+		const auto *outputs = op->outputs();
+
+		const uint32_t nin = inputs->size() - 1u;
+		const uint32_t nout = outputs != nullptr ? outputs->size() : 0u;
+
+		/* One loop over both lists, so the forced-inline reader is expanded
+		 * once.  The walk bounds each list at NN_TFLM_MAX_OP_TENSORS. */
+		for (uint32_t k = 0u; k < nin + nout && nreg < NPU_CS_MAX_REGIONS; k++)
+			regions[nreg++] = cs_region_of(tensors, buffers,
+			                               k < nin ? inputs->Get(k + 1u)
+			                                       : outputs->Get(k - nin));
+
+		const enum npu_cs_refusal r = npu_cmdstream_check(
+			reinterpret_cast<const uint32_t *>(data) + first, count,
+			regions, nreg, shram_bytes, nullptr);
+
+		if (r != NPU_CS_OK)
+			return npu_cmdstream_refusal_text(r);
 	}
 	return nullptr;
 }

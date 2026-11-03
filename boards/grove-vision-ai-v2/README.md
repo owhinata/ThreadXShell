@@ -182,7 +182,7 @@ then `.rodata`, then the NOLOAD buffers, with `.plugin` still pinned at the top.
 @`0x3404D000..0x34050CC0` and `.rodata` 79,784 B from `0x34050CC0`; ITCM used
 240,640 / free 21,504 B (`check_placement_budget`).  Of the +1,280 B over the
 14,272 above, issue #175 added 112, #178 360, #179 96 and #180 336 (each its
-commit's measurement; #181 then added 240, to 15,792 B, and #183 560, to 16,352 B); the remaining 376 B came with the load-path changes between
+commit's measurement; #181 then added 240, to 15,792 B, #183 560, to 16,352 B; 16,560 B after #188, and #184 added 3,640, to 20,200 B, with `npu_hw_init()` moved here); the remaining 376 B came with the load-path changes between
 2026-10-31 and #175 and are not itemised here.  The list below is the
 2026-10-31 inventory.
 
@@ -2370,9 +2370,9 @@ a header is listed; `nn run`'s wait table and the console-call count moved to
 | `port/nn/nn_plugin_stack.h` | build time | Per-slot plugin stack allowances asserted against this board's thread stacks. |
 | `port/nn/nn_probe.c`, `nn_probe_rtos.c` | every thread that enters a plugin slot | Stack depth at a plugin callback's entry; the rtos half asks ThreadX which thread is running. |
 | `port/nn/nn_model_board.c` | any thread calling `svc/nn/nn.h` | The dispatcher's state and its four hooks: PRIMASK, the ThreadX tick, and a cycle counter reported UNAVAILABLE (the DWT stops in WFI while the inference thread sleeps on the driver's semaphore), so `nn_last_cycles()` is 0. |
-| `port/nn/npu/nn_ethosu_board.cc` | (state) | The Ethos-U backend's state object and this board's facts: no name prefix, and the read window a model must lie inside (`NOR_XIP_BASE`, `NOR_SIZE`). |
+| `port/nn/npu/nn_ethosu_board.cc` | (state) | The Ethos-U backend's state object and this board's facts: no name prefix, the read window a model must lie inside (`NOR_XIP_BASE`, `NOR_SIZE`), and the SHRAM size the command stream walk is given (`NPU_SHRAM_BYTES`, issue #184). |
 | `port/nn/npu/npu_arena.c` | NPU (bus master), worker | `nn_ethosu_arena`, 450 KB in `.nn_arena` (SRAM, NOLOAD, 32-byte aligned), sized by `board.cmake`'s `NN_ETHOSU_ARENA_KB` and pinned by the placement gate. |
-| `port/nn/npu/npu_hw.c` | console (load / unload / info) | Ethos-U55 bring-up: SCU, the NPU interrupt and its EPK wrap, the NOR reader lease the loaded model reads through. |
+| `port/nn/npu/npu_hw.c` | console (load / unload / info) | Ethos-U55 bring-up: SCU, the SHRAM size read back against `npu_hw.h`'s `NPU_SHRAM_BYTES` (issue #184), the NPU interrupt and its EPK wrap, the NOR reader lease the loaded model reads through. |
 | `port/nn/npu/npu_rtos.c` | worker (invoke), NPU ISR (semaphore give) | The driver's mutex and semaphore hooks as ThreadX objects (a static pool); ThreadX, which `svc/` does not include. |
 | `port/nn/npu/npu_cache_board.c` | worker (inside `Invoke()`), console (plugin load) | The cache-line primitive and the fail-stop under the shared arena protocol (`svc/nn/ethosu/npu_cache.c`), and that protocol's state, `npu_cache_board_state` (12 B in DTCM). |
 | `port/plugin/plugin_run.c` | console (load / unload), worker, panel | The plugin reservation from this board's linker script, Cortex-M55 I/D-cache maintenance, the Armv8-M MPU read-back and the flash-lease precondition. |
@@ -2410,14 +2410,17 @@ the same critical section as its own gate and gives it back with it.
 
 **Refusals.**  A load is checked in one order by the backend: window, length (16 B
 floor), 16-byte alignment, the `TFL3` identifier, the bounded verifier
-(`svc/nn/ethosu/npu_verify.h`), the schema version, the payload walk, the resolver,
+(`svc/nn/ethosu/npu_verify.h`), the schema version, the payload walk, the graph
+walk, the command streams' reach (issue #184), the resolver,
 `AllocateTensors()`, then the I/O rule (1..8 inputs and outputs, every tensor with a
 buffer and rank <= 4; `svc/nn/ethosu/nn_ethosu_io.h`, which `verify_vela_model`
 calls too).  The reasons are `svc/nn/nn.h`'s codes and the shared command's words:
 the three only an in-place backend gives are new -- `NN_MODEL_ERR_WINDOW` (-10,
 "model address outside the flash window"), `NN_MODEL_ERR_IDENT` (-11, "no TFL3
 model at that address", still separate from `_FORMAT`) and `NN_MODEL_ERR_PAYLOAD`
-(-12, "model payload has actions after the command stream") -- and the rest read as
+(-12, "model payload has actions after the command stream"; since issue #184 "model
+payload is not a command stream this firmware will launch", which covers the
+payload scan and the command stream walk alike) -- and the rest read as
 on wio-lite-ai and f746g-disco (e.g. "not a valid model for this runtime" for a
 malformed flatbuffer, where this board used to say "model flatbuffer is malformed").
 A model with more than 8 outputs or a tensor of rank > 4 is now refused at load
@@ -4619,6 +4622,124 @@ runs `handle_command_stream()` once per command-stream action but waits once for
 the whole walk, so two launches would arm twice and disarm once, and a counter
 would let the backstop pass with a launch unaccounted for.
 
+### [!] Where a command stream makes the NPU read and write (issue #184)
+
+A region (base pointer) is a number the NPU **adds** to an offset, not a limit.
+The ethos-u kernel hands the driver an address and a size per base pointer
+(inputs 1.. then outputs, cut at 8), but the driver writes only the addresses to
+the NPU and gives the sizes to the cache hooks, which this port ignores; the
+NPU's accesses are outside the CPU's MPU.  So the DMA and operation descriptors
+inside the command stream alone decide what the NPU reads and writes -- the XIP
+window, the arena, or anything else it can reach on its bus, TCM included.  The
+payload scan above, the payload sum (#179) and the constant-length equality
+(#183) read none of the stream's words.
+
+**What the backend does.**  After the graph walk and before the resolver, every
+`ethos-u` operator entry's command stream is walked, command by command
+(`svc/nn/ethosu/npu_cmdstream.c`, called by `npu_model_cmdstream_refusal()` in
+`npu_model_scan.cc`).  Each base pointer stands for its tensor: its size is the
+shape's elements times the element size (INT4 half a byte, rounded up -- a
+constant's exact length and at most TFLM's allocation), read after the walk has
+proven it, and the NPU may write it only when the tensor has no data.  The model
+is refused (`NN_MODEL_ERR_PAYLOAD`, -12) unless:
+
+- every command is one both the Ethos-U55 TRM (102420_0200_02, Tables 4-112 /
+  4-113) and the driver's U55 header define, and no command's data word runs
+  past the end;
+- no address register sets bits 47..32 (the U55 has 32-bit addresses);
+- every region named is below the number of base pointers passed;
+- a DMA reads external memory as a plain 1D copy, and writes either external
+  memory or the one NPU-internal shape below;
+- every register an operation uses was set earlier in the same stream (each
+  launch starts from a soft reset, and the TRM gives no reset values);
+- every range a DMA, convolution, depthwise, pool or elementwise operation can
+  reach -- input, second input, output, weights, scales, all four tiles, 64-bit
+  arithmetic, signed and unsigned strides -- starts at 0 or later and ends at
+  or before its tensor's size;
+- nothing is written into a tensor with data (the model, for region 0);
+- every value an address depends on is one the TRM gives a meaning to (refused,
+  never masked);
+- the last command is a stop.
+
+The one NPU-internal DMA accepted is the lookup-table load Vela emits for
+sigmoid / tanh activations: core mask 3, 1..2048 bytes, wholly inside the last
+2 KB of the SHRAM.  It never reaches system memory, which is what the walk
+protects; anything else internal is refused, because the TRM does not say where
+it would land.  **The SHRAM size has one owner**: `port/nn/npu/npu_hw.h`
+states the configuration every model is compiled for (`NPU_VELA_ACCELERATOR`,
+`ethos-u55-64`, which `board.cmake` parses and hands to vela as
+`--accelerator-config`) beside that configuration's SHRAM, `NPU_SHRAM_BYTES` =
+16 KB (Vela's `ethos-u55-64`: 16 banks of 1 KB).  The firmware passes it through
+`nn_ethosu_board_facts`, the host gate by including the header, and
+`npu_hw_init()` reads the NPU's own CONFIG register (TRM 4.2.11, `shram_size` at
+bits 15:8, in KB) right after the SCU bring-up and refuses the bring-up when it
+differs (`NPU SHRAM size is not the one models are compiled for`; the load
+reports it as the bring-up failure, with nothing left enabled and the NOR lease
+given back).
+
+**The host gate runs the same function at the same point.**
+`verify_vela_model` compiles `npu_cmdstream.c` and calls
+`npu_model_cmdstream_refusal()` with `NPU_SHRAM_BYTES` after both the graph
+walk and the payload scan, in its default order and with `--board-order`; a
+refusal prints the same sentence as the firmware computes, after
+`the firmware would refuse this model (NN_MODEL_ERR_PAYLOAD): `, and an accepted
+model prints `ok     the firmware's command stream walk keeps every operator's
+NPU accesses inside its tensors`.  On the board, `nn model load` prints the
+backend's one sentence for -12 (`nn_ethosu_strerror()`), `model payload is not a
+command stream this firmware will launch`, which covers the payload scan and the
+walk alike -- there is no channel for the walk's own reason.
+
+**Measured (2026-11-03).**  All 12 Vela models measured (the pinned
+blazeface, the SDK model zoo) keep their verdict: the five whose payload scan
+passes (blazeface, both copies of the face detector, cifar10, gender_cls) pass
+the walk too, and the other
+seven keep their earlier refusal word for word (a builtin operator).  Walked
+on its own over every ethos-u operator of all 12 files (the step before, issue
+#184), the accepted streams reach at most exactly the end of their weights and
+scratch: slack 0.
+gender_cls's lookup-table DMA lands inside the last 2 KB of the 16 KB SHRAM.
+`test/host_tests.sh` runs the walk's unit test (226 cases) and the gate on
+generated files (`cs_*` in `cmake/fixtures/run_model_io_gate_tests.py`, each in
+both orders: three controls, past the end of the scratch, of the output and of
+INT4 weights, a region not passed, a write into the constant, an unknown
+command, a lookup table below the last 2 KB, no stop, and two order witnesses);
+17 single-change mutants of the wiring (sizes, writability, table order, the
+cut at 8, the SHRAM constant, the call sites, the stream's position) are all
+caught.  Cost: ITCM **-416 B** (240,640 -> 240,224 B used; `npu_hw_init()`
+moved to `.text_cold` with its read-back, one 8 B veneer left in ITCM),
+`.text_cold` +3,640 B (16,560 -> 20,200 B; the walk 2,496 B, its caller 544 B,
+`npu_hw_init()` 476 B, the rest veneers and alignment), `.rodata` +1,544 B
+(80,024 -> 81,568 B: the sentences and the compiler's switch tables).  Stack
+on the console thread, statically: the deepest new chain from
+`cli_dispatch_segment` through `nn model load` to the walk is about 1.85 KB of
+the 4 KB stack (`build_interp()` 216 B, `npu_model_cmdstream_refusal()` 184 B,
+`npu_cmdstream_check()` 320 B, an operation 88 B, a feature map's range 144 B).
+
+**What is still open (not closed by the walk).**
+
+- The ranges are a conservative upper bound built from the TRM and Vela's
+  address model (`get_address()` / `get_strides()`): the input height and width
+  do not subtract the bottom / right padding, channels round up to 16 even in
+  NHWC, depthwise / pool / elementwise inputs take the larger of the input and
+  output depth, scales count as read whenever their length is set, and an
+  NHCWB16 output covers its whole last brick.  None of it was matched against
+  the hardware.  The 12 measured models reach exactly the end of their weights
+  and scratch -- evidence the bound is not too wide, not that it is wide enough.
+- Refusing unset registers removes any reliance on reset values; what remains
+  is that the table of registers each operation uses (in `npu_cmdstream.c`) is
+  complete.  That the weight decoder stops at `WEIGHT_LENGTH` rests on the TRM
+  calling it a byte length.
+- Only the load-time walk stops the NPU's writes; there is no fence at run time.
+  What the NPU's AXI masters can reach on this SoC, and how the MSC / MPC are
+  actually configured, is not confirmed, and the walk does not depend on it (it
+  bounds the ranges as if the NPU could reach everything).
+- The hardware alternative -- running the NPU Non-secure with only the arena
+  and the XIP window Non-secure in the MPCs -- is not taken: this app is
+  SEC_ONLY (the CPU uses the same memory through the secure alias), the MPCs'
+  block granularity opens the arena's neighbours too, and the XIP window is one
+  MPC shared with the bootloader region.  It would be a different, unverified
+  isolation scheme, not a replacement for the range check.
+
 ### Inference does not block the shell
 
 The driver's default semaphore `malloc`s its objects and spins on `__WFE()`,
@@ -4758,12 +4879,16 @@ host instead of on a board at the far end of a flash cycle:
   gate's own report of the plan stays as the diagnostic)
 - every constant's data is exactly its shape's bytes and no tensor the graph
   writes has data (the shared walk, issue #183)
+- every command stream keeps the NPU's reads and writes inside the tensors
+  behind its base pointers -- **the firmware's own** `npu_cmdstream.c` walk, at
+  the same point and with the same SHRAM size (issue #184; "Where a command
+  stream makes the NPU read and write")
 - `--blazeface` additionally pins the four output shapes the decoder looks for
 
-What it does NOT prove: how far the NPU reads from an ethos-u operator's
-weights (input 1 and on).  The command stream decides that, and neither the
-weights tensor's length (which the walk now holds to its shape) nor the
-firmware's payload walk compares the stream's DMA ranges with it.
+What it does NOT prove: that the NPU stays inside those ranges when it runs.
+The ranges are a conservative bound built from the TRM and Vela's address
+model, not measured against the hardware, and nothing fences the NPU at run
+time (issue #184, "What is still open").
 
 Measured on the model built by the commands above:
 

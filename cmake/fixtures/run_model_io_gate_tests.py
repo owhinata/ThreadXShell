@@ -161,6 +161,29 @@ ok line.
 Every pl_ case runs with --board-order (the scan before the walk, the board's
 order), and a refusal is matched as the gate's whole FAIL line.
 
+And Grove's command stream walk (issue #184, svc/nn/ethosu/npu_cmdstream.c),
+which runs after the graph walk and the payload scan in both of the gate's
+orders, as on the board.  Every cs_ case runs in both orders; region 0 is a
+128 B constant, region 1 a 64 B scratch tensor without data, region 2 the 4 B
+output:
+
+  cs_ok                 control: a 64 B DMA from region 0 to region 1, a stop
+  cs_nine_ok            control: the same with 9 base pointers (the kernel's 8)
+                        and a 4 B DMA into region 7, the 8th
+  cs_lut_top_ok         control: a DMA into the SHRAM's last 64 B (16 KB part)
+  cs_dma_past           a 65 B DMA                   -> the past-the-end sentence
+  cs_region_not_passed  a DMA into region 3          -> the region sentence
+  cs_write_model        a DMA into region 0          -> the constant-data sentence
+  cs_unknown            command 0x0132 first         -> the unknown-command sentence
+  cs_lut_low            a DMA into the SHRAM below its last 2 KB -> the SHRAM sentence
+  cs_no_stop            no stop at the end           -> the stop sentence
+  cs_out_ok / _past     4 B / 5 B into region 2, the output -> control / past
+  cs_int4_ok / _past    INT4 [256] weights on 128 B: a read ending at 128 / 129
+  cs_walk_first         cs_dma_past plus a short constant: the walk's FORMAT in
+                        both orders (in PL_WALK_CASES)
+  cs_payload_first      cs_dma_past with input 1 == -1: the scan's -1 sentence in
+                        both orders (in PL_SCAN_BOTH)
+
 And the operator rules (issue #185): one operator over its own tensors, each
 constant exactly its shape's bytes, so only the rule can refuse it.  The answer
 depends on the gate's PROFILE (the op-list define on its compile line), because
@@ -421,12 +444,50 @@ PL_CASES = [
 # the default order too (the walk's ok line first, then the scan's sentence).
 PL_SCAN_BOTH = [
     ("pl_in2_data.tflite", PL_DATA),
+    # issue #184: a stream the command stream walk would refuse, behind an
+    # input the payload scan refuses first -- in either order.
+    ("cs_payload_first.tflite", PL_NEG),
 ]
 # Payload models the WALK refuses (issue #183): (file, code), each run in the
 # default order (the walk first) and with --board-order (the scan first, which
 # must pass it and print its ok line before the walk's refusal).
 PL_WALK_CASES = [
     ("pl_const_short.tflite", FORMAT),
+    # issue #184: a stream the command stream walk would refuse, behind a
+    # constant the graph walk refuses first -- in either order.
+    ("cs_walk_first.tflite", FORMAT),
+]
+
+# The command stream walk (issue #184, svc/nn/ethosu/npu_cmdstream.c via
+# npu_model_cmdstream_refusal()): run after the graph walk and the payload scan in
+# BOTH of the gate's orders, so every cs_ case runs in both and must show the
+# walk's and the scan's ok lines first.  Its sentences are
+# npu_cmdstream_refusal_text()'s, matched as the gate's whole FAIL line.
+CS_OK = ("the firmware's command stream walk keeps every operator's NPU accesses "
+         "inside its tensors")
+CS_PAST = "the command stream reaches past the end of a region's tensor"
+CS_REGION = "the command stream uses a region the operator passes no tensor for"
+CS_WRITE = "the command stream writes a region whose tensor holds constant data"
+CS_UNKNOWN = "the command stream has a command the Ethos-U55 does not define"
+CS_LUT = ("the command stream starts a DMA into NPU-internal memory outside the "
+          "last 2 KB lookup table page")
+CS_STOP = "the command stream does not end with a stop command"
+CS_REASONS = (CS_PAST, CS_REGION, CS_WRITE, CS_UNKNOWN, CS_LUT, CS_STOP)
+CS_CASES = [
+    # (file, expected sentence or None for a control that passes the walk)
+    ("cs_ok.tflite", None),
+    ("cs_nine_ok.tflite", None),
+    ("cs_lut_top_ok.tflite", None),
+    ("cs_dma_past.tflite", CS_PAST),
+    ("cs_region_not_passed.tflite", CS_REGION),
+    ("cs_write_model.tflite", CS_WRITE),
+    ("cs_unknown.tflite", CS_UNKNOWN),
+    ("cs_lut_low.tflite", CS_LUT),
+    ("cs_no_stop.tflite", CS_STOP),
+    ("cs_out_ok.tflite", None),
+    ("cs_out_past.tflite", CS_PAST),
+    ("cs_int4_ok.tflite", None),
+    ("cs_int4_past.tflite", CS_PAST),
 ]
 
 # The operator rules (issue #185): (file, answer where the profile registers the
@@ -784,6 +845,8 @@ def main():
                 cases += [(n, w, []), (n, w, PL_ARGS)]
             for n, w in PL_SCAN_BOTH:
                 cases += [(n, ("scan", w), []), (n, ("scan", w), PL_ARGS)]
+            for n, w in CS_CASES:
+                cases += [(n, ("cs", w), []), (n, ("cs", w), PL_ARGS)]
         for name, want, args_override in cases:
             took = None
             for _ in range(WITNESS_RUNS if name in WITNESSES else 1):
@@ -795,7 +858,26 @@ def main():
                 dt = time.monotonic() - t0
                 took = dt if took is None else min(took, dt)
             text = p.stdout + p.stderr
-            if args_override is not None and isinstance(want, tuple):
+            if isinstance(want, tuple) and want[0] == "cs":
+                want = want[1]
+                lines = p.stdout.splitlines()
+                # The graph walk's and the payload scan's ok lines in either
+                # order, then the command stream walk's verdict.
+                ok = OK_LINE[args.style] in text and PL_OK in text \
+                    and not any(x in text for x in PL_REASONS) \
+                    and not any(c in text for c in CODES)
+                if want is None:
+                    ok = ok and CS_OK in text and PAYLOAD not in text
+                    why = "the graph walk's, the payload scan's and the command " \
+                        "stream walk's ok lines, no NN_MODEL_ERR_PAYLOAD"
+                else:
+                    ok = ok and p.returncode == 1 and (PL_FAIL + want) in lines \
+                        and not any(x in text for x in CS_REASONS if x != want) \
+                        and CS_OK not in text
+                    why = f"rc 1 with the whole line {PAYLOAD}: \"{want}\", after " \
+                        "the graph walk's and the payload scan's ok lines"
+                name = f"{name} ({' '.join(args_override) or 'default order'})"
+            elif args_override is not None and isinstance(want, tuple):
                 want = want[1]
                 lines = p.stdout.splitlines()
                 ok = p.returncode == 1 and (PL_FAIL + want) in lines \
@@ -906,6 +988,7 @@ def main():
     if failures:
         sys.exit(f"run_model_io_gate_tests: {failures} case(s) failed for {gate_path}")
     n = len(CASES) + (len(PL_CASES) + 2 * len(PL_WALK_CASES) + 2 * len(PL_SCAN_BOTH)
+                      + 2 * len(CS_CASES)
                       if args.style == "vela" else 0) + len(op_runs)
     print(f"run_model_io_gate_tests: OK ({n} cases + schema depth, {gate_path})")
 

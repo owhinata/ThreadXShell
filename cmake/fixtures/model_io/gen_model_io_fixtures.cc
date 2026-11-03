@@ -245,6 +245,38 @@
  * entry they cost 4e8 / 1.2e8 payload words; charged before the walk the second
  * entry is refused.
  *
+ * And the command stream walk (issue #184, svc/nn/ethosu/npu_cmdstream.c via
+ * npu_model_cmdstream_refusal()), which only verify_vela_model runs, after the
+ * graph walk and the payload scan.  One ethos-u operator, inputs {payload,
+ * weights, scratch} and outputs {t0}: region 0 the weights, an int8 [128]
+ * constant (128 B of data, read-only), region 1 the scratch, an int16 [32]
+ * tensor with no data (64 B: elements x element size, writable), region 2 t0
+ * (4 B).  The payload is COP1 then one final COMMAND_STREAM; a DMA is the
+ * stream's SRC / DST region, SRC / DST / LEN and DMA_START:
+ *
+ *   cs_ok                control: 64 B from region 0 to region 1, then a stop
+ *   cs_nine_ok           control: the same with t0 six more times as inputs,
+ *                        9 base pointers -- the kernel passes the first 8 --
+ *                        and a second DMA of 4 B into region 7 (the last t0)
+ *   cs_lut_top_ok        control: 64 B from region 0 into the NPU's SHRAM at
+ *                        16,384 - 64 (core mask 3): inside the last 2 KB only
+ *                        when the SHRAM is the board's 16 KB
+ *   cs_dma_past          region 0 -> region 1, 65 B: one past the scratch
+ *   cs_region_not_passed region 0 -> region 3, which no tensor stands for
+ *   cs_write_model       region 1 -> region 0: a write into the constant
+ *   cs_unknown           a command 0x0132 (reserved in the TRM) first
+ *   cs_lut_low           into the SHRAM at 16,384 - 2,048 - 64: below the
+ *                        lookup table page
+ *   cs_no_stop           cs_ok without its stop
+ *   cs_walk_first        cs_dma_past plus an int8 [8] constant of 4 B: the
+ *                        graph walk's FORMAT in either order (it runs first)
+ *   cs_payload_first     cs_dma_past with input 1 == -1: the payload scan's
+ *                        sentence in either order (it runs first)
+ *   cs_out_ok / _past    4 B / 5 B from region 0 into region 2, the output
+ *                        (the outputs follow the inputs in the table)
+ *   cs_int4_ok / _past   the weights INT4 [256] on the same 128 B (half a byte
+ *                        per element): 64 B read from offset 64 / 65
+ *
  * And the operator rules (issue #185): one operator over tensors of its own (a
  * constant on a Buffer of its own, 16-byte aligned, exactly its shape's bytes,
  * so only the rule can refuse it), its kind, its options and its operator codes
@@ -837,11 +869,15 @@ bool write_payload_model(const std::string &dir, const pl_spec &sp)
 	flatbuffers::DefaultAllocator alloc;   /* see write_model() */
 	flatbuffers::FlatBufferBuilder fbb(1024, &alloc);
 
-	/* COP1, NOPs, then one COMMAND_STREAM of length 0 as the last word. */
+	/* COP1, NOPs, then one COMMAND_STREAM of length 1 holding a stop as the
+	 * last two words: the stream is the shortest one issue #184's walk of the
+	 * stream (run after the scan) accepts, so the scan's controls stay
+	 * controls. */
 	std::vector<uint32_t> w(sp.payload / 4u, 5u /* NOP */);
 
-	w.front() = 0x31504F43u;   /* "COP1" */
-	w.back()  = 2u;            /* COMMAND_STREAM, length 0 */
+	w.front() = 0x31504F43u;          /* "COP1" */
+	w[w.size() - 2u] = 2u | (1u << 16);   /* COMMAND_STREAM, length 1 */
+	w.back() = 0xFFFF0000u;           /* NPU_OP_STOP, IRQ mask 0xFFFF */
 	fbb.ForceVectorAlignment(sp.payload, 1, 16);
 	const auto data = fbb.CreateVector(reinterpret_cast<const uint8_t *>(w.data()),
 	                                   sp.payload);
@@ -951,6 +987,90 @@ bool write_payload_model(const std::string &dir, const pl_spec &sp)
 		return false;
 	}
 	const bool ok = fwrite(file.data(), 1, file.size(), f) == file.size();
+	return (fclose(f) == 0) && ok;
+}
+
+/* issue #184: an ethos-u model for the command stream walk (the list at the top). */
+struct cs_spec {
+	const char           *file;
+	std::vector<uint32_t> stream;     /* the command stream's words */
+	uint32_t              extra_t0;   /* t0 this many more times as inputs */
+	bool                  short_const;/* an int8 [8] constant of 4 B, unused */
+	bool                  in1_neg;    /* input 1 == -1 instead of the weights */
+	bool                  int4;       /* the weights INT4 [256] on the same 128 B */
+};
+
+bool write_cs_model(const std::string &dir, const cs_spec &sp)
+{
+	flatbuffers::DefaultAllocator alloc;   /* see write_model() */
+	flatbuffers::FlatBufferBuilder fbb(1024, &alloc);
+
+	std::vector<uint32_t> w;
+
+	w.push_back(0x31504F43u);   /* "COP1" */
+	w.push_back(2u | ((uint32_t)sp.stream.size() << 16));   /* COMMAND_STREAM */
+	w.insert(w.end(), sp.stream.begin(), sp.stream.end());
+	const uint32_t pbytes = (uint32_t)(w.size() * 4u);
+
+	fbb.ForceVectorAlignment(pbytes, 1, 16);
+	const auto pdata = fbb.CreateVector(reinterpret_cast<const uint8_t *>(w.data()), pbytes);
+	const auto payload_buf = tflite::CreateBuffer(fbb, pdata);
+	const auto weights_buf = tflite::CreateBuffer(fbb, const_data(fbb, 128u));
+	const auto empty = tflite::CreateBuffer(fbb);
+	std::vector<flatbuffers::Offset<tflite::Buffer>> bv{ empty, payload_buf, weights_buf };
+	std::vector<flatbuffers::Offset<tflite::Tensor>> tv;
+
+	/* 0 io, 1 payload, 2 weights, 3 scratch (, 4 the short constant) */
+	tv.push_back(tflite::CreateTensor(fbb, fbb.CreateVector(std::vector<int32_t>{ 1, 4 }),
+	                                  tflite::TensorType_INT8, 0, fbb.CreateString("io")));
+	tv.push_back(tflite::CreateTensor(fbb,
+	                                  fbb.CreateVector(std::vector<int32_t>{ (int32_t)pbytes }),
+	                                  tflite::TensorType_UINT8, 1));
+	tv.push_back(tflite::CreateTensor(fbb,
+	                                  fbb.CreateVector(std::vector<int32_t>{ sp.int4 ? 256 : 128 }),
+	                                  sp.int4 ? tflite::TensorType_INT4 : tflite::TensorType_INT8,
+	                                  2, fbb.CreateString("weights")));
+	tv.push_back(tflite::CreateTensor(fbb, fbb.CreateVector(std::vector<int32_t>{ 32 }),
+	                                  tflite::TensorType_INT16, 0, fbb.CreateString("scratch")));
+	if (sp.short_const) {
+		bv.push_back(tflite::CreateBuffer(fbb, const_data(fbb, 4u)));
+		tv.push_back(tflite::CreateTensor(fbb, fbb.CreateVector(std::vector<int32_t>{ 8 }),
+		                                  tflite::TensorType_INT8, 3,
+		                                  fbb.CreateString("const")));
+	}
+
+	std::vector<int32_t> in{ 1, sp.in1_neg ? -1 : 2, 3 };
+
+	for (uint32_t i = 0; i < sp.extra_t0; i++)
+		in.push_back(0);
+	const auto op = tflite::CreateOperator(fbb, 0, fbb.CreateVector(in),
+	                                       fbb.CreateVector(std::vector<int32_t>{ 0 }),
+	                                       tflite::BuiltinOptions_NONE, 0,
+	                                       fbb.CreateVector(std::vector<uint8_t>{ 0 }));
+	const auto sg = tflite::CreateSubGraph(
+		fbb, fbb.CreateVector(tv), fbb.CreateVector(std::vector<int32_t>{ 0 }),
+		fbb.CreateVector(std::vector<int32_t>{ 0 }),
+		fbb.CreateVector(std::vector<flatbuffers::Offset<tflite::Operator>>{ op }),
+		fbb.CreateString("main"));
+	std::vector<flatbuffers::Offset<tflite::SubGraph>> sgv{ sg };
+	std::vector<flatbuffers::Offset<tflite::OperatorCode>> cv{ tflite::CreateOperatorCode(
+		fbb, (int8_t)tflite::BuiltinOperator_CUSTOM, fbb.CreateString("ethos-u"), 1,
+		tflite::BuiltinOperator_CUSTOM) };
+	const auto model = tflite::CreateModel(fbb, TFLITE_SCHEMA_VERSION, fbb.CreateVector(cv),
+	                                       fbb.CreateVector(sgv),
+	                                       fbb.CreateString("issue #184 fixture"),
+	                                       fbb.CreateVector(bv));
+
+	tflite::FinishModelBuffer(fbb, model);
+
+	const std::string path = dir + "/" + sp.file;
+	FILE *f = fopen(path.c_str(), "wb");
+
+	if (!f) {
+		fprintf(stderr, "gen_model_io_fixtures: cannot write %s\n", path.c_str());
+		return false;
+	}
+	const bool ok = fwrite(fbb.GetBufferPointer(), 1, fbb.GetSize(), f) == fbb.GetSize();
 	return (fclose(f) == 0) && ok;
 }
 
@@ -1540,6 +1660,57 @@ int main(int argc, char **argv)
 		if (!write_payload_model(argv[1], sp))
 			return 1;
 		printf("%s: %u table visits\n", sp.file, (unsigned)tables_of(sp));
+	}
+
+	/* issue #184: the command stream walk (the list at the top).  A command
+	 * word is cmd0 (op | param << 16) or cmd1 (0x4000 | op, then a data word). */
+	{
+		auto c0 = [](uint32_t op, uint32_t param) { return op | (param << 16); };
+		auto dma = [&](uint32_t sr, uint32_t dr, uint32_t src, uint32_t dst,
+		               uint32_t len) {
+			return std::vector<uint32_t>{
+				c0(0x130u, sr), c0(0x131u, dr),
+				0x4030u, src, 0x4031u, dst, 0x4032u, len,
+				c0(0x010u, 0u) };
+		};
+		auto with_stop = [&](std::vector<uint32_t> v) {
+			v.push_back(c0(0x000u, 0xFFFFu));   /* NPU_OP_STOP */
+			return v;
+		};
+		const uint32_t shram = 16u * 1024u, lut = 0x100u | 3u;
+		std::vector<uint32_t> unknown{ c0(0x132u, 0u) };
+		const std::vector<uint32_t> ok = with_stop(dma(0u, 1u, 0u, 0u, 64u));
+
+		unknown.insert(unknown.end(), ok.begin(), ok.end());
+		/* The 8th base pointer (region 7) is the sixth extra t0, 4 B: the 9th,
+		 * the output, is cut. */
+		std::vector<uint32_t> nine = dma(0u, 1u, 0u, 0u, 64u);
+		const std::vector<uint32_t> r7 = with_stop(dma(0u, 7u, 0u, 0u, 4u));
+
+		nine.insert(nine.end(), r7.begin(), r7.end());
+		const cs_spec cs_specs[] = {
+			{ "cs_ok.tflite",                ok,                                        0u, false, false },
+			{ "cs_nine_ok.tflite",           nine,                                      6u, false, false },
+			{ "cs_lut_top_ok.tflite",        with_stop(dma(0u, lut, 0u, shram - 64u, 64u)), 0u, false, false },
+			{ "cs_dma_past.tflite",          with_stop(dma(0u, 1u, 0u, 0u, 65u)),       0u, false, false },
+			{ "cs_region_not_passed.tflite", with_stop(dma(0u, 3u, 0u, 0u, 4u)),        0u, false, false },
+			{ "cs_write_model.tflite",       with_stop(dma(1u, 0u, 0u, 0u, 64u)),       0u, false, false },
+			{ "cs_unknown.tflite",           unknown,                                   0u, false, false },
+			{ "cs_lut_low.tflite",           with_stop(dma(0u, lut, 0u, shram - 2048u - 64u, 64u)), 0u, false, false },
+			{ "cs_no_stop.tflite",           dma(0u, 1u, 0u, 0u, 64u),                  0u, false, false },
+			{ "cs_walk_first.tflite",        with_stop(dma(0u, 1u, 0u, 0u, 65u)),       0u, true,  false },
+			{ "cs_payload_first.tflite",     with_stop(dma(0u, 1u, 0u, 0u, 65u)),       0u, false, true },
+			{ "cs_out_ok.tflite",            with_stop(dma(0u, 2u, 0u, 0u, 4u)),        0u, false, false },
+			{ "cs_out_past.tflite",          with_stop(dma(0u, 2u, 0u, 0u, 5u)),        0u, false, false },
+			{ "cs_int4_ok.tflite",           with_stop(dma(0u, 1u, 64u, 0u, 64u)),      0u, false, false, true },
+			{ "cs_int4_past.tflite",         with_stop(dma(0u, 1u, 65u, 0u, 64u)),      0u, false, false, true },
+		};
+
+		for (const cs_spec &sp : cs_specs) {
+			if (!write_cs_model(argv[1], sp))
+				return 1;
+			printf("%s: %zu stream words\n", sp.file, sp.stream.size());
+		}
 	}
 
 	/* issue #185: the operator rules (the list at the top).  T(type, shape,

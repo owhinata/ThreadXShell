@@ -42,9 +42,17 @@ extern "C" {
  * Rejects rather than assumes on every malformed case: bad length, wrong
  * fourcc, an unknown action, a length field that runs off the end, or any
  * action at all after the command stream.
+ *
+ * WHERE THE STREAM IS (issue #184).  On success the command stream the driver
+ * hands the NPU -- the action's data, the words after its action word -- is
+ * words [*stream_first, *stream_first + *stream_words) of @p data, the words
+ * npu_cmdstream_check() walks.  Either pointer may be NULL; neither is written
+ * on refusal.
  */
 bool npu_payload_is_single_final_command_stream(const uint8_t *data,
-                                               size_t bytes);
+                                               size_t bytes,
+                                               uint32_t *stream_first,
+                                               uint32_t *stream_words);
 
 #ifdef __cplusplus
 }

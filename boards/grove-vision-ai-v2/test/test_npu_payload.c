@@ -48,7 +48,8 @@ static uint32_t action(uint32_t cmd, uint32_t reserved, uint32_t length)
 static bool run(unsigned words)
 {
 	return npu_payload_is_single_final_command_stream((const uint8_t *)buf,
-	                                                  (size_t)words * 4u);
+	                                                  (size_t)words * 4u,
+	                                                  NULL, NULL);
 }
 
 static void expect(const char *what, unsigned words, bool want)
@@ -177,20 +178,47 @@ int main(void)
 	memset(buf, 0, sizeof(buf));
 	buf[0] = FOURCC;
 	expect("fourcc only, no action", 1u, false);
-	assert(!npu_payload_is_single_final_command_stream((const uint8_t *)buf, 0u));
-	assert(!npu_payload_is_single_final_command_stream((const uint8_t *)buf, 6u));
-	assert(!npu_payload_is_single_final_command_stream(NULL, 8u));
+	assert(!npu_payload_is_single_final_command_stream((const uint8_t *)buf, 0u, NULL, NULL));
+	assert(!npu_payload_is_single_final_command_stream((const uint8_t *)buf, 6u, NULL, NULL));
+	assert(!npu_payload_is_single_final_command_stream(NULL, 8u, NULL, NULL));
 	printf("  %-52s reject\n", "empty / not a multiple of 4 / NULL");
 
 	/* A zero-length command stream still consumes its action word, and the
 	 * payload ends there -- accepted, because the driver would launch an empty
 	 * stream and still reach the wait.  Recorded so the boundary is a decision
-	 * and not an accident. */
+	 * and not an accident.  (Issue #184's walk of the stream, run after this,
+	 * then refuses it: an empty stream has no final stop, npu_cmdstream.c.) */
 	memset(buf, 0, sizeof(buf));
 	buf[0] = FOURCC;
 	buf[1] = action(ACT_CMS, 0u, 0u);
 	n = 2u;
 	expect("zero-length command stream, still final", n, true);
+
+	/* Where the stream is (issue #184): the words after its action word, to
+	 * the end -- behind a NOP and an optimizer config here -- and nothing is
+	 * written on a refusal. */
+	{
+		uint32_t first = 99u;
+		uint32_t count = 99u;
+
+		memset(buf, 0, sizeof(buf));
+		buf[0] = FOURCC;
+		buf[1] = action(ACT_NOP, 0u, 0u);
+		buf[2] = action(ACT_OPT, 0u, 0u);
+		buf[5] = action(ACT_CMS, 0u, 3u);
+		assert(npu_payload_is_single_final_command_stream(
+			(const uint8_t *)buf, 9u * 4u, &first, &count));
+		assert(first == 6u && count == 3u);
+		first = 99u;
+		count = 99u;
+		assert(!npu_payload_is_single_final_command_stream(
+			(const uint8_t *)buf, 10u * 4u, &first, &count));
+		assert(first == 99u && count == 99u);
+		assert(npu_payload_is_single_final_command_stream(
+			(const uint8_t *)buf, 9u * 4u, NULL, &count));
+		assert(count == 3u);
+		printf("  %-52s ok\n", "stream position and length reported");
+	}
 
 	printf("test_npu_payload: all passed\n");
 	return 0;

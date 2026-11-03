@@ -91,4 +91,34 @@ const uint8_t *npu_model_command_stream(const tflite::Model *model,
 const char *npu_model_payload_refusal(const tflite::Model *model,
                                       size_t model_bytes);
 
+/**
+ * Why a command stream of this model must not run, or nullptr when none
+ * reaches outside its tensors (issue #184).
+ *
+ * For every ethos-u operator entry: the stream inside its payload
+ * (npu_payload.h reports where), and one region per base pointer the kernel
+ * hands the driver -- inputs 1.. then outputs, cut at 8, the kernel's order
+ * (ethosu.cc Eval()) -- each the byte size of its tensor (the shape's elements
+ * times the element size, INT4 half a byte rounded up: the constant's length
+ * and at most the arena allocation) and writable only when the tensor has no
+ * data.  npu_cmdstream_check() then decides; the sentence is
+ * npu_cmdstream_refusal_text()'s, the same in the firmware and the host gate.
+ *
+ * [!] RUN IT AFTER npu_model_payload_refusal() AND THE SHARED WALK, both
+ * accepting (nn_ethosu.cc's order; the host gate keeps it in both of its
+ * orders).  The scan proves each payload is one final stream, charged against
+ * the model's length (so this reads at most model_bytes / 4 words again); the
+ * walk (nn_tflm_model_io_check()) proves every tensor index and buffer index
+ * in range, each tensor's size an int and a constant's data exactly its
+ * shape's bytes, which is what makes the sizes read here the ones TFLM uses.
+ * What it reads it still bounds itself, so a misuse refuses rather than reads
+ * out of range.
+ *
+ * @param shram_bytes  the NPU's SHRAM for the configuration the board compiles
+ *                     models for (grove-vision-ai-v2: npu_hw.h's
+ *                     NPU_SHRAM_BYTES)
+ */
+const char *npu_model_cmdstream_refusal(const tflite::Model *model,
+                                        uint32_t shram_bytes);
+
 #endif /* NPU_MODEL_SCAN_H */

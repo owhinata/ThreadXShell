@@ -156,6 +156,20 @@ SECTIONS
         *npu_model_scan.cc.obj(.text._Z24npu_model_command_stream*
                                .text._Z25npu_model_payload_refusal*)
         *npu_payload.c.obj(.text.npu_payload_is_single_final_command_stream)
+        /* The command stream walk run after the graph walk (issue #184):
+         * its caller, the walk and the walk's helpers the compiler kept out
+         * of line (svc/nn/ethosu/npu_cmdstream.c). */
+        *npu_model_scan.cc.obj(.text._Z27npu_model_cmdstream_refusal*)
+        *npu_cmdstream.c.obj(.text.npu_cmdstream_check
+                             .text.npu_cmdstream_refusal_text
+                             .text.kernel_op
+                             .text.fm_reach
+                             .text.touch
+                             .text.value_ok)
+        /* The NPU's bring-up, run only by the load transaction's prepare
+         * (port/nn/nn_svc_grove.c): moved here when issue #184 added its
+         * SHRAM read-back, so ITCM does not grow (port/nn/npu/npu_hw.c). */
+        *npu_hw.c.obj(.text.npu_hw_init)
         /* The shared dispatcher's open / reload / strerror (svc/nn/nn.c). */
         */svc/nn/nn.c.obj(.text.nn_model_open
                           .text.nn_model_reload

@@ -95,6 +95,12 @@ struct nn_ethosu_board_facts {
 	 * NOR_SIZE).  The backend holds no address of its own. */
 	uint32_t window_base;
 	uint32_t window_size;
+	/* The NPU's internal SHRAM, in bytes, for the configuration every model is
+	 * compiled for (issue #184): it bounds the one NPU-internal DMA the command
+	 * stream walk accepts (npu_cmdstream.h).  The board states it once and checks
+	 * it against the hardware (grove-vision-ai-v2: npu_hw.h's NPU_SHRAM_BYTES,
+	 * read back by npu_hw_init()). */
+	uint32_t npu_shram_bytes;
 };
 
 extern "C" {

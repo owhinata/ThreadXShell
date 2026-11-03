@@ -582,6 +582,20 @@ endif()
 string(REGEX REPLACE "^#define[ \t]+NPU_INFERENCE_TIMEOUT_TICKS[ \t]+([0-9]+u?)[ \t]*$"
        "\\1" GROVE_NPU_INFERENCE_TIMEOUT_TICKS "${_npu_timeout_line}")
 
+# The Ethos-U configuration vela compiles every model for (issue #184), from the
+# same header and in the same way: npu_hw.h states it once beside the SHRAM size
+# that configuration has, which the firmware reads back from the NPU and the
+# command stream walk is given.  Written here as well, the two could drift.
+file(STRINGS "${BOARD_DIR}/port/nn/npu/npu_hw.h" _npu_accel_line
+     REGEX "^#define[ \t]+NPU_VELA_ACCELERATOR[ \t]+\"[a-z0-9-]+\"[ \t]*$")
+if(NOT _npu_accel_line)
+    message(FATAL_ERROR
+            "could not find NPU_VELA_ACCELERATOR in port/nn/npu/npu_hw.h; it is "
+            "the single source of truth for vela's --accelerator-config")
+endif()
+string(REGEX REPLACE "^#define[ \t]+NPU_VELA_ACCELERATOR[ \t]+\"([a-z0-9-]+)\"[ \t]*$"
+       "\\1" GROVE_VELA_ACCELERATOR "${_npu_accel_line}")
+
 target_link_libraries(tflm_obj PUBLIC bsp_iface)
 target_include_directories(tflm_obj PUBLIC
     "${TFLM}"
@@ -722,6 +736,9 @@ add_library(shell_objs OBJECT
     # the link order does not move.
     "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_payload.c"
     "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_model_scan.cc"
+    # The command stream walk (issue #184): where each stream makes the NPU
+    # read and write, against the tensors behind its base pointers.
+    "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_cmdstream.c"
     "${BOARD_DIR}/port/nn/npu/npu_hw.c"
     "${BOARD_DIR}/port/nn/nn_preproc.c"
     "${BOARD_DIR}/port/nn/nn_camera.c"     # console side, owns the state
@@ -1501,6 +1518,7 @@ if(HOST_CXX)
                 -DETHOS_U -DETHOSU55 -DETHOSU_ARCH=u55
                 "${BOARD_DIR}/scripts/verify_vela_model.cc"
                 -x c "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_payload.c"
+                -x c "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_cmdstream.c"
                 -x c "${BOARD_DIR}/port/nn/npu/npu_arena.c"
                 -x none
                 "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_model_scan.cc"
@@ -1512,6 +1530,11 @@ if(HOST_CXX)
                 "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_model_scan.h"
                 "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_payload.c"
                 "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_payload.h"
+                # The command stream walk and the SHRAM size it is given
+                # (issue #184): the firmware's, compiled here.
+                "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_cmdstream.c"
+                "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_cmdstream.h"
+                "${BOARD_DIR}/port/nn/npu/npu_hw.h"
                 "${BOARD_DIR}/port/nn/npu/npu_arena.c"
                 "${BOARD_DIR}/port/nn/npu/npu_arena.h"
                 "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/nn_ethosu_mem.h"
@@ -1692,7 +1715,7 @@ function(grove_add_asset _name)
             OUTPUT "${_velaed}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${_model_dir}/vela"
             COMMAND ${_pinned} "${GROVE_VENV}/bin/vela"
-                    --accelerator-config ethos-u55-64
+                    --accelerator-config ${GROVE_VELA_ACCELERATOR}
                     --output-dir "${_model_dir}/vela" "${_src}"
             COMMAND "${CMAKE_COMMAND}" -E rename
                     "${_model_dir}/vela/${_stem}_vela.tflite" "${_velaed}"

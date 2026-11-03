@@ -65,6 +65,12 @@
  * maze cannot silently point the driver somewhere else. */
 #define NPU_BASE_SECURE 0x53020000u
 
+/* CONFIG, the NPU's read-only RTL configuration register: offset 0x28
+ * (TRM 4.2.11 Table 4-18; the driver's NPU_REG_CONFIG), shram_size in KB at
+ * bits 15:8.  Read by npu_hw_init() against NPU_SHRAM_BYTES (issue #184). */
+#define NPU_REG_CONFIG_OFFSET 0x28u
+#define NPU_CONFIG_SHRAM_KB(w) (((w) >> 8) & 0xFFu)
+
 static struct ethosu_driver npu_drv;
 static struct epk_irq_wrapset npu_irqs;
 static const char *fail_reason;
@@ -160,7 +166,7 @@ int npu_hw_init(void)
 	 * it on every `nn close` while the old one-way latch went on reporting the
 	 * flash as initialised.
 	 *
-	 * [!] The token stays LOCAL until this whole transaction succeeds.  Three
+	 * [!] The token stays LOCAL until this whole transaction succeeds.  Four
 	 * things below can still fail, and cmd_nn.c does NOT call npu_hw_deinit()
 	 * when npu_hw_init() returns non-zero -- so each of those returns has to
 	 * hand the lease back itself. */
@@ -175,6 +181,21 @@ int npu_hw_init(void)
 
 	if (npu_scu_bring_up() != 0) {
 		(void)nor_release(lease);
+		return -1;
+	}
+
+	/* [!] THE SHRAM IS THE ONE THE MODELS ARE COMPILED FOR (issue #184).  The
+	 * load-time walk of every command stream accepts a lookup table DMA only
+	 * inside the last 2 KB of NPU_SHRAM_BYTES (npu_hw.h); on a part with a
+	 * different SHRAM that bound would be the compiler's and not the
+	 * hardware's.  CONFIG is read-only and readable once the SCU has the NPU
+	 * out of reset -- the driver's own ethosu_dev_init() reads it first thing.
+	 * Nothing is enabled yet, so giving the lease back is the whole unwind. */
+	if (NPU_CONFIG_SHRAM_KB(*(volatile const uint32_t *)(NPU_BASE_SECURE +
+	                                                     NPU_REG_CONFIG_OFFSET)) !=
+	    NPU_SHRAM_BYTES / 1024u) {
+		(void)nor_release(lease);
+		(void)fail("NPU SHRAM size is not the one models are compiled for");
 		return -1;
 	}
 

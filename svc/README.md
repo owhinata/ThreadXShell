@@ -689,7 +689,7 @@ relative to `svc/`.
 | `nn/nn_core_frame` | The frame path: what the producer, worker and panel do with each frame. |
 | `nn/nn_handoff` | The hand-over word that says who may touch the model's input and when. |
 | `nn/nn_det_record` | The published decode record and the generation rule that keeps a stale decode out. |
-| `nn/nn_core_model` | The order of `nn model load` and `nn model unload`. |
+| `nn/nn_core_model` | The order of `nn model load` and `nn model unload`. A backend whose staging is the open model's own place says so in its table (`staging_is_open`, issue #191): the load then takes the plugin lease and moves the transition counter to odd before fetch, takes the open model down in unload's order (no hardware down), and goes on as a load from empty -- so once that ran every failure ends EMPTY, a BUSY from fetch is reported as HW, and a lease refused before it still changes nothing. No backend sets it yet. |
 | `nn/nn_swap` | Where a model load ended up and what that obliges (the ending table). |
 | `nn/nn_active_core` | Whether a plugin decodes, and every call into its decoder slots. |
 | `nn/nn_active_lease` | The lease-checked entries above that branch, for a board whose model is a `struct nn_model` (wio-lite-ai, f746g-disco); the board supplies its facts (`nn_active_facts`). |

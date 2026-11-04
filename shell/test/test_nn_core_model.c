@@ -48,6 +48,7 @@ static int  even_change;   /* a change while leased and the counter was even  */
 static int  claim_held, lease_held, swapped;
 static int  unclaimed_has;  /* has_model() asked without the claim          */
 static const struct nn_core_model_board board, board_nolease;
+static const struct nn_core_model_board board_staged, board_staged_nolease;
 static const struct nn_core_model_board *cur = &board;
 
 /* The scenario. */
@@ -206,6 +207,49 @@ static const struct nn_core_model_board board_nolease = {
 	.commit = b_commit, .geom_clear = b_geom,
 };
 
+/* The same boards over a backend that stages into the open model's own place
+ * (issue #191): the open model goes down before fetch. */
+static const struct nn_core_model_backend backend_staged = {
+	.swap = b_swap, .release = b_release, .has_model = b_has,
+	.staging_is_open = 1,
+};
+
+static const struct nn_core_model_board board_staged = {
+	.cs_enter = cs_enter, .cs_exit = cs_exit, .backend = &backend_staged,
+	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME) | NN_CORE_MODEL_TAG(NN_SPEC_ADDR),
+	.spec_refused = b_refused, .check_spec = b_check, .admit = b_admit,
+	.claim_take = b_claim, .claim_give = b_unclaim, .prepare = b_prepare,
+	.fetch = b_fetch, .lease_take = b_lease, .lease_give = b_unlease,
+	.plugin_start = b_pstart, .plugin_unload = b_punload,
+	.hw_down = b_hwdown, .invalidate = b_inval, .forget = b_forget,
+	.commit = b_commit, .geom_clear = b_geom,
+};
+
+static const struct nn_core_model_board board_staged_nolease = {
+	.cs_enter = cs_enter, .cs_exit = cs_exit, .backend = &backend_staged,
+	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME) | NN_CORE_MODEL_TAG(NN_SPEC_ADDR),
+	.spec_refused = b_refused, .check_spec = b_check, .admit = b_admit,
+	.claim_take = b_claim, .claim_give = b_unclaim, .prepare = b_prepare,
+	.fetch = b_fetch, .lease_take = NULL, .lease_give = NULL,
+	.plugin_start = b_pstart, .plugin_unload = b_punload,
+	.hw_down = b_hwdown, .invalidate = b_inval, .forget = b_forget,
+	.commit = b_commit, .geom_clear = b_geom,
+};
+
+/* How many times @p word is in the trace, as a whole word. */
+static int count_word(const char *word)
+{
+	size_t n = strlen(word);
+	const char *p = trace;
+	int c = 0;
+
+	while ((p = strstr(p, word)) != NULL) {
+		if ((p == trace || p[-1] == ' ') && (p[n] == ' ' || p[n] == '\0'))
+			c++;
+		p += n;
+	}
+	return c;
+}
 
 static void reset(int open)
 {
@@ -257,9 +301,24 @@ static void rules(const char *what, int status, uint32_t seq0)
 	        (life.seq == seq0 || life.seq == seq0 + 2u));
 	snprintf(buf, sizeof buf, "%s: claim and lease given back", what);
 	ok(buf, !claim_held && !lease_held);
-	/* [!] issue #131 stage 8 relies on this. */
+	/* [!] issue #131 stage 8 relies on this.  Issue #191: a backend that
+	 * stages into the open model's place releases before the swap, so "not
+	 * swapped" is not enough -- BUSY over an open model touched nothing of
+	 * it.  (From empty, BUSY may still take down what prepare brought up.) */
 	snprintf(buf, sizeof buf, "%s: BUSY only before the backend", what);
 	ok(buf, status != NN_SVC_ERR_BUSY || !swapped);
+	snprintf(buf, sizeof buf, "%s: BUSY over an open model takes nothing of "
+	         "it down", what);
+	ok(buf, status != NN_SVC_ERR_BUSY || !model_open ||
+	        (count_word("release") == 0 && count_word("punload") == 0 &&
+	         count_word("inval") == 0 && count_word("forget") == 0));
+	/* The counter's two moves and the lease's return come as one pair. */
+	snprintf(buf, sizeof buf, "%s: one odd and one even, at most", what);
+	ok(buf, count_word("ODD") == count_word("EVEN") && count_word("ODD") <= 1);
+	snprintf(buf, sizeof buf, "%s: the lease goes back once, exactly when "
+	         "the counter moved", what);
+	ok(buf, cur->lease_take == NULL ? count_word("unlease") == 0
+	                                : count_word("unlease") == count_word("ODD"));
 }
 
 static void load(const char *what, int tag, int want_status,
@@ -495,6 +554,106 @@ int main(void)
 	reset(1);
 	unload("no lease: unload", NN_SVC_OK,
 	       "admit claim ODD inval geom release hw_down forget EVEN unclaim");
+	cur = &board;
+
+	/* ---- a backend that stages into the open model's place (#191) ------ */
+	cur = &board_staged;
+	reset(1);
+	load("staged: opened over a model", N, NN_SVC_OK, NN_MODEL_NEW,
+	     "check admit claim prepare(open) lease ODD punload inval geom(L) "
+	     "release forget fetch swap pstart inval commit geom(L) EVEN unlease "
+	     "unclaim");
+	reset(0);
+	load("staged: opened from empty", N, NN_SVC_OK, NN_MODEL_NEW,
+	     "check admit claim prepare lease ODD fetch swap pstart inval commit "
+	     "geom(L) EVEN unlease unclaim");
+	/* the preparation still runs first, and still knows a model is open */
+	reset(1); r_prepare = NN_SVC_ERR_HW;
+	load("staged: bring-up refused over a model", N, NN_SVC_ERR_HW,
+	     NN_MODEL_PREVIOUS, "check admit claim prepare(open) unclaim");
+	/* [!] a lease refused before the take-down: nothing changed, the counter
+	 * stays */
+	reset(1); r_lease = 0;
+	load("staged: lease refused over a model", N, NN_SVC_ERR_BUSY, UNTOUCHED,
+	     "check admit claim prepare(open) lease unclaim");
+	reset(0); r_lease = 0;
+	load("staged: lease refused from empty", N, NN_SVC_ERR_BUSY, UNTOUCHED,
+	     "check admit claim prepare lease release hw_down inval forget geom "
+	     "unclaim");
+	/* [!] past the take-down every failure is EMPTY; the release runs again */
+	reset(1); r_fetch = NN_SVC_ERR_ARG;
+	load("staged: lookup refused over a model", N, NN_SVC_ERR_ARG,
+	     NN_MODEL_EMPTY,
+	     "check admit claim prepare(open) lease ODD punload inval geom(L) "
+	     "release forget fetch punload release hw_down inval forget geom(L) "
+	     "EVEN unlease unclaim");
+	ok("staged: lookup refused: the second release is there",
+	   count_word("release") == 2);
+	reset(0); r_fetch = NN_SVC_ERR_ARG;
+	load("staged: lookup refused from empty", N, NN_SVC_ERR_ARG,
+	     NN_MODEL_EMPTY,
+	     "check admit claim prepare lease ODD fetch punload release hw_down "
+	     "inval forget geom(L) EVEN unlease unclaim");
+	/* [!] a BUSY from fetch is past the take-down: HW, and the state written */
+	reset(1); r_fetch = NN_SVC_ERR_BUSY;
+	load("staged: lookup busy over a model", N, NN_SVC_ERR_HW,
+	     NN_MODEL_EMPTY,
+	     "check admit claim prepare(open) lease ODD punload inval geom(L) "
+	     "release forget fetch punload release hw_down inval forget geom(L) "
+	     "EVEN unlease unclaim");
+	reset(0); r_fetch = NN_SVC_ERR_BUSY;
+	load("staged: lookup busy from empty", N, NN_SVC_ERR_HW, NN_MODEL_EMPTY,
+	     "check admit claim prepare lease ODD fetch punload release hw_down "
+	     "inval forget geom(L) EVEN unlease unclaim");
+	reset(1); r_swap = NN_SVC_ERR_HW; r_after = 0;
+	load("staged: backend refused over a model", N, NN_SVC_ERR_HW,
+	     NN_MODEL_EMPTY,
+	     "check admit claim prepare(open) lease ODD punload inval geom(L) "
+	     "release forget fetch swap punload release hw_down inval forget "
+	     "geom(L) EVEN unlease unclaim");
+	ok("staged: backend refused: the second release is there",
+	   count_word("release") == 2);
+	/* a backend claiming it reopened what was taken down: nothing was open
+	 * for it any more, so fail closed */
+	reset(1); r_swap = NN_SVC_ERR_HW; r_after = 1;
+	load("staged: backend says restored", N, NN_SVC_ERR_HW, NN_MODEL_EMPTY,
+	     "check admit claim prepare(open) lease ODD punload inval geom(L) "
+	     "release forget fetch swap punload release hw_down inval forget "
+	     "geom(L) EVEN unlease unclaim");
+	reset(1); r_swap = NN_SVC_ERR_BUSY; r_after = 0;
+	load("staged: backend says busy", N, NN_SVC_ERR_HW, NN_MODEL_EMPTY,
+	     "check admit claim prepare(open) lease ODD punload inval geom(L) "
+	     "release forget fetch swap punload release hw_down inval forget "
+	     "geom(L) EVEN unlease unclaim");
+	/* [!] the plugin refused after the swap: UNDECODED -- NEW, a failure,
+	 * committed, the plugin unloaded, no release and no hw_down after it */
+	reset(1); r_plugin = NN_SVC_ERR_ARG;
+	load("staged: plugin refused", N, NN_SVC_ERR_ARG, NN_MODEL_NEW,
+	     "check admit claim prepare(open) lease ODD punload inval geom(L) "
+	     "release forget fetch swap pstart punload inval commit geom(L) EVEN "
+	     "unlease unclaim");
+	ok("staged: plugin refused: one release (the take-down's), no hw_down",
+	   count_word("release") == 1 && count_word("hw_down") == 0);
+	reset(1); bare = 1;
+	load("staged: bare model over a model", N, NN_SVC_OK, NN_MODEL_NEW,
+	     "check admit claim prepare(open) lease ODD punload inval geom(L) "
+	     "release forget fetch swap punload inval commit geom(L) EVEN unlease "
+	     "unclaim");
+	/* refusals before the claim are as on any board */
+	reset(1); r_claim = NN_SVC_ERR_BUSY;
+	load("staged: claim refused", N, NN_SVC_ERR_BUSY, UNTOUCHED,
+	     "check admit claim");
+
+	cur = &board_staged_nolease;
+	reset(1);
+	load("staged, no lease: opened over a model", N, NN_SVC_OK, NN_MODEL_NEW,
+	     "check admit claim prepare(open) ODD inval geom release forget fetch "
+	     "swap inval commit geom EVEN unclaim");
+	reset(1); r_fetch = NN_SVC_ERR_ARG;
+	load("staged, no lease: lookup refused", N, NN_SVC_ERR_ARG,
+	     NN_MODEL_EMPTY,
+	     "check admit claim prepare(open) ODD inval geom release forget fetch "
+	     "release hw_down inval forget geom EVEN unclaim");
 	cur = &board;
 
 	/* ---- a copy taken without the claim ------------------------------ */

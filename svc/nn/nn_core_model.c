@@ -142,6 +142,25 @@ nn_core_model_swap(const struct nn_core_model_board *b,
 	                      plugin_refused);
 }
 
+/*
+ * Step 9a (nn_core_model.h): the open model goes down before fetch writes over
+ * it, in unload's order and under the lease and the odd counter the caller
+ * holds.  No hw_down: the load goes on and needs what prepare brought up.
+ * The lease stays held for the rest of the load.
+ */
+static void nn_core_model_take_down(const struct nn_core_model_board *b)
+{
+	if (b->lease_take != NULL && b->plugin_unload != NULL)
+		b->plugin_unload();
+	if (b->invalidate != NULL)
+		b->invalidate();
+	if (b->geom_clear != NULL)
+		b->geom_clear(b->lease_take != NULL);
+	if (b->backend->release != NULL)
+		b->backend->release();
+	b->forget();
+}
+
 void nn_core_model_load(struct nn_core_model *m,
                         const struct nn_core_model_board *b,
                         struct nn_core_model_job *j,
@@ -191,8 +210,32 @@ void nn_core_model_load(struct nn_core_model *m,
 		return;
 	}
 
+	/*
+	 * [!] A BACKEND THAT STAGES INTO THE OPEN MODEL'S OWN PLACE (issue #191):
+	 * fetch is the first thing that destroys the open model, so the lease,
+	 * the odd counter and the take-down (step 9a) come before it.  A lease
+	 * refused here still changed nothing.  From the take-down on, the load
+	 * is one from empty -- had_open is 0 for the table.
+	 */
+	if (b->backend->staging_is_open) {
+		leased = (b->lease_take == NULL) ? 1 : b->lease_take(j);
+		if (!leased) {
+			status = NN_SVC_ERR_BUSY;
+			end    = NN_SWAP_REFUSED;
+			goto settle;
+		}
+		nn_core_model_bump(m, b);   /* odd: what is open changes now */
+		if (j->had_open) {
+			nn_core_model_take_down(b);
+			j->had_open = 0;
+		}
+	}
+
 	status = b->fetch(j);
 	if (status != NN_SVC_OK) {
+		/* [!] Past the take-down a BUSY is not "nothing changed". */
+		if (b->backend->staging_is_open && status == NN_SVC_ERR_BUSY)
+			status = NN_SVC_ERR_HW;
 		end = NN_SWAP_REFUSED;
 		goto settle;
 	}
@@ -204,14 +247,15 @@ void nn_core_model_load(struct nn_core_model *m,
 	 * old model; so this is the last moment at which a refusal still leaves
 	 * everything as it was.  The lookup above stays outside it.
 	 */
-	leased = (b->lease_take == NULL) ? 1 : b->lease_take(j);
-	if (!leased) {
-		status = NN_SVC_ERR_BUSY;
-		end    = NN_SWAP_REFUSED;
-		goto settle;
+	if (!b->backend->staging_is_open) {
+		leased = (b->lease_take == NULL) ? 1 : b->lease_take(j);
+		if (!leased) {
+			status = NN_SVC_ERR_BUSY;
+			end    = NN_SWAP_REFUSED;
+			goto settle;
+		}
+		nn_core_model_bump(m, b);   /* odd: what is open is about to change */
 	}
-
-	nn_core_model_bump(m, b);   /* odd: what is open is about to change */
 	end = nn_core_model_swap(b, j, &status);
 
 settle:

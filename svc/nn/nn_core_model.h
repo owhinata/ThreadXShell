@@ -41,18 +41,37 @@
  * with a model open obliges nothing; without one it takes down what step 6
  * brought up.
  *
+ * A BACKEND WHOSE STAGING IS THE OPEN MODEL'S OWN PLACE (issue #191,
+ * @ref nn_core_model_backend::staging_is_open) cannot keep the open model
+ * while fetch writes the new bytes, so steps 8 and 9 move before step 7 and
+ * the open model goes down between them:
+ *
+ *   6. prepare, as above (it still sees had_open)
+ *   8. the plugin lease, bounded                       (else BUSY) -> REFUSED
+ *   9. the transition counter goes ODD
+ *   9a. if a model is open, it goes down in unload's order -- plugin unload ->
+ *      the last result -> the geometry -> backend release -> forget (no
+ *      hw_down) -- and had_open becomes 0: the load goes on as from empty
+ *   7. fetch -> REFUSED; a BUSY from it is reported as NN_SVC_ERR_HW
+ *  10-13. as above, the table read with had_open = 0.
+ *
+ * So once 9a ran, every failure ends EMPTY (or UNDECODED when only the plugin
+ * was refused), and the EMPTY ending's release runs a second time over
+ * nothing.  A lease refused at 8 still changes nothing over an open model.
+ *
  * THE UNLOAD: preconditions -> claim -> lease (refused: nothing changes) ->
  * counter ODD -> plugin unload -> the last result -> the geometry -> lease back
  * -> backend release -> hw_down -> forget -> counter EVEN -> claim back.
  *
  * [!] A BUSY REFUSAL NEVER REPLACES OR LOSES THE OPEN MODEL (it is answered
- * before the swap; staging into an inactive buffer or an empty-state cleanup
- * may already have run).  This file's
+ * before the swap, and before 9a where that runs; staging into an inactive
+ * buffer or an empty-state cleanup may already have run).  This file's
  * own BUSY refusals are the claim (worded by the board's claim_take, which on
  * wio-lite-ai holds the OCTOSPI1 guard too) and the lease; a board's admit,
  * prepare or fetch hook may answer BUSY too (wio-lite-ai's blob store)
  * -- all of them before step 10 -- and a BUSY returned by the swap or the
- * plugin start is reported as NN_SVC_ERR_HW.  The
+ * plugin start, or by fetch once 9a may have taken the open model down, is
+ * reported as NN_SVC_ERR_HW.  The
  * shared command relies on this (issue #131 stage 8): a load refused BUSY has
  * changed nothing, so it has no model state to report -- and this does not
  * make one up: a BUSY load leaves @p state unwritten (issue #138).  A refused
@@ -132,6 +151,13 @@ struct nn_core_model_backend {
 	 *  it; for `nn info`.  0 when the backend reserves nothing. */
 	uint32_t (*reserved)(void);
 	uint32_t (*used)(void);
+	/** Non-zero when the place a load's bytes are fetched into is the open
+	 *  model's own (one staging buffer, issue #191): this file then takes
+	 *  the open model down BEFORE fetch (step 9a above).  A property of the
+	 *  backend, not of the board: a board that can build more than one
+	 *  backend sets it for the one that has it.  0 (left out): the open
+	 *  model stands until the swap, as every backend did before. */
+	int staging_is_open;
 };
 
 /** The bit for @p tag in @ref nn_core_model_board::tags. */

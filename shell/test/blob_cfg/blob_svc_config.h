@@ -9,6 +9,8 @@
  *   BLOB_TEST_SHAPE_FULL     a store that the console can fill (wio / Grove)
  *   BLOB_TEST_SHAPE_NOSTORE  no store at all (wio with BSP_ENABLE_KV off)
  *   BLOB_TEST_SHAPE_NORECV   a store, and no receive yet (f746 until 4c)
+ *   BLOB_TEST_SHAPE_RXLEVEL  FULL, and the console reports its RX ring's
+ *                            high-water (f746)
  *
  * The words are written to be told apart from every board's, so a test that
  * passes is reading the configuration, not a board's file.
@@ -36,6 +38,9 @@
 #define BLOB_SVC_SENDER       "`test-send <file>`"
 #define BLOB_SVC_READ_MAX     512u
 #define BLOB_SVC_HELP         "test blob store"
+#if defined(BLOB_TEST_SHAPE_RXLEVEL)
+#define BLOB_SVC_HAS_RX_LEVEL 1
+#endif
 #define BLOB_SVC_LIST_NOTE    "[!] test note under the list\r\n"
 
 #endif /* BLOB_SVC_CONFIG_H */

@@ -220,8 +220,8 @@ int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink)
 	static uint8_t block[1024];
 	uint32_t off;
 
-	(void)sh;
 	blob_stub.receives++;
+	sh->rx_dropped += blob_stub.drops;
 	if (sink->begin(sink->ctx, "sent.bin", blob_stub.send) != 0)
 		return 1;
 	for (off = 0u; off < blob_stub.send; off += sizeof block) {
@@ -253,6 +253,25 @@ int blob_board_say(struct cli_instance *sh, int rc)
 		cli_error(sh, "blob: the board's own sentence for %d\r\n", rc);
 		return 1;
 	}
+	return 0;
+}
+
+void blob_board_rx_level_clear(struct cli_instance *sh)
+{
+	(void)sh;
+	blob_stub.level_clears++;
+	blob_stub.erases_at_clear = blob_stub.erase_spans;
+}
+
+int blob_board_rx_level(struct cli_instance *sh, uint32_t *high,
+                        uint32_t *size)
+{
+	(void)sh;
+	blob_stub.level_reads++;
+	if (blob_stub.level_rc != 0)
+		return blob_stub.level_rc;
+	*high = blob_stub.level_high;
+	*size = blob_stub.level_size;
 	return 0;
 }
 

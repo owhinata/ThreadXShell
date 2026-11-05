@@ -900,8 +900,10 @@ done
 # (the incomplete slot after a failed verify, the unknown state after a failed
 # magic page), no slot number in the log for a write refused before a slot was
 # chosen, one colon column for 2-digit slots, `blob erase` only under the
-# reservation -- and, without a store or a receiver, nothing registered.
-for shape in FULL NOSTORE NORECV; do
+# reservation, the drops line with and without the RX ring's high-water (the
+# RXLEVEL shape: restarted before the erase, clean / NOT CLEAN, a console with
+# no ring) -- and, without a store or a receiver, nothing registered.
+for shape in FULL RXLEVEL NOSTORE NORECV; do
     gcc $CFLAGS -DCLI_USE_COLOR=0 -DBLOB_TEST_SHAPE_$shape \
         $glue_inc -I "$here/shim" -I "$here/blob_cfg" \
         -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" -I "$svc/blob" \

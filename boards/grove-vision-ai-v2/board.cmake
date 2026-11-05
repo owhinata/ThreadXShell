@@ -2001,6 +2001,11 @@ set(GROVE_PLUGIN_FORBIDDEN
     hx_lib_spi_eeprom_word_write
     Send_Op_code
     Send_Op_Read_Data
+    # The shared `blob` command's writers (src/blob_writer.c, issue #194):
+    # thin wraps of port/nor/nor_write.c's transaction.
+    blob_svc_erase_header
+    blob_svc_erase_span
+    blob_svc_program
     hx_lib_pm_enter_lp
     hx_lib_pm_enter_ulp
     EPII_NVIC_SetVector

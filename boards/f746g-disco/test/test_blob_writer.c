@@ -56,12 +56,34 @@ static uint8_t nor[QSPI_FLASH_SIZE];
 static int corrupt_payload_read;     /* flip a byte in a payload read-back */
 static unsigned writes_outside, logs;
 
+/* What to break (issue #194 4d): a program of one kind of page, the sector
+ * erase, or a payload read.  A failed program writes nothing. */
+enum fail_kind { FAIL_NONE, FAIL_PAYLOAD, FAIL_BODY, FAIL_MAGIC, FAIL_ERASE,
+                 FAIL_READ };
+static enum fail_kind fail;
+
+/* Which page a program aims at: a slot's base is the magic page, one header
+ * page in is the body, anything further is payload. */
+static enum fail_kind page_kind(uint32_t addr)
+{
+	int slot = blob_map_index_of(addr - (addr % BLOB_ERASE_UNIT));
+
+	if (slot >= 0 && addr == blob_map_slot((unsigned)slot)->base)
+		return FAIL_MAGIC;
+	if (slot >= 0 && addr == blob_map_slot((unsigned)slot)->base +
+	    BLOB_HDR_PAGE)
+		return FAIL_BODY;
+	return FAIL_PAYLOAD;
+}
+
 int qspi_flash_ready(void) { return 1; }
 
 int qspi_flash_read(uint32_t addr, void *buf, uint32_t len)
 {
 	if (addr >= QSPI_FLASH_SIZE || len > QSPI_FLASH_SIZE - addr)
 		return QSPI_FLASH_ERR_PARAM;
+	if (fail == FAIL_READ && blob_map_index_of(addr) < 0)
+		return QSPI_FLASH_ERR_HAL;
 	memcpy(buf, &nor[addr], len);
 	/* A payload read (not a header read, which is at a slot base). */
 	if (corrupt_payload_read && blob_map_index_of(addr) < 0 && len > 0u)
@@ -77,6 +99,8 @@ int qspi_flash_write(uint32_t addr, const void *buf, uint32_t len)
 		writes_outside++;
 	if (addr >= QSPI_FLASH_SIZE || len > QSPI_FLASH_SIZE - addr)
 		return QSPI_FLASH_ERR_PARAM;
+	if (fail != FAIL_NONE && fail == page_kind(addr))
+		return QSPI_FLASH_ERR_FLASH;     /* P_ERR, nothing written */
 	for (i = 0u; i < len; i++)
 		nor[addr + i] &= ((const uint8_t *)buf)[i];   /* NOR: 1 -> 0 only */
 	return QSPI_FLASH_OK;
@@ -86,6 +110,8 @@ static int erase_unit(uint32_t addr, uint32_t unit)
 {
 	uint32_t at = addr - (addr % unit);
 
+	if (fail == FAIL_ERASE && unit == QSPI_FLASH_SECTOR_SIZE)
+		return QSPI_FLASH_ERR_FLASH;
 	memset(&nor[at], 0xFF, unit);
 	return QSPI_FLASH_OK;
 }
@@ -387,6 +413,50 @@ static void t_erase_header(void)
 	      "the header survived its erase");
 }
 
+/* [!] EVERY WAY A STEP OF THE WRITE CAN FAIL, through the real writer: the
+ * result, whether the magic is the one that failed, what the slot then reads
+ * as, and the flag given back once.  A writer that swallowed a failed program
+ * or erase would pass every case above and none of these (issue #194 4d). */
+static void t_write_failures(void)
+{
+	static const struct {
+		enum fail_kind f; enum blob_write_result res; int magic;
+		enum blob_slot_state st; const char *what;
+	} c[] = {
+		{ FAIL_PAYLOAD, BLOB_WRITE_PROG_FAILED,   0, BLOB_EMPTY,
+		  "a payload page program fails" },
+		{ FAIL_BODY,    BLOB_WRITE_PROG_FAILED,   0, BLOB_EMPTY,
+		  "the header body program fails" },
+		{ FAIL_MAGIC,   BLOB_WRITE_PROG_FAILED,   1, BLOB_INCOMPLETE,
+		  "the magic page program fails" },
+		{ FAIL_ERASE,   BLOB_WRITE_ERASE_FAILED,  0, BLOB_EMPTY,
+		  "the slot erase fails" },
+		{ FAIL_READ,    BLOB_WRITE_VERIFY_FAILED, 0, BLOB_INCOMPLETE,
+		  "the read-back itself fails" },
+	};
+	unsigned i;
+
+	for (i = 0u; i < sizeof c / sizeof c[0]; i++) {
+		struct blob_write_report rep;
+		struct blob_info info;
+		enum blob_write_result res;
+
+		memset(nor, 0xFF, sizeof nor);
+		fail = c[i].f;
+		res = write_one("model", 7, 3000u, &rep);
+		fail = FAIL_NONE;
+		CHECK(res == c[i].res, "%s: the write ended %s", c[i].what,
+		      blob_write_result_name(res));
+		CHECK(rep.magic_failed == c[i].magic, "%s: magic_failed is %d",
+		      c[i].what, rep.magic_failed);
+		CHECK(blob_stat(7u, &info, NULL) == BLOB_OK && info.state == c[i].st,
+		      "%s: the slot reads %s, expected %s", c[i].what,
+		      blob_slot_state_name(info.state),
+		      blob_slot_state_name(c[i].st));
+		check_released(c[i].what);
+	}
+}
+
 int main(void)
 {
 	t_write_valid();
@@ -395,6 +465,7 @@ int main(void)
 	t_busy();
 	t_writer_bounds();
 	t_erase_header();
+	t_write_failures();
 
 	if (failures != 0) {
 		printf("test_blob_writer: %d failure(s)\n", failures);

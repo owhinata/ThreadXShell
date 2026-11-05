@@ -16,6 +16,8 @@
  */
 #include "blob.h"
 
+#include <stddef.h>          /* NULL -- not from mem_sections.h's closure */
+
 #include "blob_svc.h"
 #include "log.h"
 #include "mem_sections.h"    /* DTCM_BSS: the write's staging buffer */

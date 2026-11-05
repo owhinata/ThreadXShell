@@ -26,6 +26,9 @@
 #include "host_glue.h"
 #include "blob_err.h"
 #include "blob_svc_config.h"
+#ifndef BLOB_SVC_HAS_RX_LEVEL
+#define BLOB_SVC_HAS_RX_LEVEL 0   /* as shell/cmds/cmd_blob.c takes it */
+#endif
 #include "blob_svc_stub.h"
 #include "log.h"
 
@@ -237,7 +240,7 @@ static void t_write(void)
 	       has("           then start the sender: `test-send <file>`,\r\n"));
 	expect("the counters and the drops",
 	       has("ymodem   : 3 blocks ok, 0 bad-crc") &&
-	       has("rx drops : 0  (clean)"));
+	       has("rx drops : 0") && has("  (clean)\r\n"));
 	expect("the log names the slot",
 	       logged("blob: write 'model' slot 12: stored, 262144 B erased, "
 	              "3000 B received"));
@@ -333,6 +336,52 @@ static void t_erase(void)
 	       blob_stub.reserves == 1u && blob_stub.unreserves == 1u);
 }
 
+/* ---- the drops line (BLOB_SVC_HAS_RX_LEVEL) -------------------------------- */
+
+static void t_rx_line(void)
+{
+#if BLOB_SVC_HAS_RX_LEVEL
+	reset();
+	blob_stub.level_high = 1234u;
+	blob_stub.level_size = 4096u;
+	run("blob write model 5\r");
+	expect("the high-water is restarted once, before the erase",
+	       blob_stub.level_clears == 1u && blob_stub.erases_at_clear == 0u &&
+	       blob_stub.erase_spans == 1u);
+	expect("a clean transfer: drops, high-water and ring on one line",
+	       has("rx drops : 0, ring high-water 1234 of 4096 B  (clean)\r\n"));
+
+	reset();
+	blob_stub.drops = 2u;
+	blob_stub.level_high = 4095u;
+	blob_stub.level_size = 4096u;
+	run("blob write model 5\r");
+	expect("a transfer that dropped says NOT CLEAN",
+	       has("rx drops : 2, ring high-water 4095 of 4096 B  <-- NOT CLEAN"
+	           "\r\n") && !has("(clean)"));
+
+	reset();
+	blob_stub.level_rc = -1;
+	run("blob write model 5\r");
+	expect("a console with no ring gets the plain drops line",
+	       has("rx drops : 0  (clean)\r\n") && !has("high-water"));
+
+	/* Refused before the reservation: nothing measured, nothing to say. */
+	reset();
+	blob_stub.raw_refuse = 1;
+	run("blob write model 5\r");
+	expect("a refused write restarts nothing",
+	       blob_stub.level_clears == 0u && !has("rx drops"));
+#else
+	reset();
+	blob_stub.drops = 1u;
+	run("blob write model 5\r");
+	expect("without the property: the plain line, no ring asked",
+	       has("rx drops : 1  <-- NOT CLEAN\r\n") &&
+	       blob_stub.level_clears == 0u && blob_stub.level_reads == 0u);
+#endif
+}
+
 static void t_read(void)
 {
 	reset();
@@ -350,13 +399,15 @@ static void t_read(void)
 int main(void)
 {
 #if BLOB_SVC_HAS_STORE && BLOB_SVC_HAS_RECEIVE
-	printf("test_blob_cmd (full):\n");
+	printf("test_blob_cmd (full%s):\n",
+	       BLOB_SVC_HAS_RX_LEVEL ? ", with the RX ring level" : "");
 	t_refusals();
 	t_list();
 	t_columns();
 	t_write();
 	t_erase();
 	t_read();
+	t_rx_line();
 #else
 	printf("test_blob_cmd (%s):\n",
 	       BLOB_SVC_HAS_STORE ? "store, no receive" : "no store");

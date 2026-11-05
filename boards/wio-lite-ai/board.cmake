@@ -1513,6 +1513,11 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         nor_erase
         blob_erase_header
         blob_erase_span
+        # The shared `blob` command's writers over them (src/blob_writer.c,
+        # issue #194).
+        blob_svc_erase_header
+        blob_svc_erase_span
+        blob_svc_program
         HAL_RCC_OscConfig
         HAL_RCC_ClockConfig
         HAL_RCCEx_PeriphCLKConfig

@@ -48,8 +48,18 @@
  *   5. receive.  The sink accumulates into the staging buffer and programs a
  *      chunk at a time; a program that does not report OK latches, and no
  *      further program or header follows it.
- *   6. release the console, then write the body page (read back by the
- *      board writer).
+ *   6. release the console, then write the body page.  Whether the board
+ *      writer reads it back depends on the board (issue #194):
+ *        grove-vision-ai-v2  yes -- every program is one port/nor/nor_write.c
+ *                            transaction, which reads what it wrote back and
+ *                            treats a mismatch as a terminal fault;
+ *        wio-lite-ai,        no -- nor_write() / qspi_flash_write() report a
+ *        f746g-disco         failed page (f746 from the flag status
+ *                            register) but do not re-read it.
+ *      Where it is not read back, the body is still not trusted on its word:
+ *      it carries its own CRC, which the decoder checks, so a body that went
+ *      down wrong reads INVALID, never VALID -- and the payload under it is
+ *      read back whole against the stream's CRC in step 7, before the magic.
  *   7. verify the payload against the CRC of the stream that arrived.
  *   8. [!] ONLY IF IT MATCHED, write the magic page -- the one thing that
  *      makes the slot VALID.  So every outcome is either "no magic, so not

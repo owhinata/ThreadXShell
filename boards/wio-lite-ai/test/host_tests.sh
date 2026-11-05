@@ -75,6 +75,20 @@ gcc $CFLAGS -I "$here/blob_shim" \
     "$svc/blob/blob_map.c" "$svc/blob/blob_state.c" "$svc/crc32.c" \
     $LDFLAGS -o "$out/test_blob_store_wio"
 "$out/test_blob_store_wio"
+# issue #194 4d -- the whole store (src/blob.c + src/blob_writer.c) under the
+# shared write coordinator, end to end on the array, as f746g-disco's
+# test_blob_writer.c: a completed write reads VALID and verifies; a failed
+# payload, body or magic program, a failed erase and a failed or disagreeing
+# read-back each end as they must, with the slot reading what it should; the
+# busy flag is taken and given back once.  blob_shim/ stands in for the HAL's
+# PRIMASK, svc/log.h and include/mem_sections.h.
+gcc $CFLAGS -I "$here/blob_shim" \
+    -I "$board/src" -I "$board/port/nor" -I "$svc" -I "$svc/blob" \
+    "$here/test_blob_writer.c" "$board/src/blob.c" "$board/src/blob_writer.c" \
+    "$board/src/blob_slots.c" "$svc/blob/blob_map.c" "$svc/blob/blob_state.c" \
+    "$svc/blob/blob_write.c" "$svc/crc32.c" \
+    $LDFLAGS -o "$out/test_blob_writer_wio"
+"$out/test_blob_writer_wio"
 
 # issue #130 step 6c (#122 P8) -- how a decode's answer is counted in `nn stream
 # stats`: in svc/ since issue #163 (svc/nn/nn_decode_count.c, one copy with

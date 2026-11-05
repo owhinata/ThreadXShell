@@ -29,9 +29,15 @@ struct blob_stub {
 	int corrupt_read_back;   /* the write's verify disagrees */
 	int fail_magic;          /* the magic page's program fails */
 	uint32_t send;           /* bytes the receive delivers */
+	uint32_t drops;          /* bytes the receive "drops" (sh->rx_dropped) */
+	int      level_rc;       /* blob_board_rx_level()'s answer */
+	uint32_t level_high, level_size;
 	/* what happened */
 	unsigned reserves, unreserves, erase_headers, erase_spans, programs;
 	unsigned receives, says;
+	unsigned level_clears;   /* blob_board_rx_level_clear() calls */
+	unsigned erases_at_clear;/* erase spans already run at the last clear */
+	unsigned level_reads;
 };
 
 extern struct blob_stub blob_stub;

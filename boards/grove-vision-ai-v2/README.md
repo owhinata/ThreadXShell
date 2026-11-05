@@ -4156,6 +4156,22 @@ Note that even the read side is not free of writes: the first lease on a cold
 port runs the vendor's quad-enable, which writes the NOR's non-volatile status
 register, exactly as `nor info` does.
 
+**Which parts are this board's and which are shared (issue #192).**  The
+board-independent parts of the store are in `svc/blob/`: the header format and
+every decision a transfer makes (`blob_state`), the rules a slot table has to
+satisfy and the lookups over it (`blob_map`), and the `blob write` coordinator
+(`blob_write`).  Their host tests are `shell/test/test_blob_state.c`,
+`test_blob_map.c` and `test_blob_write.c`.  What stays here is everything that
+touches this part or this board's facts:
+
+| File | What it is |
+|---|---|
+| `src/blob_slots.c` | The slot table (eleven slots, below) under the fixed names `svc/blob/blob_map.h` declares; pinned entry by entry by `test/test_blob_map.c` |
+| `src/blob_stage.c` | The 64 KB staging buffer, placed by name (`check_placement_budget.py`); `blob write` hands it to the coordinator with its length |
+| `src/blob.c` | The read side: the lease, the invalidate, a slot turned into an address in the XIP window; checks at build time that the format's 256-byte header page equals `NOR_PROGRAM_PAGE` |
+| `cmds/cmd_blob.c` | The command, and the coordinator's operations on this board (the NOR reservation, the erase and programs through `port/nor/nor_write.c`, the console) |
+| `port/nor/` | The NOR lifecycle, the bounded write transaction and the seam |
+
 **The slots are a table over the seam's writable interval, not a second
 declaration of it.**  `blob_map_check()` takes `lo`, `hi` and `unit` as
 arguments and they come from `nor_seam_limits` -- so when #49 Step 4b deleted

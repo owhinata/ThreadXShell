@@ -15,8 +15,9 @@ The files are grouped by the feature they serve (issue #153):
 | `svc/nn/` | The `nn` command's contract and shared core (`nn_*`, described below), the neutral tensor descriptor (`tensor.h`), the inference API `nn.h`, its one implementation `nn.c` (the dispatcher over the compiled-in backend, `nn_backend.h`) and its translation into that descriptor `nn_desc` (every board: issue #161, grove-vision-ai-v2 since issue #169), the tflm and Ethos-U backends (`tflm/`, `ethosu/`), and the BlazeFace decoder (`blazeface`), which reaches every board only inside a plugin container (no board links it into its firmware since issue #159 Step 4c). |
 | `svc/plugin/` | The plugin container's ABI, loader, executor and the checks around them (`plugin_*`, below). |
 | `svc/camera/` | The camera frame pipeline (`frame`, `frame_pipeline`), the camera stream's holder table, sink steps and stream generations (`cam_holders`, `cam_step`, `cam_gen`, below) and the `camera` command's contract (`camera_svc`, below). |
+| `svc/blob/` | The asset store's board-independent parts (issue #192): the header format and a transfer's decisions (`blob_state`), the slot table's rules and lookups (`blob_map`) and the `blob write` coordinator (`blob_write`); see [The asset store's shared parts](#the-asset-stores-shared-parts-issue-192). No file here is named `blob.h` (wio-lite-ai has a `src/blob.h` of its own). |
 
-Every one of the four directories is on the include path wherever `svc/` is, so
+Every one of the five directories is on the include path wherever `svc/` is, so
 a source names a header by its file name alone (`#include "nn_core.h"`), and the
 storage audit covers the whole tree under `svc/`.
 
@@ -733,6 +734,34 @@ relative to `svc/`.
 | `camera/camera_svc.h` | The contract the shared `camera` command speaks; implemented by each board's adapter (issue #143). |
 | `camera/camera_svc_adapter.h` | Static-inline helpers every camera adapter uses to fill a result and write a line. |
 | `camera/cam_gen.h` | Stream generations: has THE stream a stop named ended (pure, shared by f746g-disco and wio-lite-ai). |
+
+## The asset store's shared parts (issue #192)
+
+grove-vision-ai-v2 is the only board that links `svc/blob/` today (wio-lite-ai
+and f746g-disco have it on their include path and compile none of it).  What a
+board provides, and how:
+
+| The board provides | How the shared code takes it |
+|---|---|
+| Its slot table and the number of slots | Const data under fixed names, `blob_map_slots[]` and `blob_map_slots_count` (declared in `blob_map.h`), plus `blob_map_table()` / `blob_map_count()`; `blob_map_slot()` and `blob_map_index_of()` read the table by name, so no caller can hand them another. grove-vision-ai-v2: `src/blob_slots.c` |
+| The writable interval and the erase unit | Arguments to `blob_map_check()` and the payload arithmetic; nothing here states a boundary |
+| Every operation of a write (reserve, erase, program, console, receive, read back, stat, geometry) | A const `struct blob_write_ops`; grove-vision-ai-v2: `cmds/cmd_blob.c` |
+| The staging buffer | `blob_write_run()`'s buffer and length, at least one header page and a whole number of them, refused before anything is taken otherwise; grove-vision-ai-v2 passes `blob_stage_buf` / `BLOB_STAGE_BYTES` |
+
+**The header page is a fact of the format, not of a part.**  `BLOB_HDR_PAGE`
+(256 B, `blob_state.h`) is the size of each of the header's two pages wherever
+the header is stored.  A board whose flash programs in pages checks at build
+time that its program page is that size (grove-vision-ai-v2: `src/blob.c`,
+against `NOR_PROGRAM_PAGE`) rather than the format following the board.
+
+The three translation units hold no mutable storage (the build-derived audit
+covers them like the rest of `svc/`).  The sentences of `blob_name_verdict_name()`
+and `blob_lookup_name()`, which a board's `nn` adapter copies into its
+explanation, are checked against `NN_SVC_DETAIL_MAX` by enumeration in
+`shell/test/test_nn_detail_tables.c`, not with `nn_detail.h`.  Host tests:
+`shell/test/test_blob_state.c`, `test_blob_map.c` (with a table of its own under
+the fixed names) and `test_blob_write.c`; a board's shipped table is pinned by
+that board's own test.
 
 ## Why the lock and the threads are the board's
 

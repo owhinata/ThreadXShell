@@ -8,13 +8,16 @@
  *          (issue #122 P15).
  *
  * Split out of nn_svc.h so that the tables a board's words come from -- a
- * backend's status names, a bring-up's refusals, an asset store's verdicts --
- * can check their sentences against the bound without including the whole `nn`
- * contract.  Includes nothing but <stddef.h>, so any C or C++ file may use it.
+ * backend's status names, a bring-up's refusals -- can check their sentences
+ * against the bound without including the whole `nn` contract.  Includes
+ * nothing but <stddef.h>, so any C or C++ file may use it.
  *
- * [!] svc/ SHARED TABLES DO NOT INCLUDE THIS.  A shared layer that names the
- * `nn` field's size would be depending upward; their sentences are enumerated
- * against NN_SVC_DETAIL_MAX by a host test instead (test_nn_detail_check.c).
+ * [!] svc/ SHARED TABLES BELOW THE `nn` CONTRACT DO NOT INCLUDE THIS.  A shared
+ * layer that names the `nn` field's size would be depending upward; their
+ * sentences -- the plugin loader's and executor's, and since issue #192 the
+ * asset store's name verdicts and name lookups (svc/blob/blob_state.c) -- are
+ * enumerated against NN_SVC_DETAIL_MAX by a host test instead
+ * (shell/test/test_nn_detail_tables.c).
  */
 #ifndef NN_DETAIL_H
 #define NN_DETAIL_H

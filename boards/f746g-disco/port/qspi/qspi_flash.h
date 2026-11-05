@@ -103,6 +103,46 @@ int qspi_flash_read_status(uint8_t *sr);
 /** Geometry + configured clock; valid (static) even before init. */
 const struct qspi_flash_info *qspi_flash_get_info(void);
 
+/* ---- failure record and live registers (issue #194) ----------------------
+ * After every receive the driver puts the controller's functional mode back
+ * to indirect write and reads it back; a receive that does not then read idle
+ * fails.  Every failed HAL call, and every such receive, is recorded (before
+ * any recovery) and the controller is then brought back to idle if it can be;
+ * the failed call still fails, and nothing is retried.  The rules are in
+ * qspi_idle.h.  Both functions below only read. */
+
+/** QUADSPI registers without side effects (DR is never read: it pops the FIFO). */
+struct qspi_flash_regs {
+	uint32_t cr, sr, ccr, dlr, ar;
+};
+
+/** One failure. */
+struct qspi_flash_fail {
+	const char *op;          /* driver step, e.g. "rdsr", "qread", "wren"   */
+	const char *phase;       /* "cmd", "rx", "tx", or "rxend" (a receive the
+	                          * HAL called successful that did not end idle) */
+	uint32_t tick;           /* HAL_GetTick() at the capture                 */
+	int hal_rc;              /* HAL_StatusTypeDef (0 ok, 1 error, 2 busy,
+	                          * 3 timeout)                                   */
+	uint32_t state, error;   /* handle State / ErrorCode before recovery     */
+	struct qspi_flash_regs regs;    /* before recovery                       */
+	int recovered;           /* 1 = idle read back, handle READY             */
+	struct qspi_flash_regs after;   /* after the recovery attempt            */
+	uint32_t state_after;    /* handle State after it (READY or ERROR)       */
+};
+
+struct qspi_flash_record {
+	uint32_t fail_count;
+	struct qspi_flash_fail first, last;   /* valid when fail_count > 0       */
+};
+
+/** Live registers and handle state; takes no lock and issues no command. */
+void qspi_flash_regs_now(struct qspi_flash_regs *r, uint32_t *state,
+                         uint32_t *error);
+
+/** Copy of the failure record (bounded wait for the operation mutex). */
+void qspi_flash_record_get(struct qspi_flash_record *out);
+
 #ifdef __cplusplus
 }
 #endif

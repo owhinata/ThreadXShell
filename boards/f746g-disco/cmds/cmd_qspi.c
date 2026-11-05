@@ -8,10 +8,16 @@
  * bring-up/debug.
  *
  *   qspi probe             read the JEDEC ID (expect 20 BA 18)
- *   qspi info              geometry, clock, status/flag registers
+ *   qspi info              geometry, clock, status register, controller
+ *                          registers and the driver's failure record
  *   qspi read <addr> [len] hexdump flash content (indirect read, no 0x90000000)
  *   qspi erase <addr>      erase the 4 KB subsector containing <addr>   (danger)
  *   qspi test <addr>       destructive self-test on one 4 KB subsector  (danger)
+ *
+ * `qspi info` also prints the controller's registers as they were when it was
+ * typed and after its own status read, and the driver's failure record (count,
+ * first and last; issue #194).  The driver recovers by itself; there is no
+ * manual recover.
  *
  * `qspi test` is the Phase A hardware acceptance: erase -> blank check ->
  * program a counting pattern page by page -> read back and verify.  It polls
@@ -106,6 +112,70 @@ static int cmd_qspi_probe(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
+/* ---- controller registers and the failure record (issue #194) ---------- */
+
+/* SR: BUSY bit 5, FLEVEL bits 13:8, TCF bit 1, FTF bit 2, TEF bit 0.
+ * CR: ABORT bit 1.
+ * CCR: FMODE bits 27:26 (0 ind-write, 1 ind-read, 2 polling, 3 mapped),
+ * DMODE bits 25:24 (0 = no data phase). */
+static void print_regs(struct cli_instance *sh, const char *label,
+                       const struct qspi_flash_regs *r)
+{
+	cli_print(sh, "%s: CR %08lx (abort %lu) SR %08lx (busy %lu flevel %lu "
+	              "tcf %lu ftf %lu tef %lu)\r\n",
+	          label, (unsigned long)r->cr,
+	          (unsigned long)((r->cr >> 1) & 1u),
+	          (unsigned long)r->sr,
+	          (unsigned long)((r->sr >> 5) & 1u),
+	          (unsigned long)((r->sr >> 8) & 0x3Fu),
+	          (unsigned long)((r->sr >> 1) & 1u),
+	          (unsigned long)((r->sr >> 2) & 1u),
+	          (unsigned long)(r->sr & 1u));
+	cli_print(sh, "            CCR %08lx (fmode %lu dmode %lu) DLR %08lx "
+	              "AR %08lx\r\n",
+	          (unsigned long)r->ccr,
+	          (unsigned long)((r->ccr >> 26) & 3u),
+	          (unsigned long)((r->ccr >> 24) & 3u),
+	          (unsigned long)r->dlr, (unsigned long)r->ar);
+}
+
+static void print_live(struct cli_instance *sh, const char *label)
+{
+	struct qspi_flash_regs r;
+	uint32_t state, error;
+
+	qspi_flash_regs_now(&r, &state, &error);
+	print_regs(sh, label, &r);
+	cli_print(sh, "            handle state 0x%02lx error 0x%lx, t %lu ms\r\n",
+	          (unsigned long)state,
+	          (unsigned long)error, (unsigned long)HAL_GetTick());
+}
+
+static void print_fail(struct cli_instance *sh, const char *label,
+                       const struct qspi_flash_fail *f)
+{
+	cli_print(sh, "%s: t %lu ms, %s-%s, hal %d, state 0x%02lx error 0x%lx\r\n",
+	          label, (unsigned long)f->tick, f->op, f->phase, f->hal_rc,
+	          (unsigned long)f->state, (unsigned long)f->error);
+	print_regs(sh, "  regs    ", &f->regs);
+	cli_print(sh, "            recovery %s, handle state 0x%02lx\r\n",
+	          f->recovered ? "ok" : "FAILED (handle set to error)",
+	          (unsigned long)f->state_after);
+	print_regs(sh, "  after   ", &f->after);
+}
+
+static void print_record(struct cli_instance *sh)
+{
+	struct qspi_flash_record d;
+
+	qspi_flash_record_get(&d);
+	cli_print(sh, "failures  : %lu\r\n", (unsigned long)d.fail_count);
+	if (d.fail_count > 0) {
+		print_fail(sh, "first fail", &d.first);
+		print_fail(sh, "last fail ", &d.last);
+	}
+}
+
 static int cmd_qspi_info(struct cli_instance *sh, int argc, char **argv)
 {
 	const struct qspi_flash_info *fi = qspi_flash_get_info();
@@ -113,6 +183,10 @@ static int cmd_qspi_info(struct cli_instance *sh, int argc, char **argv)
 	int rc;
 
 	(void)argc; (void)argv;
+
+	/* [!] Before any command of our own, so what is printed is what the
+	 * controller looked like when the operator typed this. */
+	print_live(sh, "before    ");
 
 	cli_print(sh, "size      : %lu KiB\r\n", (unsigned long)(fi->size / 1024u));
 	cli_print(sh, "sector    : %lu KiB (erase 0xD8)\r\n",
@@ -129,13 +203,14 @@ static int cmd_qspi_info(struct cli_instance *sh, int argc, char **argv)
 	                  : "fast read 0x0B (1-1-1, dummy 8)");
 
 	rc = qspi_flash_read_status(&sr);
-	if (rc != 0) {
+	if (rc != 0)
 		cli_error(sh, "qspi: read status failed: %s\r\n", qspi_strerror(rc));
-		return 1;
-	}
-	cli_print(sh, "status    : 0x%02x%s\r\n", sr,
-	          (sr & 0x01u) ? " (write in progress)" : "");
-	return 0;
+	else
+		cli_print(sh, "status    : 0x%02x%s\r\n", sr,
+		          (sr & 0x01u) ? " (write in progress)" : "");
+	print_live(sh, "after     ");
+	print_record(sh);
+	return rc != 0 ? 1 : 0;
 }
 
 static int cmd_qspi_read(struct cli_instance *sh, int argc, char **argv)

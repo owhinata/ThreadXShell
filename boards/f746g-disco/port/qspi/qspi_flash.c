@@ -24,6 +24,7 @@
  * tx_thread_sleep(1) between reads so other threads keep running.
  */
 #include "qspi_flash.h"
+#include "qspi_idle.h"
 
 #include "stm32f7xx_hal.h"
 #include "tx_api.h"
@@ -74,6 +75,21 @@ static int qspi_ready;   /* set once by qspi_flash_init() */
 static int quad_mode;    /* reads use 0x6B / 4 data lines       */
 static uint8_t read_dummy = DUMMY_CYCLES_READ;   /* tracks the VCR setting */
 
+/*
+ * Failure record (issue #194): every HAL_QSPI_* call that does not return
+ * HAL_OK, and every receive the HAL called successful that did not leave the
+ * controller idle, is captured here BEFORE any recovery -- driver step, HAL
+ * return, handle state, the controller's CR / SR / CCR / DLR / AR (never DR:
+ * reading it pops the FIFO) and the tick -- and then the controller is brought
+ * back to idle if it can be (fail_and_recover()).  The failed operation still
+ * returns its error; nothing is retried.  Written only under the operation
+ * mutex (or by init, before qspi_ready).
+ */
+#define RECOVER_TIMEOUT_MS   100u
+#define RECOVER_SPIN_CAP     20000000u   /* bound even if the tick stopped */
+
+static struct qspi_flash_record record;
+
 static const struct qspi_flash_info flash_info = {
 	.size           = QSPI_FLASH_SIZE,
 	.sector_size    = QSPI_FLASH_SECTOR_SIZE,
@@ -101,6 +117,182 @@ static int op_lock(void)
 static void op_unlock(void)
 {
 	tx_mutex_put(&qspi_lock);
+}
+
+/* ---- idle check, failure capture and recovery --------------------------- */
+
+/* qspi_idle.h restates the bits so a host test can compile it; hold them to
+ * the device header's. */
+_Static_assert(QSPI_IDLE_CR_ABORT == QUADSPI_CR_ABORT, "CR.ABORT");
+_Static_assert(QSPI_IDLE_SR_BUSY == QUADSPI_SR_BUSY, "SR.BUSY");
+_Static_assert(QSPI_IDLE_CCR_ADMODE == QUADSPI_CCR_ADMODE, "CCR.ADMODE");
+_Static_assert(QSPI_IDLE_CCR_DMODE == QUADSPI_CCR_DMODE, "CCR.DMODE");
+_Static_assert(QSPI_IDLE_CCR_FMODE == QUADSPI_CCR_FMODE, "CCR.FMODE");
+
+/* Controller registers without side effects (DR is deliberately not read).
+ * Through QUADSPI directly: valid before init too (they read as reset values
+ * or zero while the clock is gated). */
+static void regs_read(struct qspi_flash_regs *r)
+{
+	r->cr  = QUADSPI->CR;
+	r->sr  = QUADSPI->SR;
+	r->ccr = QUADSPI->CCR;
+	r->dlr = QUADSPI->DLR;
+	r->ar  = QUADSPI->AR;
+}
+
+/*
+ * Apply qspi_ccr_step() to the CCR, then read CR / SR / CCR back and judge
+ * them with qspi_idle_ok().  The only write is the FMODE restore, and only
+ * for a form with a data phase (qspi_idle.h says why that starts nothing).
+ * Returns nonzero when the controller reads idle.  Caller holds the mutex.
+ */
+static int put_idle(void)
+{
+	uint32_t ccr = QUADSPI->CCR;
+
+	if (qspi_ccr_step(QUADSPI->SR, ccr) == QSPI_CCR_RESTORE)
+		QUADSPI->CCR = ccr & ~QUADSPI_CCR_FMODE;
+	return qspi_idle_ok(QUADSPI->CR, QUADSPI->SR, QUADSPI->CCR);
+}
+
+/*
+ * Bring the controller back to idle after a failure.
+ *
+ * HAL_QSPI_Abort() cannot be used: it acts only when State has bit 1 set (the
+ * BUSY states) and does nothing in HAL_QSPI_STATE_ERROR, which is the state a
+ * failed Command leaves behind.  So, by hand, the steps it takes:
+ *   - if SR.BUSY is set, request CR.ABORT, then wait (bounded,
+ *     RECOVER_TIMEOUT_MS) for ABORT to self-clear and BUSY to drop (RM0385
+ *     14.3.14: both reset once the abort is complete);
+ *   - clear TEF / TCF / SMF / TOF through FCR;
+ *   - put_idle(): the FMODE restore under the qspi_idle.h rule, then the
+ *     read-back of ABORT, BUSY and FMODE.
+ * Only when that read-back is idle does the handle go back to READY.
+ * Otherwise the handle is set to ERROR explicitly -- HAL_QSPI_Receive() puts
+ * State back to READY on its way out even after its own timeout, which would
+ * let the next call run against a busy controller.  In ERROR the HAL refuses
+ * at once, that refusal comes back through fail_and_recover(), and so the
+ * next driver call runs this bounded recovery again.
+ * Returns 0 when the controller reads back idle.  Caller holds the mutex.
+ */
+static int recover_locked(void)
+{
+	uint32_t t0, spins = 0;
+
+	if (QUADSPI->SR & QUADSPI_SR_BUSY)
+		SET_BIT(QUADSPI->CR, QUADSPI_CR_ABORT);
+	t0 = HAL_GetTick();
+	while ((QUADSPI->CR & QUADSPI_CR_ABORT) ||
+	       (QUADSPI->SR & QUADSPI_SR_BUSY)) {
+		if ((HAL_GetTick() - t0) > RECOVER_TIMEOUT_MS ||
+		    ++spins > RECOVER_SPIN_CAP)
+			break;
+	}
+	WRITE_REG(QUADSPI->FCR, QUADSPI_FCR_CTEF | QUADSPI_FCR_CTCF |
+	                        QUADSPI_FCR_CSMF | QUADSPI_FCR_CTOF);
+	if (!put_idle()) {
+		hqspi.Lock  = HAL_UNLOCKED;
+		hqspi.State = HAL_QSPI_STATE_ERROR;
+		return -1;
+	}
+	hqspi.ErrorCode = HAL_QSPI_ERROR_NONE;
+	hqspi.Lock      = HAL_UNLOCKED;
+	hqspi.State     = HAL_QSPI_STATE_READY;
+	return 0;
+}
+
+/*
+ * Record one failure: capture the evidence first, log it, then recover and
+ * log whether that worked.  Returns QSPI_FLASH_ERR_HAL.  @p st is the HAL's
+ * return (HAL_OK for a receive that did not leave the controller idle);
+ * @p op / @p phase are string literals.
+ */
+static int fail_and_recover(HAL_StatusTypeDef st, const char *op,
+                            const char *phase)
+{
+	struct qspi_flash_fail f;
+
+	regs_read(&f.regs);
+	f.tick   = HAL_GetTick();
+	f.op     = op;
+	f.phase  = phase;
+	f.hal_rc = (int)st;
+	f.state  = (uint32_t)hqspi.State;
+	f.error  = hqspi.ErrorCode;
+
+	record.fail_count++;
+	LOG_ERR("fail #%lu %s-%s hal %d state 0x%02lx err 0x%lx t %lu",
+	        (unsigned long)record.fail_count, op, phase, f.hal_rc,
+	        (unsigned long)f.state, (unsigned long)f.error,
+	        (unsigned long)f.tick);
+	LOG_ERR("CR %08lx SR %08lx CCR %08lx DLR %08lx AR %08lx",
+	        (unsigned long)f.regs.cr, (unsigned long)f.regs.sr,
+	        (unsigned long)f.regs.ccr, (unsigned long)f.regs.dlr,
+	        (unsigned long)f.regs.ar);
+
+	f.recovered = (recover_locked() == 0);
+	regs_read(&f.after);
+	f.state_after = (uint32_t)hqspi.State;
+	if (f.recovered)
+		LOG_WRN("recovered: SR %08lx CCR %08lx state 0x%02lx",
+		        (unsigned long)f.after.sr, (unsigned long)f.after.ccr,
+		        (unsigned long)f.state_after);
+	else
+		LOG_ERR("recovery failed: CR %08lx SR %08lx CCR %08lx, handle "
+		        "set to error", (unsigned long)f.after.cr,
+		        (unsigned long)f.after.sr, (unsigned long)f.after.ccr);
+
+	if (record.fail_count == 1u)
+		record.first = f;
+	record.last = f;
+	return QSPI_FLASH_ERR_HAL;
+}
+
+/* One HAL return: 0 for HAL_OK, otherwise the failure path. */
+static int hal_check(HAL_StatusTypeDef st, const char *op, const char *phase)
+{
+	if (st == HAL_OK)
+		return 0;
+	return fail_and_recover(st, op, phase);
+}
+
+/*
+ * One receive (HAL_QSPI_Receive()) and what must hold after it: the HAL
+ * leaves CCR.FMODE at indirect read when the transfer ended with BUSY clear,
+ * so put_idle() puts it back (one CCR write, one read-back; no wait).  A
+ * receive the HAL called successful that does not then read idle -- BUSY
+ * still set, an abort pending, or FMODE not back at 00 -- is a failure
+ * (phase "rxend") and goes through the same recovery.
+ */
+static int rx_check(HAL_StatusTypeDef st, const char *op)
+{
+	if (st != HAL_OK)
+		return fail_and_recover(st, op, "rx");
+	if (put_idle())
+		return 0;
+	return fail_and_recover(st, op, "rxend");
+}
+
+/* The driver-step name of an instruction, for the capture. */
+static const char *op_name(uint8_t instruction)
+{
+	switch (instruction) {
+	case 0x9Fu: return "rdid";
+	case 0x0Bu: return "read";
+	case 0x6Bu: return "qread";
+	case 0x06u: return "wren";
+	case 0x02u: return "prog";
+	case 0x20u: return "erase4k";
+	case 0xD8u: return "erase64k";
+	case 0xC7u: return "erasechip";
+	case 0x05u: return "rdsr";
+	case 0x70u: return "rdfsr";
+	case 0x50u: return "clfsr";
+	case 0x85u: return "rdvcr";
+	case 0x81u: return "wrvcr";
+	default:    return "op";
+	}
 }
 
 /* ---- 1-line command helpers (all run under the operation mutex) --------- */
@@ -131,9 +323,8 @@ static int send_simple(uint8_t instruction)
 	QSPI_CommandTypeDef c;
 
 	cmd_init(&c, instruction);
-	if (HAL_QSPI_Command(&hqspi, &c, HAL_QSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-		return QSPI_FLASH_ERR_HAL;
-	return 0;
+	return hal_check(HAL_QSPI_Command(&hqspi, &c, HAL_QSPI_TIMEOUT_DEFAULT_VALUE),
+	                 op_name(instruction), "cmd");
 }
 
 /* Register read (RDSR/RDFSR/RDID): instruction then `len` data bytes. */
@@ -144,11 +335,11 @@ static int read_reg(uint8_t instruction, uint8_t *buf, uint32_t len)
 	cmd_init(&c, instruction);
 	c.DataMode = QSPI_DATA_1_LINE;
 	c.NbData   = len;
-	if (HAL_QSPI_Command(&hqspi, &c, HAL_QSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
+	if (hal_check(HAL_QSPI_Command(&hqspi, &c, HAL_QSPI_TIMEOUT_DEFAULT_VALUE),
+	              op_name(instruction), "cmd") != 0)
 		return QSPI_FLASH_ERR_HAL;
-	if (HAL_QSPI_Receive(&hqspi, buf, HAL_QSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-		return QSPI_FLASH_ERR_HAL;
-	return 0;
+	return rx_check(HAL_QSPI_Receive(&hqspi, buf, HAL_QSPI_TIMEOUT_DEFAULT_VALUE),
+	                op_name(instruction));
 }
 
 /*
@@ -226,9 +417,11 @@ static int write_reg_verified(uint8_t instruction, uint8_t readback_cmd,
 	cmd_init(&c, instruction);
 	c.DataMode = QSPI_DATA_1_LINE;
 	c.NbData   = 1;
-	if (HAL_QSPI_Command(&hqspi, &c, HAL_QSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
+	if (hal_check(HAL_QSPI_Command(&hqspi, &c, HAL_QSPI_TIMEOUT_DEFAULT_VALUE),
+	              op_name(instruction), "cmd") != 0)
 		return QSPI_FLASH_ERR_HAL;
-	if (HAL_QSPI_Transmit(&hqspi, &value, HAL_QSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
+	if (hal_check(HAL_QSPI_Transmit(&hqspi, &value, HAL_QSPI_TIMEOUT_DEFAULT_VALUE),
+	              op_name(instruction), "tx") != 0)
 		return QSPI_FLASH_ERR_HAL;
 	rc = wait_ready(TIMEOUT_PAGE_MS, 0);
 	if (rc != 0)
@@ -287,8 +480,8 @@ static int erase_common(uint8_t instruction, int has_addr, uint32_t addr,
 			c.Address     = addr;
 			c.AddressMode = QSPI_ADDRESS_1_LINE;
 		}
-		if (HAL_QSPI_Command(&hqspi, &c, HAL_QSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-			rc = QSPI_FLASH_ERR_HAL;
+		rc = hal_check(HAL_QSPI_Command(&hqspi, &c, HAL_QSPI_TIMEOUT_DEFAULT_VALUE),
+		               op_name(instruction), "cmd");
 	}
 	if (rc == 0)
 		rc = wait_ready(timeout_ms, 1);
@@ -427,10 +620,11 @@ int qspi_flash_read(uint32_t addr, void *buf, uint32_t len)
 	c.DataMode    = quad_mode ? QSPI_DATA_4_LINES : QSPI_DATA_1_LINE;
 	c.NbData      = len;
 	c.DummyCycles = read_dummy;
-	if (HAL_QSPI_Command(&hqspi, &c, HAL_QSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-		rc = QSPI_FLASH_ERR_HAL;
-	else if (HAL_QSPI_Receive(&hqspi, buf, HAL_QSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-		rc = QSPI_FLASH_ERR_HAL;
+	rc = hal_check(HAL_QSPI_Command(&hqspi, &c, HAL_QSPI_TIMEOUT_DEFAULT_VALUE),
+	               op_name(c.Instruction), "cmd");
+	if (rc == 0)
+		rc = rx_check(HAL_QSPI_Receive(&hqspi, buf, HAL_QSPI_TIMEOUT_DEFAULT_VALUE),
+		              op_name(c.Instruction));
 
 	op_unlock();
 	return rc;
@@ -468,16 +662,16 @@ int qspi_flash_write(uint32_t addr, const void *buf, uint32_t len)
 		c.AddressMode = QSPI_ADDRESS_1_LINE;
 		c.DataMode    = QSPI_DATA_1_LINE;
 		c.NbData      = chunk;
-		if (HAL_QSPI_Command(&hqspi, &c, HAL_QSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
-			rc = QSPI_FLASH_ERR_HAL;
+		rc = hal_check(HAL_QSPI_Command(&hqspi, &c, HAL_QSPI_TIMEOUT_DEFAULT_VALUE),
+		               "prog", "cmd");
+		if (rc != 0)
 			break;
-		}
 		/* HAL_QSPI_Transmit takes a non-const pointer but only reads. */
-		if (HAL_QSPI_Transmit(&hqspi, (uint8_t *)(uintptr_t)p,
-		                      HAL_QSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
-			rc = QSPI_FLASH_ERR_HAL;
+		rc = hal_check(HAL_QSPI_Transmit(&hqspi, (uint8_t *)(uintptr_t)p,
+		                                 HAL_QSPI_TIMEOUT_DEFAULT_VALUE),
+		               "prog", "tx");
+		if (rc != 0)
 			break;
-		}
 		rc = wait_ready(TIMEOUT_PAGE_MS, 0);
 		if (rc != 0)
 			break;
@@ -515,4 +709,28 @@ int qspi_flash_erase_subsector(uint32_t addr)
 int qspi_flash_erase_chip(void)
 {
 	return erase_common(CMD_ERASE_CHIP, 0, 0, TIMEOUT_CHIP_MS);
+}
+
+/* ---- read-only views for `qspi info` (issue #194) ------------------------ */
+
+void qspi_flash_regs_now(struct qspi_flash_regs *r, uint32_t *state,
+                         uint32_t *error)
+{
+	/* No lock, no command: register reads only, so it shows what the
+	 * controller says right now even if the driver or the mutex is wedged. */
+	regs_read(r);
+	*state = (uint32_t)hqspi.State;
+	*error = hqspi.ErrorCode;
+}
+
+void qspi_flash_record_get(struct qspi_flash_record *out)
+{
+	/* The record is written under the operation mutex; take it with a bound
+	 * so a wedged driver still lets the operator see the record. */
+	int locked = qspi_ready &&
+	             tx_mutex_get(&qspi_lock, 100u) == TX_SUCCESS;
+
+	*out = record;
+	if (locked)
+		tx_mutex_put(&qspi_lock);
 }

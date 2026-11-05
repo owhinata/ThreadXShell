@@ -180,6 +180,17 @@ else
          "$HOST_TEST_REPO/tools/ (configure an f746 build once to fetch it)" >&2
 fi
 
+# issue #194 -- the QSPI driver's two decisions after a receive and after a
+# failed HAL call (port/qspi/qspi_idle.h): whether the CCR may be rewritten to
+# put the functional mode back to indirect write (only for a form with a data
+# phase -- rewriting one without sends its instruction again), and whether the
+# controller reads idle (no abort pending, not busy, not in indirect read).
+# The controller decides when it is busy, so no console command reaches these
+# combinations; the driver around them is seen on the board only.
+gcc $CFLAGS -I "$board/port/qspi" \
+    "$here/test_qspi_idle.c" $LDFLAGS -o "$out/test_qspi_idle"
+"$out/test_qspi_idle"
+
 # issue #194 -- the blob store on the QSPI NOR.  First the slot table
 # (src/blob_slots.c), pinned entry by entry and checked against the interval
 # src/blob.h compiles into the firmware; then the store code itself

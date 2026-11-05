@@ -1763,8 +1763,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         # The receipt's commands are THIS board's: since issue #193 `blob
         # write` takes the name and the slot, refuses a slot that holds a blob
         # under another name (hence the erase first), and erases the slot
-        # itself before it receives.  The load still names the slot until
-        # `nn model load --name` (the next step of #193).
+        # itself before it receives.  The load names the blob, as the store
+        # keys on it.
         add_asset(${_name}
             # No ingest, so the packer is the pin's first consumer and
             # re-checks it on the bytes it packs (issue #132).
@@ -1780,7 +1780,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
             CAPACITY "${WIO_PLUGIN_MAX}"
             RECEIPT_STEPS "blob erase {slot}   (the slot must be empty first)"
                           "blob write {name} {slot}   (erases the slot, then waits for the file)"
-            RECEIPT_THEN  "nn model load --slot {slot}"
+            RECEIPT_THEN  "nn model load --name {name}"
             # How the file gets there and how the stored bytes are compared
             # with the receipt's CRC -- this board's, since issue #159.
             RECEIPT_TRANSFER "in picocom:" "C-a C-s, then the path above"

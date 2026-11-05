@@ -173,6 +173,57 @@ int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed)
 	return (crc == info.crc32) ? BLOB_OK : BLOB_ERR_CRC;
 }
 
+int blob_find(const char *name, unsigned *slot, struct blob_info *out,
+              enum blob_lookup *why)
+{
+	struct blob_slot_view v[BLOB_MAX_SLOTS];
+	struct blob_info info, hit;
+	unsigned count, i, found = 0u;
+	enum blob_lookup l;
+	int rc;
+
+	if (why != NULL)
+		*why = BLOB_LOOKUP_REFUSE;
+	if (name == NULL || slot == NULL || out == NULL)
+		return BLOB_ERR_PARAM;
+	if (blob_check_map(NULL) != BLOB_MAP_OK)
+		return BLOB_ERR_MAP;
+	count = blob_map_count();
+	/* blob_check_map() has no upper bound on the count; the views array has. */
+	if (count > BLOB_MAX_SLOTS)
+		return BLOB_ERR_MAP;
+
+	memset(&hit, 0, sizeof hit);
+	for (i = 0u; i < count; i++) {
+		rc = blob_stat(i, &info, NULL);
+		if (rc != BLOB_OK)
+			return rc;
+		v[i].state = info.state;
+		v[i].name_match = (uint8_t)(info.state == BLOB_VALID &&
+		                            strcmp(info.name, name) == 0);
+		/* The first match is kept; FOUND means it is the only one. */
+		if (v[i].name_match && hit.state != BLOB_VALID)
+			hit = info;
+	}
+
+	l = blob_resolve_name(v, count, &found);
+	if (why != NULL)
+		*why = l;
+	switch (l) {
+	case BLOB_LOOKUP_FOUND:
+		*slot = found;
+		*out = hit;
+		return BLOB_OK;
+	case BLOB_LOOKUP_NONE:
+		return BLOB_ERR_EMPTY;
+	case BLOB_LOOKUP_DUPLICATE:
+		return BLOB_ERR_DUPLICATE;
+	default:
+		break;
+	}
+	return BLOB_ERR_MAP;
+}
+
 /* ---- mutating side --------------------------------------------------------- */
 
 /*

@@ -14,7 +14,7 @@
  *
  * HOW A RUN LOOKS
  *
- *     wio> nn model load --slot 0            # a benchmark model from a NOR blob slot
+ *     wio> nn model load --name <name>       # a benchmark model from the NOR blob store
  *     wio> mlperf                     # console goes raw; the host drives from here
  *     ...                             # PC: python main.py --mode=p
  *     ^]                              # back to the shell, with a local summary
@@ -138,7 +138,7 @@ static int cmd_mlperf(struct cli_instance *sh, int argc, char **argv)
 	}
 	if (nn_input_count(m) == 0) {
 		cli_error(sh, "mlperf: no model loaded -- `blob list`, then "
-		              "`nn model load --slot <n>`\r\n");
+		              "`nn model load --name <name>`\r\n");
 		return 1;
 	}
 

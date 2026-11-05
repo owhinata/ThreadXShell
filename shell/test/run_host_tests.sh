@@ -833,6 +833,7 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
 # adapters are stubs (nothing is loaded); nn_cfg/ stands in for a board's
 # nn_svc_config.h with the loader on, and -D picks the sources.
 for shape in "-DNN_SVC_HAS_MODEL_SLOT=1" \
+             "-DNN_SVC_HAS_MODEL_NAME=1" \
              "-DNN_SVC_HAS_MODEL_NAME=1 -DNN_SVC_HAS_MODEL_ADDR=1" \
              "-DNN_SVC_HAS_MODEL_PATH=1" \
              "-DNN_SVC_HAS_MODEL_PATH=1 -DNN_SVC_HAS_MODEL_BUILTIN=1"; do

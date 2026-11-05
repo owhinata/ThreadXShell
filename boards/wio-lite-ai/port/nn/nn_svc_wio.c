@@ -242,6 +242,9 @@ static enum plugin_claims_seen nn_claims_snapshot(struct plugin_claims *out,
  * a truncated one can read as a different, equally legal, name. */
 _Static_assert(NN_SVC_MODEL_MAX >= BLOB_NAME_MAX,
                "nn info would truncate this board's longest asset name");
+/* ...and the parser's copy (`--name`), which is what the lookup compares. */
+_Static_assert(NN_SPEC_NAME_MAX >= BLOB_NAME_MAX,
+               "nn model load --name cannot carry this board's longest blob name");
 
 /*
  * This board's stop codes, and nothing else (issue #99).
@@ -374,6 +377,7 @@ static void nn_life_blob_give(void)
  *  adapter's until commit(). */
 struct nn_wio_job {
 	struct blob_info info;
+	unsigned         slot;   /**< where the name resolved, under the blob lock */
 	struct plugin_claims claims;
 	void            *stage;
 	uint32_t         cap;
@@ -450,7 +454,7 @@ static const struct nn_core_model_backend nn_life_backend = {
 	.staging_is_open = nn_model_staging_is_open,
 };
 
-/* Every tag but a slot, refused before anything is acquired. */
+/* Every tag but a name, refused before anything is acquired. */
 static void nn_life_spec_refused(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
@@ -458,22 +462,26 @@ static void nn_life_spec_refused(struct nn_core_model_job *j)
 
 	if (spec == NULL)
 		return;
-	nn_detail_set("this board loads a model from a NOR asset slot "
-	              "(--slot); it has no %s",
-	              spec->tag == NN_SPEC_NAME ? "lookup by name"
+	nn_detail_set("this board loads a model from a NOR asset by name "
+	              "(--name); it has no %s",
+	              spec->tag == NN_SPEC_SLOT ? "load by slot number "
+	                                          "(`blob list` names them)"
 	              : spec->tag == NN_SPEC_PATH ? "filesystem"
 	              : spec->tag == NN_SPEC_ADDR ? "raw model window"
 	              : spec->tag == NN_SPEC_BUILTIN ? "built-in model"
 	                                             : "such source");
 }
 
+/* The name's own rules, before anything is acquired: a name the store could
+ * never have stored is not looked for (the same rules `blob write` applied). */
 static int nn_life_check_spec(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
+	enum blob_name_verdict v = blob_name_check(j->spec->name, NULL);
 
-	if (j->spec->slot >= blob_map_count()) {
-		nn_detail_set("slot must be 0 .. %u (see `blob list`)",
-		              blob_map_count() - 1u);
+	if (v != BLOB_NAME_OK) {
+		nn_detail_set("'%s' is not a blob name (%s)", j->spec->name,
+		              blob_name_verdict_name(v));
 		return NN_SVC_ERR_ARG;
 	}
 	return NN_SVC_OK;
@@ -542,7 +550,8 @@ static void nn_life_claim_give(void)
 /*
  * Everything a load can be refused for WITHOUT CHANGING ANYTHING, before the
  * shared order takes the open model down (issue #191): the backend's capacity,
- * the slot's header, that it holds a valid blob that fits, and the PSRAM guard.
+ * the name resolved to exactly one slot holding a valid blob that fits, and the
+ * PSRAM guard.
  * A refusal here leaves the previous model as it was (the order answers
  * PREVIOUS), and gives back what it took.  On success the blob lock and the
  * PSRAM guard stay held for fetch(); claim_give() returns whichever is left.
@@ -570,32 +579,48 @@ static int nn_life_prepare(struct nn_core_model_job *j)
 	}
 
 	/*
-	 * Hold the blob mutation lock from the header decode to the payload read
-	 * (nn_life_blob), so the length and CRC validated against belong to the
-	 * same generation of the slot as the bytes read.  The CRC in fetch() would
-	 * catch a mid-sequence `blob erase` anyway -- this turns a mysterious
-	 * "CRC32 mismatch" into an accurate "blob busy".
+	 * Hold the blob mutation lock from the name lookup to the payload read
+	 * (nn_life_blob), so the slot the name resolved to, and the length and
+	 * CRC validated against, belong to the same generation of the store as
+	 * the bytes read -- a `blob write` cannot move the name in between.
+	 * The CRC in fetch() would catch a mid-sequence `blob erase` anyway --
+	 * this turns a mysterious "CRC32 mismatch" into an accurate "blob busy".
 	 */
 	if (blob_busy_acquire() != BLOB_OK) {
 		nn_detail_set("blob busy (a blob write or erase is running)");
 		return NN_SVC_ERR_BUSY;
 	}
 	nn_life_blob = 1u;
-	if (blob_stat(spec->slot, &w->info, NULL) != BLOB_OK) {
-		nn_detail_set("cannot read slot %lu's header (see `nor info`)",
-		              (unsigned long)spec->slot);
-		nn_life_blob_give();
-		return NN_SVC_ERR_HW;
+	{
+		enum blob_lookup why = BLOB_LOOKUP_REFUSE;
+
+		rc = blob_find(spec->name, &w->slot, &w->info, &why);
+		if (rc == BLOB_ERR_EMPTY || rc == BLOB_ERR_DUPLICATE) {
+			/* Two answers, two sentences: "no slot holds that name"
+			 * and "more than one slot holds that name" ask for
+			 * different things from the operator. */
+			nn_detail_set("'%s': %s (`blob list` shows what is where)",
+			              spec->name, blob_lookup_name(why));
+			nn_life_blob_give();
+			return NN_SVC_ERR_ARG;
+		}
+		if (rc != BLOB_OK) {
+			nn_detail_set("cannot read the blob headers (%d, see `nor info` "
+			              "and `blob list`)", rc);
+			nn_life_blob_give();
+			return NN_SVC_ERR_HW;
+		}
 	}
+	/* blob_find() answers FOUND only for a VALID slot; asked again here so
+	 * that what this function relies on is stated where it relies on it. */
 	if (w->info.state != BLOB_VALID) {
-		nn_detail_set("slot %lu holds no valid blob -- `blob list`",
-		              (unsigned long)spec->slot);
+		nn_detail_set("slot %u holds no valid blob -- `blob list`", w->slot);
 		nn_life_blob_give();
 		return NN_SVC_ERR_ARG;
 	}
 	if (w->info.length == 0u || w->info.length > w->cap) {
 		nn_detail_set("slot %lu is %lu B, staging holds %lu B",
-		              (unsigned long)spec->slot,
+		              (unsigned long)w->slot,
 		              (unsigned long)w->info.length, (unsigned long)w->cap);
 		nn_life_blob_give();
 		return NN_SVC_ERR_ARG;
@@ -617,13 +642,12 @@ static int nn_life_prepare(struct nn_core_model_job *j)
  * The bytes: into the staging buffer, the CRC over the copy, the container
  * split.  On a tflm build the open model is already down (issue #191), so a
  * failure here ends with no model; the operator loads the previous one again
- * from its slot.
+ * by its name.
  */
 static int nn_life_fetch(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
 	struct nn_wio_job *w = j->board;
-	const struct nn_spec *spec = j->spec;
 	uint32_t crc;
 	int rc;
 
@@ -648,7 +672,7 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 	}
 #endif
 
-	rc = blob_read(spec->slot, 0u, w->stage, w->info.length);
+	rc = blob_read(w->slot, 0u, w->stage, w->info.length);
 	nn_life_blob_give();          /* the NOR is done with; the rest is PSRAM */
 	if (rc != BLOB_OK) {
 		nn_detail_set("NOR read failed (%d)", rc);
@@ -671,7 +695,7 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 		              "blob is intact on the NOR only if `blob verify %lu` "
 		              "passes, the copy is not",
 		              (unsigned long)w->info.crc32, (unsigned long)crc,
-		              (unsigned long)spec->slot);
+		              (unsigned long)w->slot);
 		return NN_SVC_ERR_HW;
 	}
 
@@ -701,7 +725,7 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 		pr = plugin_parse(w->stage, w->info.length, &w->claims.view);
 		if (pr != PLUGIN_OK) {
 			nn_detail_set("slot %lu is a container this firmware refuses: %s",
-			              (unsigned long)spec->slot, plugin_result_name(pr));
+			              (unsigned long)w->slot, plugin_result_name(pr));
 			return NN_SVC_ERR_ARG;
 		}
 		w->is_container = 1;
@@ -712,7 +736,7 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 			(void)memcpy(name, w->info.name, sizeof name);
 			name[sizeof name - 1u] = '\0';
 			nn_detail_to(w->claims.from, sizeof w->claims.from,
-			             "slot %lu, blob '%s'", (unsigned long)spec->slot,
+			             "slot %lu, blob '%s'", (unsigned long)w->slot,
 			             name);
 		}
 		w->model_at  = (const uint8_t *)w->stage + w->claims.view.model_off;
@@ -780,7 +804,7 @@ static int nn_life_plugin_start(struct nn_core_model_job *j)
 		return NN_SVC_OK;
 	/* plugin_run_why(): the strerror, plus the board's own NOT_HELD by name
 	 * (issue #130). */
-	nn_detail_set("slot %lu: %s", (unsigned long)j->spec->slot,
+	nn_detail_set("slot %lu: %s", (unsigned long)w->slot,
 	              plugin_run_why(pr));
 	return NN_SVC_ERR_ARG;
 }
@@ -836,7 +860,7 @@ static const struct nn_core_model_board nn_life_board = {
 	.cs_enter      = nn_core_cs_enter,
 	.cs_exit       = nn_core_cs_exit,
 	.backend       = &nn_life_backend,
-	.tags          = NN_CORE_MODEL_TAG(NN_SPEC_SLOT),
+	.tags          = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
 	.spec_refused  = nn_life_spec_refused,
 	.check_spec    = nn_life_check_spec,
 	.admit         = nn_life_admit,
@@ -1427,7 +1451,7 @@ static const char *nn_nncam_strerror(int rc)
 	case NNCAM_ERR_MODEL:
 		return NN_SVC_DETAIL_LIT(
 			"no model loaded, or it has no usable input "
-			"tensor (`blob list`, then `nn model load --slot <n>`)");
+			"tensor (`blob list`, then `nn model load --name <name>`)");
 	case NNCAM_ERR_SESSION:
 		return NN_SVC_DETAIL_LIT(
 			"the NN session is busy (`nn bench` or "

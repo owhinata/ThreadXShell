@@ -35,12 +35,19 @@
 /* The source list each shape must print -- written out, not rebuilt from the
  * macros, so a wrong expansion cannot agree with itself. */
 #if defined(NN_SVC_HAS_MODEL_SLOT) && NN_SVC_HAS_MODEL_SLOT
-#define SHAPE    "slot (wio-lite-ai)"
+/* No board declares this since issue #193 (wio-lite-ai loads by name now); the
+ * shared command still spells the tag, so the shape is still walked. */
+#define SHAPE    "slot (no board)"
 #define SOURCES  "<--slot <n>>"
 #define A_SOURCE "--slot 5"
-#elif defined(NN_SVC_HAS_MODEL_NAME) && NN_SVC_HAS_MODEL_NAME
+#elif defined(NN_SVC_HAS_MODEL_NAME) && NN_SVC_HAS_MODEL_NAME && \
+      defined(NN_SVC_HAS_MODEL_ADDR) && NN_SVC_HAS_MODEL_ADDR
 #define SHAPE    "name + addr (grove-vision-ai-v2)"
 #define SOURCES  "<--name <name> | --addr <addr> <len>>"
+#define A_SOURCE "--name person"
+#elif defined(NN_SVC_HAS_MODEL_NAME) && NN_SVC_HAS_MODEL_NAME
+#define SHAPE    "name (wio-lite-ai)"
+#define SOURCES  "<--name <name>>"
 #define A_SOURCE "--name person"
 #elif defined(NN_SVC_HAS_MODEL_PATH) && NN_SVC_HAS_MODEL_PATH && \
       defined(NN_SVC_HAS_MODEL_BUILTIN) && NN_SVC_HAS_MODEL_BUILTIN

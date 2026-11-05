@@ -30,7 +30,8 @@
  * svc/blob/blob_state.c; the table's rules and lookups are svc/blob/blob_map.c;
  * the order of one `blob write` is svc/blob/blob_write.c.  This board provides
  * the table (src/blob_slots.c), the interval and erase unit below, the reads
- * (src/blob.c) and the write's operations (cmds/cmd_blob.c).
+ * and the name lookup over them (src/blob.c) and the write's operations
+ * (cmds/cmd_blob.c).
  *
  * Slot layout.  The first 4 KB sector of a slot holds the header -- the shared
  * format's two 256 B pages, magic page first and written last -- and the rest
@@ -113,6 +114,7 @@ extern "C" {
 #define BLOB_ERR_CRC      -6   /* read-back does not match the stored CRC32    */
 #define BLOB_ERR_MAP      -7   /* the slot table does not fit the interval     */
 #define BLOB_ERR_CANCEL   -8   /* an erase stopped because the operator asked  */
+#define BLOB_ERR_DUPLICATE -9  /* more than one VALID slot carries the name    */
 
 /* ---- the table, checked against the interval ------------------------------ */
 
@@ -163,6 +165,30 @@ int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len);
  * interrupted transfer is intact as far as it got" is a question it can answer.
  */
 int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed);
+
+/**
+ * Which slot holds the VALID blob called @p name, and its header.
+ *
+ * Reads every slot's header and hands the views to the shared
+ * blob_resolve_name(), so the rule is the one grove-vision-ai-v2 resolves by:
+ * exactly one VALID slot under the name is FOUND.  @p slot and @p out are
+ * written only on BLOB_OK; @p out is the header read in this scan, not a second
+ * read of the same slot.  @p why (may be NULL) receives the lookup's answer
+ * whenever the scan completed.
+ *
+ * @return BLOB_OK; BLOB_ERR_EMPTY when no VALID slot carries the name;
+ *         BLOB_ERR_DUPLICATE when more than one does -- its own answer, NOT
+ *         "not found" (issue #93): flash outlives firmware and a raw `nor write`
+ *         can put anything anywhere, and picking the first would load whichever
+ *         copy the table reaches first; BLOB_ERR_MAP for a table that does not
+ *         check out; or a read failure from blob_stat()
+ *
+ * [!] THE ANSWER IS ONLY STILL TRUE UNDER THE BUSY FLAG.  Nothing here takes
+ * it: `nn model load` holds it from this scan to the payload read, which is
+ * what keeps a `blob write` or `blob erase` from changing the slot in between.
+ */
+int blob_find(const char *name, unsigned *slot, struct blob_info *out,
+              enum blob_lookup *why);
 
 /* ---- mutating side (all of it under blob_busy_acquire) -------------------- */
 

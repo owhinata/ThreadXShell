@@ -106,17 +106,24 @@ python3 "$board/cmake/fixtures/run_layout_tests.py"
 # console cannot produce on demand: a refusal from empty, a backend that
 # "restores" from nothing (EMPTY, released), a success that left no model (HW),
 # and `nn info` from another console in the middle of a swap (BUSY on all three
-# lines).  shell/test/test_nn_core_model.c walks the order itself.
-gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
+# lines).  shell/test/test_nn_core_model.c walks the order itself.  Since issue
+# #194 the model is a blob, read by name out of a stand-in store
+# (nn_blob_stub.c): every answer of the store, refused with its own status and
+# words, and the blob flag taken and given back once on every path.
+gcc $CFLAGS -I "$here/nn_shim" -I "$here" -I "$board/src" -I "$board/port/qspi" \
+    -I "$board/port/nn" -I "$board/port/camera" \
     -I "$board/port/sdram" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
     "$here/test_nn_model_life.c" "$board/port/nn/nn_svc_f746_model.c" \
+    "$here/nn_blob_stub.c" "$HOST_TEST_SVC/blob/blob_state.c" \
+    "$HOST_TEST_SVC/crc32.c" \
     "$HOST_TEST_SVC/nn/nn.c" "$HOST_TEST_REPO/shell/test/nn_model_host.c" \
     "$HOST_TEST_SVC/nn/nn_core_model.c" "$HOST_TEST_SVC/nn/nn_svc_common.c" \
     "$HOST_TEST_SVC/nn/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \
     $LDFLAGS -o "$out/test_nn_model_life"
 "$out/test_nn_model_life"
 
-# issue #159 (#78 Step 4a) -- `nn model load --path <container>` on the tflm
+# issue #159 (#78 Step 4a) -- `nn model load --name <container>` (a file on the
+# SD card until issue #194) on the tflm
 # build: the same adapter compiled WITH CONFIG_NN_BACKEND_TFLM and this board's
 # policy macros (the values board.cmake gives a tflm build), over the real
 # plugin validator and CRC -- through the firmware's entry
@@ -124,16 +131,16 @@ gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
 # name, as the device does (issue #165).  A container built byte by byte with this board's
 # facts is accepted and its MODEL SECTION handed over in place; wio's target
 # word, a truncated file and a damaged plugin byte are refused before the
-# backend is touched; the CRC the reader prints and the one `nn info` prints
-# beside the claims are one value, equal to an independent CRC of the file.
+# backend is touched, and so is a copy whose CRC disagrees with its header.
 gcc $CFLAGS -DCONFIG_NN_BACKEND_TFLM=1 -DF746_PLUGIN_TARGET_ID=0x1101 \
     -DF746_PLUGIN_BASE=0x20048000u -DF746_PLUGIN_MAX=32768u \
     -DPLUGIN_VENEER_BASE_COST=640u -DF746_PLUGIN_STACK_NN_WORK=1024u \
     -DF746_PLUGIN_STACK_GUIX=1024u -DF746_PLUGIN_STACK_SHELL=1024u \
-    -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
+    -I "$here/nn_shim" -I "$here" -I "$board/src" -I "$board/port/qspi" \
+    -I "$board/port/nn" -I "$board/port/camera" \
     -I "$board/port/sdram" -I "$board/port/plugin" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
     "$here/test_nn_model_container.c" "$board/port/nn/nn_svc_f746_model.c" \
-    "$HOST_TEST_SVC/nn/nn_container.c" \
+    "$here/nn_blob_stub.c" "$HOST_TEST_SVC/blob/blob_state.c" \
     "$HOST_TEST_SVC/nn/nn.c" "$HOST_TEST_REPO/shell/test/nn_model_host.c" \
     "$HOST_TEST_SVC/nn/nn_core_model.c" "$HOST_TEST_SVC/nn/nn_svc_common.c" \
     "$HOST_TEST_SVC/nn/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \
@@ -159,7 +166,9 @@ gcc $CFLAGS "$here/test_sbrk.c" "$out/retarget_host.o" \
 "$out/test_sbrk"
 
 # issue #159 -- the file destination's fit check reads the staging capacity
-# back out of the shipped firmware (cmake/build_asset.py stage_capacity()); its
+# back out of the shipped firmware (cmake/build_asset.py stage_capacity()).  No
+# board sends an asset as a file since issue #194 (this one sends to a slot);
+# the shared route and its tests stay until it is removed (issue #195).  Its
 # refusals need a real ARM ELF, so this runs with the repository-pinned cross
 # toolchain and SKIPS -- loudly -- without it.  (The toolchain-free cases of the
 # same script run from shell/test/run_host_tests.sh.)
@@ -334,4 +343,9 @@ elif ! ninja -C "$io_build" -t targets all 2>/dev/null | grep -q "^verify_tflite
 else
     python3 "$HOST_TEST_REPO/cmake/fixtures/run_model_io_gate_tests.py" \
         --build-dir "$io_build" --gate verify_tflite --style tflite
+    # issue #194 -- the same tool's length checks: the slot limit is the largest
+    # payload of the shipped table (compiled in), so 1,044,480 B gets past it
+    # and one more -- and the old 1 MB limit -- must not.  Same tree, same SKIP.
+    python3 "$board/cmake/fixtures/run_verify_tflite_size_tests.py" \
+        --build-dir "$io_build"
 fi

@@ -173,7 +173,10 @@ int blob_stat_reserved(unsigned slot, struct blob_info *out)
 	return stat_slot(slot, out, NULL);
 }
 
-int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len)
+/* The payload read, with the flag already decided by the caller: @p check
+ * refuses while it is held (the public read), 0 does not look (the holder's). */
+static int read_slot(unsigned slot, uint32_t off, void *buf, uint32_t len,
+                     int check)
 {
 	const struct blob_slot *s;
 	uint32_t cap;
@@ -184,14 +187,26 @@ int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len)
 	s = checked_slot(slot, &err);
 	if (s == NULL)
 		return err;
-	err = refused_while_busy();
-	if (err != BLOB_OK)
-		return err;
+	if (check) {
+		err = refused_while_busy();
+		if (err != BLOB_OK)
+			return err;
+	}
 	cap = blob_map_payload_max(s, BLOB_ERASE_UNIT);
 	if (off >= cap || len > cap - off)
 		return BLOB_ERR_PARAM;
 	return read_split(blob_map_payload_addr(s, BLOB_ERASE_UNIT) + off,
 	                  (uint8_t *)buf, len);
+}
+
+int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len)
+{
+	return read_slot(slot, off, buf, len, 1);
+}
+
+int blob_read_reserved(unsigned slot, uint32_t off, void *buf, uint32_t len)
+{
+	return read_slot(slot, off, buf, len, 0);
 }
 
 int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed)

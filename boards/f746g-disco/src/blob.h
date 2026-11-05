@@ -134,6 +134,11 @@ int blob_stat_reserved(unsigned slot, struct blob_info *out);
  */
 int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len);
 
+/** blob_read() for a caller that HOLDS the busy flag (`nn model load`, from
+ *  its name lookup to the end of its payload read, issue #194): the same read,
+ *  with no look at the flag. */
+int blob_read_reserved(unsigned slot, uint32_t off, void *buf, uint32_t len);
+
 /**
  * Re-read @p slot's payload and check it against its stored CRC-32.  BLOB_OK on
  * a match, BLOB_ERR_CRC on a mismatch, BLOB_ERR_EMPTY when the slot holds no

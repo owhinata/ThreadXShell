@@ -4,9 +4,10 @@
  */
 /**
  * @file    verify_tflite.cc
- * @brief   Check a .tflite on the PC before copying it to this board's card
- *          (issue #159; wio-lite-ai's checker of the same name, with this
- *          board's operator list and staging capacity).
+ * @brief   Check a .tflite on the PC before sending it to this board's asset
+ *          store (issue #159; wio-lite-ai's checker of the same name, with this
+ *          board's operator list, staging capacity and slot table -- issue
+ *          #194).
  *
  * A HOST tool, never compiled into a firmware: built with the host compiler
  * against the SAME tflite-micro tree the `tflm` build generated, so it runs
@@ -15,7 +16,8 @@
  * gate on the model section of every container it packs.
  *
  * WHAT IT CHECKS, in the order the board would:
- *   1. length, and that it fits the backend's staging slot
+ *   1. length, and that it fits the payload of the largest blob slot (the shipped
+ *      table, src/blob_slots.c) AND the backend's staging buffer
  *   2. the "TFL3" file identifier at offset 4
  *   3. tflite::VerifyModelBuffer() -- the full structural walk, BOUNDED by the
  *      limits this board's firmware (NN_TFLM_VERIFY) and grove-vision-ai-v2's
@@ -47,7 +49,7 @@
  * registers from, so the two cannot drift apart.
  *
  * It prints the CRC-32/ISO-HDLC of the file -- for a bare .tflite, the number
- * to compare with what the card holds.
+ * to compare with what `blob list` shows once it is stored.
  *
  * Build + run:  cmake --build build/f746-tflm --target verify-model
  *               ./build/f746-tflm/verify_tflite <model.tflite>
@@ -72,10 +74,60 @@
 #include <string>
 #include <vector>
 
-/* Mirrors NN_TFLM_MODEL_KB, the one staging buffer (cmake/tflite-micro.cmake ->
- * svc/nn/tflm/nn_tflm_mem.h).  Restated rather than included because that header
- * needs the firmware's compile definitions; the message below names its source. */
-static const uint32_t kStagingMax = 1024u * 1024u;
+/* The staging buffer's size, from the variable the firmware is built with
+ * (cmake/tflite-micro.cmake passes NN_TFLM_MODEL_KB to both), and the blob
+ * store's table and header unit -- the shipped table itself, compiled in as C
+ * with svc/blob/blob_map.c's lookups (issue #194, wio-lite-ai's since #193). */
+#include "nn_tflm_mem.h"
+#include "blob.h"
+
+/*
+ * [!] NEITHER LIMIT IS RESTATED HERE (issue #194).  Until then this file held
+ * 1 MB as a literal, so 1,044,481 .. 1,048,576 B passed here and could not be
+ * stored in any slot (the largest payload is 1 MB less its 4 KB header).
+ */
+static const uint32_t kStagingMax = NN_TFLM_MODEL_MAX;
+
+/* The largest payload any slot of the shipped table holds, or 0 when the table
+ * is not one the store would act on (then nothing is judged). */
+static uint32_t largest_payload(void)
+{
+	uint32_t best = 0u;
+	unsigned i;
+
+	if (blob_map_check(BLOB_REGION_BASE, BLOB_REGION_END, BLOB_ERASE_UNIT,
+	                   blob_map_table(), blob_map_count(), nullptr) != BLOB_MAP_OK)
+		return 0u;
+	for (i = 0u; i < blob_map_count(); i++) {
+		uint32_t p = blob_map_payload_max(blob_map_slot(i), BLOB_ERASE_UNIT);
+
+		if (p > best)
+			best = p;
+	}
+	return best;
+}
+
+/* The smallest slot class that holds @p len, and the first slot of it. */
+static bool smallest_fit(uint32_t len, uint32_t *size, uint32_t *payload,
+                         unsigned *first)
+{
+	bool found = false;
+	unsigned i;
+
+	for (i = 0u; i < blob_map_count(); i++) {
+		const struct blob_slot *s = blob_map_slot(i);
+		uint32_t p = blob_map_payload_max(s, BLOB_ERASE_UNIT);
+
+		if (p < len || (found && p >= *payload))
+			continue;
+		*size = s->size;
+		*payload = p;
+		*first = i;
+		found = true;
+	}
+	return found;
+}
+
 
 /* CRC-32/ISO-HDLC, bit by bit -- the same value svc/crc32.c produces on the board
  * and Python's zlib.crc32() produces on this machine.  Written out rather
@@ -130,8 +182,8 @@ int main(int argc, char **argv)
 	if (argc != 2) {
 		fprintf(stderr,
 		        "usage: verify_tflite <model.tflite>\n"
-		        "  Checks a model against THIS firmware configuration before you copy\n"
-		        "  it to the card for `nn model load --path`.\n");
+		        "  Checks a model against THIS firmware configuration before you send\n"
+		        "  it with `blob write <name> [slot]` + `sb <model.tflite>`.\n");
 		return 2;
 	}
 
@@ -142,7 +194,7 @@ int main(int argc, char **argv)
 	const uint32_t len = (uint32_t)buf.size();
 	printf("file    : %s\n", argv[1]);
 	printf("size    : %u B\n", len);
-	printf("crc32   : %08X\n",
+	printf("crc32   : %08X   (compare with `blob list`)\n",
 	       crc32_iso_hdlc(buf.data(), buf.size()));
 
 	/* 1. length ---------------------------------------------------------- */
@@ -150,11 +202,32 @@ int main(int argc, char **argv)
 		printf("RESULT  : REJECT -- too short to be a flatbuffer (%u B)\n", len);
 		return 1;
 	}
+	const uint32_t slot_max = largest_payload();
+	if (slot_max == 0u) {
+		printf("RESULT  : CANNOT CHECK -- the blob slot table this tool was built\n"
+		       "          with does not check out against its interval.\n");
+		return 2;
+	}
+	if (len > slot_max) {
+		printf("RESULT  : REJECT -- %u B exceeds the largest blob slot's payload (%u B);\n"
+		       "          no slot of this firmware can hold it.  Use a smaller model.\n",
+		       len, slot_max);
+		return 1;
+	}
 	if (len > kStagingMax) {
-		printf("RESULT  : REJECT -- %u B exceeds the backend staging slot (%u B).\n"
-		       "          Widen NN_TFLM_MODEL_KB in cmake/tflite-micro.cmake.\n",
+		printf("RESULT  : REJECT -- %u B exceeds the model staging buffer (%u B) that\n"
+		       "          `nn model load` copies a blob into.\n",
 		       len, kStagingMax);
 		return 1;
+	}
+	{
+		uint32_t size = 0u, payload = 0u;
+		unsigned first = 0u;
+
+		if (smallest_fit(len, &size, &payload, &first))
+			printf("slot    : fits a %u KB slot (%u B of payload) or larger --\n"
+			       "          e.g. `blob write <name> %u` (`blob free` lists the free ones)\n",
+			       size / 1024u, payload, first);
 	}
 
 	/* 2. file identifier -------------------------------------------------- */

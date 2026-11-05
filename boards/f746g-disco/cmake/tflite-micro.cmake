@@ -185,20 +185,26 @@ target_compile_definitions(tflm
 # This board's facts for the shared backend (svc/nn/tflm/, issue #161), each ONE
 # definition there is no fallback for:
 #   NN_TFLM_ARENA_KB / NN_TFLM_MODEL_KB   the arena (512 KB; BlazeFace plans ~470 KB)
-#       and the one SD staging buffer (1 MB, issue #191) --
+#       and the one model staging buffer (1 MB, issue #191) --
 #       svc/nn/tflm/nn_tflm_mem.h.  1.5 MB of the 2 MB bank3; the linker ASSERT
 #       enforces the fit.
 #   NN_TFLM_VERIFY=1   the flatbuffer verifier runs on the board before a model is
-#       built, as it always has here: a file copied to the card by hand has not
-#       necessarily been through verify_tflite, and this 1 MB flash can afford it.
+#       built, as it always has here: a blob sent by hand has not necessarily
+#       been through verify_tflite, and this 1 MB flash can afford it.
 #   NN_TFLM_OPS_EXTENDED=1   the 23-operator common-vision profile
-#       (svc/nn/tflm/nn_tflm_ops.h) this board has always registered, so an SD-loaded
+#       (svc/nn/tflm/nn_tflm_ops.h) this board has always registered, so a loaded
 #       int8 classifier or detector runs without a rebuild.  The host verify_tflite
 #       below gets the same define (F746_TFLM_OPS_DEFINE), so the two cannot disagree.
 set(F746_TFLM_OPS_DEFINE "NN_TFLM_OPS_EXTENDED=1")
+# NN_TFLM_MODEL_KB as a plain variable, not a cache knob (issue #194, as
+# wio-lite-ai's since #193): the slot table is sized against it
+# (cmake/check_blob_staging.py checks the pair in the image), and verify_tflite
+# below is given the same variable so the host check states the same limit.
+set(NN_TFLM_ARENA_KB 512)
+set(NN_TFLM_MODEL_KB 1024)
 target_compile_definitions(tflm PRIVATE
-    NN_TFLM_ARENA_KB=512
-    NN_TFLM_MODEL_KB=1024
+    NN_TFLM_ARENA_KB=${NN_TFLM_ARENA_KB}
+    NN_TFLM_MODEL_KB=${NN_TFLM_MODEL_KB}
     NN_TFLM_VERIFY=1
     ${F746_TFLM_OPS_DEFINE})
 
@@ -253,8 +259,23 @@ target_link_libraries(tflm PUBLIC stdc++_nano supc++_nano m)
 # target in this project cross-compiles.
 find_program(HOST_CXX NAMES c++ g++ clang++)
 if(HOST_CXX)
+    # [!] THE SLOT LIMIT IS THE SHIPPED TABLE'S (issue #194), compiled in as C --
+    # src/blob_slots.c with svc/blob/blob_map.c's lookups, as scripts/slot_table.c
+    # does -- and the staging limit is the variable the firmware is built with
+    # (nn_tflm_mem.h's NN_TFLM_MODEL_MAX).  No number is restated in the tool.
+    set(_vt_dir "${CMAKE_BINARY_DIR}/verify_tflite.d")
+    set(_vt_blob_inc
+        -I "${BOARD_DIR}/src" -I "${BOARD_DIR}/port/qspi"
+        -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/blob")
     add_custom_command(
         OUTPUT "${CMAKE_BINARY_DIR}/verify_tflite"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${_vt_dir}"
+        COMMAND "${HOST_CXX}" -x c -std=c11 -O1 -w ${_vt_blob_inc}
+                -c "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+                -o "${_vt_dir}/blob_map.o"
+        COMMAND "${HOST_CXX}" -x c -std=c11 -O1 -w ${_vt_blob_inc}
+                -c "${BOARD_DIR}/src/blob_slots.c"
+                -o "${_vt_dir}/blob_slots.o"
         COMMAND "${HOST_CXX}" -std=c++17 -O1 -w
                 -I "${TFLM_ROOT}"
                 -I "${TFLM_ROOT}/third_party/flatbuffers/include"
@@ -262,8 +283,12 @@ if(HOST_CXX)
                 -I "${TFLM_ROOT}/third_party/ruy"
                 -I "${CMAKE_SOURCE_DIR}/svc/nn/tflm"
                 -I "${CMAKE_SOURCE_DIR}/svc/nn"
+                ${_vt_blob_inc}
                 "-D${F746_TFLM_OPS_DEFINE}"
+                -DNN_TFLM_ARENA_KB=${NN_TFLM_ARENA_KB}
+                -DNN_TFLM_MODEL_KB=${NN_TFLM_MODEL_KB}
                 "${BOARD_DIR}/scripts/verify_tflite.cc"
+                "${_vt_dir}/blob_map.o" "${_vt_dir}/blob_slots.o"
                 # GetBuiltinCode(): reads an operator code correctly across the
                 # schema's deprecated/current field pair.
                 "${TFLM_ROOT}/tensorflow/compiler/mlir/lite/schema/schema_utils.cc"
@@ -275,7 +300,17 @@ if(HOST_CXX)
                 # with the firmware it speaks for.
                 "${CMAKE_SOURCE_DIR}/svc/nn/tflm/nn_tflm_model_check.h"
                 "${CMAKE_SOURCE_DIR}/svc/nn/nn.h"
-        COMMENT "host c++ -> verify_tflite (checks a .tflite before you copy it)"
+                # The slot table, its lookups and the headers the limits come
+                # from (issue #194): a re-carved table rebuilds the checker.
+                "${BOARD_DIR}/src/blob_slots.c"
+                "${BOARD_DIR}/src/blob.h"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.h"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_state.h"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_err.h"
+                "${BOARD_DIR}/port/qspi/qspi_flash.h"
+                "${CMAKE_SOURCE_DIR}/svc/nn/tflm/nn_tflm_mem.h"
+        COMMENT "host c++ -> verify_tflite (checks a .tflite before you send it)"
         VERBATIM)
     add_custom_target(verify-model DEPENDS "${CMAKE_BINARY_DIR}/verify_tflite")
 endif()

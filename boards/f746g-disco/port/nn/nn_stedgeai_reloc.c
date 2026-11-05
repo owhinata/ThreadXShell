@@ -10,14 +10,17 @@
  * Runtime model swap for the ST Edge AI Core runtime: instead of baking one model
  * into Flash (nn_stedgeai.c, STAI API), this backend loads a position-independent
  * `network_rel.bin` (PIC code + embedded weights, produced offline by
- * `stedgeai generate --relocatable --target stm32f7`) from the SD card at runtime
- * and runs it XIP via the ST host loader (ai_reloc_network.c) + the legacy
- * ai_rel_network_* API.  Same "SD swap, no reflash" capability the tflm backend
+ * `stedgeai generate --relocatable --target stm32f7`) at runtime -- a blob of the
+ * QSPI asset store since issue #194, a file on the SD card before -- and runs it
+ * XIP via the ST host loader (ai_reloc_network.c) + the legacy
+ * ai_rel_network_* API.  Same "swap, no reflash" capability the tflm backend
  * has (owhinata/stm32f746g-disco#89 P2), but on the X-CUBE-AI runtime -- so it plugs into the same
  * nn vtable load_region()/reload() path and cmd_nn's `nn model load`.
  *
- * SD-only: there is NO built-in model.  open() returns an empty handle (0 in/out);
- * `nn model load --path <bin>` installs a model; `nn model unload` (release())
+ * Loaded only: there is NO built-in model.  open() returns an empty handle (0
+ * in/out); `nn model load --name <blob>` installs a model (a blob longer than a
+ * 448 KB slot is refused by the adapter before it is read, issue #194 D4);
+ * `nn model unload` (release())
  * empties it again.  `nn model load builtin` is refused (not a source this
  * board takes) -- it used to unload, which is not what the word says (issue
  * #131 P16).
@@ -331,12 +334,12 @@ static int reloc_map(struct nn_tensor *t, const ai_buffer *b)
 
 static void reloc_set_name(const char *name)
 {
-	/* "sd:<basename>" for display parity with the tflm SD path (owhinata/stm32f746g-disco#89). */
+	/* The blob's name, as the tflm backend shows it (issue #194; "sd:<path>"
+	 * until the model came from the SD card, owhinata/stm32f746g-disco#89). */
 	size_t n;
-	g_reloc.name[0] = 's'; g_reloc.name[1] = 'd'; g_reloc.name[2] = ':';
-	for (n = 0; name && name[n] && n + 4u < sizeof(g_reloc.name); n++)
-		g_reloc.name[3 + n] = name[n];
-	g_reloc.name[3 + n] = '\0';
+	for (n = 0; name && name[n] && n + 1u < sizeof(g_reloc.name); n++)
+		g_reloc.name[n] = name[n];
+	g_reloc.name[n] = '\0';
 }
 
 /* =====================================================================
@@ -439,7 +442,7 @@ static void reloc_empty(void)
 
 static int reloc_bk_open(void **impl_out)
 {
-	/* SD-only: start empty.  A model appears only after `nn model load`.
+	/* Loaded only: start empty.  A model appears only after `nn model load`.
 	 * nn.c opens once (its singleton stays open), so this never runs over a
 	 * loaded model. */
 	reloc_empty();
@@ -489,7 +492,7 @@ static int reloc_bk_run(void *impl)
 	return (ai_rel_network_run(m->hdl, m->report.inputs, m->report.outputs) >= 1) ? 0 : -1;
 }
 
-/* Return the INACTIVE .bin slot as the writable staging buffer for an SD read. */
+/* Return the INACTIVE .bin slot as the writable staging buffer for a load. */
 static int reloc_bk_load_region(void **buf, uint32_t *cap)
 {
 	int s = (g_reloc.slot == 0) ? 1 : 0;   /* slot -1/1 -> 0, slot 0 -> 1 */
@@ -498,7 +501,7 @@ static int reloc_bk_load_region(void **buf, uint32_t *cap)
 	return 0;
 }
 
-/* Rebuild the model from an SD-loaded .bin (transactional).  @p data==NULL asks for
+/* Rebuild the model from a loaded .bin (transactional).  @p data==NULL asks for
  * a built-in model, which this backend does not have: refused, nothing changes
  * (the adapter refuses `builtin` before it gets here; unload is release()).
  * *impl_out is ALWAYS &g_reloc (non-NULL): "no model" is the internal hdl==NULL state
@@ -573,5 +576,5 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.reload = reloc_bk_reload,
 	.release = reloc_bk_release,
 	.arena_reserved = RELOC_ACTS_CAP,         /* g_acts */
-	.has_builtin = 0u,                        /* SD-only */
+	.has_builtin = 0u,                        /* loaded only */
 };

@@ -369,9 +369,10 @@ set(CLI_DEVMEM_DUMP_MAX_LEN "256" CACHE STRING "Max bytes per devmem dump")
 # `tflm` (tflite-micro, the DEFAULT since issue #130) is a C++ runtime whose
 # interpreter + backend live in a separate `tflm` static lib
 # (cmake/tflite-micro.cmake); it enables C++ only for that build.  It carries
-# no model since issue #159 Step 4c: one is loaded from the SD card (`nn model
-# load --path`), bare or as a container -- the pinned BlazeFace is the
-# `asset-blazeface` container below.  Its configure needs the network, for
+# no model since issue #159 Step 4c: one is loaded from a blob in the QSPI
+# asset store (`nn model load --name`, issue #194; the SD card until then),
+# bare or as a container -- the pinned BlazeFace is the `asset-blazeface`
+# container below.  Its configure needs the network, for
 # tflite-micro itself; its build does not.
 # `null` (no runtime -> builds offline, with no toolchain or model beyond the
 # cross compiler; the `nn` command reports a BlazeFace-shaped stub whose
@@ -380,10 +381,11 @@ set(CLI_DEVMEM_DUMP_MAX_LEN "256" CACHE STRING "Max bytes per devmem dump")
 # local ST Edge AI Core install; those ST-SLA artifacts are NOT committed (public
 # repo, see .gitignore + port/nn/generated/).
 # `stedgeai_reloc` (X-CUBE-AI relocatable network) loads a position-independent
-# `network_rel.bin` (PIC code + weights) from SD at runtime and runs it XIP via the
-# ST host loader (ai_reloc_network.c) + the legacy ai_rel_network_* API -- no model is
-# baked into Flash and no runtime .a is linked (the PIC kernels are embedded in the
-# .bin).  Same SD-swap capability as tflm, but on the X-CUBE-AI runtime.
+# `network_rel.bin` (PIC code + weights) from a blob at runtime (`nn model load
+# --name`, issue #194; the SD card until then) and runs it XIP via the ST host
+# loader (ai_reloc_network.c) + the legacy ai_rel_network_* API -- no model is
+# baked into Flash and no runtime .a is linked (the PIC kernels are embedded in
+# the .bin).  A blob longer than its 448 KB slot is refused at load.
 #
 # [!] A CACHE DEFAULT DOES NOT REACH AN EXISTING TREE.  A build directory first
 # configured while `null` was the default keeps `null`, and nothing about its
@@ -479,8 +481,9 @@ elseif(CONFIG_NN_BACKEND STREQUAL "stedgeai_reloc")
     # X-CUBE-AI relocatable network backend.  Compiles the ST host loader
     # (Middlewares/ST/AI/Reloc/Src/ai_reloc_network.c, ST-SLA -> NOT committed) + our
     # backend TU.  NO runtime .a is linked: the PIC kernels + weights live inside the
-    # SD-loaded network_rel.bin (generated offline with scripts/gen-reloc-model.sh).
-    # No port/nn/generated model is needed (the model is loaded from SD at runtime).
+    # network_rel.bin loaded at runtime (generated offline with
+    # scripts/gen-reloc-model.sh), from a blob since issue #194.
+    # No port/nn/generated model is needed (the model is loaded at runtime).
     set(STEDGEAI_ROOT "/opt/ST/STEdgeAI/4.0" CACHE PATH "ST Edge AI Core install root")
     set(STEDGEAI_INC "${STEDGEAI_ROOT}/Middlewares/ST/AI/Inc")
     set(STEDGEAI_RELOC_INC "${STEDGEAI_ROOT}/Middlewares/ST/AI/Reloc/Inc")
@@ -539,7 +542,6 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_net.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
-    "${BOARD_DIR}/cmds/cmd_nn_board.c"
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_stream_life.c"
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_core.c"
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_core_frame.c"   # the frame path (#130)
@@ -662,7 +664,7 @@ endif()
 
 # X-CUBE-AI relocatable backend: legacy ai_rel_network_* + ST host loader.  Add the
 # ST AI + Reloc include paths and mark the backend; NO runtime .a is linked (PIC
-# kernels are inside the SD-loaded .bin).  The ST loader TU gets APP_DEBUG=0 (drops
+# kernels are inside the loaded .bin).  The ST loader TU gets APP_DEBUG=0 (drops
 # its printf trace) scoped to that source only -- and we do NOT define STM32F7 for it,
 # so in XIP mode it has zero HAL/CMSIS dependency (its only SCB_CleanDCache is
 # COPY-mode-guarded; our backend does the cache maintenance itself).
@@ -790,7 +792,6 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c" # ...and the claims around them
         # (svc/crc32.c, the digest and the load CRC, is in the main sources
         # since issue #194: the blob store uses it in every backend.)
-        "${CMAKE_SOURCE_DIR}/svc/nn/nn_container.c"      # ...over the bytes read
         # Step 4b: the loader, the lease, the painter and the decoder branch.
         # What is board-independent is svc/'s (shared with wio-lite-ai); what
         # touches this board's hardware or RTOS is port/plugin/ and port/nn/.
@@ -940,9 +941,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     #   verify_container  svc/plugin/plugin_load.c -- the device's validator -- on
     #                     the host, so a container cannot pass here and fail there
     #   slot_table        THIS board's slot capacities, from src/blob_slots.c
-    #                     (issue #194; no asset reads it yet -- the destination
-    #                     is still a file on the card, fit-checked against the
-    #                     staging capacity read back from shell.elf)
+    #                     (issue #194): what an asset's slot is checked against
     set(F746_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
     set(F746_SLOT_TABLE_JSON "${CMAKE_BINARY_DIR}/plugin/slot_table.json")
     set(F746_CONTAINER_VERIFIER "${CMAKE_BINARY_DIR}/verify_container")
@@ -1027,17 +1026,17 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     #
     # `--target asset-<name>` produces build/<board>/asset/<name>.nnc: a container
     # that has already been through every gate, published only after passing
-    # (cmake/build_asset.py), and a receipt.  This board's destination is a FILE
-    # copied to the SD card (plan #159 D4/D5): its fit is checked against the
-    # staging capacity the shipped shell.elf holds in nn_tflm_stage_cap -- the
-    # object the backend's load_region() hands out as the read limit
-    # (port/nn/tflm/nn_tflm_bufs.c) -- and the closing check is the CRC the load
-    # prints over the whole file it read, compared with the receipt's.
+    # (cmake/build_asset.py), and a receipt.  This board's destination is a SLOT
+    # of the QSPI asset store since issue #194 (a file copied to the SD card
+    # before, plan #159 D4/D5): its fit is checked against the slot's payload
+    # capacity in the slot table JSON (scripts/slot_table.c, the table the
+    # firmware links), and the closing check is the receipt's CRC against what
+    # `blob list` shows for the slot -- wio-lite-ai's.
     #
-    # [!] THE GATES RUN AT BUILD TIME, NOT AT COPY TIME: nothing checks that the
-    # file copied is the file built -- the CRC the load prints is the only
-    # "built bytes = stored bytes" check.  Neither the asset nor its fetch is in
-    # ALL (issue #94's lesson).
+    # [!] THE GATES RUN AT BUILD TIME, NOT AT SEND TIME: nothing checks that the
+    # file sent is the file built -- `blob list`'s CRC is the only "built bytes
+    # = stored bytes" check.  Neither the asset nor its fetch is in ALL (issue
+    # #94's lesson).
     if(HOST_CXX)
         set(F746_MODEL_VERIFIER "${CMAKE_BINARY_DIR}/verify_tflite")
     else()
@@ -1049,7 +1048,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
 
     function(f746_add_asset _name)
         cmake_parse_arguments(A ""
-            "PLUGIN;FILE_NAME;FILE;URL;COMMIT;PATH_IN;SHA256" "" ${ARGN})
+            "PLUGIN;SLOT;FILE;URL;COMMIT;PATH_IN;SHA256" "" ${ARGN})
         if(A_UNPARSED_ARGUMENTS)
             message(FATAL_ERROR
                 "f746_add_asset(${_name}): unrecognised: ${A_UNPARSED_ARGUMENTS}")
@@ -1063,32 +1062,43 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         # No ingest: the model as the zoo ships it (tflm with CMSIS-NN reads it).
         asset_model_source(${_name}
             OVERRIDE_VAR F746_ASSET_${_name}_FILE OUT_VAR _src ${_pin})
+        # The receipt's commands are THIS board's since issue #194, and the
+        # same as wio-lite-ai's: `blob write` takes the name and the slot,
+        # refuses a slot that holds a blob under another name (hence the
+        # erase first), and erases the slot itself before it receives.  The
+        # load names the blob, as the store keys on it.
         add_asset(${_name}
             MODEL "${_src}"  MODEL_SHA256 "${_src_SHA256}"
-            PLUGIN ${A_PLUGIN}
-            FILE_NAME "${A_FILE_NAME}"  STAGE_SYMBOL nn_tflm_stage_cap
+            PLUGIN ${A_PLUGIN}  SLOT ${A_SLOT}
             PACKER "${F746_PACKER}"  LAYOUT "${F746_ABI_LAYOUT_JSON}"
             MODEL_VERIFIER "${F746_MODEL_VERIFIER}"
             CONTAINER_VERIFIER "${F746_CONTAINER_VERIFIER}"
+            SLOT_TABLE "${F746_SLOT_TABLE_JSON}"
             BUILD_ID "${F746_PLUGIN_BUILD_ID}"
             TARGET_ID "${F746_PLUGIN_TARGET_ID}"
             LINK_ADDR "${F746_PLUGIN_BASE}"
             CAPACITY "${F746_PLUGIN_MAX}"
-            # The board has no receive path of its own: the file reaches the
-            # card through a PC card reader, and the load reads it whole.
-            RECEIPT_STEPS "nn model load --path /{file}   (once the file is on the card)"
-            RECEIPT_TRANSFER "on the PC:" "copy the path above to the card's root as {file}"
-            RECEIPT_VERIFY   "the load:"
-                "must print crc32 {crc} -- that is how you know the bytes"
-                "that were built are the bytes that were read.")
+            RECEIPT_STEPS "blob erase {slot}   (the slot must be empty first)"
+                          "blob write {name} {slot}   (erases the slot, then waits for the file)"
+            RECEIPT_THEN  "nn model load --name {name}"
+            RECEIPT_TRANSFER "in picocom:" "C-a C-s, then the path above"
+            RECEIPT_VERIFY   "afterwards:"
+                "`blob list` must show crc32 {crc} -- that is how you know"
+                "the bytes that were built are the bytes that were stored.")
     endfunction()
 
     # The file wio-lite-ai and Grove pin -- the same commit and SHA-256, from the
     # ST model zoo (until issue #159 Step 4c this board also compiled it into
     # Flash).  Licence: model-zoo weights, fetched into the build tree only,
     # never committed.
+    #
+    # [!] THE SLOT IS A DECLARATION THE BOARD CANNOT CHECK, as on wio-lite-ai:
+    # the build refuses a container too large for it; nothing refuses the WRONG
+    # slot -- the receipt's `blob erase` retires whatever is there.  Read `blob
+    # list` first.  Slot 12 is the last 256 KB slot (src/blob_slots.c, 258,048 B
+    # of payload), wio-lite-ai's choice for the same container.
     f746_add_asset(blazeface
-        PLUGIN  blazeface  FILE_NAME blazeface.nnc
+        PLUGIN  blazeface  SLOT 12
         URL     "https://github.com/STMicroelectronics/stm32ai-modelzoo.git"
         COMMIT  "1423c78953a830903485135febe1dd98ff31aed8"
         PATH_IN "face_detection/facedetect_front/Public_pretrainedmodel_public_dataset/widerface/blazeface_front_128/blazeface_front_128_int8.tflite"
@@ -1130,8 +1140,8 @@ if(CONFIG_NN_BACKEND STREQUAL "null")
     list(APPEND F746_LAYOUT_REQUIRED --require-sdram-ai null_in_buf)
 endif()
 if(CONFIG_NN_BACKEND STREQUAL "tflm")
-    # port/nn/tflm/nn_tflm_bufs.c -- the activation arena and the two SD model
-    # slots, the tflm backend's whole bank3 footprint (issue #130).  Defined in
+    # port/nn/tflm/nn_tflm_bufs.c -- the activation arena and the model staging
+    # buffer, the tflm backend's whole bank3 footprint (issue #130).  Defined in
     # C since issue #161 (the backend is svc/nn/tflm/), so nm spells them
     # plainly; until then they were anonymous-namespace objects required here by
     # their mangled local names.  Renaming either makes the name match NOTHING,

@@ -18,7 +18,9 @@ extern "C" {
 
 nn_tflm_state nn_tflm_board_state;
 
-/* Models come off the SD card: `nn info` names one "sd:<path>". */
-const struct nn_tflm_board_facts nn_tflm_board_facts = { "sd:" };
+/* Models come out of the QSPI asset store by name (issue #194; off the SD
+ * card as "sd:<path>" until then): `nn info` names one by its blob name, with
+ * no prefix, as wio-lite-ai's does. */
+const struct nn_tflm_board_facts nn_tflm_board_facts = { "" };
 
 }  /* extern "C" */

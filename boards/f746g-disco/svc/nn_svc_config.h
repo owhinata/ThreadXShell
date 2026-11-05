@@ -23,13 +23,14 @@
  */
 #if defined(CONFIG_NN_BACKEND_TFLM) || defined(CONFIG_NN_BACKEND_STEDGEAI_RELOC)
 #define NN_SVC_HAS_MODEL_LOAD  1
-/** ...and the source is a path on the SD card, so this board also supplies the
- *  whole-file read the shared command passes down (see nn_svc.h). */
-#define NN_SVC_HAS_MODEL_PATH  1
+/** ...and the source is a blob in the QSPI asset store, named as it was stored
+ *  (`nn model load --name <blob>`, issue #194; until then a path on the SD
+ *  card, `--path`, which is gone). */
+#define NN_SVC_HAS_MODEL_NAME  1
 #endif
 /* No NN_SVC_HAS_MODEL_BUILTIN: since issue #159 Step 4c no build of this board
- * carries a model it could adopt by name -- tflm loads from the SD card only,
- * like stedgeai_reloc -- so `nn model load builtin` is refused and the usage
+ * carries a model it could adopt by name -- tflm loads from the asset store
+ * only, like stedgeai_reloc -- so `nn model load builtin` is refused and the usage
  * does not list it.  (null / stedgeai still open their own stub / generated
  * model without a load; that is has_builtin in nn_backend.h, not a source.) */
 

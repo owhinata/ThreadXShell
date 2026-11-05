@@ -10,8 +10,11 @@
  * The ORDER of a load and an unload is svc/nn/nn_core_model.c's -- one copy for
  * every board -- and where a load ends is svc/nn/nn_swap.c's table.  What is here
  * is only what this board is: where its claim is (the NN session), what it must
- * see before it (no stream, SDRAM up, the first open), how it reads a model off
- * the SD card, and how its backend replaces one model with another.
+ * see before it (no stream, SDRAM up, the first open), how it reads a model out
+ * of a QSPI asset slot into the staging buffer and checks it (issue #194; until
+ * then a file on the SD card), and how its backend replaces one model with
+ * another.  The reading is wio-lite-ai's (port/nn/nn_svc_wio.c), over this
+ * board's store (src/blob.c).
  *
  * WHY IT IS ITS OWN FILE.  The rest of the adapter (nn_svc_f746.c) needs the
  * camera, the stream machine and the decoder; this half needs only svc/nn/nn.c,
@@ -31,6 +34,8 @@
 
 #include <string.h>
 
+#include "blob.h"           /* the QSPI asset store (issue #194)       */
+#include "crc32.h"          /* the CRC of the copy                      */
 #include "nn.h"
 #include "nn_camera.h"
 #include "sdram.h"
@@ -38,7 +43,6 @@
 
 #if defined(CONFIG_NN_BACKEND_TFLM)
 #include "nn_active.h"
-#include "nn_container.h"
 #include "plugin_claims.h"   /* the open model's claims and `nn info` lines */
 #include "plugin_lease.h"    /* the one lock into the plugin (#159 Step 4b) */
 #include "plugin_load.h"
@@ -146,14 +150,14 @@ const struct plugin_policy plugin_board_policy = {
  * and while the transition counter is odd -- so `nn info`, which takes no lock,
  * reads the counter in the same masked section as these and says "a model load
  * is in progress" rather than pairing one model with another's claims.  "from"
- * is this board's: the file the claims came with, its length and the CRC the
- * load printed, so a load landing between `nn info`'s model line and its plugin
- * line shows up as a mismatch.
+ * is this board's: the slot and the blob the claims came with, so a load landing
+ * between `nn info`'s model line and its plugin line shows up as a mismatch.
+ * (Until issue #194 it was the SD path, the length and the CRC the load
+ * printed; the CRC is now the store's, in `blob list`.)
  */
-#define NN_CLAIMS_PATH_MAX 48u
-/* "<path>, 4294967295 B, file crc32 XXXXXXXX" must survive whole. */
-_Static_assert((NN_CLAIMS_PATH_MAX - 1u) + 35u < PLUGIN_CLAIMS_FROM_MAX,
-               "a container's path, length and CRC would be cut on `nn info`");
+/* "slot 4294967295, blob '" + a name + "'" must survive whole. */
+_Static_assert(23u + BLOB_NAME_MAX + 1u < PLUGIN_CLAIMS_FROM_MAX,
+               "a container's slot and blob name would be cut on `nn info`");
 
 static struct plugin_claims_store nn_claims;
 
@@ -168,22 +172,45 @@ static void nn_claims_set(const struct plugin_claims *c)
 
 /* ---- the backend ---------------------------------------------------------- */
 
-/** One load's resolution, on the console's stack. */
+/** One load's resolution, on the console's stack: nothing in it is the
+ *  adapter's until commit(). */
 struct nn_f746_job {
-	nn_svc_read_fn read;
-	void          *ctx;
-	void          *buf;
-	uint32_t       cap;
-	uint32_t       len;
-	/* What the backend is handed: the whole file, or -- for a container --
-	 * its model section, in place inside the staging slot (issue #159). */
-	const void    *model_at;
-	uint32_t       model_len;
+	struct blob_info info;
+	unsigned         slot;   /**< where the name resolved, under the blob flag */
+	void            *buf;
+	uint32_t         cap;
+	/* What the backend is handed: the whole payload, or -- for a container --
+	 * its model section, in place inside the staging buffer (issue #159). */
+	const void      *model_at;
+	uint32_t         model_len;
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	int                  is_container;
 	struct plugin_claims claims;
 #endif
 };
+
+/*
+ * [!] THE BLOB FLAG OF A LOAD, HELD FROM prepare()'s NAME LOOKUP TO fetch()'s
+ * PAYLOAD READ (issue #194, wio-lite-ai's since #191), so the slot the name
+ * resolved to and the length and CRC checked before the open model went down
+ * belong to the same generation of the slot as the bytes read after.  A `blob
+ * write` / `blob erase` and `qspi erase` / `qspi test` are refused meanwhile.
+ * fetch() gives it back as soon as the QSPI is done with; every other exit -- a
+ * refusal in prepare(), a lease the order could not take, any failure in
+ * between -- gives it back in claim_give().  Written and read only by the
+ * holder of the NN session.  The flag is a try-acquire with interrupts masked,
+ * never a wait, so holding it while the order waits for the plugin lease orders
+ * no lock against another.
+ */
+static uint8_t nn_life_blob;
+
+static void nn_life_blob_give(void)
+{
+	if (nn_life_blob) {
+		nn_life_blob = 0u;
+		blob_busy_release();
+	}
+}
 
 /*
  * The backend's reload: nn_model_reload() adopts the new model, or -- if it is
@@ -202,7 +229,7 @@ static int nn_life_swap(struct nn_core_model_job *j, int *model_after)
 	const struct nn_f746_job *f = j->board;
 	int rc;
 
-	rc = nn_model_reload(f->model_at, f->model_len, j->spec->path,
+	rc = nn_model_reload(f->model_at, f->model_len, f->info.name,
 	                     model_after);
 	if (rc == 0)
 		return NN_SVC_OK;
@@ -224,7 +251,7 @@ static void nn_life_release(void)
 /*
  * [!] staging_is_open IS THE BACKEND'S ANSWER (issues #191, #200), 1 on tflm
  * only: its one staging buffer is where the open model lives, so the shared
- * order takes that model down before fetch() reads the file over it.
+ * order takes that model down before fetch() reads the payload over it.
  * stedgeai_reloc keeps its own two slots and its restore; null and stedgeai
  * stage nothing.  The fact is in the backend's table, not written here.
  */
@@ -240,9 +267,10 @@ static const struct nn_core_model_backend nn_life_backend = {
 
 /* ---- the board ------------------------------------------------------------ */
 
-/* Every tag but a path, refused before anything is acquired.  `builtin` is
- * one of them since issue #159 Step 4c: no build of this board that can load
- * a model carries one in the image any more. */
+/* Every tag but a name, refused before anything is acquired -- in
+ * wio-lite-ai's words.  `--path` is one of them since issue #194: the model
+ * is a blob in the QSPI store, no longer a file on the SD card.  `builtin`
+ * since issue #159 Step 4c. */
 static void nn_life_spec_refused(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
@@ -250,13 +278,30 @@ static void nn_life_spec_refused(struct nn_core_model_job *j)
 
 	if (spec == NULL)
 		return;
-	nn_detail_set("this board loads a model from the SD card (--path); it "
-	              "has no %s",
-	              spec->tag == NN_SPEC_NAME ? "asset store"
-	              : spec->tag == NN_SPEC_SLOT ? "slot index"
+	nn_detail_set("this board loads a model from a QSPI asset by name "
+	              "(--name); it has no %s",
+	              spec->tag == NN_SPEC_SLOT ? "load by slot number "
+	                                          "(`blob list` names them)"
+	              : spec->tag == NN_SPEC_PATH ? "filesystem load (send the "
+	                                            "file with `blob write`)"
 	              : spec->tag == NN_SPEC_ADDR ? "raw model window"
 	              : spec->tag == NN_SPEC_BUILTIN ? "built-in model"
 	                                             : "such source");
+}
+
+/* The name's own rules, before anything is acquired: a name the store could
+ * never have stored is not looked for (the rules `blob write` applied). */
+static int nn_life_check_spec(struct nn_core_model_job *j)
+{
+	struct nn_op_result *res = j->res;
+	enum blob_name_verdict v = blob_name_check(j->spec->name, NULL);
+
+	if (v != BLOB_NAME_OK) {
+		nn_detail_set("'%s' is not a blob name (%s)", j->spec->name,
+		              blob_name_verdict_name(v));
+		return NN_SVC_ERR_ARG;
+	}
+	return NN_SVC_OK;
 }
 
 /*
@@ -311,7 +356,7 @@ static int nn_life_admit(struct nn_core_model_job *j)
  * THE CLAIM, worded.  claim_give gives it back.
  *
  * [!] THE SESSION IS CLAIMED BEFORE THE BUFFER IS ASKED FOR, so the answer,
- * the SD read and the swap are atomic against another console: otherwise a
+ * the payload read and the swap are atomic against another console: otherwise a
  * second shell could open a model in the buffer handed out (tflm's one buffer,
  * or stedgeai_reloc's inactive slot) between load_region() and the read, and
  * the live flatbuffer would be corrupted.
@@ -334,54 +379,110 @@ static int nn_life_claim_take(struct nn_core_model_job *j)
 	return NN_SVC_OK;
 }
 
+/* The blob flag, if a load still holds it, then the session. */
+static void nn_life_claim_give(void)
+{
+	nn_life_blob_give();
+	nn_session_release();
+}
+
 /*
- * What the read needs, asked before the SD card is touched.  [!] On tflm the
- * buffer is NOT asked for here (issue #191): it is the open model's until the
- * shared order takes that model down, and the backend refuses it until then,
- * so fetch() asks.  The other backends ask here, as they always did -- moving
- * their refusal (null's NOSUP) into fetch() would change how it ends.  The SD
- * read is one call that opens and reads, so it is not split: on tflm a file
- * that is not there also ends with no model.
+ * Everything a load can be refused for WITHOUT CHANGING ANYTHING, before the
+ * shared order takes the open model down (issue #191): the backend's capacity,
+ * and the name resolved to exactly one slot holding a valid blob that fits.  A
+ * refusal here leaves the previous model as it was (the order answers
+ * PREVIOUS) and gives back what it took.  On success the blob flag stays held
+ * for fetch(); claim_give() returns it if fetch() never runs.
+ *
+ * [!] On tflm the buffer is NOT asked for here (issue #191): it is the open
+ * model's until the shared order takes that model down, and the backend refuses
+ * it until then, so the capacity is asked apart (nn_model_stage_capacity()) and
+ * fetch() asks for the buffer.  The other backends hand out their region here,
+ * as they always did -- null's NOSUP refusal stays where it was -- and
+ * stedgeai_reloc's region is its inactive 448 KB slot, so a blob longer than
+ * that is refused here, at load (issue #194 D4).
  */
 static int nn_life_prepare(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
 	struct nn_f746_job *f = j->board;
+	const struct nn_spec *spec = j->spec;
+	int rc;
 
-#if !defined(CONFIG_NN_BACKEND_TFLM)
-	if (nn_model_load_region(&f->buf, &f->cap) != 0) {
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	rc = nn_model_stage_capacity(&f->cap);
+#else
+	rc = nn_model_load_region(&f->buf, &f->cap);
+#endif
+	if (rc != 0) {
 		nn_detail_set("this backend has no runtime model loader");
 		return NN_SVC_ERR_NOSUP;
 	}
-#endif
-	if (f->read == NULL) {
-		nn_detail_set("no filesystem reader was supplied for --path");
-		return NN_SVC_ERR_NOSUP;
+
+	/* Hold the blob flag from the name lookup to the payload read
+	 * (nn_life_blob). */
+	if (blob_busy_acquire() != BLOB_OK) {
+		nn_detail_set("blob busy (a `blob write` / `erase` or `qspi erase` "
+		              "/ `qspi test` is running)");
+		return NN_SVC_ERR_BUSY;
+	}
+	nn_life_blob = 1u;
+	{
+		enum blob_lookup why = BLOB_LOOKUP_REFUSE;
+
+		rc = blob_find(spec->name, &f->slot, &f->info, &why);
+		if (rc == BLOB_ERR_EMPTY || rc == BLOB_ERR_DUPLICATE) {
+			/* Two answers, two sentences: "no slot holds that name"
+			 * and "more than one slot holds that name" ask for
+			 * different things from the operator. */
+			nn_detail_set("'%s': %s (`blob list` shows what is where)",
+			              spec->name, blob_lookup_name(why));
+			nn_life_blob_give();
+			return NN_SVC_ERR_ARG;
+		}
+		if (rc != BLOB_OK) {
+			nn_detail_set("cannot read the blob headers (%d, see `qspi "
+			              "info` and `blob list`)", rc);
+			nn_life_blob_give();
+			return NN_SVC_ERR_HW;
+		}
+	}
+	/* blob_find() answers FOUND only for a VALID slot; asked again here so
+	 * that what this function relies on is stated where it relies on it. */
+	if (f->info.state != BLOB_VALID) {
+		nn_detail_set("slot %u holds no valid blob -- `blob list`", f->slot);
+		nn_life_blob_give();
+		return NN_SVC_ERR_ARG;
+	}
+	if (f->info.length == 0u || f->info.length > f->cap) {
+		nn_detail_set("slot %lu is %lu B, staging holds %lu B",
+		              (unsigned long)f->slot,
+		              (unsigned long)f->info.length, (unsigned long)f->cap);
+		nn_life_blob_give();
+		return NN_SVC_ERR_ARG;
 	}
 	return NN_SVC_OK;
 }
 
 /*
- * The file, into the staging buffer the backend handed out -- and, on tflm, split
- * if it is a plugin container (issue #159).
+ * The bytes: into the staging buffer, the CRC over the copy, the container
+ * split (tflm, issue #159).  On a tflm build the open model is already down
+ * (issue #191), so a failure here ends with no model; the operator loads the
+ * previous one again by its name.
  *
- * A payload that is not a container is a bare model and takes the old path
- * unchanged.  A container goes through svc/plugin/plugin_load.c -- the same
- * validator the host asset build runs -- with this board's policy, and its
- * MODEL SECTION is handed to the backend IN PLACE, at its offset inside the
- * staged file (nn.h, NN_MODEL_ALIGN): copying it down to the buffer's start
- * would overwrite the validated container with bytes nobody validated.  A
- * refused container is a refused load (REFUSED; on tflm the previous model is
- * already down, so it ends with none, issue #191).
- *
- * j->bare = 0 for a container is the truth, and in Step 4a changes nothing:
- * the plugin hooks are unset, so the shared order touches no plugin either way
- * (nn_core_model.h).
+ * A payload that is not a container is a bare model.  A container goes through
+ * svc/plugin/plugin_load.c -- the same validator the host asset build runs --
+ * with this board's policy, and its MODEL SECTION is handed to the backend IN
+ * PLACE, at its offset inside the staged copy (nn.h, NN_MODEL_ALIGN): copying
+ * it down to the buffer's start would overwrite the validated container with
+ * bytes nobody validated.
  */
 static int nn_life_fetch(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
 	struct nn_f746_job *f = j->board;
+	uint32_t crc;
+	int rc;
 
 	j->bare = 1;
 #if defined(CONFIG_NN_BACKEND_TFLM)
@@ -392,48 +493,66 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 		nn_detail_set("the model buffer was not handed out");
 		return NN_SVC_ERR_HW;
 	}
-#endif
-	/* The reader prints its own failure: it is the board's shell-layer file
-	   and it has the console this command came in on. */
-	if (f->read(f->ctx, j->spec->path, f->buf, f->cap, &f->len) != 0) {
-		nn_detail_clear();
-		return NN_SVC_ERR_ARG;
+	if (f->info.length > f->cap) {
+		/* prepare() checked against the same object; a different answer
+		 * now is the backend's fault, not the slot's. */
+		nn_detail_set("the staging capacity changed (%lu B)",
+		              (unsigned long)f->cap);
+		return NN_SVC_ERR_HW;
 	}
-	f->model_at  = f->buf;
-	f->model_len = f->len;
-#if defined(CONFIG_NN_BACKEND_TFLM)
+#endif
+
+	/* Under the flag, so the read does not look at it (src/blob.h). */
+	rc = blob_read_reserved(f->slot, 0u, f->buf, f->info.length);
+	nn_life_blob_give();          /* the QSPI is done with; the rest is SDRAM */
+	if (rc != BLOB_OK) {
+		nn_detail_set("QSPI read failed (%d)", rc);
+		return NN_SVC_ERR_HW;
+	}
+
 	/*
-	 * [!] THE CRC IS OVER THE SAME BYTES THE READER PRINTED ITS CRC OVER: the
-	 * reader (cmds/cmd_nn_board.c) calls nn_container_crc() on (f->buf, f->len)
-	 * as it returns them, and this calls it again on exactly that range, before
-	 * anything else writes the slot.  So the number `nn info` prints beside the
-	 * claims is the number the load printed, for the file the operator copied.
+	 * [!] CRC THE COPY, NOT THE FLASH.  `blob verify` re-reads the QSPI and
+	 * compares against the stored value, which says nothing about the bytes
+	 * that are about to be interpreted: a fault between the QSPI and this
+	 * buffer -- driver, bus, or the SDRAM itself -- would pass that check and
+	 * still hand a corrupt flatbuffer to the runtime.
 	 */
-	uint32_t crc;
+	crc = crc32_update(0u, f->buf, f->info.length);
+	if (crc != f->info.crc32) {
+		nn_detail_set("CRC32 mismatch -- stored %08lX, in memory %08lX; the "
+		              "blob is intact on the QSPI only if `blob verify %lu` "
+		              "passes, the copy is not",
+		              (unsigned long)f->info.crc32, (unsigned long)crc,
+		              (unsigned long)f->slot);
+		return NN_SVC_ERR_HW;
+	}
 
-	if (nn_container_crc(f->buf, f->len, &crc)) {
-		enum plugin_result pr = plugin_parse(f->buf, f->len,
-		                                     &f->claims.view);
-		char path[NN_CLAIMS_PATH_MAX];
-		size_t n;
+	f->model_at  = f->buf;
+	f->model_len = f->info.length;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/* [!] THE SPLIT IS DONE ON THE COPY THE CRC WAS JUST CHECKED AGAINST:
+	 * deciding what the bytes mean on a second read would decide it about
+	 * bytes nobody checked. */
+	if (plugin_probe(f->buf, f->info.length) == PLUGIN_KIND_CONTAINER) {
+		enum plugin_result pr;
 
+		pr = plugin_parse(f->buf, f->info.length, &f->claims.view);
 		if (pr != PLUGIN_OK) {
-			nn_detail_set("%s is a container this firmware refuses: %s",
-			              j->spec->path, plugin_result_name(pr));
+			nn_detail_set("slot %lu is a container this firmware refuses: %s",
+			              (unsigned long)f->slot, plugin_result_name(pr));
 			return NN_SVC_ERR_ARG;
 		}
-		f->is_container  = 1;
-		j->bare          = 0;
-		n = strlen(j->spec->path);
-		if (n >= sizeof path)
-			n = sizeof path - 1u;
-		memcpy(path, j->spec->path, n);
-		path[n] = '\0';
-		/* The whole container, as read off the card, and the CRC of exactly
-		 * those bytes (nn_container.h). */
-		nn_detail_to(f->claims.from, sizeof f->claims.from,
-		             "%s, %lu B, file crc32 %08lX", path,
-		             (unsigned long)f->len, (unsigned long)crc);
+		f->is_container = 1;
+		j->bare         = 0;
+		{
+			char name[BLOB_NAME_MAX + 1u];
+
+			(void)memcpy(name, f->info.name, sizeof name);
+			name[sizeof name - 1u] = '\0';
+			nn_detail_to(f->claims.from, sizeof f->claims.from,
+			             "slot %lu, blob '%s'", (unsigned long)f->slot,
+			             name);
+		}
 		f->model_at  = (const uint8_t *)f->buf + f->claims.view.model_off;
 		f->model_len = f->claims.view.model_len;
 	}
@@ -507,7 +626,7 @@ static int nn_life_lease_take(struct nn_core_model_job *j)
  * it (Step 4c: no resident decoder), and the status says the load did not
  * give what was asked for.  plugin_run_start() also logs its own reason.
  *
- * [!] THE STAGING REGION IS PASSED, NOT LOOKED UP: the buffer the reader filled
+ * [!] THE STAGING REGION IS PASSED, NOT LOOKED UP: the buffer fetch() filled
  * (f->buf, f->cap) is the region the container lies in, and the backend's
  * load_region() would now refuse -- its one buffer is the open model's (issue
  * #191; with two slots it answered with the other one).
@@ -522,7 +641,8 @@ static int nn_life_plugin_start(struct nn_core_model_job *j)
 	pr = plugin_run_start(&f->claims.view, f->buf, f->buf, f->cap);
 	if (pr == PLUGIN_RUN_OK || pr == PLUGIN_RUN_NO_PLUGIN)
 		return NN_SVC_OK;
-	nn_detail_set("%s: %s", j->spec->path, plugin_run_why(pr));
+	nn_detail_set("slot %lu: %s", (unsigned long)f->slot,
+	              plugin_run_why(pr));
 	return NN_SVC_ERR_ARG;
 }
 
@@ -545,12 +665,12 @@ static const struct nn_core_model_board nn_life_board = {
 	.cs_enter      = nn_life_cs_enter,
 	.cs_exit       = nn_life_cs_exit,
 	.backend       = &nn_life_backend,
-	.tags          = NN_CORE_MODEL_TAG(NN_SPEC_PATH),
+	.tags          = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
 	.spec_refused  = nn_life_spec_refused,
-	.check_spec    = NULL,     /* a path has no argument to range-check */
+	.check_spec    = nn_life_check_spec,
 	.admit         = nn_life_admit,
 	.claim_take    = nn_life_claim_take,
-	.claim_give    = nn_session_release,
+	.claim_give    = nn_life_claim_give,
 	.prepare       = nn_life_prepare,
 	.fetch         = nn_life_fetch,
 #if defined(CONFIG_NN_BACKEND_TFLM)
@@ -606,10 +726,13 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	struct nn_f746_job f;
 	struct nn_core_model_job j;
 
+	/* The model is read out of the QSPI asset store here; no filesystem
+	 * reader is needed or taken (issue #194). */
+	(void)read;
+	(void)ctx;
+
 	nn_detail_clear();
 	memset(&f, 0, sizeof f);
-	f.read  = read;
-	f.ctx   = ctx;
 	j.spec  = spec;
 	j.res   = res;
 	j.board = &f;
@@ -639,11 +762,10 @@ void nn_svc_model_unload(struct nn_op_result *res)
  * actually branched into (since Step 4b), and "validated, not loaded" a
  * container whose plugin was refused or never reached.
  *
- * Two CRCs, which are different things: `crc` on the plugin line is the
- * plugin-section digest the container carries (it moves when the plugin's
- * bytes do, not when the model does); `file crc32` on the from-line is the CRC
- * of the WHOLE container as read off the card -- the number the load printed
- * and the asset receipt names (nn_container.h).
+ * `crc` on the plugin line is the plugin-section digest the container carries
+ * (it moves when the plugin's bytes do, not when the model does).  The CRC of
+ * the WHOLE container -- what the asset receipt names -- is the store's, in
+ * `blob list` (issue #194; until then the from-line carried it).
  *
  * [!] NOTHING IS HELD WHILE THIS PRINTS.  The claims and the transition counter
  * are copied out in one masked section and written afterwards, by

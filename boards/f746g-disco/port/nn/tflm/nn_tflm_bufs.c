@@ -18,7 +18,7 @@
  * maintenance is ever owed.  The section is NOLOAD (the FMC is not up at reset), so
  * neither buffer may assume it starts as zeros, and neither does: TFLM's allocator
  * writes the arena before any kernel reads it, and the model buffer is only read over
- * the range the SD read just wrote.  Since issue #130 the camera producer writes the model's
+ * the range the load just copied in (from the QSPI asset store since issue #194).  Since issue #130 the camera producer writes the model's
  * input tensor straight into the arena, so the arena's bank3 require is also the
  * placement guarantee for those writes.
  *
@@ -35,11 +35,13 @@
 uint8_t nn_tflm_arena[NN_TFLM_ARENA_BYTES]
 	__attribute__((aligned(32), section(".sdram.ai")));
 
-/* The SD model buffer (owhinata/stm32f746g-disco#89 P2; one buffer since issue #191),
+/* The model staging buffer (owhinata/stm32f746g-disco#89 P2; one buffer since issue #191),
  * 16-aligned for tflite::GetModel() (NN_MODEL_ALIGN). */
 uint8_t nn_tflm_model_buf[NN_TFLM_MODEL_MAX]
 	__attribute__((aligned(16), section(".sdram.ai")));
 
-/* The staging capacity load_region() hands out, and the object the asset build reads
- * back out of shell.elf (board.cmake STAGE_SYMBOL nn_tflm_stage_cap): the buffer. */
+/* The staging capacity load_region() hands out (svc/nn/tflm/nn_tflm_mem.h), and
+ * the object cmake/check_blob_staging.py reads back out of shell.elf against the
+ * slot table (issue #194; the asset build's file destination read it until
+ * then): the buffer. */
 const uint32_t nn_tflm_stage_cap = NN_TFLM_MODEL_MAX;

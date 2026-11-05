@@ -528,7 +528,7 @@ endif()
 if(FIX_HOST_TU STREQUAL "OBJ")
     target_sources(fw_objs PRIVATE "@SVC@/plugin/plugin_load_host.c")
 endif()
-target_include_directories(fw_objs PRIVATE "@SVC@" "@SVC@/nn" "@SVC@/plugin" "@SVC@/camera")
+target_include_directories(fw_objs PRIVATE "@SVC@" "@SVC@/nn" "@SVC@/plugin" "@SVC@/camera" "@SVC@/blob")
 add_library(fw_objlink OBJECT objlink.c)
 add_library(fw_lib STATIC lib.c)
 if(FIX_HOST_TU STREQUAL "LIB")
@@ -703,7 +703,7 @@ if(FIX_PLUGIN)
                -ffunction-sections -fdata-sections -fno-stack-protector
                -fno-unwind-tables -fno-asynchronous-unwind-tables
                -fstack-usage
-               -I "@SVC@" -I "@SVC@/nn" -I "@SVC@/plugin" -I "@SVC@/camera"
+               -I "@SVC@" -I "@SVC@/nn" -I "@SVC@/plugin" -I "@SVC@/camera" -I "@SVC@/blob"
                -I "${CMAKE_SOURCE_DIR}/asset/common"
         ARCH_FLAGS ${_parch}
         MEMORY_LD "${CMAKE_SOURCE_DIR}/plugin_memory.ld"

@@ -11,8 +11,9 @@
  * CRC is wrong, a sender that closes the batch after fewer bytes than it
  * declared, a program that failed in the middle of a 1.7 MB payload -- each one
  * costs a flash cycle of a part whose endurance is not documented (#89) to
- * stage on hardware, and most cannot be staged at all.  test/test_blob_state.c
- * walks them here, and src/blob.c is left holding the I/O.
+ * stage on hardware, and most cannot be staged at all.
+ * shell/test/test_blob_state.c walks them here, and the board's store
+ * (grove-vision-ai-v2: src/blob.c) is left holding the I/O.
  *
  * THE HEADER IS TWO PROGRAM PAGES, AND THE MAGIC PAGE IS WRITTEN LAST AND
  * ALONE.  The first erase unit of a slot is its header sector; page 0 of that
@@ -55,13 +56,21 @@
 
 #include <stdint.h>
 
-#include "nor_span.h"   /* NOR_PROGRAM_PAGE -- the header's page granularity */
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* ---- format -------------------------------------------------------------- */
+
+/**
+ * One header page, in bytes.  A fact of the FORMAT, not of whichever part a
+ * board stores it on: the header is two pages of this size wherever it lives,
+ * so a blob written by one board's store reads the same in another's.  A board
+ * whose flash programs in pages checks at build time that its program page is
+ * this size (grove-vision-ai-v2: src/blob.c, against NOR_PROGRAM_PAGE) rather
+ * than this file following the board's constant.
+ */
+#define BLOB_HDR_PAGE        256u
 
 /** Bumped when a field changes meaning; the decoder refuses anything else. */
 #define BLOB_FMT_VER         1u
@@ -85,7 +94,7 @@ extern "C" {
 #define BLOB_BODY_SIZE        (BLOB_BODY_OFF_BODYCRC + 4u)           /* 88 */
 
 /** What a stat reads from the top of a slot: the magic page and the body page. */
-#define BLOB_HDR_SPAN        (2u * NOR_PROGRAM_PAGE)
+#define BLOB_HDR_SPAN        (2u * BLOB_HDR_PAGE)
 
 /* ---- what a slot holds --------------------------------------------------- */
 
@@ -346,7 +355,7 @@ const char *blob_lookup_name(enum blob_lookup l);
  * [!] AND THE VIEWS MUST COME FROM A SCAN THE CALLER IS STILL HOLDING THE
  * WINDOW UP FOR.  This is arithmetic over what somebody read; what makes the
  * answer still true when the model is parsed is the lease that was never
- * dropped in between (blob.h).
+ * dropped in between (grove-vision-ai-v2: src/blob.h).
  */
 enum blob_lookup blob_resolve_name(const struct blob_slot_view *v,
                                    unsigned count, unsigned *found);
@@ -356,8 +365,8 @@ enum blob_lookup blob_resolve_name(const struct blob_slot_view *v,
 /**
  * One `blob write`, from the erase to the header.
  *
- * [!] THE BOOKKEEPING IS HERE AND THE I/O IS NOT.  src/blob.c stages bytes and
- * programs them; what it may do next is decided by these functions, which is
+ * [!] THE BOOKKEEPING IS HERE AND THE I/O IS NOT.  The board's writer
+ * (grove-vision-ai-v2: src/blob_write.c) stages bytes and programs them; what it may do next is decided by these functions, which is
  * what lets the host test drive a whole transfer -- including the ones that end
  * badly -- with no flash under it.
  */
@@ -395,7 +404,8 @@ const char *blob_wr_verdict_name(enum blob_wr_verdict v);
 /** Arm @p w for @p slot, whose payload area is @p capacity bytes.  Called after
  *  the erase reported NOR_WRITE_OK and never before it: programming into a slot
  *  whose erase was cut short reads back as the AND of the two, which the
- *  writer's read-back turns into a terminal fault (nor_write.h). */
+ *  writer's read-back turns into a terminal fault (grove-vision-ai-v2:
+ *  port/nor/nor_write.h). */
 void blob_write_arm(struct blob_write *w, unsigned slot, uint32_t capacity);
 
 /** The sender declared @p declared bytes in block 0.  ARMED -> RECV. */

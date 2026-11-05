@@ -442,9 +442,10 @@ def header_rebuild(cmake_dir):
         # -fstack-usage as the boards pass it: without it the .su byproducts
         # never appear and ninja reruns every edge, so every case would pass.
         args["CFLAGS"] = ('-O1 -ffreestanding -fstack-usage -I "%s" -I "%s" -I "%s" '
-                          '-I "%s" -I "%s"') % (
+                          '-I "%s" -I "%s" -I "%s"') % (
             os.path.join(repo, "svc"), os.path.join(repo, "svc", "nn"),
             os.path.join(repo, "svc", "plugin"), os.path.join(repo, "svc", "camera"),
+            os.path.join(repo, "svc", "blob"),
             os.path.join(repo, "asset", "common"))
         call = "\n".join("    %s %s" % (k, v) for k, v in args.items())
         gcall = "\n".join("    %s %s" % (k, v) for k, v in GATE.items())

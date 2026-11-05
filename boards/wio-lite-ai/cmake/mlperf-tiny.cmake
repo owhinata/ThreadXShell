@@ -52,6 +52,7 @@ target_include_directories(mlperf_obj PRIVATE
     "${CMAKE_SOURCE_DIR}/svc/nn"
     "${CMAKE_SOURCE_DIR}/svc/plugin"
     "${CMAKE_SOURCE_DIR}/svc/camera"
+    "${CMAKE_SOURCE_DIR}/svc/blob"
     "${TX_DIR}/common/inc"               # cli.h -> cli_config.h -> ThreadX types
     "${TX_PORT}/inc")
 

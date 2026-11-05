@@ -123,7 +123,8 @@ def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None,
                           else BASE_FLAGS + NO_UNWIND) + [
         "-I", os.path.join(REPO, "svc"), "-I", os.path.join(REPO, "svc", "nn"),
         "-I", os.path.join(REPO, "svc", "plugin"),
-        "-I", os.path.join(REPO, "svc", "camera"), "-I", src]
+        "-I", os.path.join(REPO, "svc", "camera"),
+        "-I", os.path.join(REPO, "svc", "blob"), "-I", src]
     objs, sus = [], []
     # [!] KEEP THIS IN STEP WITH add_plugin()'s source list.  plugin_text.c
     # arrived with #105 and was added there and NOT here, which nothing noticed

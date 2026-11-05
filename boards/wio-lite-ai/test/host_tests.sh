@@ -53,7 +53,7 @@ gcc $CFLAGS -Wno-unused-parameter \
 # issue #162 -- the camera input refusals (svc/nn/nn_input_codes.h, tested in
 # shell/test/test_nn_input_codes.c) against this board's other nn_camera_start()
 # codes: none may land on a value that already means something else here.
-gcc $CFLAGS -I "$board/port/nn" -I "$board/svc" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+gcc $CFLAGS -I "$board/port/nn" -I "$board/svc" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
     "$here/test_nncam_input.c" $LDFLAGS -o "$out/test_nncam_input"
 "$out/test_nncam_input"
 
@@ -82,7 +82,7 @@ gcc $CFLAGS -I "$board/port/nn" -I "$board/svc" -I "$HOST_TEST_SVC" -I "$HOST_TE
 # the same one the packer reads), and the shared decoder it carries comes with
 # it -- the firmware image no longer links svc/nn/blazeface.c at all.
 gcc $CFLAGS -I "$board/port/nn" -I "$board/port/plugin" -I "$board/svc" \
-    -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
     "$here/test_nn_active.c" \
     "$board/port/nn/nn_active.c" "$HOST_TEST_SVC/nn/nn_desc.c" \
     "$HOST_TEST_SVC/nn/nn_active_lease.c" "$HOST_TEST_SVC/nn/nn_active_core.c" \
@@ -111,8 +111,8 @@ gcc $CFLAGS -I "$board/port/nn" -I "$board/port/plugin" -I "$board/svc" \
 # script's named exemptions in both directions (cmake/check_lease_entries.py,
 # shared with f746g-disco).
 lease_check="$HOST_TEST_REPO/cmake/check_lease_entries.py"
-lease_inc_active="-I $board/port/nn -I $board/port/plugin -I $board/svc -I $HOST_TEST_SVC -I $HOST_TEST_SVC/nn -I $HOST_TEST_SVC/plugin -I $HOST_TEST_SVC/camera"
-lease_inc_run="-I $here/plugin_run_shim -I $board/port/plugin -I $board/svc -I $svc -I $svc/nn -I $svc/plugin -I $svc/camera"
+lease_inc_active="-I $board/port/nn -I $board/port/plugin -I $board/svc -I $HOST_TEST_SVC -I $HOST_TEST_SVC/nn -I $HOST_TEST_SVC/plugin -I $HOST_TEST_SVC/camera -I $HOST_TEST_SVC/blob"
+lease_inc_run="-I $here/plugin_run_shim -I $board/port/plugin -I $board/svc -I $svc -I $svc/nn -I $svc/plugin -I $svc/camera -I $svc/blob"
 gcc $CFLAGS $lease_inc_active -c "$board/port/nn/nn_active.c" \
     -o "$out/lease_nn_active.o"
 gcc $CFLAGS $lease_inc_active -c "$HOST_TEST_SVC/nn/nn_active_lease.c" \
@@ -133,7 +133,7 @@ python3 "$lease_check" \
 # DREGION above the snapshot refuses rather than clamps.  The shared lease test
 # stubs this binding, so this is where the loop itself is seen.
 gcc $CFLAGS -I "$here/plugin_run_shim" -I "$board/svc" \
-    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
     "$here/test_plugin_run_mpu.c" "$board/port/plugin/plugin_run.c" \
     "$HOST_TEST_SVC/plugin/plugin_mpu_v7m.c" \
     $LDFLAGS -o "$out/test_plugin_run_mpu"
@@ -188,7 +188,7 @@ done
 # reason mlperf_th is C++ too (see its header).
 mlperf="$HOST_TEST_REPO/lib/mlperf-tiny/benchmark"
 if [ -f "$mlperf/api/internally_implemented.cpp" ]; then
-    gcc $CFLAGS -c -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" "$svc/fmt.c" -o "$out/fmt.o"
+    gcc $CFLAGS -c -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" "$svc/fmt.c" -o "$out/fmt.o"
     gcc $CFLAGS -I "$board/port/nn" -I "$board/port/mlperf" -I "$svc/nn" \
         -c "$here/test_mlperf.c" -o "$out/test_mlperf.o"
     # -std=gnu++17 to match the firmware, which passes no -std and so gets the GNU
@@ -199,7 +199,7 @@ if [ -f "$mlperf/api/internally_implemented.cpp" ]; then
     # both, but the dialect match is what made the difference visible.)
     g++ -std=gnu++17 -Wall -Wextra -ffunction-sections -fdata-sections -no-pie \
         -I "$mlperf" -I "$board/port/mlperf" -I "$board/port/nn" \
-        -I "$inc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$board/port/threadx" \
+        -I "$inc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" -I "$board/port/threadx" \
         -fno-exceptions -fno-rtti \
         -include "$board/port/mlperf/mlperf_th.h" \
         "$mlperf/api/internally_implemented.cpp" \
@@ -237,7 +237,7 @@ gcc $CFLAGS "$here/test_sbrk.c" "$out/retarget_host.o" \
 # it -- and those goldens are the OTHER board's, because rect_geom.c is shared
 # and an 8x8 outline of stroke 2 must cost 48 on both.
 gcc $CFLAGS -DPLUGIN_PAINT_COUNT_STORES \
-    -I "$board/port/plugin" -I "$board/../../svc" -I "$board/../../svc/nn" -I "$board/../../svc/plugin" -I "$board/../../svc/camera" \
+    -I "$board/port/plugin" -I "$board/../../svc" -I "$board/../../svc/nn" -I "$board/../../svc/plugin" -I "$board/../../svc/camera" -I "$board/../../svc/blob" \
     "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
     "$board/../../svc/plugin/plugin_paint_budget.c" "$board/../../svc/rect_geom.c" \
     "$board/../../svc/plugin/plugin_bindings.c" "$board/../../svc/plugin/plugin_paint_span.c" \
@@ -253,7 +253,7 @@ gcc $CFLAGS -DPLUGIN_PAINT_COUNT_STORES \
 # write byte-identical records for the same text.  The REAL log.c is compiled
 # (by #include, to read the ring back); log_shim/ supplies only the intrinsics
 # it uses, traced, and -DLOG_HOST_TEST switches on its read-back tap.
-gcc $CFLAGS -DLOG_HOST_TEST -I "$here/log_shim" -I "$board/svc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+gcc $CFLAGS -DLOG_HOST_TEST -I "$here/log_shim" -I "$board/svc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
     "$here/test_log.c" "$svc/fmt.c" \
     $LDFLAGS -o "$out/test_log"
 "$out/test_log"
@@ -360,7 +360,7 @@ for sd in 0 1; do
     gcc $CFLAGS -DCLI_USE_COLOR=0 -DBSP_ENABLE_SD=$sd \
         -I "$st" -I "$HOST_TEST_BACKEND" -I "$st/shim" -I "$st/fx_shim" \
         -I "$board/svc" -I "$inc" -I "$HOST_TEST_CORE" \
-        -I "$st/../cmds" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+        -I "$st/../cmds" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
         "$here/test_camera_table.c" "$st/camera_svc_stub.c" \
         "$st/../cmds/cmd_camera.c" \
         "$HOST_TEST_CORE/cli_session.c" "$HOST_TEST_CORE/cli_edit.c" \

@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the blob header codec and the transfer's decisions (#92,
- * src/blob_state.c).
+ * svc/blob/blob_state.c).
  *
  * WHY THIS EXISTS.  Every case below is one the console cannot stage.  A body
  * whose CRC is wrong, a header that names a slot it is not in, a sender that
@@ -38,12 +38,13 @@ static int failures;
 		}                                                              \
 	} while (0)
 
-/* Slot 0 of the shipped table: 2 MB at 0x200000, one 4 KB unit of header. */
+/* Slot 0 of grove-vision-ai-v2's shipped table: 2 MB at 0x200000, one 4 KB
+ * unit of header. */
 #define BASE   0x00200000u
 #define CAP    (0x00200000u - 0x1000u)
 
 static uint8_t hdr[BLOB_HDR_SPAN];
-#define BODY  (hdr + NOR_PROGRAM_PAGE)
+#define BODY  (hdr + BLOB_HDR_PAGE)
 
 static void hdr_erase(void)
 {
@@ -61,12 +62,12 @@ static enum blob_hdr_reject put_body(uint32_t base, uint32_t cap,
 	memcpy(info.name, name, strlen(name));
 	info.length = length;
 	info.crc32  = crc;
-	return blob_hdr_encode_body(BODY, NOR_PROGRAM_PAGE, base, cap, &info);
+	return blob_hdr_encode_body(BODY, BLOB_HDR_PAGE, base, cap, &info);
 }
 
 static void put_magic(void)
 {
-	CHECK(blob_hdr_encode_magic(hdr, NOR_PROGRAM_PAGE) == BLOB_REJECT_NONE,
+	CHECK(blob_hdr_encode_magic(hdr, BLOB_HDR_PAGE) == BLOB_REJECT_NONE,
 	      "the magic would not encode");
 }
 
@@ -213,7 +214,7 @@ static void t_empty_and_foreign(void)
 	 * nothing -- rather than complaining about the version of a KVDB
 	 * sector. */
 	hdr_erase();
-	memset(BODY, 0x5A, NOR_PROGRAM_PAGE);
+	memset(BODY, 0x5A, BLOB_HDR_PAGE);
 	st = decode(&why, &got);
 	CHECK(st == BLOB_INVALID && why == BLOB_REJECT_BODY_TAIL,
 	      "an erased magic over foreign bytes is %s (%s)",
@@ -259,11 +260,11 @@ static void t_magic_page(void)
 	 * as valid would accept a header somebody else's data happened to sit
 	 * on top of. */
 	put_magic();
-	hdr[NOR_PROGRAM_PAGE - 1u] = 0x00u;
+	hdr[BLOB_HDR_PAGE - 1u] = 0x00u;
 	CHECK(decode(&why, &got) == BLOB_INVALID && why == BLOB_REJECT_MAGIC,
 	      "a magic page with a stray byte decoded as %s",
 	      blob_hdr_reject_name(why));
-	hdr[NOR_PROGRAM_PAGE - 1u] = 0xFFu;
+	hdr[BLOB_HDR_PAGE - 1u] = 0xFFu;
 	CHECK(decode(&why, &got) == BLOB_VALID,
 	      "clearing the stray byte did not restore the header");
 }
@@ -274,7 +275,7 @@ static void t_magic_page(void)
  * asymmetry was the fail-open; these are the vectors that close it. */
 static void t_body_page_tail(void)
 {
-	static uint8_t page[NOR_PROGRAM_PAGE];
+	static uint8_t page[BLOB_HDR_PAGE];
 	struct blob_info info, got;
 	enum blob_hdr_reject why;
 	uint32_t i;
@@ -295,7 +296,7 @@ static void t_body_page_tail(void)
 	      "clearing the stray byte did not restore the header");
 
 	/* And the last byte of the page, so the check covers the whole tail. */
-	BODY[NOR_PROGRAM_PAGE - 1u] = 0xFEu;
+	BODY[BLOB_HDR_PAGE - 1u] = 0xFEu;
 	CHECK(decode(&why, &got) == BLOB_INVALID &&
 	      why == BLOB_REJECT_BODY_TAIL,
 	      "a stray byte at the end of the page decoded as %s",
@@ -312,7 +313,7 @@ static void t_body_page_tail(void)
 	info.length = 16u;
 	CHECK(blob_hdr_encode_body(page, sizeof page, BASE, CAP, &info) ==
 	      BLOB_REJECT_NONE, "the body would not encode");
-	for (i = BLOB_BODY_SIZE; i < NOR_PROGRAM_PAGE; i++) {
+	for (i = BLOB_BODY_SIZE; i < BLOB_HDR_PAGE; i++) {
 		if (page[i] != 0xFFu) {
 			CHECK(0, "the encoder left 0x%02X at page offset %u",
 			      page[i], i);
@@ -447,29 +448,29 @@ static void t_codec_edges(void)
 	      BLOB_REJECT_SHORT, "the encoder wrote a body without its page");
 	CHECK(blob_hdr_encode_magic(hdr, BLOB_MAGIC_SIZE) == BLOB_REJECT_SHORT,
 	      "the magic went into a buffer smaller than a page");
-	CHECK(blob_hdr_encode_body(NULL, NOR_PROGRAM_PAGE, BASE, CAP, &info) ==
+	CHECK(blob_hdr_encode_body(NULL, BLOB_HDR_PAGE, BASE, CAP, &info) ==
 	      BLOB_REJECT_SHORT, "the encoder accepted a NULL buffer");
-	CHECK(blob_hdr_encode_body(BODY, NOR_PROGRAM_PAGE, BASE, CAP, NULL) ==
+	CHECK(blob_hdr_encode_body(BODY, BLOB_HDR_PAGE, BASE, CAP, NULL) ==
 	      BLOB_REJECT_SHORT, "the encoder accepted a NULL info");
 	info.name[0] = '\0';
-	CHECK(blob_hdr_encode_body(BODY, NOR_PROGRAM_PAGE, BASE, CAP, &info) ==
+	CHECK(blob_hdr_encode_body(BODY, BLOB_HDR_PAGE, BASE, CAP, &info) ==
 	      BLOB_REJECT_NAME, "the encoder wrote an empty name");
 	memcpy(info.name, "two words", 10u);
-	CHECK(blob_hdr_encode_body(BODY, NOR_PROGRAM_PAGE, BASE, CAP, &info) ==
+	CHECK(blob_hdr_encode_body(BODY, BLOB_HDR_PAGE, BASE, CAP, &info) ==
 	      BLOB_REJECT_NAME, "the encoder wrote a name with a space");
 	/* [!] Not terminated at all -- the field is exactly BLOB_NAME_MAX + 1
 	 * bytes, so the name rules have to stop on their own rather than on a
 	 * NUL that is not there.  They read index BLOB_NAME_MAX and no
 	 * further. */
 	memset(info.name, 'x', sizeof info.name);
-	CHECK(blob_hdr_encode_body(BODY, NOR_PROGRAM_PAGE, BASE, CAP, &info) ==
+	CHECK(blob_hdr_encode_body(BODY, BLOB_HDR_PAGE, BASE, CAP, &info) ==
 	      BLOB_REJECT_NAME, "an unterminated name was written");
 
 	memset(small, 0xA5, sizeof small);
 	CHECK(blob_hdr_encode_magic(small, sizeof small) == BLOB_REJECT_SHORT,
 	      "the magic went into a buffer too small");
 	CHECK(small[0] == 0xA5u, "a refused magic still wrote bytes");
-	CHECK(blob_hdr_encode_magic(NULL, NOR_PROGRAM_PAGE) == BLOB_REJECT_SHORT,
+	CHECK(blob_hdr_encode_magic(NULL, BLOB_HDR_PAGE) == BLOB_REJECT_SHORT,
 	      "the magic went into a NULL buffer");
 }
 

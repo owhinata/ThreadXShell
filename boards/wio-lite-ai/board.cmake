@@ -1074,6 +1074,7 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/svc/nn"
     "${CMAKE_SOURCE_DIR}/svc/plugin"
     "${CMAKE_SOURCE_DIR}/svc/camera"
+    "${CMAKE_SOURCE_DIR}/svc/blob"
     "${BOARD_DIR}/svc"                           # log.h / timebase.h: the board's
                                                  # services, which the shared
                                                  # cmd_dmesg.c / cmd_sleep.c consume
@@ -1536,7 +1537,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables
         # The stack gate's input.
         -fstack-usage
-        -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${WIO_PLUGIN_COMMON}")
+        -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob" -I "${WIO_PLUGIN_COMMON}")
 
     include("${CMAKE_SOURCE_DIR}/cmake/add_plugin.cmake")
 
@@ -1617,7 +1618,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         add_custom_command(
             OUTPUT "${WIO_ABI_LAYOUT_JSON}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
-            COMMAND "${WIO_HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
+            COMMAND "${WIO_HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
                     "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
                     -o "${CMAKE_BINARY_DIR}/plugin/abi_layout"
             COMMAND "${CMAKE_BINARY_DIR}/plugin/abi_layout"
@@ -1639,7 +1640,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
                     -MD -MF "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
                     -MT "${WIO_SLOT_TABLE_JSON}"
                     -I "${BOARD_DIR}/src" -I "${BOARD_DIR}/port/nor"
-                    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
+                    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
                     "${BOARD_DIR}/scripts/slot_table.c"
                     -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
             COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table"
@@ -1652,7 +1653,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         add_custom_command(
             OUTPUT "${WIO_CONTAINER_VERIFIER}"
             COMMAND "${WIO_HOST_CC}" -std=c11 -O1 -Wall -Wextra
-                    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
+                    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
                     "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"

@@ -61,7 +61,8 @@ INCLUDES = ["-I", os.path.join(BOARD, "port", "nn"),
             "-I", os.path.join(REPO, "svc"),
             "-I", os.path.join(REPO, "svc", "nn"),
             "-I", os.path.join(REPO, "svc", "plugin"),
-            "-I", os.path.join(REPO, "svc", "camera")]
+            "-I", os.path.join(REPO, "svc", "camera"),
+            "-I", os.path.join(REPO, "svc", "blob")]
 CFLAGS = shlex.split(os.environ.get("HOST_TEST_CFLAGS", "-std=c11 -Wall -Wextra"))
 # -Werror: an "ok" has to mean the header compiled clean, not that a warning
 # about one of its comparisons scrolled past.

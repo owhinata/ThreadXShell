@@ -6,22 +6,25 @@
  * (issue #122 P15, review CONCERN 1).
  *
  * A board copies plugin_result_name() and plugin_run_strerror() whole into
- * struct nn_op_result::detail.  A board's OWN tables are checked where they are
- * written, with NN_SVC_DETAIL_LIT -- but svc/plugin/plugin_load.c and plugin_exec.c
- * sit below the `nn` contract and must not depend on it.  So their sentences are
+ * struct nn_op_result::detail, and grove-vision-ai-v2's adapter does the same
+ * with blob_name_verdict_name() and blob_lookup_name() (issue #192).  A board's
+ * OWN tables are checked where they are written, with NN_SVC_DETAIL_LIT -- but
+ * svc/plugin/plugin_load.c, plugin_exec.c and svc/blob/blob_state.c sit below
+ * the `nn` contract and must not depend on it.  So their sentences are
  * checked here instead, by ENUMERATION rather than by a list: every integer
- * around the enumerations is asked for its name, so a sentence added to either
+ * around the enumerations is asked for its name, so a sentence added to any
  * table is covered without anyone adding it here.  (Listing the enumerators
  * would pass for a new one nobody listed, which is the gap this closes.)
  */
 #include <stdio.h>
 #include <string.h>
 
+#include "blob_state.h"
 #include "nn_detail.h"
 #include "plugin_exec.h"
 #include "plugin_load.h"
 
-/* Wider than either enumeration by far; both start at 0 and count up. */
+/* Wider than any of the enumerations by far; all start at 0 and count up. */
 #define PROBE_LO (-256)
 #define PROBE_HI 256
 
@@ -49,14 +52,22 @@ int main(void)
 	for (v = PROBE_LO; v <= PROBE_HI; v++) {
 		const char *a = plugin_result_name((enum plugin_result)v);
 		const char *b = plugin_run_strerror((enum plugin_run_result)v);
+		const char *c = blob_name_verdict_name((enum blob_name_verdict)v);
+		const char *d = blob_lookup_name((enum blob_lookup)v);
 
 		bad += check("plugin_result_name", v, a);
 		bad += check("plugin_run_strerror", v, b);
+		bad += check("blob_name_verdict_name", v, c);
+		bad += check("blob_lookup_name", v, d);
 		if (a != NULL && strlen(a) > longest)
 			longest = strlen(a);
 		if (b != NULL && strlen(b) > longest)
 			longest = strlen(b);
-		n += 2;
+		if (c != NULL && strlen(c) > longest)
+			longest = strlen(c);
+		if (d != NULL && strlen(d) > longest)
+			longest = strlen(d);
+		n += 4;
 	}
 	if (bad != 0) {
 		printf("test_nn_detail_tables: %d failure(s)\n", bad);

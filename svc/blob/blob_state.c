@@ -6,15 +6,20 @@
  * @file    blob_state.c
  * @brief   The header codec and the transfer's decisions, as pure functions (#92).
  *
- * No hardware, no ThreadX, no shell -- test/test_blob_state.c compiles this
- * exact file on the host, against the same nor_span.h the firmware uses.  The
- * one thing it links is svc/crc32.c, which is equally freestanding.
+ * No hardware, no ThreadX, no shell -- shell/test/test_blob_state.c compiles
+ * this exact file on the host.  The one thing it links is svc/crc32.c, which is
+ * equally freestanding.
  *
  * See blob_state.h for the format and for why each decision lives here rather
- * than in src/blob.c.
+ * than in the board's store (grove-vision-ai-v2: src/blob.c).
+ *
+ * [!] blob_name_verdict_name() and blob_lookup_name() are copied whole into an
+ * `nn` explanation by a board's adapter, so their sentences have to fit
+ * NN_SVC_DETAIL_MAX.  This file sits below the `nn` contract and does not
+ * include nn_detail.h: shell/test/test_nn_detail_tables.c enumerates both
+ * tables against the bound instead.
  */
 #include "blob_state.h"
-#include "nn_detail.h"   /* NN_SVC_DETAIL_LIT: `nn model load` prints these (#122) */
 
 #include <string.h>
 
@@ -59,13 +64,13 @@ static int all_erased(const uint8_t *p, uint32_t n)
 const char *blob_name_verdict_name(enum blob_name_verdict v)
 {
 	switch (v) {
-	case BLOB_NAME_OK:    return NN_SVC_DETAIL_LIT("ok");
-	case BLOB_NAME_EMPTY: return NN_SVC_DETAIL_LIT("name is empty");
-	case BLOB_NAME_LONG:  return NN_SVC_DETAIL_LIT("name is too long");
-	case BLOB_NAME_CHAR:  return NN_SVC_DETAIL_LIT("name has a character that is not printable ASCII");
+	case BLOB_NAME_OK:    return "ok";
+	case BLOB_NAME_EMPTY: return "name is empty";
+	case BLOB_NAME_LONG:  return "name is too long";
+	case BLOB_NAME_CHAR:  return "name has a character that is not printable ASCII";
 	default:              break;
 	}
-	return NN_SVC_DETAIL_LIT("?");
+	return "?";
 }
 
 enum blob_name_verdict blob_name_check(const char *name, uint32_t *len_out)
@@ -187,15 +192,15 @@ enum blob_slot_state blob_hdr_decode(const uint8_t *hdr, uint32_t hdr_len,
 			out->state = BLOB_INVALID;
 		return BLOB_INVALID;
 	}
-	body = hdr + NOR_PROGRAM_PAGE;
+	body = hdr + BLOB_HDR_PAGE;
 
-	magic_erased = all_erased(hdr, NOR_PROGRAM_PAGE);
+	magic_erased = all_erased(hdr, BLOB_HDR_PAGE);
 	/* Present means the magic AND nothing else: this port programs eight
 	 * bytes into an erased page and never touches the rest, so a page with
 	 * anything further in it did not come from here. */
 	magic_present = (memcmp(hdr, magic_bytes, BLOB_MAGIC_SIZE) == 0) &&
 	                all_erased(hdr + BLOB_MAGIC_SIZE,
-	                           NOR_PROGRAM_PAGE - BLOB_MAGIC_SIZE);
+	                           BLOB_HDR_PAGE - BLOB_MAGIC_SIZE);
 
 	if (!magic_erased && !magic_present) {
 		if (why != NULL)
@@ -213,7 +218,7 @@ enum blob_slot_state blob_hdr_decode(const uint8_t *hdr, uint32_t hdr_len,
 	 * everywhere still reaches the EMPTY answer below, since an erased tail
 	 * passes this. */
 	if (!all_erased(body + BLOB_BODY_SIZE,
-	                NOR_PROGRAM_PAGE - BLOB_BODY_SIZE)) {
+	                BLOB_HDR_PAGE - BLOB_BODY_SIZE)) {
 		if (why != NULL)
 			*why = BLOB_REJECT_BODY_TAIL;
 		if (out != NULL)
@@ -233,7 +238,7 @@ enum blob_slot_state blob_hdr_decode(const uint8_t *hdr, uint32_t hdr_len,
 
 	/* Erased everywhere is the one case where a body that does not decode
 	 * is not a complaint. */
-	if (magic_erased && all_erased(body, NOR_PROGRAM_PAGE)) {
+	if (magic_erased && all_erased(body, BLOB_HDR_PAGE)) {
 		if (out != NULL) {
 			memset(out, 0, sizeof *out);
 			out->state = BLOB_EMPTY;
@@ -258,7 +263,7 @@ enum blob_hdr_reject blob_hdr_encode_body(uint8_t *page, uint32_t page_len,
 	uint8_t *body = page;
 	uint32_t nlen = 0u;
 
-	if (page == NULL || page_len < NOR_PROGRAM_PAGE || info == NULL)
+	if (page == NULL || page_len < BLOB_HDR_PAGE || info == NULL)
 		return BLOB_REJECT_SHORT;
 	if (blob_name_check(info->name, &nlen) != BLOB_NAME_OK)
 		return BLOB_REJECT_NAME;
@@ -268,7 +273,7 @@ enum blob_hdr_reject blob_hdr_encode_body(uint8_t *page, uint32_t page_len,
 	/* Erased first, body over it: whatever length the caller programs, from
 	 * the body to the whole page, the flash ends up the same.  0xFF over
 	 * erased flash clears no bits. */
-	memset(page, 0xFF, NOR_PROGRAM_PAGE);
+	memset(page, 0xFF, BLOB_HDR_PAGE);
 	memset(body, 0, BLOB_BODY_SIZE);
 	put32(body + BLOB_BODY_OFF_VER, BLOB_FMT_VER);
 	put32(body + BLOB_BODY_OFF_BASE, slot_base);
@@ -283,9 +288,9 @@ enum blob_hdr_reject blob_hdr_encode_body(uint8_t *page, uint32_t page_len,
 
 enum blob_hdr_reject blob_hdr_encode_magic(uint8_t *page, uint32_t page_len)
 {
-	if (page == NULL || page_len < NOR_PROGRAM_PAGE)
+	if (page == NULL || page_len < BLOB_HDR_PAGE)
 		return BLOB_REJECT_SHORT;
-	memset(page, 0xFF, NOR_PROGRAM_PAGE);
+	memset(page, 0xFF, BLOB_HDR_PAGE);
 	memcpy(page, magic_bytes, BLOB_MAGIC_SIZE);
 	return BLOB_REJECT_NONE;
 }
@@ -368,13 +373,13 @@ enum blob_choice blob_choose_target(const struct blob_slot_view *v,
 const char *blob_lookup_name(enum blob_lookup l)
 {
 	switch (l) {
-	case BLOB_LOOKUP_FOUND:     return NN_SVC_DETAIL_LIT("found");
-	case BLOB_LOOKUP_NONE:      return NN_SVC_DETAIL_LIT("no slot holds that name");
-	case BLOB_LOOKUP_DUPLICATE: return NN_SVC_DETAIL_LIT("more than one slot holds that name");
-	case BLOB_LOOKUP_REFUSE:    return NN_SVC_DETAIL_LIT("the slot scan does not hold together");
+	case BLOB_LOOKUP_FOUND:     return "found";
+	case BLOB_LOOKUP_NONE:      return "no slot holds that name";
+	case BLOB_LOOKUP_DUPLICATE: return "more than one slot holds that name";
+	case BLOB_LOOKUP_REFUSE:    return "the slot scan does not hold together";
 	default:                    break;
 	}
-	return NN_SVC_DETAIL_LIT("?");
+	return "?";
 }
 
 enum blob_lookup blob_resolve_name(const struct blob_slot_view *v,

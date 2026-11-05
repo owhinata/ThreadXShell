@@ -6,11 +6,11 @@
  * @file    blob.c
  * @brief   The asset store's read side (#92).
  *
- * Thin on purpose.  The decisions are in blob_map.c and blob_state.c, where a
- * host test can walk them; what is left here is the part that needs the board:
- * the lease, the invalidate, and the address arithmetic that turns a slot into
- * a pointer into the memory-mapped window.  See blob.h for why each read takes
- * a lease and invalidates before it looks.
+ * Thin on purpose.  The decisions are in blob_map.c and svc/blob/blob_state.c,
+ * where a host test can walk them; what is left here is the part that needs the
+ * board: the lease, the invalidate, and the address arithmetic that turns a
+ * slot into a pointer into the memory-mapped window.  See blob.h for why each
+ * read takes a lease and invalidates before it looks.
  */
 #include "blob.h"
 
@@ -20,6 +20,15 @@
 #include "crc32.h"
 #include "nor_flash.h"   /* nor_acquire / nor_release / nor_alias_invalidate */
 #include "nor_seam.h"    /* nor_seam_limits -- the interval, from the seam    */
+#include "nor_span.h"    /* NOR_PROGRAM_PAGE -- checked against the format     */
+
+/* The header's page is a fact of the format (svc/blob/blob_state.h), and each
+ * of its two pages is programmed exactly once (see there for why).  That holds
+ * only while one header page is one program page of this part, so the build
+ * refuses a format and a part that disagree rather than letting either follow
+ * the other. */
+_Static_assert(BLOB_HDR_PAGE == NOR_PROGRAM_PAGE,
+               "the blob header page is not this part's program page");
 
 /* The one place a slot becomes an address.  Reading the alias through a plain
  * pointer rather than a volatile one is deliberate: the lease is out, so

@@ -147,6 +147,7 @@ target_include_directories(bsp_iface INTERFACE
     "${CMAKE_SOURCE_DIR}/svc/nn"
     "${CMAKE_SOURCE_DIR}/svc/plugin"
     "${CMAKE_SOURCE_DIR}/svc/camera"   # frame.h
+    "${CMAKE_SOURCE_DIR}/svc/blob"
     "${BOARD_DIR}/svc"          # this board's services: log.h / timebase.h
     "${GEN_DIR}"
     "${HAL_DIR}/Inc"
@@ -615,6 +616,7 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/svc/nn"
     "${CMAKE_SOURCE_DIR}/svc/plugin"
     "${CMAKE_SOURCE_DIR}/svc/camera"
+    "${CMAKE_SOURCE_DIR}/svc/blob"
     "${BOARD_DIR}/svc")            # this board's svc: log.h / timebase.h
 target_compile_definitions(shell PRIVATE TX_INCLUDE_USER_DEFINE_FILE
     FX_INCLUDE_USER_DEFINE_FILE           # port/filex/fx_user.h
@@ -865,7 +867,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         -ffunction-sections -fdata-sections
         -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables
         -fstack-usage
-        -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${F746_PLUGIN_COMMON}")
+        -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob" -I "${F746_PLUGIN_COMMON}")
 
     include("${CMAKE_SOURCE_DIR}/cmake/add_plugin.cmake")
 
@@ -923,7 +925,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         add_custom_command(
             OUTPUT "${F746_ABI_LAYOUT_JSON}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
-            COMMAND "${F746_HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
+            COMMAND "${F746_HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
                     "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
                     -o "${CMAKE_BINARY_DIR}/plugin/abi_layout"
             COMMAND "${CMAKE_BINARY_DIR}/plugin/abi_layout"
@@ -935,7 +937,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         add_custom_command(
             OUTPUT "${F746_CONTAINER_VERIFIER}"
             COMMAND "${F746_HOST_CC}" -std=c11 -O1 -Wall -Wextra
-                    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
+                    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
                     "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"

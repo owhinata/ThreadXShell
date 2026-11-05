@@ -4224,7 +4224,9 @@ this is where a future class goes without touching anything already stored.  (A
 the bootloader's slot header, which nothing may ever write.
 
 **The header is two program pages, and the magic page is written last and
-alone** (`src/blob_state.c`).  Page 0 holds an 8-byte magic and nothing else;
+alone** (`svc/blob/blob_state.c`, shared since issue #192; the 256-byte page
+is the format's own constant and `src/blob.c` checks at build time that it is
+this part's program page).  Page 0 holds an 8-byte magic and nothing else;
 page 1 holds version, the slot's own base, the payload length, the payload
 CRC-32, the name and a CRC over itself.  So an interrupted transfer leaves a
 slot with no magic, and a body that failed to program cannot be rescued by a

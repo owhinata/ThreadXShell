@@ -147,7 +147,7 @@ static int write_header(struct wr *w, const char *name, uint32_t base)
 	                         w->bk.capacity, &info) != BLOB_REJECT_NONE)
 		return -1;
 	w->rep->transactions++;
-	if (w->ops->program(w->ops->ctx, w->token, base + NOR_PROGRAM_PAGE,
+	if (w->ops->program(w->ops->ctx, w->token, base + BLOB_HDR_PAGE,
 	                    blob_stage_buf, BLOB_BODY_SIZE) != 0)
 		return -1;
 

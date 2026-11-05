@@ -71,7 +71,7 @@ gcc $CFLAGS -I "$board/port/camera" \
 # issue #162 -- the camera input refusals (svc/nn/nn_input_codes.h, tested in
 # shell/test/test_nn_input_codes.c) against this board's other nn_camera_start()
 # codes: none may land on a value that already means something else here.
-gcc $CFLAGS -I "$board/port/nn" -I "$board/port/camera" -I "$board/svc" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+gcc $CFLAGS -I "$board/port/nn" -I "$board/port/camera" -I "$board/svc" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
     "$here/test_nncam_input.c" $LDFLAGS -o "$out/test_nncam_input"
 "$out/test_nncam_input"
 
@@ -108,7 +108,7 @@ python3 "$board/cmake/fixtures/run_layout_tests.py"
 # and `nn info` from another console in the middle of a swap (BUSY on all three
 # lines).  shell/test/test_nn_core_model.c walks the order itself.
 gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
-    -I "$board/port/sdram" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    -I "$board/port/sdram" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
     "$here/test_nn_model_life.c" "$board/port/nn/nn_svc_f746_model.c" \
     "$HOST_TEST_SVC/nn/nn.c" "$HOST_TEST_REPO/shell/test/nn_model_host.c" \
     "$HOST_TEST_SVC/nn/nn_core_model.c" "$HOST_TEST_SVC/nn/nn_svc_common.c" \
@@ -131,7 +131,7 @@ gcc $CFLAGS -DCONFIG_NN_BACKEND_TFLM=1 -DF746_PLUGIN_TARGET_ID=0x1101 \
     -DPLUGIN_VENEER_BASE_COST=640u -DF746_PLUGIN_STACK_NN_WORK=1024u \
     -DF746_PLUGIN_STACK_GUIX=1024u -DF746_PLUGIN_STACK_SHELL=1024u \
     -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
-    -I "$board/port/sdram" -I "$board/port/plugin" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    -I "$board/port/sdram" -I "$board/port/plugin" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
     "$here/test_nn_model_container.c" "$board/port/nn/nn_svc_f746_model.c" \
     "$HOST_TEST_SVC/nn/nn_container.c" \
     "$HOST_TEST_SVC/nn/nn.c" "$HOST_TEST_REPO/shell/test/nn_model_host.c" \
@@ -182,7 +182,7 @@ st="$HOST_TEST_SHELL_TEST"
 gcc $CFLAGS -DCLI_USE_COLOR=0 \
     -I "$st" -I "$HOST_TEST_BACKEND" -I "$st/shim" -I "$st/fx_shim" \
     -I "$board/svc" -I "$HOST_TEST_INC" -I "$HOST_TEST_CORE" \
-    -I "$st/../cmds" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    -I "$st/../cmds" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
     "$here/test_camera_table.c" "$st/camera_svc_stub.c" \
     "$st/../cmds/cmd_camera.c" \
     "$HOST_TEST_CORE/cli_session.c" "$HOST_TEST_CORE/cli_edit.c" \
@@ -199,7 +199,7 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 \
 # outline goldens are wio-lite-ai's (rect_geom.c is shared), so the two boards'
 # loops are held to the same rule from opposite layouts.
 gcc $CFLAGS -DPLUGIN_PAINT_COUNT_STORES -I "$board/port/plugin" \
-    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
     "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
     "$HOST_TEST_SVC/plugin/plugin_paint_budget.c" \
     "$HOST_TEST_SVC/plugin/plugin_bindings.c" "$HOST_TEST_SVC/plugin/plugin_paint_span.c" "$HOST_TEST_SVC/rect_geom.c" \
@@ -219,7 +219,7 @@ gcc $CFLAGS -I "$HOST_TEST_SVC/plugin" \
 # once; anywhere else keeps the dump-and-halt (src/fault_plugin.c over the real
 # shared loader).  A plugin cannot be made to fault on demand on the board.
 gcc $CFLAGS -I "$board/src" \
-    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
     "$here/test_fault_plugin.c" "$board/src/fault_plugin.c" \
     "$HOST_TEST_SVC/plugin/plugin_run_core.c" "$HOST_TEST_SVC/plugin/plugin_exec.c" \
     "$HOST_TEST_SVC/plugin/plugin_load.c" "$HOST_TEST_SVC/plugin/plugin_load_host.c" "$HOST_TEST_SVC/crc32.c" "$HOST_TEST_SVC/fmt.c" \
@@ -234,7 +234,7 @@ gcc $CFLAGS -I "$board/src" \
 # (shell/test/test_nn_active_lease.c, test_plugin_run_lease.c).  The HAL for
 # the binding is test/plugin_run_shim (compile only).
 lease_check="$HOST_TEST_REPO/cmake/check_lease_entries.py"
-lease_inc="-I $board/port/nn -I $board/port/plugin -I $board/port/camera -I $board/svc -I $here/plugin_run_shim -I $here/nn_shim -I $HOST_TEST_SVC -I $HOST_TEST_SVC/nn -I $HOST_TEST_SVC/plugin -I $HOST_TEST_SVC/camera"
+lease_inc="-I $board/port/nn -I $board/port/plugin -I $board/port/camera -I $board/svc -I $here/plugin_run_shim -I $here/nn_shim -I $HOST_TEST_SVC -I $HOST_TEST_SVC/nn -I $HOST_TEST_SVC/plugin -I $HOST_TEST_SVC/camera -I $HOST_TEST_SVC/blob"
 gcc $CFLAGS -DCONFIG_NN_BACKEND_TFLM=1 $lease_inc -c "$board/port/nn/nn_active.c" \
     -o "$out/f746_lease_nn_active.o"
 gcc $CFLAGS $lease_inc -c "$HOST_TEST_SVC/nn/nn_active_lease.c" \
@@ -256,7 +256,7 @@ python3 "$lease_check" \
 # DREGION above the snapshot refuses rather than clamps.  The shared lease test
 # stubs this binding, so this is where the loop itself is seen.
 gcc $CFLAGS -I "$here/plugin_run_shim" -I "$board/svc" \
-    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
     "$here/test_plugin_run_mpu.c" "$board/port/plugin/plugin_run.c" \
     "$HOST_TEST_SVC/plugin/plugin_mpu_v7m.c" \
     $LDFLAGS -o "$out/test_plugin_run_mpu"

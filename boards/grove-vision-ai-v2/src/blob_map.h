@@ -53,9 +53,9 @@
  *
  * [!] IDENTITY IS THE BASE ADDRESS, NEVER THE INDEX.  Reorder the table and
  * every index means a different piece of flash, so nothing that persists may
- * carry one: a stored header names its own base (blob_state.h), and the index
- * `blob list` prints is a display ordinal resolved against the table on the
- * spot.  blob_map_index_of() is the resolver for the other direction.
+ * carry one: a stored header names its own base (svc/blob/blob_state.h), and
+ * the index `blob list` prints is a display ordinal resolved against the table
+ * on the spot.  blob_map_index_of() is the resolver for the other direction.
  *
  * [!] WHICH IS WHY THE ONLY SAFE EDIT IS AN APPEND -- and why #94 re-carving
  * this table whole was a one-off with a price attached.  A slot that moves

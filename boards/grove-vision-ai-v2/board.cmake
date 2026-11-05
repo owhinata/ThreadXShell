@@ -672,13 +672,14 @@ add_library(shell_objs OBJECT
     # than settling it when something needs the room.
     "${BOARD_DIR}/src/blob_stage.c"
     # The asset store (issue #92).  blob_map.c carves the seam's writable
-    # interval into slots and blob_state.c decides what the bytes at the top of
-    # one mean -- both pure, both walked by test/test_blob_{map,state}.c on the
-    # host -- and blob.c is the part that needs the board: the lease, the cache
-    # invalidate, and the arithmetic that turns a slot into a pointer into the
-    # memory-mapped window.
+    # interval into slots and svc/blob/blob_state.c (shared since issue #192)
+    # decides what the bytes at the top of one mean -- both pure, walked on the
+    # host by test/test_blob_map.c and shell/test/test_blob_state.c -- and
+    # blob.c is the part that needs the board: the lease, the cache invalidate,
+    # and the arithmetic that turns a slot into a pointer into the memory-mapped
+    # window.
     "${BOARD_DIR}/src/blob_map.c"
-    "${BOARD_DIR}/src/blob_state.c"
+    "${CMAKE_SOURCE_DIR}/svc/blob/blob_state.c"
     "${BOARD_DIR}/src/blob.c"
     # The write coordinator (issue #92).  Takes its operations as a vtable so
     # that test/test_blob_write.c can fail each of them and watch the
@@ -873,6 +874,7 @@ target_include_directories(shell_objs PRIVATE
     "${CMAKE_SOURCE_DIR}/svc/nn/tflm"     # nn_tflm_ops.h / nn_tflm_glue.h (#169)
     "${CMAKE_SOURCE_DIR}/svc/plugin"
     "${CMAKE_SOURCE_DIR}/svc/camera"
+    "${CMAKE_SOURCE_DIR}/svc/blob"
     "${BOARD_DIR}/svc"          # log.h / timebase.h: the board's services,
                                 # which the shared cmd_dmesg.c / cmd_sleep.c
                                 # consume
@@ -1947,7 +1949,7 @@ set(GROVE_PLUGIN_CFLAGS
     # The stack gate's input.  Without it a bound cannot be derived at all, and
     # the gate says so rather than guessing.
     -fstack-usage
-    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${GROVE_PLUGIN_COMMON}")
+    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob" -I "${GROVE_PLUGIN_COMMON}")
 # The build rule itself is repository-wide (issue #106): the plugin sources are
 # not this board's, so neither is the rule that compiles them.  What IS this
 # board's -- the flags carrying -mcpu, the .plugin MEMORY fragment, the post-link
@@ -2149,7 +2151,7 @@ if(HOST_CC)
     add_custom_command(
         OUTPUT "${GROVE_ABI_LAYOUT_JSON}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
-        COMMAND "${HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
+        COMMAND "${HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
                 "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
                 -o "${CMAKE_BINARY_DIR}/plugin/abi_layout"
         COMMAND "${CMAKE_BINARY_DIR}/plugin/abi_layout"
@@ -2162,7 +2164,7 @@ if(HOST_CC)
         OUTPUT "${GROVE_SLOT_TABLE_JSON}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
         COMMAND "${HOST_CC}" -std=c11 -O1 -w
-                -I "${BOARD_DIR}/src" -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
+                -I "${BOARD_DIR}/src" -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
                 "${BOARD_DIR}/scripts/slot_table.c" "${BOARD_DIR}/src/blob_map.c"
                 -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
         COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table" "${GROVE_ERASE_GRAN}"
@@ -2174,7 +2176,7 @@ if(HOST_CC)
     add_custom_command(
         OUTPUT "${GROVE_CONTAINER_VERIFIER}"
         COMMAND "${HOST_CC}" -std=c11 -O1 -Wall -Wextra
-                -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
+                -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
                 "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
                 "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
                 "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"

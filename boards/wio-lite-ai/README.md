@@ -768,7 +768,7 @@ in it.  #193 re-carved the table whole once (six 512 KB slots at
 blob list                    every slot: base, size, state, length, crc32, name
 blob info <slot>             one slot in full, and why an invalid one is
 blob read <slot> [off] [len] hexdump of the payload (up to 1,024 B)
-blob free                    the slots `blob write` takes without an erase
+blob free                    the slots `blob write` accepts with no `blob erase` first
 blob write <name> [slot]     erase the slot, receive a file over YMODEM, verify
 blob verify <slot>           re-read the payload against its stored crc32
 blob erase <slot>            retire a blob: erase its header sector only

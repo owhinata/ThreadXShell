@@ -62,6 +62,20 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_blob_slots_wio"
 "$out/test_blob_slots_wio"
 
+# issue #193 -- this board's store code itself (src/blob.c), compiled unchanged
+# against a 16 MB array standing in for the NOR (nor_flash.h's calls are defined
+# by the test, which counts and can fail them) and a shim of the three PRIMASK
+# intrinsics it takes from the HAL (blob_shim/).  The slot erase `blob write`
+# runs, the header-only erase, the name lookup of `nn model load --name`, the
+# reads' range checks and the busy flag -- the cases a console cannot stage
+# without spending flash cycles.
+gcc $CFLAGS -I "$here/blob_shim" \
+    -I "$board/src" -I "$board/port/nor" -I "$svc" -I "$svc/blob" \
+    "$here/test_blob_store.c" "$board/src/blob.c" "$board/src/blob_slots.c" \
+    "$svc/blob/blob_map.c" "$svc/blob/blob_state.c" "$svc/crc32.c" \
+    $LDFLAGS -o "$out/test_blob_store_wio"
+"$out/test_blob_store_wio"
+
 # issue #130 step 6c (#122 P8) -- how a decode's answer is counted in `nn stream
 # stats`: in svc/ since issue #163 (svc/nn/nn_decode_count.c, one copy with
 # f746g-disco, and grove-vision-ai-v2 since issue #164) and walked by shell/test/test_nn_decode_count.c.

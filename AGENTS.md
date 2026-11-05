@@ -163,7 +163,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
 配置保証はポストリンクのチェックで行う。**どのボードでも、以下を外す・弱める変更は不可。**
 
 - **wio-lite-ai**（LTO を使う）: `check_{itcm,dtcm,psram_ai}_residency.py` と
-  `check_plugin_reservation.py` が唯一の砦（`ALLOWED_VENEER_TARGETS` は**理由つきで**増やす）。
+  `check_plugin_reservation.py` と `check_blob_staging.py`（置き場に入らない slot を拒む）が唯一の砦（`ALLOWED_VENEER_TARGETS` は**理由つきで**増やす）。**slot 表も出荷後は append のみ**（identity は基底アドレス、全面の作り直しは #193 の一度きり）。
 - **f746g-disco**: 逆に **LTO を禁止**する（`board.cmake` が per-config 変種込みで FATAL_ERROR。
   ldscript の ASSERT 群が invariant の本体だから）。加えて `check_f746_layout.py` がシンボル常駐 /
   ベクタ / float ランタイムを実イメージで検査する。

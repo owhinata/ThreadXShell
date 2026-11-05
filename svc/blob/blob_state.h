@@ -26,12 +26,14 @@
  * INCOMPLETE and never VALID, and a body that failed to program cannot be
  * rescued by a magic that lands anyway.
  *
- * [!] THE TWO PAGES ARE WHY THIS DIFFERS FROM THE DONOR.  wio's blob puts the
- * magic and the body in ONE page and programs the page twice, resting on the
- * W25Q128JV datasheet's partial-page programming.  The die actually fitted here
- * is a Zbit ZB25LQ128C (#89) and there is no datasheet for it, so this format
- * does not depend on any second program touching a page that has already been
- * written: every page here is programmed once.
+ * [!] THE TWO PAGES ARE WHY THIS DIFFERED FROM THE DONOR.  wio's blob put the
+ * magic and the body in ONE page and programmed the page twice, resting on the
+ * W25Q128JV datasheet's partial-page programming.  The die fitted on
+ * grove-vision-ai-v2 is a Zbit ZB25LQ128C (#89) and there is no datasheet for
+ * it, so this format does not depend on any second program touching a page that
+ * has already been written: every page here is programmed once.  (wio-lite-ai
+ * stores this format too since issue #193; a header in its old one-page format
+ * is refused at the magic page.)
  *
  * [!] THE BODY CARRIES ITS OWN SLOT'S BASE ADDRESS.  The donor learned this the
  * expensive way (owhinata/wio-lite-ai#55): when its slot geometry changed, old

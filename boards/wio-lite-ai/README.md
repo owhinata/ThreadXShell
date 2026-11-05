@@ -200,6 +200,11 @@ functions, so LTO has nothing to rename.  They are still the linker checking its
 own script, which is why `cmake/check_plugin_reservation.py` checks the image as
 well.
 
+`cmake/check_blob_staging.py` (issue #193) reads the blob slot table and the
+tflm staging capacity back out of the linked image and refuses a slot whose
+payload the buffer could not hold -- see
+[the NOR asset store](#the-nor-asset-store-blob-issue-193).
+
 Since issue #97 there is one more, and it protects something less obvious.  The
 stateless service and nn translation units may own NO storage -- each board
 places what the shared code works on, so that its own residency gate keeps naming a symbol it
@@ -653,7 +658,7 @@ them:
 |---|---|---|
 | `psram.h` | `port/nn/nn_camera.c`, `port/nn/nn_svc_wio.c` | An OCTOSPI1 user place (`psram_acquire_shared()` / `psram_release_shared()`): the stream and `nn bench` read PSRAM, so a command that retunes the bus must be kept out (users do not exclude each other). |
 | `cam_preview.h` | `port/nn/nn_svc_wio.c` | `CAM_PREVIEW_STACK_BYTES`, the preview thread's stack: the ceiling the plugin draw allowance is asserted below. (The plugin-draw counters moved to `port/nn/nn_panel.h` in issue #140.) |
-| `blob.h` | `port/nn/nn_svc_wio.c` | The NOR asset store: `nn model load --slot` reads a blob under the store's busy guard. |
+| `blob.h` | `port/nn/nn_svc_wio.c` | The NOR asset store: `nn model load --name` resolves the name and reads the blob under the store's busy guard. |
 
 ### The camera input: one contract with f746g-disco (issue #162)
 
@@ -714,6 +719,114 @@ is 192 B), plus 104 B for an exception frame with FP state and 100 B for the
 ThreadX context save -- 572 B of 1024.  From the `.su` files of the final
 image (LTO partitions), with the calls through the band sink's function
 pointers added by hand.
+
+## The NOR asset store (`blob`, issue #193)
+
+Models and containers live on the 16 MB external NOR, above the `kv` partition,
+in named slots.  Since issue #193 the store is built on the shared parts in
+`svc/blob/` (the header format, the name and slot rules, the order of one
+`blob write`; see [svc/README.md](../../svc/README.md#the-asset-stores-shared-parts-issue-192)),
+the same ones grove-vision-ai-v2 uses.  What is this board's: the slot table
+(`src/blob_slots.c`), the interval and erase unit (`src/blob.h`), the indirect
+NOR reads and erases and the busy flag (`src/blob.c`), and the write's operations
+and words (`cmds/cmd_blob.c`).
+
+| NOR range | What |
+|---|---|
+| `0x000000 .. 0x100000` | `kv` (FlashDB) |
+| `0x100000 .. 0x800000` | the blob store: 13 slots, below |
+| `0x800000 .. 0x1000000` | unallocated; the `nor test` default address is `0x800000` |
+
+| Slots | Base | Size | Payload |
+|---|---|---|---|
+| 0-2 | `0x100000`, `0x200000`, `0x300000` | 1 MB | 1,044,480 B |
+| 3-8 | `0x400000` .. `0x680000`, every 512 KB | 512 KB | 520,192 B |
+| 9-12 | `0x700000`, `0x740000`, `0x780000`, `0x7C0000` | 256 KB | 258,048 B |
+
+The first 4 KB sector of a slot is its header; the rest is the payload.  The
+largest class is 1 MB because that is the tflm staging buffer
+(`NN_TFLM_MODEL_KB`): a payload is copied into it whole before it is parsed.
+`cmake/check_blob_staging.py` reads the table and the buffer's size back out of
+the linked image and stops the build if any slot's payload is larger (with the
+`null` backend it says NOT APPLICABLE, and checks the image has no staging
+buffer).  Its tests are `cmake/fixtures/run_blob_staging_tests.py`, which also
+compare the header size and the table entry layout it restates with
+`src/blob.h`.
+
+[!] **Identity is the base address, and the table only grows by appending.**
+A stored header names its own slot's base, so a slot that moves strands what is
+in it.  #193 re-carved the table whole once (six 512 KB slots at
+`0x100000 .. 0x400000` before it), at the same moment the header format changed;
+`test/test_blob_slots.c` pins every entry.
+
+### Commands
+
+```
+blob list                    every slot: base, size, state, length, crc32, name
+blob info <slot>             one slot in full, and why an invalid one is
+blob read <slot> [off] [len] hexdump of the payload (up to 1,024 B)
+blob free                    the slots `blob write` takes without an erase
+blob write <name> [slot]     erase the slot, receive a file over YMODEM, verify
+blob verify <slot>           re-read the payload against its stored crc32
+blob erase <slot>            retire a blob: erase its header sector only
+nn model load --name <name>  load the blob stored under <name>
+```
+
+- **The name is the one typed, not the sender's filename** (which only goes to
+  `dmesg`).  Printable ASCII with no space, at most 64 characters; anything
+  else is refused before anything is touched.
+- **A name already stored goes back to its own slot** (`blob write <name>`
+  needs no slot then).  Naming a different slot for it is refused (`that name
+  is in another slot`), and a new name has to say which slot.
+- **A slot holding a VALID blob under another name, or bytes this firmware
+  cannot read (`invalid`), is refused** (`that slot holds something else`):
+  `blob erase <slot>` first, on purpose.  An `empty` or `incomplete` slot is
+  taken as it is.  The refusals happen before anything is erased; a file that
+  turns out empty or larger than the slot is found only once the sender's first
+  block arrives, after the erase.
+- **The erase is one 64 KB block at a time** (`nor_erase()` per block), so the
+  NOR mutex is given back between blocks and `kv` gets a turn, and **Ctrl+C
+  stops it between blocks**: nothing is sent, the amount erased is printed (and
+  logged -- after a Ctrl+C the shell discards what the command prints, so
+  `dmesg` has it), and `blob list` shows what is left.  A cancel before the
+  first block leaves the slot as it was; after it, the header is gone.
+- **[!] The console is claimed after the erase** (the shared order), where the
+  store before #193 claimed it before.  The claim waits for the output lock
+  without a limit, so on a healthy ThreadX it waits rather than refuses; a
+  background `blob write ... &` is refused before anything is taken, and so is
+  `blob write` from the telnet console.
+- `empty` means "no header", not "blank flash": the payload underneath may
+  still hold old data.
+
+### [!] Blobs written before issue #193 read `invalid`
+
+The old store wrote a one-page header ('WBL1' magic and the body in the same
+256 B page).  The shared format's magic page must be either erased or the
+shared magic alone, so every old header -- finished or interrupted -- is
+refused at that page (`magic page is neither erased nor a header`), never read
+as a blob; `test/test_blob_slots.c` tries both at every slot base.  On a board
+updated in place, old headers sit at `0x100000`, `0x200000` and `0x300000`
+(new slots 0-2), and `0x400000` (new slot 3) is where the old `nor test`
+default wrote.  Each such slot needs `blob erase <slot>`, and every blob has to
+be sent again.
+
+### Measured
+
+| | before #193 (`2cb5fe8`) | after |
+|---|---|---|
+| app partition (FLASH, LTO, tflm) | 379,384 B | 384,208 B (9,008 B free) |
+| DTCM | 118,976 B | 120,000 B (the 1 KB write staging buffer) |
+| `blob_stat()` stack frame | 104 B | 560 B (the two 512 B header pages) |
+
+The deepest `blob write` path is about 1.3 KB of the 4 KB console stack and the
+`nn model load` path about 2.0 KB (from the LTO `.su` files).
+
+Not yet measured on hardware (to be filled in from the first DFU of the #193
+firmware): the erase time of a 256 KB / 512 KB / 1 MB slot (the datasheet's
+64 KB block erase is 150 ms typical, 2 s maximum, so the announcement says
+about 1 s / 2 s / 3 s with 8 s / 16 s / 32 s at most), how long `kv get` waits
+on another console during an erase, and what `blob list` shows on the updated
+board before the store is re-filled.
 
 ## Plugin containers (issues #108, #110, #116 = #78 Steps 3a, 3b and 3c)
 
@@ -854,8 +967,9 @@ on grove-vision-ai-v2 and f746g-disco): `infers` counts the results a reader
 can use, so it and `errors` never count the same frame. Until #138 this board
 counted it in both, because the inference ran.
 
-`nn model load --slot <n>` reads the blob into the PSRAM staging buffer and
-CRC-checks that copy exactly as before, then:
+`nn model load --name <name>` (issue #193; `--slot <n>` before it) resolves the
+name to the one slot holding a VALID blob under it, reads the blob into the
+PSRAM staging buffer and CRC-checks that copy exactly as before, then:
 
 - a payload that is not a container is a bare model and takes the old path
   unchanged (models already in the store do not need re-sending);
@@ -876,12 +990,14 @@ backend stages into one 1,048,576 B buffer, `nn_tflm_model_buf` at
 buffer at `0x90780000`, and the carve-out still holds 1,638,400 B.  Because the
 buffer is where the open model lives, a load runs in this order:
 
-1. the read-only checks, which change nothing: the slot number, the blob lock,
-   the slot's header, that it holds a VALID blob, that its length fits the
-   backend's capacity (asked on its own, `nn_model_stage_capacity()`), and the
-   PSRAM guard.  A refusal here (`blob busy`, an empty slot, a slot that does
-   not exist, PSRAM busy) leaves the previous model, its plugin and its result
-   as they were: `the previous model is still active`;
+1. the read-only checks, which change nothing: the name's rules, the blob lock,
+   the name resolved over every slot's header (no slot, or more than one,
+   holding it under a VALID header is refused, each in its own words), that the
+   blob's length fits the backend's capacity (asked on its own,
+   `nn_model_stage_capacity()`), and the PSRAM guard.  A refusal here (`blob
+   busy`, `no slot holds that name`, `more than one slot holds that name`,
+   PSRAM busy) leaves the previous model, its plugin and its result as they
+   were: `the previous model is still active`;
 2. the plugin lease (a timeout is still a BUSY that changed nothing), then the
    open model goes down in unload's order -- plugin, last result, interpreter;
 3. only then the buffer is handed out (the backend refuses it while a model is
@@ -889,14 +1005,15 @@ buffer is where the open model lives, a load runs in this order:
    container split and the reload run.
 
 Every failure in step 3 ends with **no model** (`nothing is loaded now`), and
-the operator loads the previous model again from its slot (`nn model load
---slot <n>`).  While steps 2 and 3 run, `nn info` on the other console says the
+the operator loads the previous model again by its name (`nn model load
+--name <name>`).  While steps 2 and 3 run, `nn info` on the other console says the
 model is busy, and `nn thresh` waits for the lease and then answers busy.
 
-The capacity the backend reports is 1,048,576 B, but a blob slot's payload is at
-most 520,192 B (`BLOB_PAYLOAD_MAX`, `src/blob.h`), and that bound is checked
-first.  So on this board a model larger than 512 KB still cannot be loaded until
-the store's slots grow (issue #193).
+The capacity the backend reports is 1,048,576 B, and the largest blob slot's
+payload is 1,044,480 B (a 1 MB slot less its 4 KB header, issue #193), so any
+blob the store holds fits; `cmake/check_blob_staging.py` keeps it that way at
+build time.  Until #193 the slots were 512 KB and a model was bounded by their
+520,192 B.
 
 [!] **Every build of an interpreter zeroes the whole arena first** (issue #167,
 `nn_tflm_construct_interp()` in `svc/nn/tflm/nn_tflm_glue.h`): a model refused
@@ -941,7 +1058,7 @@ subgraph 0's two I/O lists are walked once, one compare per entry, before their
 count is judged (at most ~128K entries in a 512 KB file), so that a model
 broken in two ways stays `NN_MODEL_ERR_FORMAT`.  On this board, with no
 verifier, the walk is again the only thing in front of those reads; how many
-entries there are is bounded only by the file (at most a blob payload, 520,192 B).  The pinned model
+entries there are is bounded only by the file (at most a blob payload, 1,044,480 B since issue #193).  The pinned model
 (blazeface, rank 4, operator lists <= 3) passes unchanged.  Cost: +592 B of
 Flash (`shell.elf` text 371,380 -> 371,972 B).
 
@@ -1364,15 +1481,18 @@ with the M7 blazeface plugin, runs the device's validator over the packed file,
 and publishes only then.  It prints a receipt:
 
 ```
-  on the board:  blob write 5   (erases the slot, then waits for the file)
+  on the board:  blob erase 12   (the slot must be empty first)
+                 blob write blazeface 12   (erases the slot, then waits for the file)
   in picocom:    C-a C-s, then the path above
   afterwards:    `blob list` must show crc32 <CRC> -- ...
-  then:          nn model load --slot 5
+  then:          nn model load --name blazeface
 ```
 
-**Slot 5 is only the declaration in `board.cmake`.**  The build refuses a
-container too large for it; nothing refuses the *wrong* slot, and `blob write`
-erases the whole slot before the transfer.  Read `blob list` first.
+**Slot 12 (the last 256 KB slot) is only the declaration in `board.cmake`.**
+The build refuses a container too large for it; nothing refuses the *wrong*
+slot -- the receipt's `blob erase` retires whatever is there, and `blob write`
+erases the whole slot before the transfer.  Read `blob list` first.  (Until
+issue #193 the receipt said `blob write 5` and `nn model load --slot 5`.)
 
 [!] **The `.nnc` under `build/` is the last one PACKED, not the last one SENT.**
 What the board holds is established by `blob list`'s crc32 against the receipt
@@ -1397,7 +1517,7 @@ nothing checks that the file sent is the file built:
 | a container whose magic is damaged | probes as unknown and falls through as a bare model, so the TFLM backend -- **not** `plugin_load.c` | `nn model load` |
 | a malformed `.tflite` (bare, or as a container's model section) | the backend's parse only; the bounded verifier (`nn_tflm_verify_model_buffer()`, the host gate's) runs on the board only with `NN_TFLM_VERIFY=ON` (off by default) | `nn model load` |
 | a stale artifact, or a model that never passed `verify_tflite` | **nothing** | -- |
-| the wrong slot | **nothing** -- and the slot's previous contents are gone | `blob write` |
+| the wrong slot | **nothing** once `blob erase` has run -- the slot's previous contents are gone.  `blob write` alone refuses a slot holding another name's blob | `blob erase` / `blob write` |
 
 The **receipt CRC compared with `blob list`** is the one "built bytes = stored
 bytes" check.  `nn info`'s CRC is the plugin-section digest and does not move
@@ -1649,8 +1769,9 @@ says so: its stack-accounting version is now **2**.
 The loader compares that version for equality, so a container packed before
 #124 is refused on load as `stack declared under another analysis` -- not as a
 stack that is too big.  Build the asset again and send it as in **Sending an
-asset** above (`asset-blazeface` to slot 5), then compare the receipt's crc32
-with `blob list`.  The new container differs from the old one in the version
+asset** above (`asset-blazeface`, to the slot its receipt names -- slot 5 at the
+time, slot 12 since issue #193), then compare the receipt's crc32 with `blob
+list`.  The new container differs from the old one in the version
 field and in the digest and CRC over it, so its crc32 is not `E07F7D79`.
 
 Re-sent on 2026-10-27, with the firmware at `bc92a6f-dirty` (the version-2

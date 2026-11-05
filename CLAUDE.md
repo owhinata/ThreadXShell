@@ -239,7 +239,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   （prelink なので動かすと全 container 無効）で、**4 箇所で独立に宣言**し 1 変数から生成しない。
   heap の天井は `__heap_end` で `__ram_end` を再定義しない（1 シンボルに 2 事実を載せない）。
 - [!] **リンカスクリプトの `ASSERT` は LTO 下で空振りする**。最終ガードはポストリンクの residency
-  チェック 4 本（`check_{itcm,dtcm,psram_ai}_residency.py` / `check_plugin_reservation.py`）で、外さない。
+  チェック 4 本（`check_{itcm,dtcm,psram_ai}_residency.py` / `check_plugin_reservation.py`）と置き場に入らない slot を拒む `check_blob_staging.py` で、外さない。**slot 表も出荷後は append のみ**（identity は基底アドレス、全面の作り直しは #193 の一度きり）。
 - **panel は `valid` だけでなく kind も見る**（「誰も解釈していない」の publish は共有 `nn` 節）。
 - **decode と draw を隔てるものが無い**ので**結果リース**で囲う: **常にリース → フレームロック**、
   worker は decode と publish の全体を保持、**パネルは待たない**。**リース保持は「描いてよい」ではない**。

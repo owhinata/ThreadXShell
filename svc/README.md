@@ -89,7 +89,7 @@ counts and stack depths, is the board README's:
 | Subcommand | Meaning | Capability | What differs by board |
 |---|---|---|---|
 | `nn info` | The backend (`nn_backend()`'s name and version), the model and where it came from, the arena reserved and used, the input and output tensors, then the board's plugin lines; answered in full while a stream runs, busy while a load is in flight. | always | f746g-disco: `sdram test` holding `.sdram.ai` answers busy.  grove-vision-ai-v2: also busy while a `nn run` or `nn bench` holds its gate; the `source` line says the NPU runs secure and privileged. |
-| `nn model load --name / --slot / --path / --addr` | Point the model at bytes from the board's one store and swap it in as one transaction (the plugin after the backend succeeds; the order is `nn/nn_core_model`). | `MODEL_LOAD` and the tag's | grove-vision-ai-v2: a NOR blob by name, or a raw window with its length, read in place through the XIP window.  wio-lite-ai: a NOR slot copied to PSRAM, the CRC checked on the copy.  f746g-disco: a microSD file into SDRAM; prints the CRC32 of every byte it adopted. |
+| `nn model load --name / --slot / --path / --addr` | Point the model at bytes from the board's one store and swap it in as one transaction (the plugin after the backend succeeds; the order is `nn/nn_core_model`). | `MODEL_LOAD` and the tag's | grove-vision-ai-v2: a NOR blob by name, or a raw window with its length, read in place through the XIP window.  wio-lite-ai: a NOR blob by name (since issue #193) copied to PSRAM, the CRC checked on the copy.  f746g-disco: a microSD file into SDRAM; prints the CRC32 of every byte it adopted. |
 | `nn model unload` | Unload the plugin and the model; nothing is loaded afterwards. | `MODEL_LOAD` | grove-vision-ai-v2: also powers the NPU down and gives back the NOR lease. |
 | `nn bench [n]` | One hold: fill every input with `0x5A`, n timed runs, min / avg / max (`nn/nn_bench`). | `BENCH` | grove-vision-ai-v2: the 1 ms ThreadX tick and no `@MHz` (the DWT stops in WFI); the other two count DWT cycles. |
 | `nn run` | One frame through the same producer and worker as a stream; ends one of five ways (`nn/nn_run_wait`) and prints its own result. | `CAMERA` | grove-vision-ai-v2: int8 input only (the Ethos-U55 fills a byte per element), and the first frames after a camera bring-up are skipped.  wio-lite-ai: the input must tile onto the 60-row DCMI bands; PSRAM must be up and OCTOSPI1 not held by a retuner.  f746g-disco: the camera must stream RGB565; `sdram test` holding `.sdram.ai` answers busy. |
@@ -737,22 +737,23 @@ relative to `svc/`.
 
 ## The asset store's shared parts (issue #192)
 
-grove-vision-ai-v2 is the only board that links `svc/blob/` today (wio-lite-ai
-and f746g-disco have it on their include path and compile none of it).  What a
-board provides, and how:
+grove-vision-ai-v2 and, since issue #193, wio-lite-ai link `svc/blob/`
+(f746g-disco has it on its include path and compiles none of it until #194).
+What a board provides, and how:
 
 | The board provides | How the shared code takes it |
 |---|---|
-| Its slot table and the number of slots | Const data under fixed names, `blob_map_slots[]` and `blob_map_slots_count` (declared in `blob_map.h`), plus `blob_map_table()` / `blob_map_count()`; `blob_map_slot()` and `blob_map_index_of()` read the table by name, so no caller can hand them another; the board asserts the count against `BLOB_MAX_SLOTS` at build time. grove-vision-ai-v2: `src/blob_slots.c` |
-| The writable interval and the erase unit | Arguments to `blob_map_check()` and the payload arithmetic; nothing here states a boundary |
-| Every operation of a write (reserve, erase, program, console, receive, read back, stat, geometry) | A const `struct blob_write_ops`; grove-vision-ai-v2: `cmds/cmd_blob.c` |
-| The staging buffer | `blob_write_run()`'s buffer and length, at least one header page and a whole number of them, refused before anything is taken otherwise; grove-vision-ai-v2 passes `blob_stage_buf` / `BLOB_STAGE_BYTES` |
+| Its slot table and the number of slots | Const data under fixed names, `blob_map_slots[]` and `blob_map_slots_count` (declared in `blob_map.h`), plus `blob_map_table()` / `blob_map_count()`; `blob_map_slot()` and `blob_map_index_of()` read the table by name, so no caller can hand them another; the board asserts the count against `BLOB_MAX_SLOTS` at build time. Both boards: `src/blob_slots.c` |
+| The writable interval and the erase unit | Arguments to `blob_map_check()` and the payload arithmetic; nothing here states a boundary (grove-vision-ai-v2: the NOR seam's limits; wio-lite-ai: `src/blob.h`) |
+| Every operation of a write (reserve, erase, program, console, receive, read back, stat, geometry) | A const `struct blob_write_ops`; both boards: `cmds/cmd_blob.c` (wio-lite-ai's reservation is its busy flag, its erase one `nor_erase()` per 64 KB block) |
+| The staging buffer | `blob_write_run()`'s buffer and length, at least one header page and a whole number of them, refused before anything is taken otherwise; grove-vision-ai-v2 passes `blob_stage_buf` / `BLOB_STAGE_BYTES`, wio-lite-ai a 1 KB DTCM buffer in `cmds/cmd_blob.c` |
 
 **The header page is a fact of the format, not of a part.**  `BLOB_HDR_PAGE`
 (256 B, `blob_state.h`) is the size of each of the header's two pages wherever
 the header is stored.  A board whose flash programs in pages checks at build
 time that its program page is that size (grove-vision-ai-v2: `src/blob.c`,
-against `NOR_PROGRAM_PAGE`) rather than the format following the board.
+against `NOR_PROGRAM_PAGE`; wio-lite-ai: `src/blob.c`, against `NOR_PAGE_SIZE`)
+rather than the format following the board.
 
 The three translation units hold no mutable storage (the build-derived audit
 covers them like the rest of `svc/`).  The sentences of `blob_name_verdict_name()`

@@ -826,6 +826,13 @@ nn model load --name <name>  load the blob stored under <name>
   taken as it is.  The refusals happen before anything is erased; a file that
   turns out empty or larger than the slot is found only once the sender's first
   block arrives, after the erase.
+- **A slot header the store cannot read while the slot is chosen ends the
+  write before anything is erased**, and says which and why (issue #194):
+  `blob: refused -- the header of slot N could not be read; nothing was
+  erased`, then the store's answer as every other `blob` refusal words it
+  (the board's sentence where it has one; `blob: <part> read/program/erase
+  failed` for an I/O error); `dmesg` has the slot and the store's code.  Every other refusal before the choice keeps the plain
+  `blob: refused (...)` line.
 - **The erase stops between sectors on Ctrl+C**: nothing is sent, the amount
   erased is printed and logged (after a Ctrl+C the shell discards what the
   command prints, so `dmesg` has it), and `blob list` shows what is left.  A

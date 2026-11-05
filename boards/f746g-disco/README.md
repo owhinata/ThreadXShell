@@ -117,11 +117,65 @@ default map.
 | 4 | `0x80000000` | 512 MB | strongly ordered, no access, XN | fence: unused FMC NAND bank and the QUADSPI window |
 | 5-7 | -- | -- | disabled explicitly | free |
 
-Regions 3 and 4 read back `RASR = 0x10040039`.  They keep the CPU, including
-its speculative reads, out of `0x60000000-0x9FFFFFFF`, which nothing on this
-board uses (issue #194); a real access is a MemManage fault.  A window opened
-in that space later needs its own region numbered above 4, so that it wins on
-overlap.
+#### [!] Why `0x60000000-0x9FFFFFFF` is fenced (issue #194)
+
+The ARMv7-M default map types this space as Normal memory, which the core may
+read speculatively, and the QUADSPI memory window (`0x90000000`) is inside it.
+What was observed on this board, before the fence: after the last indirect
+read of an `nn model load --name` the QUADSPI sat idle (SR 0) but still in
+indirect-read mode; about 4 s later, with no driver call in between, it was
+busy with a full FIFO and AR 0, and every QSPI operation after that failed
+(see [the defect](#qspi-operations-failing-after-nn-model-load-issue-194)).
+Within one boot, with the two regions switched on by a diagnostic build's
+command, three loads, several `nn
+run` and a 100-frame `nn stream` gave no QSPI failure and no MemManage fault;
+with them taken out again, three loads failed three times.  **That the
+trigger is a speculative CPU read of the window is an inference, not an
+established fact**: RM0385 14.3.13 says only that an access to the window
+outside memory-mapped mode is a bus error, and the errata sheet ES0290 has
+nothing on it.  wio-lite-ai fences its OCTOSPI2 window for the same reason
+(wio-lite-ai#25).
+
+Nothing on this board uses the space: the FMC drives only the SDRAM bank at
+`0xC0000000`, the QUADSPI is driven in indirect mode only, the linker script
+has no MEMORY region there, and every DMA target (SDMMC, DCMI, DMA2D, LTDC,
+ETH) is internal SRAM or SDRAM.  The MPU stops only the CPU, so that last
+point is a fact the fence relies on, not one it enforces.  A real access by
+the CPU is now a MemManage fault, recorded with MMFAR and the PC to the
+reset-persistent log (from a loaded plugin, the plugin fault handler takes
+it).  `0xA0000000` and up (the QUADSPI / FMC control registers, the SDRAM)
+is Device in the default map and is not fenced.
+
+[!] **A window opened in this space later** (a memory-mapped QSPI, say --
+issue #190 measured XIP and did not take it) **needs its own region numbered
+above 4**, so that it wins over the fence on overlap (the higher region
+number wins), designed together with the window.  Do not delete or shrink
+regions 3 and 4 to make room for it.
+
+Read back on the board (2026-11-06) with `devmem`: select a region by writing
+its number to `MPU_RNR` (`0xE000ED98`), then read `MPU_RBAR` (`0xE000ED9C`)
+and `MPU_RASR` (`0xE000EDA0`); `MPU_CTRL` is `0xE000ED94`.
+
+```
+devmem peek 0xE000ED94          CTRL  0x00000005 (enabled, PRIVDEFENA)
+devmem poke 0xE000ED98 3        select region 3
+devmem peek 0xE000ED9C          RBAR  0x60000003
+devmem peek 0xE000EDA0          RASR  0x10040039
+```
+
+| Region | RBAR | RASR |
+|---|---|---|
+| 0 | `0xC0000000` | `0x1308002D` |
+| 1 | `0xC0600001` | `0x13030029` |
+| 3 | `0x60000003` | `0x10040039` |
+| 4 | `0x80000004` | `0x10040039` |
+| 5-7 | | `0` |
+
+[!] **Poke only `MPU_RNR`.**  A poke one word off -- into RBAR, RASR or CTRL
+-- reprograms or disables a live region under the running firmware (the SDRAM
+attributes, or the fence itself).  `test/test_plugin_mpu_f746.c` holds its
+hand-written copy of the region set to the values above; the board is the
+only place that shows what was actually programmed.
 
 ### [!] The top 32 KB of internal SRAM is the plugin reservation (issue #159)
 
@@ -915,7 +969,7 @@ What is shared and what is this board's:
 | store side | `src/blob.c`, `src/blob.h`, `src/blob_slots.c` | the interval and the slot table, the header and payload reads, the erases, the name lookup and the busy flag |
 | write side | `src/blob_writer.c` | the functions `blob_svc.h` names: the 1 KB staging buffer, the reservation (the busy flag), the program and the read-back, each held to the store's interval, and the log lines a transfer leaves |
 | console side | `cmds/cmd_blob_board.c` | YMODEM over the VCP, the refusal on the telnet console, the busy and driver-down words, the VCP's RX ring high-water |
-| the driver | `port/qspi/qspi_flash.c` | indirect-mode reads, page programs and erases, one mutex per call |
+| the driver | `port/qspi/qspi_flash.c`, `port/qspi/qspi_idle.h` | indirect-mode reads, page programs and erases, one mutex per call; the controller left idle after every receive, failures recorded and recovered from ([below](#the-qspi-driver-leaves-the-controller-idle-and-recovers-issue-194)) |
 
 | QSPI range | What |
 |---|---|
@@ -993,6 +1047,22 @@ What is this board's:
   destroy this session. Run it from the VCP console.`; YMODEM over telnet is
   issue #197), and a background `blob write ... &` is refused by the shared
   command.
+- **Sending from picocom.**  The command prints that `sz` will NOT work; on
+  this board with lrzsz, picocom's default send command `sz -vv` did work: it
+  sends ZMODEM headers first, times out a few times (5 and 7 header timeouts
+  seen) and then falls back to YMODEM, and the file was stored and verified;
+  the 189,816 / 520,192 / 1,044,480 B transfers in [Measured](#measured)
+  were sent that way.  `--send-cmd "sb
+  -k"` (Quick start) skips those timeouts.  The printed sentence is the shared
+  command's and stays as it is.
+- **Type the file name within about 30 s.**  While `blob write` waits for the
+  sender it sends a `C` every 3 s.  picocom does not read the line while its
+  file-name prompt is open, so they queue up on the PC, and once `sb` starts it
+  resends block 0 for each queued `C` until its retry limit, then gives up
+  with `Retry Count Exceeded` (seen after a 51 s pause).  The slot is left
+  erased, nothing else is harmed, and running the same `blob write` again
+  works.  The wait is the shared YMODEM receiver's (`svc/ymodem.c`), so the
+  other boards behave the same.
 - **[!] The VCP's RX ring is 4,096 B** (`CLI_UART_RX_BUFFER_SIZE` in
   `board.cmake`; 256 B before #194).  At 115200 baud that is about 355 ms of
   line time, against a 1 KB YMODEM block while the same thread programs the
@@ -1025,6 +1095,106 @@ What is this board's:
   plugin image gate refuses a plugin that defines any of them.
 - `empty` means "no header", not "blank flash": the payload underneath may
   still hold old data.
+
+### The QSPI driver leaves the controller idle, and recovers (issue #194)
+
+`port/qspi/qspi_flash.c` drives the QUADSPI through the stock HAL in indirect
+mode only.  Two things it does that the HAL does not:
+
+- **[!] After every receive the controller is put back out of indirect-read
+  mode.**  `HAL_QSPI_Receive()` aborts -- and so resets the functional mode --
+  only when the controller is still busy at the end; a transfer that ends
+  cleanly leaves CCR's FMODE at indirect read, and in that mode a read can
+  start without the driver.  So after every receive (the data reads, and
+  every status-register read, which includes the polls of an erase or a
+  program) the driver writes FMODE back to indirect write, reads CR / SR / CCR
+  back, and reports the receive successful only if no abort is pending, the
+  controller is not busy and FMODE reads 0.  With a data phase in the command
+  and FMODE 0, nothing starts until the data register is written, so the
+  write itself starts nothing; the driver never writes AR there.
+- **[!] CCR is written only when the command form it holds has a data
+  phase.**  A command with neither address nor data starts as soon as CCR is
+  written (RM0385 14.3.11), so rewriting an instruction-only form (write
+  enable, clear flag status, chip erase) would send that instruction again.
+  Such a form is already in indirect write when the HAL builds it; one that
+  reads otherwise is not repaired, it is counted as a failure.  The two
+  decisions are pure functions of register values (`port/qspi/qspi_idle.h`),
+  walked by `test/test_qspi_idle.c` over every command form.
+- **A failed HAL call is recorded, then recovered from.**  The record is taken
+  before anything is touched -- the driver step, the HAL's return, the handle
+  state and error, CR / SR / CCR / DLR / AR (never DR: reading it pops the
+  FIFO) and the tick -- and logged to `dmesg` (`fail #N <op>-<phase> ...`).
+  Then the driver aborts the controller if it is busy (waiting at most
+  100 ms), clears the flags, applies the CCR rule above, and puts the HAL
+  handle back to READY only when ABORT and BUSY both read 0 (`recovered:` in
+  the log).  Otherwise it sets the handle to ERROR itself (`recovery failed`):
+  the HAL then refuses the next call at once, that refusal comes through the
+  same path, and so every later driver call tries the bounded recovery again.
+  The failed operation still returns its error; nothing is retried.  There is
+  no manual recover command.
+- **No erase or program starts while the part is still busy.**  Controller
+  recovery does not tell whether the flash part itself is still finishing an
+  erase or a program whose wait failed or timed out.  So every erase, program
+  and register write checks the status register right after WRITE ENABLE and
+  starts only when the write-enable latch is set and write-in-progress is
+  clear.  Otherwise it fails at once with `flash still busy with an earlier
+  erase/program (status 0x..)` in `dmesg`, and a later attempt succeeds once
+  the part is done.  (That a busy part keeps the latch set and ignores a new
+  instruction is the usual behaviour of this family; it was not checked
+  against the N25Q128A datasheet here.)
+
+`qspi info` shows all of it (the shape; values elided):
+
+```
+before    : CR ... (abort 0) SR ... (busy 0 flevel 0 tcf . ftf . tef .)
+            CCR ... (fmode 0 dmode .) DLR ... AR ...
+            handle state 0x.. error 0x., t ... ms
+size      : ...                 (geometry, clock, read mode as before)
+status    : 0x00
+after     : (the same three lines, after its own status read)
+failures  : 0
+```
+
+`before` is the controller as it was when the command was typed, before
+`qspi info` sends anything; `after` follows its own status-register read.
+Healthy is `abort 0`, `busy 0` and `fmode 0` in both.  `failures` counts the
+driver's failures since boot; when it is not 0, `first fail` and `last fail`
+follow, each with the step that failed (`<op>-<phase>`; phase `rxend` is a
+receive the HAL called successful that did not read idle afterwards), the
+HAL return, the registers at the failure, whether the recovery succeeded,
+and the registers after it.  A recovered failure leaves the driver usable;
+`FAILED (handle set to error)` means the next call will try again.
+
+### QSPI operations failing after `nn model load` (issue #194)
+
+**Symptom** (on the #194 firmware up to `22aa173`): a few seconds after an
+`nn model load --name` -- on one boot only after an `nn run` -- every `blob`
+and `qspi` operation failed until reboot, and `qspi info` said `QUADSPI
+transfer failed`.  A `blob write` then ended in a bare `blob: refused (0 B
+erased, ...)`; since issue #194 it names the slot and the store's answer
+(`blob: refused -- the header of slot N could not be read; nothing was
+erased`, then `blob: QSPI read/program/erase failed`).
+
+**What the registers showed** (a diagnostic build): right after the load's
+last read, SR 0 and CCR `0x0728256B` -- FMODE 01, indirect read, as the HAL
+leaves it.  About 4 s later, with no driver call in between, SR
+`0x00002024` (busy, FIFO full) and AR 0, DLR and CCR unchanged.  The next
+command waited out its 5 s timeout, and the stock HAL kept its handle in
+ERROR from then on, so everything after failed at once.  The timing moved
+from boot to boot.
+
+**What stopped it**: fencing `0x60000000-0x9FFFFFFF` with the MPU gave 0
+failures in 3 loads + several `nn run` + a 100-frame stream; taking the fence
+out again gave 3 failures in 3 loads, within the same boot.  Separately, the
+driver change above alone, with the MPU not yet fenced, gave 0 failures in 3
+loads (a container and a bare model), 2 `nn run`, a 100-frame stream and a
+`blob list` / `blob erase` / `blob write`, with FMODE 0 and BUSY 0 at every
+look.  Both are kept: the fence keeps the CPU out of the window ([why, and
+the inference it rests on](#-why-0x60000000-0x9fffffff-is-fenced-issue-194)),
+the driver leaves nothing for any access to start, and the fence does not
+stop a bus master other than the CPU.  With both in place: 3 loads, 2 `nn
+run`, a 100-frame stream and a `blob list`, 0 failures and no MemManage
+fault.
 
 ### Moving models off the SD card
 
@@ -1061,15 +1231,21 @@ A 1 MB payload is read for a load in sixteen 64 KB pieces (`BLOB_READ_CHUNK`),
 about 250 ms at the 4 KB/ms `qspi test` measured, each piece far below the
 driver's 5 s timeout, with interrupts on and the IWDG fed by its own thread.
 
-Not yet measured on hardware (to be filled in after the first run):
+On hardware (2026-11-06, the board updated in place, sender lrzsz from
+picocom; a transfer's time is from the log's `sender offered` to the end of
+the receive):
 
 | | Value |
 |---|---|
-| 64 KB sector erase, as `blob write` sees it (one 256 KB / 512 KB / 1 MB slot) | not measured |
-| 1 MB `blob write` transfer at 115200 baud | not measured |
-| RX ring high-water during `blob write` (idle; with `nn stream`, GUIX, telnet and MJPEG running) | not measured |
+| `blob list` on the first boot of the #194 firmware (updated in place) | all 13 slots `invalid` (what the LevelX volume left, as [expected](#moving-models-off-the-sd-card)); cleared with `blob erase` |
+| 64 KB sector erase, as `blob write` sees it (one 256 KB / 512 KB / 1 MB slot) | no stopwatch figure: the operator saw the erase take roughly what the announcement says (about 3 / 6 / 12 s) |
+| 1 MB slot `blob write` transfer at 115200 baud | 93.0 s for 1,044,480 B (1022 blocks) |
+| 512 KB slot transfer | 46.2 s for 520,192 B (510 blocks) |
+| 256 KB slot transfer | 17.0 s for 189,816 B; 17.5 s for 194,232 B |
+| RX ring high-water during `blob write`, the board as it boots (camera preview and GUIX on, no inference, no telnet client, no MJPEG) | 2 of 4,096 B, 0 drops, in four transfers; 15 B in a fifth, after inference had run |
+| RX ring high-water during `blob write` with `nn stream`, GUIX, telnet and MJPEG running | not measured |
 | `nn model load --name` of a 1 MB-class blob | not measured |
-| `blob list` on the first boot of the #194 firmware (updated in place) | not seen |
+| QSPI driver failures after `nn model load --name` / `nn run` | see [the defect](#qspi-operations-failing-after-nn-model-load-issue-194): 3 in 3 loads before the fix, 0 after |
 
 ## Plugin containers (issue #159 = #78 Step 4)
 

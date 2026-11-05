@@ -4377,6 +4377,10 @@ board taught:
    it: a name already stored goes back to its own slot, a new one has to be told
    which slot to use, and a name that lives in a DIFFERENT slot is refused
    rather than moved -- there is never a window with two slots under one name.
+   A header that cannot be read here ends the write with nothing erased, and
+   since issue #194 the shared command says which (`blob: refused -- the
+   header of slot N could not be read; nothing was erased`, then the store's
+   answer).
 3. **announce**, then **erase the whole slot in one transaction**
    (`blob_svc_erase_span()` in `src/blob_writer.c`), cancellable between
    sectors.  ~21 s for 1 MB, ~41 s for 2 MB.  The announcement happens

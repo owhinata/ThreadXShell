@@ -751,7 +751,10 @@ the linked image and stops the build if any slot's payload is larger (with the
 `null` backend it says NOT APPLICABLE, and checks the image has no staging
 buffer).  Its tests are `cmake/fixtures/run_blob_staging_tests.py`, which also
 compare the header size and the table entry layout it restates with
-`src/blob.h`.
+`src/blob.h`.  The host checker `verify_tflite` is built with the same table
+(and the staging buffer's `NN_TFLM_MODEL_KB`): it refuses a file longer than
+the largest slot's payload, names the smallest slot class that would hold it,
+and was a literal 520,192 B until #193 (`cmake/fixtures/run_verify_tflite_size_tests.py`).
 
 [!] **Identity is the base address, and the table only grows by appending.**
 A stored header names its own slot's base, so a slot that moves strands what is

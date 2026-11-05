@@ -422,4 +422,10 @@ elif ! ninja -C "$io_build" -t targets all 2>/dev/null | grep -q "^verify_tflite
 else
     python3 "$HOST_TEST_REPO/cmake/fixtures/run_model_io_gate_tests.py" \
         --build-dir "$io_build" --gate verify_tflite --style tflite
+    # issue #193 -- the same tool's length checks: the slot limit is the largest
+    # payload of the shipped table (compiled in), so a length past the old
+    # 520,192 B and up to 1,044,480 B must get past it, and one more must not.
+    # Same tree, same SKIP.
+    python3 "$board/cmake/fixtures/run_verify_tflite_size_tests.py" \
+        --build-dir "$io_build"
 fi

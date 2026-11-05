@@ -116,7 +116,7 @@ endif()
 # different machine, a colleague, a script that skipped the step -- is not examined.
 #
 #   cmake --build build/wio-lite-ai-tflm --target verify-model
-#   ./build/wio-lite-ai-tflm/verify_tflite model.tflite      # then blob write + sb
+#   ./build/wio-lite-ai-tflm/verify_tflite model.tflite      # then blob write <name> [slot] + sb
 #
 # [!] Turn it back ON for any build whose models will not pass through that command.
 set(NN_TFLM_VERIFY OFF CACHE BOOL "Verify the flatbuffer before building an interpreter")
@@ -282,9 +282,13 @@ target_compile_definitions(tflm
 # NN_TFLM_MODEL_KB is the one staging buffer (issue #191: 2 x 512 KB before, the
 # same bytes): it swallows a whole payload of the largest blob slot (1 MB slots,
 # src/blob_slots.c since issue #193), so no blob is ever refused for its size.
+# A plain variable, not a cache knob: the slot table is sized against it
+# (cmake/check_blob_staging.py checks the pair in the image), and verify_tflite
+# below is given the same variable so the host check states the same limit.
+set(NN_TFLM_MODEL_KB 1024)
 target_compile_definitions(tflm PRIVATE
     NN_TFLM_ARENA_KB=${NN_TFLM_ARENA_KB}
-    NN_TFLM_MODEL_KB=1024
+    NN_TFLM_MODEL_KB=${NN_TFLM_MODEL_KB}
     NN_TFLM_VERIFY=$<BOOL:${NN_TFLM_VERIFY}>
     ${NN_TFLM_OPS_DEFINE})
 
@@ -369,8 +373,23 @@ if(HOST_CXX)
     # The same profile define the firmware library got, so the checker and the board
     # agree on the op set by construction (never empty, see NN_TFLM_OPS_DEFINE).
     set(_vt_ops_def "-D${NN_TFLM_OPS_DEFINE}")
+    # [!] THE SLOT LIMIT IS THE SHIPPED TABLE'S (issue #193), compiled in as C --
+    # src/blob_slots.c with svc/blob/blob_map.c's lookups, as scripts/slot_table.c
+    # does -- and the staging limit is the variable the firmware is built with
+    # (nn_tflm_mem.h's NN_TFLM_MODEL_MAX).  No number is restated in the tool.
+    set(_vt_dir "${CMAKE_BINARY_DIR}/verify_tflite.d")
+    set(_vt_blob_inc
+        -I "${BOARD_DIR}/src" -I "${BOARD_DIR}/port/nor"
+        -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/blob")
     add_custom_command(
         OUTPUT "${CMAKE_BINARY_DIR}/verify_tflite"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${_vt_dir}"
+        COMMAND "${HOST_CXX}" -x c -std=c11 -O1 -w ${_vt_blob_inc}
+                -c "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+                -o "${_vt_dir}/blob_map.o"
+        COMMAND "${HOST_CXX}" -x c -std=c11 -O1 -w ${_vt_blob_inc}
+                -c "${BOARD_DIR}/src/blob_slots.c"
+                -o "${_vt_dir}/blob_slots.o"
         COMMAND "${HOST_CXX}" -std=c++17 -O1 -w
                 -I "${TFLM_ROOT}"
                 -I "${TFLM_ROOT}/third_party/flatbuffers/include"
@@ -378,8 +397,12 @@ if(HOST_CXX)
                 -I "${TFLM_ROOT}/third_party/ruy"
                 -I "${CMAKE_SOURCE_DIR}/svc/nn/tflm"
                 -I "${CMAKE_SOURCE_DIR}/svc/nn"
+                ${_vt_blob_inc}
                 ${_vt_ops_def}
+                -DNN_TFLM_ARENA_KB=${NN_TFLM_ARENA_KB}
+                -DNN_TFLM_MODEL_KB=${NN_TFLM_MODEL_KB}
                 "${BOARD_DIR}/scripts/verify_tflite.cc"
+                "${_vt_dir}/blob_map.o" "${_vt_dir}/blob_slots.o"
                 # GetBuiltinCode() is declared in a header and defined here; it is the
                 # accessor that reads an operator code correctly across the schema's
                 # deprecated/current field pair, so it is worth linking rather than
@@ -393,6 +416,15 @@ if(HOST_CXX)
                 # with the firmware it speaks for.
                 "${CMAKE_SOURCE_DIR}/svc/nn/tflm/nn_tflm_model_check.h"
                 "${CMAKE_SOURCE_DIR}/svc/nn/nn.h"
+                # The slot table, its lookups and the headers the limits come
+                # from (issue #193): a re-carved table rebuilds the checker.
+                "${BOARD_DIR}/src/blob_slots.c"
+                "${BOARD_DIR}/src/blob.h"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.h"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_state.h"
+                "${BOARD_DIR}/port/nor/nor_flash.h"
+                "${CMAKE_SOURCE_DIR}/svc/nn/tflm/nn_tflm_mem.h"
         COMMENT "host c++ -> verify_tflite (checks a .tflite before you send it)"
         VERBATIM)
     add_custom_target(verify-model DEPENDS "${CMAKE_BINARY_DIR}/verify_tflite")

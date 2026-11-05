@@ -27,7 +27,8 @@
  * model was checked.  The only version of this worth having is the identical code.
  *
  * WHAT IT CHECKS, in the order the board would:
- *   1. length, and that it fits a blob slot payload AND the backend's staging buffer
+ *   1. length, and that it fits the payload of the largest blob slot (the shipped
+ *      table, src/blob_slots.c) AND the backend's staging buffer
  *   2. the "TFL3" file identifier at offset 4
  *   3. tflite::VerifyModelBuffer() -- the full structural walk, BOUNDED by the
  *      limits f746g-disco's and grove-vision-ai-v2's firmware (this board's builds it out)
@@ -74,6 +75,12 @@
 #include "tensorflow/lite/micro/micro_interpreter.h"
 
 #include "nn_tflm_ops.h"
+/* The staging buffer's size, from the variable the firmware is built with
+ * (cmake/tflite-micro.cmake passes NN_TFLM_MODEL_KB to both), and the blob
+ * store's table and header unit -- the shipped table itself, compiled in as C
+ * with svc/blob/blob_map.c's lookups (issue #193). */
+#include "nn_tflm_mem.h"
+#include "blob.h"
 /* The board's own check of the model's graph and I/O (issues #175, #178): the
  * function the tflm backend calls before it plans a model, so this gate and the
  * board reach the same verdict on the same bytes. */
@@ -86,12 +93,54 @@
 #include <string>
 #include <vector>
 
-/* Mirrors app/blob.h (BLOB_SLOT_SIZE - BLOB_HDR_SIZE) and
- * cmake/tflite-micro.cmake (NN_TFLM_MODEL_KB).  Restated rather than included
- * because those sources belong to the firmware's world; the numbers are checked against
- * their sources by the message this prints when a model is too big. */
-static const uint32_t kBlobPayloadMax = 520192u;
-static const uint32_t kStagingMax     = 1024u * 1024u;
+/*
+ * [!] NEITHER LIMIT IS RESTATED HERE (issue #193).  Until then this file held
+ * 520,192 B and 1 MB as literals "mirroring" the firmware, and the first one went
+ * stale the moment the store grew 1 MB slots: it refused models every slot of
+ * that class could hold.  The slot limit is now the largest payload of the
+ * table the firmware ships, the staging limit the firmware's own macro.
+ */
+static const uint32_t kStagingMax = NN_TFLM_MODEL_MAX;
+
+/* The largest payload any slot of the shipped table holds, or 0 when the table
+ * is not one the store would act on (then nothing is judged). */
+static uint32_t largest_payload(void)
+{
+	uint32_t best = 0u;
+	unsigned i;
+
+	if (blob_map_check(BLOB_REGION_BASE, BLOB_REGION_END, BLOB_ERASE_UNIT,
+	                   blob_map_table(), blob_map_count(), nullptr) != BLOB_MAP_OK)
+		return 0u;
+	for (i = 0u; i < blob_map_count(); i++) {
+		uint32_t p = blob_map_payload_max(blob_map_slot(i), BLOB_ERASE_UNIT);
+
+		if (p > best)
+			best = p;
+	}
+	return best;
+}
+
+/* The smallest slot class that holds @p len, and the first slot of it. */
+static bool smallest_fit(uint32_t len, uint32_t *size, uint32_t *payload,
+                         unsigned *first)
+{
+	bool found = false;
+	unsigned i;
+
+	for (i = 0u; i < blob_map_count(); i++) {
+		const struct blob_slot *s = blob_map_slot(i);
+		uint32_t p = blob_map_payload_max(s, BLOB_ERASE_UNIT);
+
+		if (p < len || (found && p >= *payload))
+			continue;
+		*size = s->size;
+		*payload = p;
+		*first = i;
+		found = true;
+	}
+	return found;
+}
 
 /* CRC-32/ISO-HDLC, bit by bit -- the same value FlashDB's fdb_calc_crc32() produces on
  * the board and Python's zlib.crc32() produces on this machine.  Written out rather
@@ -179,7 +228,7 @@ int main(int argc, char **argv)
 		fprintf(stderr,
 		        "usage: verify_tflite <model.tflite>\n"
 		        "  Checks a model against THIS firmware configuration before you send\n"
-		        "  it with `blob write <slot>` + `sb <model.tflite>`.\n");
+		        "  it with `blob write <name> [slot]` + `sb <model.tflite>`.\n");
 		return 2;
 	}
 
@@ -198,17 +247,32 @@ int main(int argc, char **argv)
 		printf("RESULT  : REJECT -- too short to be a flatbuffer (%u B)\n", len);
 		return 1;
 	}
-	if (len > kBlobPayloadMax) {
-		printf("RESULT  : REJECT -- %u B exceeds a blob slot payload (%u B).\n"
-		       "          Widen BLOB_SLOT_SIZE in app/blob.h, or use a smaller model.\n",
-		       len, kBlobPayloadMax);
+	const uint32_t slot_max = largest_payload();
+	if (slot_max == 0u) {
+		printf("RESULT  : CANNOT CHECK -- the blob slot table this tool was built\n"
+		       "          with does not check out against its interval.\n");
+		return 2;
+	}
+	if (len > slot_max) {
+		printf("RESULT  : REJECT -- %u B exceeds the largest blob slot's payload (%u B);\n"
+		       "          no slot of this firmware can hold it.  Use a smaller model.\n",
+		       len, slot_max);
 		return 1;
 	}
 	if (len > kStagingMax) {
-		printf("RESULT  : REJECT -- %u B exceeds the backend staging slot (%u B).\n"
-		       "          Widen NN_TFLM_MODEL_KB in cmake/tflite-micro.cmake.\n",
+		printf("RESULT  : REJECT -- %u B exceeds the model staging buffer (%u B) that\n"
+		       "          `nn model load` copies a blob into.\n",
 		       len, kStagingMax);
 		return 1;
+	}
+	{
+		uint32_t size = 0u, payload = 0u;
+		unsigned first = 0u;
+
+		if (smallest_fit(len, &size, &payload, &first))
+			printf("slot    : fits a %u KB slot (%u B of payload) or larger --\n"
+			       "          e.g. `blob write <name> %u` (`blob free` lists the free ones)\n",
+			       size / 1024u, payload, first);
 	}
 
 	/* 2. file identifier -------------------------------------------------- */

@@ -29,7 +29,8 @@
  * This tool removes that leading QUANTIZE and makes its output the graph input.  The
  * result has the same weights, the same arithmetic, and the same detections -- the only
  * difference is WHO quantizes: the model, or nncam_rows().  That makes the on-board
- * check a differential one (load slot 0, load slot 1, the same face must appear) rather
+ * check a differential one (load the original, load the rewritten one -- each stored
+ * under its own name -- and the same face must appear) rather
  * than "the numbers look plausible", which is the strongest form the check can take.
  *
  * WHAT IT REFUSES, AND WHY IT REFUSES RATHER THAN COPES
@@ -70,7 +71,7 @@
  *
  * Build + run:  cmake --build build-tflm --target int8-input-model
  *               ./build-tflm/tflite_int8_input in.tflite out.tflite
- *               ./build-tflm/verify_tflite out.tflite       # then blob write + sb
+ *               ./build-tflm/verify_tflite out.tflite       # then blob write <name> [slot] + sb
  */
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/schema/schema_utils.h"   /* GetBuiltinCode()          */

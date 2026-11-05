@@ -522,25 +522,8 @@ gcc $CFLAGS \
 # The blob header codec and the transfer's decisions (svc/blob/blob_state.c)
 # are board-independent since issue #192 and tested by shell/test/test_blob_state.c.
 
-# issue #92 (#49 Step 2) -- the `blob write` coordinator (src/blob_write.c).  A
-# write holds the NOR reservation and the console claim at once and there are
-# nine ways to leave; each has to give back exactly what it took.  The board can
-# stage perhaps two of them, each costs flash cycles of a part whose endurance
-# is not documented (issue #89), and a leaked reservation does not announce
-# itself -- it turns the next `nn open` into "busy" for the rest of the session,
-# by which time the cause is gone.  So the coordinator takes its operations as a
-# vtable, and this fails each in turn and counts the unwinding.  It drives the
-# coordinator's own sink as well, which is how a rejected block 0, a short file
-# and an empty batch happen without a PC.  Since issue #192 the staging buffer
-# is the caller's argument, so the test hands over its own (one of 64 KB, one of
-# exactly one page, and ones the coordinator must refuse before taking anything)
-# and links neither blob_stage.c nor any port/nor header.
-gcc $CFLAGS \
-    -I "$board/src" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
-    "$here/test_blob_write.c" "$board/src/blob_write.c" \
-    "$svc/blob/blob_state.c" "$svc/crc32.c" \
-    $LDFLAGS -o "$out/test_blob_write"
-"$out/test_blob_write"
+# The `blob write` coordinator (svc/blob/blob_write.c) is board-independent
+# since issue #192 and tested by shell/test/test_blob_write.c.
 
 # issue #105 (#78 Step 2) -- the plugin font and its rasteriser
 # (asset/common/plugin_text.c).

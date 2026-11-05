@@ -683,11 +683,12 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/src/blob_slots.c"
     "${CMAKE_SOURCE_DIR}/svc/blob/blob_state.c"
     "${BOARD_DIR}/src/blob.c"
-    # The write coordinator (issue #92).  Takes its operations as a vtable so
-    # that test/test_blob_write.c can fail each of them and watch the
-    # reservation and the console claim come back exactly once -- which is the
-    # part of a transfer hardware cannot demonstrate.
-    "${BOARD_DIR}/src/blob_write.c"
+    # The write coordinator (issue #92; shared since issue #192).  Takes its
+    # operations as a vtable so that shell/test/test_blob_write.c can fail each
+    # of them and watch the reservation and the console claim come back
+    # exactly once -- which is the part of a transfer hardware cannot
+    # demonstrate.  This board's operations are in cmds/cmd_blob.c.
+    "${CMAKE_SOURCE_DIR}/svc/blob/blob_write.c"
     "${BOARD_DIR}/port/threadx/fp_enforce.c"
     "${BOARD_DIR}/port/threadx/tx_glue.c"
     "${BOARD_DIR}/port/sdk_seam/timer_seam.c"

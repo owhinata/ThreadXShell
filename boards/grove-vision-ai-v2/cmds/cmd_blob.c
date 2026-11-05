@@ -303,7 +303,7 @@ static int cmd_blob_free(struct cli_instance *sh, int argc, char **argv)
 
 /* Everything the coordinator needs from the board, and nothing else.  It is a
  * vtable because the unwinding is what has to be tested and hardware can
- * demonstrate about two of the seven ways out (blob_write.h). */
+ * demonstrate about two of the seven ways out (svc/blob/blob_write.h). */
 struct wr_ctx {
 	struct cli_instance *sh;
 	int console_bg;      /**< the claim was refused because we are a bg job */
@@ -472,6 +472,20 @@ static int op_geometry(void *ctx, unsigned slot, uint32_t *base,
 	       BLOB_OK ? 0 : -1;
 }
 
+/*
+ * `blob write`, through the shared coordinator (svc/blob/blob_write.c since
+ * issue #192).  What that coordinator calls "the board writer" is, on this
+ * board, the NOR write transaction of port/nor/nor_write.c and its reservation
+ * (#91), and the facts its comments leave to the board are these:
+ *
+ *   - the reservation token stays local until committed, the same discipline
+ *     npu_hw_init() follows;
+ *   - one slot erase is ~40 s for a 2 MB slot on this die, which is why the
+ *     console is claimed only after it;
+ *   - nor_write.c reads every program back, so programming over an erase that
+ *     stopped early latches a TERMINAL fault -- which is why only an erase that
+ *     reported OK is programmed into.
+ */
 static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 {
 	struct wr_ctx ctx = { sh, 0 };

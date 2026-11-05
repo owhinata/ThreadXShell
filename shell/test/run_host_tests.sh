@@ -329,6 +329,25 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
     $LDFLAGS -o "$out/test_blob_map_svc"
 "$out/test_blob_map_svc"
 
+# issue #92 (#49 Step 2), shared since issue #192 -- the `blob write` coordinator
+# (svc/blob/blob_write.c).  A write holds the board writer's reservation and the
+# console claim at once and there are nine ways to leave; each has to give back
+# exactly what it took.  A board can stage perhaps two of them, each costs flash
+# cycles (on grove-vision-ai-v2, of a part whose endurance is not documented,
+# issue #89), and a leaked reservation does not announce itself -- it turns the
+# next reader into "busy" for the rest of the session, by which time the cause
+# is gone.  So the coordinator takes its operations as a vtable, and this fails
+# each in turn and counts the unwinding.  It drives the coordinator's own sink
+# as well, which is how a rejected block 0, a short file and an empty batch
+# happen without a PC.  The staging buffer is the caller's argument, so the test
+# hands over its own (one of 64 KB, one of exactly one page, and ones the
+# coordinator must refuse before taking anything) and links no board file.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
+    "$here/test_blob_write.c" "$svc/blob/blob_write.c" \
+    "$svc/blob/blob_state.c" "$svc/crc32.c" \
+    $LDFLAGS -o "$out/test_blob_write"
+"$out/test_blob_write"
+
 # issue #101 (#78 Step 1a) -- container and manifest validation (svc/plugin/plugin_load.c):
 # everything that must hold BEFORE a plugin's first instruction is fetched.
 #

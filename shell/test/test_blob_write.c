@@ -2,17 +2,19 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test for the `blob write` coordinator (#92, src/blob_write.c).
+ * Host test for the `blob write` coordinator (#92, svc/blob/blob_write.c;
+ * shared since #192).
  *
- * WHAT IT IS FOR.  A write holds two things at once -- the NOR reservation and
- * the console claim -- and there are nine ways to leave: the reservation
- * refused, no slot to write into, the erase cancelled, the erase incomplete,
- * the console busy, the transfer cancelled or timed out, a program refused, the
- * header refused, the read-back disagreeing.  Each has to give back exactly
- * what it took.  On the board perhaps two of those can be staged, each costs
- * flash cycles of a part whose endurance is not documented (#89), and a leaked
- * reservation does not announce itself -- it turns the next `nn open` into
- * "busy" for the rest of the session, at which point the cause is long gone.
+ * WHAT IT IS FOR.  A write holds two things at once -- the board writer's
+ * reservation and the console claim -- and there are nine ways to leave: the
+ * reservation refused, no slot to write into, the erase cancelled, the erase
+ * incomplete, the console busy, the transfer cancelled or timed out, a program
+ * refused, the header refused, the read-back disagreeing.  Each has to give
+ * back exactly what it took.  On a board perhaps two of those can be staged, each costs
+ * flash cycles (on grove-vision-ai-v2, of a part whose endurance is not
+ * documented, #89), and a leaked reservation does not announce itself -- it
+ * turns the next reader into "busy" for the rest of the session, at which
+ * point the cause is long gone.
  *
  * So the coordinator takes its operations as a vtable and this drives it: every
  * failure injected in turn, and after each one the same three questions --

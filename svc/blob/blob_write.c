@@ -4,11 +4,11 @@
  */
 /**
  * @file    blob_write.c
- * @brief   The `blob write` coordinator (#92).
+ * @brief   The `blob write` coordinator (#92; shared since #192).
  *
  * No hardware and no shell: everything it does to the world goes through the
- * vtable in blob_write.h, so test/test_blob_write.c compiles this exact file on
- * the host and fails each operation in turn.  What it is really checking is the
+ * vtable in blob_write.h, so shell/test/test_blob_write.c compiles this exact
+ * file on the host and fails each operation in turn.  What it is really checking is the
  * unwinding -- see that header for why that is the part worth a test.
  */
 #include "blob_write.h"
@@ -265,9 +265,9 @@ enum blob_write_result blob_write_run(const struct blob_write_ops *ops,
 		ops->announce(ops->ctx, target, base,
 		              (payload_addr - base) + payload_max);
 
-	/* The whole slot, one transaction, cancellable between sectors.  ~40 s
-	 * for 2 MB on this die, which is why it is here and not inside the
-	 * protocol's timeouts. */
+	/* The whole slot, one transaction, cancellable between sectors.  It can
+	 * take tens of seconds on a board's flash, which is why it is here and
+	 * not inside the protocol's timeouts. */
 	rep->transactions++;
 	/* The WHOLE slot: the header unit and the payload.  Derived from the two
 	 * addresses rather than taking the erase unit as a third parameter, so
@@ -282,15 +282,16 @@ enum blob_write_result blob_write_run(const struct blob_write_ops *ops,
 	}
 	/* [!] ONLY AN OK ERASE MAY BE PROGRAMMED INTO.  Bits only go 1 -> 0, so
 	 * programming over an erase that stopped early reads back as the AND of
-	 * the two -- which nor_write.c latches as a TERMINAL fault.  A perfectly
-	 * ordinary interruption would kill the port for the session. */
+	 * the two -- which a board writer that reads its programs back may latch
+	 * as a TERMINAL fault.  A perfectly ordinary interruption could kill the
+	 * port for the session. */
 	if (rc != 0) {
 		res = BLOB_WRITE_ERASE_FAILED;
 		goto out;
 	}
 
 	/* After the erase: the erase wants a live line editor for its cancel, and
-	 * nobody should be handed a raw console for the 40 s it can take. */
+	 * nobody should be handed a raw console for as long as it can take. */
 	if (ops->claim_console(ops->ctx) != 0) {
 		res = BLOB_WRITE_NO_CONSOLE;
 		goto out;

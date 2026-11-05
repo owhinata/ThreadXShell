@@ -4,38 +4,46 @@
  */
 /**
  * @file    blob_write.h
- * @brief   One `blob write`, from the erase to the magic page (#92).
+ * @brief   One `blob write`, from the erase to the magic page (#92; shared
+ *          since #192).
  *
  * The coordinator, and it takes its operations as a VTABLE.  Not for
  * abstraction -- there is exactly one production implementation and it is fifty
  * lines below the test that matters -- but because the thing worth checking
  * about this file cannot be produced on a board: that whatever goes wrong, the
- * NOR reservation and the console claim are each given back EXACTLY ONCE.
+ * board writer's reservation and the console claim are each given back EXACTLY
+ * ONCE.
  *
- * A `blob write` holds two things at once.  The reservation (#91) is what keeps
- * a reader from taking the part between the erase and the last program, and the
+ * A `blob write` holds two things at once.  The reservation is what keeps a
+ * reader from taking the part between the erase and the last program, and the
  * console claim is what stops the shell's line editor eating the sender's
  * bytes.  Between them there are seven ways to leave: the reservation refused,
  * the erase cancelled, the erase incomplete, the console busy, the transfer
  * timed out or cancelled, a program failed, the header failed.  Each has to
  * unwind exactly what it took, and hardware can demonstrate perhaps two of them
- * -- so test/test_blob_write.c drives all seven through this vtable and counts.
+ * -- so shell/test/test_blob_write.c drives all seven through this vtable and
+ * counts.
  *
  * THE ORDER IS THE DESIGN, and each step is here because of something learned
  * elsewhere:
  *
- *   1. reserve the part.  A token that stays LOCAL until it is committed, the
- *      way npu_hw_init() does it: a caller that fails at step 3 must not leave
- *      a token anybody could mistake for live.
+ *   1. reserve the part.  A token that stays LOCAL until it is committed: a
+ *      caller that fails at step 3 must not leave a token anybody could
+ *      mistake for live.
  *   2. erase the whole slot, in ONE transaction, with a progress callback that
- *      can cancel between sectors.  ~40 s for a 2 MB slot on this die, which is
- *      why it happens here rather than inside the protocol.
+ *      can cancel between sectors.  A slot erase can take tens of seconds on a
+ *      board's flash, which is why it happens here rather than inside the
+ *      protocol.
  *   3. [!] ONLY IF THE ERASE REPORTED OK.  Programming into flash whose erase
- *      was cut short reads back as the AND of the two, and nor_write.c makes
- *      that a TERMINAL fault -- so an ordinary Ctrl+C would kill the port.
+ *      was cut short reads back as the AND of the two, and a board writer that
+ *      reads its programs back may treat that as a TERMINAL fault -- so an
+ *      ordinary Ctrl+C could kill the port.
  *   4. claim the console -- AFTER the erase, so that the erase's progress and
- *      its cancel work normally, and so a 40 s wait does not happen with the
+ *      its cancel work normally, and so a long erase does not happen with the
  *      line editor already handed over.
+ *
+ * (The board's own measurements and writer are described with its caller:
+ * grove-vision-ai-v2: cmds/cmd_blob.c.)
  *   5. receive.  The sink accumulates into the staging buffer and programs a
  *      chunk at a time; a program that does not report OK latches, and no
  *      further program or header follows it.
@@ -88,7 +96,7 @@ struct blob_write_report {
 	uint32_t declared;    /**< bytes block 0 announced, 0 if it never came  */
 	uint32_t crc;         /**< CRC-32 of what arrived                       */
 	uint32_t verified;    /**< CRC-32 read back, when a verify ran          */
-	uint32_t transactions;/**< NOR write transactions this run spent        */
+	uint32_t transactions;/**< board write transactions this run spent      */
 	int      vendor_rc;   /**< the last writer status, for the log          */
 };
 

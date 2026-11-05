@@ -365,10 +365,11 @@ enum blob_lookup blob_resolve_name(const struct blob_slot_view *v,
 /**
  * One `blob write`, from the erase to the header.
  *
- * [!] THE BOOKKEEPING IS HERE AND THE I/O IS NOT.  The board's writer
- * (grove-vision-ai-v2: src/blob_write.c) stages bytes and programs them; what it may do next is decided by these functions, which is
- * what lets the host test drive a whole transfer -- including the ones that end
- * badly -- with no flash under it.
+ * [!] THE BOOKKEEPING IS HERE AND THE I/O IS NOT.  The write coordinator
+ * (svc/blob/blob_write.c) stages bytes and has the board program them; what it
+ * may do next is decided by these functions, which is what lets the host test
+ * drive a whole transfer -- including the ones that end badly -- with no flash
+ * under it.
  */
 enum blob_phase {
 	BLOB_PHASE_IDLE = 0,  /**< nothing armed                                */

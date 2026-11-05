@@ -1243,8 +1243,10 @@ the receive):
 | 512 KB slot transfer | 46.2 s for 520,192 B (510 blocks) |
 | 256 KB slot transfer | 17.0 s for 189,816 B; 17.5 s for 194,232 B |
 | RX ring high-water during `blob write`, the board as it boots (camera preview and GUIX on, no inference, no telnet client, no MJPEG) | 2 of 4,096 B, 0 drops, in four transfers; 15 B in a fifth, after inference had run |
-| RX ring high-water during `blob write` with `nn stream`, GUIX, telnet and MJPEG running | not measured |
-| `nn model load --name` of a 1 MB-class blob | not measured |
+| RX ring high-water during `blob write` with `nn stream` running and the GUIX preview on | 116 of 4,096 B, 0 drops |
+| RX ring high-water during `blob write` with the camera streaming JPEG (14 fps), the MJPEG server up and a telnet session open (GUIX stopped) | 26 of 4,096 B, 0 drops |
+| (the four cannot run at once) | MJPEG needs the camera's JPEG format, `nn stream` and the GUIX preview the raster one, so the loaded case is those two configurations; both are far below the 2,047 B pass line |
+| `nn model load --name` of a 1 MB-class blob | about 0.2 s from the command to the refusal, for 1,044,480 B of random bytes in a 1 MB slot (the read, the CRC of the copy and the model check's refusal; a real model adds building the interpreter) |
 | QSPI driver failures after `nn model load --name` / `nn run` | see [the defect](#qspi-operations-failing-after-nn-model-load-issue-194): 3 in 3 loads before the fix, 0 after |
 
 ## Plugin containers (issue #159 = #78 Step 4)

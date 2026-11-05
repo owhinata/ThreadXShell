@@ -621,7 +621,7 @@ table moved to `svc/nn/` in issue #163, see svc/README.md):
 
 | File | Thread or context | Hardware reason |
 |---|---|---|
-| `port/nn/nn_svc_wio.c` | console | The adapter over the `nn.h` API (`svc/nn/nn.h`, implemented by `svc/nn/nn.c`, shared with f746g-disco); model bytes come out of the NOR asset store into the backend's PSRAM staging slot. `nn info`'s model section and `nn thresh` are `svc/nn/nn_svc_common`'s, the refusals' words `svc/nn/nn_refusal`'s (issue #174); this file passes its counter read, its lease and its teardown clause. The open model's claims are a `svc/plugin/plugin_claims.h` store read under this file's interrupt mask. |
+| `port/nn/nn_svc_wio.c` | console | The adapter over the `nn.h` API (`svc/nn/nn.h`, implemented by `svc/nn/nn.c`, shared with f746g-disco); model bytes come out of the NOR asset store into the backend's PSRAM staging buffer, after the shared load order has taken the open model down (issue #191). `nn info`'s model section and `nn thresh` are `svc/nn/nn_svc_common`'s, the refusals' words `svc/nn/nn_refusal`'s (issue #174); this file passes its counter read, its lease and its teardown clause. The open model's claims are a `svc/plugin/plugin_claims.h` store read under this file's interrupt mask. |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) | Binds the shared frame path to the nn step of the band sink (`port/camera/cam_band.h`), holds nn's place among the camera's holders, and holds the NN session plus an OCTOSPI1 user place for the stream's lifetime; owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
 | `port/nn/nn_producer.c` | camera producer (the nn step of the band sink) | Downsamples each 60-row DCMI band straight into the model's input tensor on the CPU through the shared conversion (`svc/nn/nn_input_contract.h`), inside one band period (~18.5 ms), and hands the frame over after the fourth band. |
 | `port/nn/nn_worker.c` | inference worker (`nn_work`, priority 18) | Inference runs on the CPU for ~373 ms with no yield, so the worker sits below the console, the preview and the producer; it holds the result lease across decode + publish because the preview thread outranks it. |
@@ -632,7 +632,7 @@ table moved to `svc/nn/` in issue #163, see svc/README.md):
 | `port/nn/nn_null.c` | as `svc/nn/nn.c` | The `null` backend: a stub that builds without any runtime or model. |
 | `port/nn/crc32_fdb.c` | console (container validation) | Serves `svc/crc32.h` with the FlashDB CRC-32 this firmware already links. |
 | `port/nn/tflm/nn_tflm_board.cc` | as `svc/nn/tflm/nn_tflm.cc` (worker: invoke; console: load / reload / info) | The state object of the shared tflite-micro backend (`svc/nn/tflm/`, one implementation with f746g-disco since issue #161) as plain CPU-only `.bss`, and this board's facts (model names printed as given). C++ only because the state holds TFLM objects' storage. |
-| `port/nn/tflm/nn_tflm_bufs.c` | as above | The arena and the two model staging slots in the cacheable, CPU-only PSRAM carve-out (`.psram_ai`), defined in C so `check_psram_ai_residency.py` sees their plain names, and the staging capacity object `load_region()` hands out. |
+| `port/nn/tflm/nn_tflm_bufs.c` | as above | The arena and the one model staging buffer (1 MB since issue #191; two 512 KB slots before, the same bytes) in the cacheable, CPU-only PSRAM carve-out (`.psram_ai`), defined in C so `check_psram_ai_residency.py` sees their plain names, and the staging capacity object `load_region()` hands out. |
 | `port/plugin/plugin_run.c` | console (load / unload), fault handler | The reservation in the top 32 KB of AXI-SRAM (a Cortex-M7 cannot fetch from DTCM), M7 I/D-cache maintenance and the Armv7-M MPU read-back.  The lease checks, the log lines and the staging-region precondition around them are `svc/plugin/plugin_run_core.c`, shared with f746g-disco (issue #159). |
 | `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex: the preview thread outranks the worker and would otherwise preempt a decode mid-way. |
 | `port/plugin/plugin_paint.c` | panel | CPU pixel loops into the rotated, native-order RGB565 LTDC frame (no DMA2D: see [the painter](#-the-painter-draws-with-the-cpu-fills-included)). |
@@ -862,20 +862,50 @@ CRC-checks that copy exactly as before, then:
 - a container goes through `svc/plugin/plugin_load.c` -- the same validator the host
   build runs -- with this board's policy, and its **model section is handed to
   the backend in place**, at its offset inside the staged container.  The TFLM
-  backend accepts any range inside the staging slot it handed out that starts
+  backend accepts any range inside the staging buffer it handed out that starts
   on `NN_MODEL_ALIGN` (16 B); a container's model section is 16-aligned by the
   format's own rule, which `nn_svc_wio.c` asserts meets the backend's;
 - the **plugin section is copied into `.plugin`, the caches are made to agree
   about it, the reservation is read back and its entry point is called** --
   but only after the backend has accepted the model.
 
+**[!] One staging buffer, and it is the open model's (issue #191).**  The tflm
+backend stages into one 1,048,576 B buffer, `nn_tflm_model_buf` at
+`0x90600000` -- the bytes the two 512 KB slots used to occupy, so nothing in
+`.psram_ai` moved: the arena is still at `0x90700000` (524,288 B), the membench
+buffer at `0x90780000`, and the carve-out still holds 1,638,400 B.  Because the
+buffer is where the open model lives, a load runs in this order:
+
+1. the read-only checks, which change nothing: the slot number, the blob lock,
+   the slot's header, that it holds a VALID blob, that its length fits the
+   backend's capacity (asked on its own, `nn_model_stage_capacity()`), and the
+   PSRAM guard.  A refusal here (`blob busy`, an empty slot, a slot that does
+   not exist, PSRAM busy) leaves the previous model, its plugin and its result
+   as they were: `the previous model is still active`;
+2. the plugin lease (a timeout is still a BUSY that changed nothing), then the
+   open model goes down in unload's order -- plugin, last result, interpreter;
+3. only then the buffer is handed out (the backend refuses it while a model is
+   open, before a byte is written), and the NOR read, the CRC of the copy, the
+   container split and the reload run.
+
+Every failure in step 3 ends with **no model** (`nothing is loaded now`), and
+the operator loads the previous model again from its slot (`nn model load
+--slot <n>`).  While steps 2 and 3 run, `nn info` on the other console says the
+model is busy, and `nn thresh` waits for the lease and then answers busy.
+
+The capacity the backend reports is 1,048,576 B, but a blob slot's payload is at
+most 520,192 B (`BLOB_PAYLOAD_MAX`, `src/blob.h`), and that bound is checked
+first.  So on this board a model larger than 512 KB still cannot be loaded until
+the store's slots grow (issue #193).
+
 [!] **Every build of an interpreter zeroes the whole arena first** (issue #167,
 `nn_tflm_construct_interp()` in `svc/nn/tflm/nn_tflm_glue.h`): a model refused
 at an unregistered op used to leave the rest of TFLM's per-op table holding the
 previous model's bytes, which the interpreter's destructor then called as a
 function pointer (`--slot 0`'s 16-op ResNet after BlazeFace froze the console).
-The cost is one memset of `nn_tflm_arena` (524,288 B, PSRAM) per load, the
-restore of a previous model included.
+The cost is one memset of `nn_tflm_arena` (524,288 B, PSRAM) per load (until
+issue #191 the restore of a previous model paid it too; there is no restore
+now).
 
 [!] **A model whose input or output has a dimension outside 0..65535 is
 refused** (issue #175, `NN_MODEL_ERR_DIMS`, -13: `an input/output tensor
@@ -911,7 +941,7 @@ subgraph 0's two I/O lists are walked once, one compare per entry, before their
 count is judged (at most ~128K entries in a 512 KB file), so that a model
 broken in two ways stays `NN_MODEL_ERR_FORMAT`.  On this board, with no
 verifier, the walk is again the only thing in front of those reads; how many
-entries there are is bounded only by the file (512 KB).  The pinned model
+entries there are is bounded only by the file (at most a blob payload, 520,192 B).  The pinned model
 (blazeface, rank 4, operator lists <= 3) passes unchanged.  Cost: +592 B of
 Flash (`shell.elf` text 371,380 -> 371,972 B).
 
@@ -1095,7 +1125,7 @@ that changed what is open change what decodes it:
 |---|---|
 | a bare model loaded | whatever was loaded is unloaded -- a new model with an old model's decoder is the accident this ordering prevents.  Since #116 that leaves the model with NO decoder, which is the bare-model behaviour above |
 | a container loaded | its plugin is loaded; **if it refuses, the model stays open with nothing reading it**, the plugin is unloaded explicitly and **the load fails** with the loader's reason in the detail, state `new` -- the shared command says `the new model is open, but it has no decoder` (issue #122 D6; until then this reported success).  Until #116 it fell back on the resident decoder |
-| the previous model was restored | nothing moved, so nothing moves here -- the previous plugin keeps reading the previous model |
+| the previous model was restored | nothing moved, so nothing moves here -- the previous plugin keeps reading the previous model.  **Not reachable on this board since issue #191**: the previous model is down before the read, so a refused reload ends with nothing open (the row below) |
 | nothing is open | the plugin is unloaded too |
 
 The table is the one every board shares (`svc/nn/nn_swap.c`, issue #131), and
@@ -1142,7 +1172,8 @@ carried the used figure under the word "reserved".
 
 **[!] Two of those rows are not exercised on hardware.**  "A new model adopted
 and its plugin refused" and "the reload failed and the previous model was
-restored" differ only in which one keeps its decoder, and telling them apart
+restored" (the second cannot happen here since issue #191) differ only in which
+one keeps its decoder, and telling them apart
 needs a container the DEVICE refuses -- which the build cannot produce, because
 the host packer runs the device's own validator (`svc/plugin/plugin_load.c`) over what
 it packs and publishes nothing that would be refused.  The host tests reach the
@@ -1163,8 +1194,9 @@ refused or never reached, which since #116 means nothing is reading the model
 -- `from : slot <n>, blob '<name>'`,
 the image sizes and each slot's declared stack).  The claims follow the model
 that is actually open: they are settled only after the backend adopted (or
-refused) the model; a refused load that left the previous model active keeps the
-previous claims; a bare load and `nn model unload` clear them.  `nn info` takes
+refused) the model; a refused load that left the previous model active (since
+issue #191 only a refusal in the read-only checks) keeps the previous claims; a
+bare load, a load that ends with no model and `nn model unload` clear them.  `nn info` takes
 no lock (it has to answer while a stream holds the NN session), so between the
 backend adopting a model and the claims being settled it says `a model load is
 in progress` rather than pairing one model with the other's claims -- and the
@@ -1714,7 +1746,7 @@ then, which is what several of these were read against):
 - **The first run of all failed, and the check that failed was mine.**  Every
   container was refused with *the image is not inside the backend's staging
   region*, because the source check asked `nn_model_load_region()` where that
-  region was -- and the backend is double-slotted, so once the reload had
+  region was -- and the backend was double-slotted then, so once the reload had
   adopted the staged model the query answered with the OTHER slot.  It failed
   closed.  The caller passes the region it was handed now, and port/plugin no
   longer includes the header that would let the question be asked again.

@@ -250,7 +250,7 @@ issue #163, see svc/README.md):
 | File | Thread or context | Hardware reason |
 |---|---|---|
 | `port/nn/nn_svc_f746.c` | console | The thin adapter over the `nn.h` API (`svc/nn/nn.h`, implemented by `svc/nn/nn.c`, shared with wio-lite-ai); it adds no state. `nn thresh` is `svc/nn/nn_svc_common`'s and the refusals' words are `svc/nn/nn_refusal`'s (issue #174); this file passes its lease and its teardown clause. |
-| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | `nn info`'s model section is `svc/nn/nn_svc_common`'s (issue #174), given this file's counter read. The steps of the shared load order on this board: the SD-card model slots in SDRAM; on `tflm`, the plugin policy, the container split and the open container's claims (issue #159; the claims' store and their `nn info` lines are `svc/plugin/plugin_claims`, read under this file's critical section). |
+| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | `nn info`'s model section is `svc/nn/nn_svc_common`'s (issue #174), given this file's counter read. The steps of the shared load order on this board: the SD-card model buffer in SDRAM (on `tflm` asked for only after the open model went down, issue #191); on `tflm`, the plugin policy, the container split and the open container's claims (issue #159; the claims' store and their `nn info` lines are `svc/plugin/plugin_claims`, read under this file's critical section). |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) and the camera sink's open / close of the nn step | Binds the shared frame path to this board's camera as the nn step of the one camera sink, and holds nn's place among the camera's holders (issue #142); owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
 | `port/nn/nn_producer.c` | camera producer (the nn step of the camera sink's `consume()`) | Prepares a frame straight into the model's input tensor (nearest-neighbour resize + RGB565 expansion on the CPU, each value through the shared conversion `svc/nn/nn_input_contract.h`) and hands it over; it does not put the frame -- the sink does, last. |
 | `port/camera/cam_sink.c` | camera producer (`consume()`), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one RGB565 subscriber of the base capture, running the GUIX display step and then the nn step, with `camera_frame_put()` last. Each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
@@ -265,7 +265,7 @@ issue #163, see svc/README.md):
 | `port/nn/nn_null.c` | as `svc/nn/nn.c` | The `null` backend: a BlazeFace-shaped stub with no runtime, present without a load. Its input is int8, scale 1/128, zero point 0, so under the default `nn norm 0` the camera writes 0..127 into it (issue #162; the old `v - 128`, -128..127, comes back with `nn norm 1`); its run does nothing, so the tensor's contents are the only visible effect. |
 | `port/nn/nn_stedgeai.c`, `nn_stedgeai_reloc.c` | as `svc/nn/nn.c` | The non-default ST Edge AI Core backends (a model baked into Flash, or a relocatable one); they need a local ST install. |
 | `port/nn/tflm/nn_tflm_board.cc` | as `svc/nn/tflm/nn_tflm.cc` (worker: invoke; console: load / info) | The state object of the default backend, the shared tflite-micro one (`svc/nn/tflm/`, CMSIS-NN kernels; one implementation with wio-lite-ai since issue #161), as plain `.bss` in internal SRAM, and this board's fact that a model is named `sd:<path>` (it comes off the SD card). C++ only because the state holds TFLM objects' storage. |
-| `port/nn/tflm/nn_tflm_bufs.c` | as above | The arena and the two SD model slots in SDRAM bank3 (`.sdram.ai`, CPU-only), defined in C so `check_f746_layout.py` requires them by their plain names, and `nn_tflm_stage_cap`, the read limit the asset build reads back. |
+| `port/nn/tflm/nn_tflm_bufs.c` | as above | The arena and the one SD model buffer (1 MB since issue #191; two 512 KB slots before, the same bytes) in SDRAM bank3 (`.sdram.ai`, CPU-only), defined in C so `check_f746_layout.py` requires them by their plain names, and `nn_tflm_stage_cap`, the read limit the asset build reads back. |
 
 [!] **`nn run`'s driver (`nn_svc_run_once()`) stays in this board's adapter** (issue #174 D7).  Its policy is shared already: the refusals and the base words of how a run ends (`svc/nn/nn_refusal`), when the wait ends (`svc/nn/nn_run_wait`) and how one run ended (`svc/nn/nn_shot`).  What is left is the camera API (the start's arguments and refusals, how a lost stream is read, the decode read-out), the teardown's clause, and ThreadX's sleep and clock -- `svc/` cannot include `tx_api.h`, so a shared driver would need a hook table as large as the loop itself.
 
@@ -437,17 +437,31 @@ is no built-in model) and after `nn model unload`.
   refused at an unregistered op otherwise leaves the rest of TFLM's per-op table
   holding the previous model's bytes, which the destructor calls as a function
   pointer. The cost is one memset of `nn_tflm_arena` (524,288 B, SDRAM) per
-  load, the restore of a previous model included.
-- A refused `nn model load --path` restores the previous model; from empty it
-  stays empty and says `nothing is loaded`. The answer comes from the reload
-  itself (whether a model is left), not from whether the handle is open.
+  load (until issue #191 the restore of a previous model paid it too).
+- [!] **On `tflm` a refused `nn model load --path` leaves no model** (issue
+  #191).  The backend stages into one 1 MB buffer, the bytes the open model
+  lives in, so the shared order takes the plugin lease and takes the open model
+  and its plugin down before the SD read, and the backend hands the buffer out
+  only then.  Every refusal from the read on ends `nothing is loaded now` --
+  a file that does not exist or cannot be read too, because the reader opens
+  and reads in one call and is not split (the SD load itself goes in issue
+  #194) -- and the operator loads the previous file again.  Only the refusals
+  before it (a running stream, SDRAM down, the NN session, the plugin lease)
+  leave the previous model.  From empty a refusal stays empty.  The answer
+  comes from the reload itself (whether a model is left), not from whether the
+  handle is open.  `stedgeai_reloc` keeps its two slots and still restores the
+  previous model.  A model up to 1,048,576 B now fits (`nn_tflm_stage_cap`,
+  which the asset build reads back); measured on hardware with the pinned
+  blazeface padded to 600 KB.  Cost on `build/f746-tflm`: -64 B of Flash
+  (text + data 621,508 -> 621,444 B, `shell.bin` 621,548 -> 621,484 B), 8 B
+  less `.bss`.
 - [!] **A model whose input or output has a dimension outside 0..65535 is
   refused, `the model was refused (-13)`** (`NN_MODEL_ERR_DIMS`, issue #175):
   `nn_tensor`'s dims are 16-bit, and the descriptor used to be published with
   the dimension truncated.  The tflm backend checks the model's I/O shapes
   (`svc/nn/tflm/nn_tflm_model_check.h`) after the on-board verifier and the
-  schema version, before anything is planned, so the refusal restores the
-  previous model like any other; `verify_tflite` runs the same function.
+  schema version, before anything is planned, so the refusal ends like any
+  other (on `tflm` with no model, issue #191); `verify_tflite` runs the same function.
 - [!] **The same walk covers the whole graph, lengths before elements** (issue
   #178): a subgraph without tensors, an operator without an inputs or outputs
   list, an operator list (inputs / outputs / intermediates) longer than 64 --
@@ -650,7 +664,9 @@ backend. What that changed here:
   instead of copying a name and a size that may come from
   two different models. The same transition counter as wio-lite-ai and
   grove-vision-ai-v2: it is odd only while the backend is being changed --
-  the SD read happens before it -- and a stream, which holds the NN session
+  on `tflm` that includes the SD read, because the open model goes down
+  before it (issue #191); on the other backends the read happens before it --
+  and a stream, which holds the NN session
   but never moves it, still gets the full report. Not exercised on hardware:
   the two-console race cannot be hit by typing, so
   `test/test_nn_model_life.c` holds it (its stub reload asks `nn info` in the
@@ -700,7 +716,7 @@ the resident decoder's candidate scratch (`nn_dec_scratch`, 1,536 B):
 
 | Object | Address | Size | Owner |
 |---|---|---|---|
-| `nn_tflm_model_buf` | `0xC0600000` | 1,048,576 B (2 x 512 KB) | `port/nn/tflm/nn_tflm_bufs.c`, SD model slots |
+| `nn_tflm_model_buf` | `0xC0600000` | 1,048,576 B (one buffer since issue #191; 2 x 512 KB before, the same bytes) | `port/nn/tflm/nn_tflm_bufs.c`, SD model buffer |
 | `nn_tflm_arena` | `0xC0700000` | 524,288 B | `port/nn/tflm/nn_tflm_bufs.c`, activation arena (holds the input tensor) |
 | free | `0xC0780000` | 524,288 B | |
 
@@ -845,7 +861,8 @@ operator copies to the microSD card with a PC card reader, and loads with
 `nn model load --path /<name>.nnc`.
 
 - The reader (`cmds/cmd_nn_board.c`) reads the whole file into the backend's
-  staging slot as before.  If the bytes probe as a container it prints
+  staging buffer, which the backend hands out only once the open model is down
+  (issue #191).  If the bytes probe as a container it prints
   `nn: read <path>: plugin container, <n> B, crc32 <CRC>` -- the CRC-32 of
   every byte read, **the closing check**: it must equal the asset receipt's
   CRC, because nothing on the PC checks that the file copied is the file the
@@ -859,11 +876,12 @@ operator copies to the microSD card with a PC card reader, and loads with
   address `0x20048000`, capacity 32 KB, the stack table in `board.cmake`).  A
   refusal names its reason (`<path> is a container this firmware refuses:
   built for another target`, `... size disagrees with payload`, `... digest
-  mismatch`, ...) and changes nothing: the previous model and its claims stay.
+  mismatch`, ...) and ends with no model and no claims: since issue #191 the
+  open model went down before the read (before, it changed nothing).
 - Its **model section is handed to the backend in place**, at its offset
   inside the staged file.  The tflm backend now accepts any range wholly inside
-  one of its two staging slots that starts on `NN_MODEL_ALIGN` (16 B) -- a slot
-  is identified by containment, not equality, as on wio-lite-ai since #108 --
+  its staging buffer that starts on `NN_MODEL_ALIGN` (16 B) -- identified by
+  containment, not equality, as on wio-lite-ai since #108 --
   so the validated container is never overwritten with unvalidated bytes.
   The rule is `svc/nn/tflm/nn_tflm_fit.h`, a pure function the backend calls
   and `shell/test/test_nn_tflm_fit.c` walks at its boundaries (since #161 it
@@ -1255,7 +1273,8 @@ already running`.
 > **The last result outlives the session** (issue #118). `nn dets` reads the
 > last published decode after a `nn run`, during a stream and after its stop;
 > only a `nn model load` that changed what is open (a new model, or a refusal
-> whose rollback left nothing -- a refusal that kept the previous model keeps its
+> whose rollback left nothing, which on `tflm` since issue #191 is every refusal
+> from the SD read on -- a refusal that kept the previous model keeps its
 > result; the reload reports which, issue #122 P1) and `nn model unload` clear it. `nn run` waits on
 > the record's accepted-publish count, not the worker's inference counter, which
 > this board bumps before the decode is published. `nn stream stats` reads
@@ -1365,7 +1384,7 @@ camera res | format | fps | set   (this board's own)
   GUIX camera screen also opens at boot), so `nn stream stop` alone never
   clears it (issue #175).
 - **`sdram test` also claims `.sdram.ai` from nn and skips live Ethernet state**
-  (issue #152).  The NN arena and model slots live in
+  (issue #152).  The NN arena and model buffer live in
   `.sdram.ai` (bank 3), owned by `port/nn`, so the test takes
   `nn_scratch_claim()` right after the camera claim and keeps it for its whole
   run.  While it is held no nn session can be taken (`nn model load` /

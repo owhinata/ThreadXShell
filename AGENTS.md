@@ -91,7 +91,7 @@
   worker は arm 時点の世代を控え publish のロック内で照合（`svc/nn/nn_det_record.c`）。**RAW 記述子と top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
 - **[!] 推論を非同期の worker で回すボードは「誰も解釈していない」も世代規則の下で publish する**（しないと `nn run` が timeout する。3 ボードとも）。
 - **[!] モデルの load / unload の順序は `svc/nn/nn_core_model` の 1 実装**（表は `svc/nn/nn_swap`、3 ボードがフック + const 表で採る）: 差し替えは
-  backend 成功後、bare は plugin unload、モデルが残らない終わり方は全部下ろす、**BUSY は swap より前だけ**（BUSY 拒否は状態行を出さない、#131）。
+  backend 成功後、bare は plugin unload、モデルが残らない終わり方は全部下ろす、**BUSY は swap より前だけ**（BUSY 拒否は状態行を出さない、#131）、**置き場が 1 本の backend（`staging_is_open`）は複写の前に今のモデルを下ろす**（load_region はモデルが開いている間は拒否、#191）。
 - **[!] nn ディスパッチャ（`svc/nn/nn.c`）は 3 ボードの 1 実装、backend は TFLM（`svc/nn/tflm/`、wio・f746）と Ethos-U（`svc/nn/ethosu/`、Grove）の各 1 実装**: ボードが出すのは配置・状態の実体・HW フックだけでリンク時に結合し、**ボード側の写しを戻さない**（#161・#169、`svc/README.md`）。 **interpreter は組む前に arena 全体をゼロ埋めする**（TFLM は途中失敗した演算表を初期化せず破棄で `free` を呼ぶ、#167、`nn_tflm_glue.h`）。
 - **[!] wio・f746 の入力の値と受入は `svc/nn/nn_input_contract` の 1 実装**（述語・1 要素の変換・開始コードの表 `nn_input_codes`。ボードは画素の取り方だけ、**Grove は自分の約束を持ち揃えない**。#162、`svc/README.md`）。
 

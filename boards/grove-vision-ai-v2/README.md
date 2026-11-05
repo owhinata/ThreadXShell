@@ -4143,33 +4143,52 @@ one back.
 ### `blob` -- the asset store (issue #92, #49 Step 2)
 
 ```
-blob list           every slot: state, size, length, crc32, name
-blob info <slot>    one slot in full, and why an invalid one is
-blob read <slot> [off] [len]    hexdump payload bytes (256 B max)
-blob free           slots that can take something, and what cannot
-blob write <name> <slot>        receive a file over YMODEM into a slot
-blob verify <slot>  re-read a slot and check its stored crc32
-blob erase <slot>   retire a blob: erase its header sector
+blob list                    every slot: base, size, state, length, crc32, name
+blob info <slot>             one slot in full, and why an invalid one is
+blob read <slot> [off] [len] hexdump of the payload (256 B max here)
+blob free                    the slots `blob write` accepts with no `blob erase` first
+blob write <name> [slot]     erase the slot, receive a file over YMODEM, verify
+blob verify <slot>           re-read the payload against its stored crc32
+blob erase <slot>            retire a blob: erase its header sector only
 ```
+
+Since issue #194 the command is the one shared by all three boards,
+`shell/cmds/cmd_blob.c`, and its rules (the name, which slot a name goes to,
+what is refused before the erase, Ctrl+C, the console claim, what a finished
+transfer prints) are described once in
+[svc/README.md](../../svc/README.md#the-blob-command-is-shared-issue-194).  It
+moved to wio-lite-ai's wording where the two differed: `help` reads `named
+assets on the external NOR (models etc.)`; a refused name gives the rule
+(`printable ASCII, no space, at most 64 characters`); `blob info` says
+`(one sector)` and points at `blob verify N` / `blob erase N`; a busy read
+says `blob: busy -- <holder>` in `nor`'s words; `blob free`'s last line reads
+`uncarved : N B of 0x00200000 .. 0x00ffe000 named by no slot`.  The store's
+result numbers became the shared `svc/blob/blob_err.h` ones (busy -4, table
+-7, faulted -10 where they were -2, -3 and -4), which `nn model load --name`'s
+`could not be verified (N)` prints.
 
 Note that even the read side is not free of writes: the first lease on a cold
 port runs the vendor's quad-enable, which writes the NOR's non-volatile status
 register, exactly as `nor info` does.
 
-**Which parts are this board's and which are shared (issue #192).**  The
-board-independent parts of the store are in `svc/blob/`: the header format and
-every decision a transfer makes (`blob_state`), the rules a slot table has to
-satisfy and the lookups over it (`blob_map`), and the `blob write` coordinator
-(`blob_write`).  Their host tests are `shell/test/test_blob_state.c`,
-`test_blob_map.c` and `test_blob_write.c`.  What stays here is everything that
-touches this part or this board's facts:
+**Which parts are this board's and which are shared (issues #192, #194).**
+The board-independent parts of the store are in `svc/blob/`: the header format
+and every decision a transfer makes (`blob_state`), the rules a slot table has
+to satisfy and the lookups over it (`blob_map`), the `blob write` coordinator
+(`blob_write`), the store's results (`blob_err.h`) and the contract the shared
+command calls (`blob_svc.h`); the command is `shell/cmds/cmd_blob.c`.  Their
+host tests are `shell/test/test_blob_state.c`, `test_blob_map.c`,
+`test_blob_write.c`, `test_blob_err.c` and `test_blob_cmd.c`.  What stays here
+is everything that touches this part or this board's facts:
 
 | File | What it is |
 |---|---|
 | `src/blob_slots.c` | The slot table (eleven slots, below) under the fixed names `svc/blob/blob_map.h` declares; pinned entry by entry by `test/test_blob_map.c` |
 | `src/blob_stage.c` | The 64 KB staging buffer, placed by name (`check_placement_budget.py`); `blob write` hands it to the coordinator with its length |
-| `src/blob.c` | The read side: the lease, the invalidate, a slot turned into an address in the XIP window; checks at build time that the format's 256-byte header page equals `NOR_PROGRAM_PAGE` |
-| `cmds/cmd_blob.c` | The command, and the coordinator's operations on this board (the NOR reservation, the erase and programs through `port/nor/nor_write.c`, the console) |
+| `src/blob.c` | The store side, its reads: the lease, the invalidate, a slot turned into an address in the XIP window; checks at build time that the format's 256-byte header page equals `NOR_PROGRAM_PAGE` |
+| `src/blob_writer.c` | The write side, the functions `svc/blob/blob_svc.h` names: the NOR writer reservation, the slot erase, the header erase and the programs, each through `port/nor/nor_write.c` (moved out of `cmds/cmd_blob.c` in issue #194 and still never reaching the seam itself), and the log lines a transfer leaves |
+| `cmds/cmd_blob_board.c` | The console side: YMODEM over UART0, and the holder of a busy NOR or the reason a port is faulted, in `nor`'s words |
+| `svc/blob_svc_config.h` | The words and limits the shared command prints with: the part's name, the 8-digit address, the erase estimate (1,280 ms per 64 KB, from the ~80 ms per 4 KB sector measured below; no maximum is documented for this part), the sender (`sb -k`), `blob read`'s 256 B |
 | `port/nor/` | The NOR lifecycle, the bounded write transaction and the seam |
 
 **The slots are a table over the seam's writable interval, not a second
@@ -4242,13 +4261,14 @@ this is where a future class goes without touching anything already stored.  (A
 the bootloader's slot header, which nothing may ever write.
 
 **The header is two program pages, and the magic page is written last and
-alone** (`svc/blob/blob_state.c`, shared since issue #192; the 256-byte page
+alone, after the payload was read back** (`svc/blob/blob_state.c`, shared since issue #192; the 256-byte page
 is the format's own constant and `src/blob.c` checks at build time that it is
 this part's program page).  Page 0 holds an 8-byte magic and nothing else;
 page 1 holds version, the slot's own base, the payload length, the payload
 CRC-32, the name and a CRC over itself.  So an interrupted transfer leaves a
-slot with no magic, and a body that failed to program cannot be rescued by a
-magic that lands anyway.  Two pages rather than the donor's one because wio
+slot with no magic, a body that failed to program cannot be rescued by a
+magic that lands anyway, and since issue #194 a payload whose read-back
+disagrees leaves the slot `incomplete` rather than `valid`.  Two pages rather than the donor's one because wio
 rests on the W25Q128JV datasheet's partial-page programming and the die
 actually fitted here has no datasheet at all (issue #89): every page here is
 programmed once.
@@ -4357,8 +4377,9 @@ board taught:
    it: a name already stored goes back to its own slot, a new one has to be told
    which slot to use, and a name that lives in a DIFFERENT slot is refused
    rather than moved -- there is never a window with two slots under one name.
-3. **announce**, then **erase the whole slot in one transaction**, cancellable
-   between sectors.  ~21 s for 1 MB, ~41 s for 2 MB.  The announcement happens
+3. **announce**, then **erase the whole slot in one transaction**
+   (`blob_svc_erase_span()` in `src/blob_writer.c`), cancellable between
+   sectors.  ~21 s for 1 MB, ~41 s for 2 MB.  The announcement happens
    here rather than at the top of the command, so a refused write does not warn
    about destroying a slot it never touched.
 4. **only if the erase reported OK.**  Programming into flash whose erase was
@@ -4368,12 +4389,33 @@ board taught:
    editor for its cancel and nobody holds a raw console for 40 s.
 6. **receive**, programming a 64 KB chunk at a time.  A program that does not
    report OK latches, and no further program or header follows it.
-7. **release the console, then the body page, then the magic page**, each its
-   own transaction and each read back by the writer.  Split so every outcome is
+7. **release the console, then the body page**, its own transaction, read
+   back by the writer.
+8. **verify the payload against the CRC of the stream that arrived.**
+9. **only if it matched, the magic page**, its own transaction, read back by
+   the writer -- the one page that makes the slot valid.  So every outcome is
    either "no magic, so not valid" or "magic, so the body was read back and
-   matched".
-8. **verify the payload against the CRC of the stream that arrived**, and give
-   the reservation back.  One exit, whatever happened.
+   the payload matched".  Until issue #194 the magic went down before the
+   verify, so a payload that failed it left a slot that read `valid`; now it
+   reads `incomplete` (`blob: verify FAIL -- read back X, the stream was Y.
+   Slot N is left incomplete (not valid); `blob write <name> N` sends it
+   again`), and a magic page whose program fails is reported as such (`blob:
+   the last header page did not take -- slot N may read valid, invalid or
+   incomplete; `blob list` says which`).
+10. **give the reservation back.**  One exit, whatever happened.
+
+A stored write now prints (the shared command's lines; numbers illustrative):
+
+```
+ymodem   : <n> blocks ok, 0 bad-crc, 0 bad-seq, 0 short-read, 0 header-timeouts
+rx drops : 0  (clean)
+stored   : '<name>' in slot <n>, <len> B, crc32 <CRC>
+verify   : PASS (read back <CRC>)
+```
+
+where this board printed `cost : N NOR transaction(s), rx_drop +N` before
+#194; the transaction count is in `dmesg` (`write '<name>' slot N: <result>,
+N B erased, N B received, N tx, rx_drops N`).
 
 Measured end to end, against values computed on the host first:
 
@@ -4383,7 +4425,9 @@ Measured end to end, against values computed on the host first:
 | 1,704,672 B | slot 0 | `1D2E14C4` | **30** | +0 |
 
 30 is the budget #49 Step 2 was planned against: 1 erase + 27 chunks + body +
-magic.  `sb -k` moves the bytes at 76-79 KB/s.
+magic (measured in the old order; #194 moved the magic after the verify, which
+reads through the window and spends no transaction, so the count is the
+same).  `sb -k` moves the bytes at 76-79 KB/s.
 
 **`blob erase` is one 4 KB sector**, the header, and the payload underneath is
 left alone -- the next `blob write` erases it anyway.  So `blob list` stops

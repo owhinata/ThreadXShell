@@ -33,8 +33,9 @@
  *
  * TWO KINDS OF EXCLUSION, said once.  The reads (blob_stat, blob_read,
  * blob_verify) take whatever their board needs for one call and give it back
- * (a busy flag is not taken at all on wio-lite-ai and f746g-disco; a lease is,
- * on grove-vision-ai-v2).  Erasing and writing go under ONE reservation held
+ * (a busy flag is not taken at all on wio-lite-ai and f746g-disco -- f746g-disco's
+ * only look at it and answer BUSY while it is held; a lease is, on
+ * grove-vision-ai-v2).  Erasing and writing go under ONE reservation held
  * across the whole command (blob_svc_reserve): the busy flag, or the NOR
  * writer reservation.  The _reserved forms are for use under it.
  */

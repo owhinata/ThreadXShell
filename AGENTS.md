@@ -56,15 +56,15 @@
   開いているモデルに従い**、reload 後の状態は `nn_model_reload()` 自身の戻り値で決める。**監査は
   `AUDIT_SHARED` だけ。**
 
-### 7. `nn` と `camera` は 3 ボード共有の 1 コマンド（各 1 つ）
+### 7. `nn`・`camera`・`blob` は 3 ボード共有の 1 コマンド（各 1 つ）
 
-`cmd_nn.c` / `cmd_camera.c` が唯一の実装、契約は `svc/nn/nn_svc.h` / `svc/camera/camera_svc.h`、ボード側は `nn_svc_*.c` / `camera_svc_*.c`。**緩めた時点で BLOCKING。**
+`cmd_nn.c` / `cmd_camera.c` / `cmd_blob.c` が唯一の実装、契約は `svc/nn/nn_svc.h` / `svc/camera/camera_svc.h` / `svc/blob/blob_svc.h`、ボード側は `nn_svc_*.c` / `camera_svc_*.c` / `src/blob.c`・`src/blob_writer.c`・`cmds/cmd_blob_board.c`。**緩めた時点で BLOCKING。**
 
-- **共有 TU（`cmd_nn.c` / `nn_cmd_core.c` / `cmd_camera.c`）は可変記憶域を持たない**（状態はアダプタだけ）。強制は
+- **共有 TU（`cmd_nn.c` / `nn_cmd_core.c` / `cmd_camera.c` / `cmd_blob.c`）は可変記憶域を持たない**（状態はアダプタだけ）。強制は
   `cmake/check_no_mutable_storage.py` を**ボードごとの監査コンパイル**で当てること — **ホストの結果は
   当てにならない**（host ではコマンド表が `.data.rel.ro` に落ちて偽陽性になる）。
 - **ファーム監査は列挙せずビルドから導出する**（`cmake/shared_storage_gate.cmake`。対象は実際に
-  コンパイルする `svc/` の TU と上記 2 本で、唯一の既存例外は `svc/ymodem.c`）。評価済み CMake
+  コンパイルする `svc/` の TU と上記の共有コマンドで、唯一の既存例外は `svc/ymodem.c`）。評価済み CMake
   target/source と compile DB を両方向照合し実引数で監査コンパイルする。**導出・照合・失敗伝播を
   弱めない。** plugin の実オブジェクト監査は別に維持する。詳細は `cmake/README.md`。
 - **capability マクロは性質であってボード名ではない**（バックエンド依存は `CONFIG_NN_BACKEND` に従う）。
@@ -121,7 +121,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   ダイジェストは署名ではない**（由来は packer のプロセス制約が担保する）。
 - **container は組んでから検査し、その同一ファイルを送る**。ホストは `verify_container` で**デバイスと
   同じ `svc/plugin/plugin_load.c`** を走らせ、**全ゲート通過まで公開しない**。**`--profile` と行き先は必須**
-  で前者はファイル名から推測しない。**asset の行き先はちょうど 1 つ**（slot ボードは `--slot` と slot 表、file ボードは出荷 ELF から読み戻した staging 容量に公開前に照合し、無し・両方・半分は拒否。#159）。**`--profile` はチェック集合の選択であって識別ではない**ので非対称
+  で前者はファイル名から推測しない。**asset の行き先はちょうど 1 つ**（全ボード `--slot` と slot 表に公開前に照合。出荷 ELF の staging 容量に照合するファイル宛ては使うボードが無いが道具に残る（#194・#195）。無し・両方・半分は拒否。#159）。**`--profile` はチェック集合の選択であって識別ではない**ので非対称
   — 対処は**拒否ではなく警告**で、**`cls` 側に出力 shape 固定を足さない**。
 - **[!] モデル区画は 16 バイト整列**（flatbuffer の 4 ではなく Ethos-U ドライバの要求）。
   **[!] オフセット → アドレスの変換は `plugin_run_slot()` の 1 箇所**で、**実行前に MPU を読み戻して
@@ -152,8 +152,9 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   決めず、写像できない組は `#error`。
 - **[!] アセットは `--target asset-<name>` が作る。ゲートは送信時ではなくビルド時にある** — 送信は打った
   パスをそのまま送り**それがその成果物かは誰も検査しない**ので、閉じ手は receipt の **CRC32** を転送後に
-  ボードの保存バイトの CRC（slot ボードは `blob list`、f746 は load が印字する採用済み全バイトの CRC）と突き合わせること。**モデルは commit + SHA256 で pin**（Git LFS 不在だとポインタが
+  ボードの保存バイトの CRC（全ボード `blob list`）と突き合わせること。**モデルは commit + SHA256 で pin**（Git LFS 不在だとポインタが
   exit 0 で置かれる）、**pin が消えたら fail closed**。**ファームと plugin は別成果物で間違いは両方向。** **[!] veneer ゲートの DELIVERY は build.ninja から導出したファーム成果物の使用者と両方向で照合し（`cmake/check_delivery_gate.py`）、全 target がその検査を先に待つ。外す・弱めない。**
+- **[!] slot 表は出荷後 append のみ**（identity は基底アドレス、全面の作り直しは各ボード一度きり: Grove #94・wio #193、f746 は #194 で wio の表から）。**置き場に入らない slot はリンク後に共有の `check_blob_staging.py` が拒む**（wio・f746。外す・弱めない）。`empty` は「ヘッダが無い」で「空きフラッシュ」ではない。
 - **[!] 同じ plugin の callback は 2 つ同時に走らない**: plugin に入る全経路（param・admission・report・load/unload も）がボードの lease を取り、worker とコンソールは有界に待ち、panel は try だけ。**入口（ボードの分岐点と ENTRY の直前）は保持を検査し、無ければ「plugin 無し」とは別の答えを返す**（#127）。
 - **[!] 3 ボードのファームとも共有デコーダをリンクしない — デコーダは container でしか届かない**（**常駐デコーダを戻さない。別フラグで組み直した監査対象を作らない**。f746 も #159 で外した）。素の `.tflite` は **`nn run` でテンソルをそのまま報告**、**`nn stream start` は拒否**、**`nn thresh` は none**（set は **state**）。**非 tflm backend も同じ答え。**
   **wio・f746 は admission を `nn run` と共有するので shape の問いは no-plugin で通し**（refuse すると素のモデルの `nn run` が消える）、**stream を止めるのは `nn_active_can_draw()` 1 本**（Grove は 12 節）。
@@ -162,11 +163,10 @@ plugin は board code と同格の**信頼された native code**。ゲートが
 
 配置保証はポストリンクのチェックで行う。**どのボードでも、以下を外す・弱める変更は不可。**
 
-- **wio-lite-ai**（LTO を使う）: `check_{itcm,dtcm,psram_ai}_residency.py` と
-  `check_plugin_reservation.py` と `check_blob_staging.py`（置き場に入らない slot を拒む）が唯一の砦（`ALLOWED_VENEER_TARGETS` は**理由つきで**増やす）。**slot 表も出荷後は append のみ**（identity は基底アドレス、全面の作り直しは #193 の一度きり）。
+- **wio-lite-ai**（LTO を使う）: `check_{itcm,dtcm,psram_ai}_residency.py` と `check_plugin_reservation.py` と共有の `check_blob_staging.py`（9 節）が唯一の砦（`ALLOWED_VENEER_TARGETS` は**理由つきで**増やす）。
 - **f746g-disco**: 逆に **LTO を禁止**する（`board.cmake` が per-config 変種込みで FATAL_ERROR。
   ldscript の ASSERT 群が invariant の本体だから）。加えて `check_f746_layout.py` がシンボル常駐 /
-  ベクタ / float ランタイムを実イメージで検査する。
+  ベクタ / float ランタイムを実イメージで検査し、共有の `check_blob_staging.py`（9 節）が slot を見る。
 - **wio-lite-ai の boot ツリー**: `check_boot_safety.py`（precheck + POST_BUILD）。`boot_image` の
   always-relink を外す変更はゲートの無効化と同じ。negative test は `cmake/fixtures/`。
 - **grove-vision-ai-v2**: ポストビルド 5 本（`check_image_coherence.py` / `check_placement_budget.py` /
@@ -185,6 +185,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
 - **raster の DCMI OVR を終端に戻さない**（#137）: 復帰は producer の `cam_stream_resync()` 1 本（`cam_lock` 下・NVIC マスク下、subscriber の close/open 無し）。**teardown は stop とエラーだけ**（#142 で上限は無い）。
 - **DCMI の LINE / VSYNC 割込みを有効に戻さない**（消費者が無く、試した構成では有効だと 40 s 周期 overrun の必要条件だった。`HAL_DCMI_Init` が足すので Init 直後に `dcmi_hal_init()` で切る。#144）
 - **LTDC の pixel-clock 域レジスタ（RM0385 Table 117）を flip / 毎フレーム経路で触らない**（1 アクセスで APB2 が約 1.1 us 止まり SDMMC / DCMI が溢れる。flip は LxCFBAR だけ書く、`HAL_LTDC_SetAddress*` を戻さない、#160）
+- **QSPI の消去・書込みは blob の busy flag の下だけ**（`qspi erase/test`・`nn model load` も取り、保持中の読みは BUSY。64 KB 消去は含む sector を消すので 64 KB 境界でだけ。plugin 禁止表の `qspi_flash_*`・blob 書込みを外さない。#194）
 - **購読者は camera sink（表示 + nn の step）と MJPEG の 2 つ、step の停止は印を落として使用中 0**（`svc/camera/cam_step`）。`camera_frame_put()` は**全 `consume()` の最後の
   文**、`CAM_OWN_DRAINING` は `camera_unsubscribe()` / step の disable の**前**、直列化（PRIMASK）は作業を跨がない。判定は
   `cam_drain.c` / `cam_own.c` の純関数が**唯一の判断点**で**両方 fail-closed**、**`default:` を足さない**。
@@ -214,8 +215,7 @@ board README が正。
   ライフサイクルと QSPI/XIP と EPK wrapset は `port/nor/` 所有**（NPU へ戻すと unload が IRQ を切る）。
 - **[!] 弱めない**: **`NOR_ST_WRITING` は state と reader マスクを同一クリティカルセクションで読む /
   `NOR_ST_RESERVED` は跨ぐ所有権で commit は RESERVED に戻し owner と同時に publish、不整合は terminal、
-  予約は全出口で返す / `nor info` はリースを取らない / blob の identity は基底アドレス、`empty` は
-  「空きフラッシュ」ではない、全面 re-carve は一度きりで以後 append のみ。**
+  予約は全出口で返す / `nor info` はリースを取らない（slot 表と `empty` の規則は 9 節）。**
 - **[!] flash geometry は実測値でノブではない**（非キャッシュ。**CACHE 化は不可** — 宣言と検査が同じ値
   から出る）。**消去粒度とヘッダ複製数は束ね直さない。firmware 予約はブートローダの算術から導出**し
   **1 イメージ 1 スロットは `--image-max` で検査**。**`check_flash_partitions.py` は予約の非重複を成果物

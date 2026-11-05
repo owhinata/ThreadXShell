@@ -4,7 +4,9 @@
 when the ELF is already current. It covers every compiled translation unit in
 the repository's `svc/` tree and the shared commands outside it,
 `SHARED_COMMANDS` in `check_shared_storage_build.py`:
-`shell/cmds/{cmd_nn,nn_cmd_core,cmd_camera}.c` (`cmd_camera.c` since #143).
+`shell/cmds/{cmd_nn,nn_cmd_core,cmd_camera,cmd_blob}.c` (`cmd_camera.c` since
+#143, `cmd_blob.c` since #194; a board whose store is not built, wio-lite-ai
+without KV, still compiles `cmd_blob.c` and registers nothing).
 Each of those must also be compiled by the board -- a build that stops
 compiling one is refused ("mandatory command missing"), not audited less. The exact
 `svc/ymodem.c` path is the sole existing exception: it owns non-reentrant send
@@ -373,24 +375,59 @@ pins the tree it lives in (Grove's cifar10 is inside the pinned Himax SDK).
 # Asset destinations: a slot or a file, exactly one (#159)
 
 `add_asset()` takes exactly one destination. A store slot -- `SLOT` with
-`SLOT_TABLE` -- is what Grove and wio use, and its fit check against the slot
-table before publication is unchanged. A file the operator copies to the
-board's card -- `FILE_NAME` with `STAGE_SYMBOL` -- is f746's (from #159 Step
-4b): `build_asset.py` reads the staging capacity the shipped firmware holds in
-that `const uint32_t`, out of the ELF `veneer_cost_gate()` registered, and
-refuses a container larger than it before publishing. None, both, or half of
-either is refused at configure (`add_asset()`) and again in `build_asset.py`,
-which used to skip the fit check on a call that named no slot.
+`SLOT_TABLE` -- is what every board uses since #194 (Grove and wio before it,
+f746 from then on), and its fit check against the slot table before
+publication is unchanged. A file the operator copies to the board's card --
+`FILE_NAME` with `STAGE_SYMBOL` -- was f746's (from #159 Step 4b to #194):
+`build_asset.py` reads the staging capacity the shipped firmware holds in that
+`const uint32_t`, out of the ELF `veneer_cost_gate()` registered, and refuses a
+container larger than it before publishing. None, both, or half of either is
+refused at configure (`add_asset()`) and again in `build_asset.py`, which used
+to skip the fit check on a call that named no slot.  [!] No board passes the
+file destination any more, but the route is still in the tools
+(`add_asset.cmake`, `build_asset.py --stage-symbol` / `--file`,
+`asset_receipt.py --file`, `run_with_pinned_input.py`) and their tests still
+run it; removing it is issue #195.
 
 The receipt's transfer and verify lines are the board's too
 (`RECEIPT_TRANSFER` / `RECEIPT_VERIFY`: a label and its lines, templates over
 `{name}`, `{slot}`, `{file}` and `{crc}`). Grove and wio pass the picocom and
 `blob list` text the receipt always printed, so their receipts are
-byte-identical. `fixtures/run_add_plugin_arg_tests.py` covers the configure
+byte-identical; f746 passes wio's text since #194. `fixtures/run_add_plugin_arg_tests.py` covers the configure
 refusals; `fixtures/run_asset_dest_tests.py` covers `build_asset.py`'s, the
 receipt (including the slot boards' text byte for byte) and, with the cross
 toolchain, the capacity read-back's refusals (missing, writable, zero, not a
 `uint32_t`).
+
+# Blob slots against the model staging buffer (`check_blob_staging.py`, #193)
+
+A post-link step of every board whose tflm backend copies a blob whole into
+its one staging buffer (wio-lite-ai since #193, f746g-disco since #194; it was
+wio's `cmake/` until then): it reads the slot table (`blob_map_slots[]`,
+`blob_map_slots_count`) and the capacity (`nn_tflm_stage_cap`, with
+`nn_tflm_model_buf` at least that long) out of the linked image and refuses a
+slot whose payload, the slot less its header unit, is larger than the buffer
+-- a slot `blob write` would fill with a model this firmware cannot load.
+
+The board passes only its own facts, in its `board.cmake`:
+
+| Argument | Means | wio-lite-ai | f746g-disco |
+|---|---|---|---|
+| `--backend` | what this build compiled (`CONFIG_NN_BACKEND`) | | |
+| `--staged-backend` | a backend that loads through the tflm buffer, and so must hold it | `tflm` | `tflm` |
+| `--unstaged-backend` | a backend that does not, and so must not | `null` | `null`, `stedgeai`, `stedgeai_reloc` |
+| `--header-bytes` | the header unit at the top of every slot (`src/blob.h` `BLOB_ERASE_UNIT`) | 4096 | 4096 |
+
+wio-lite-ai runs it only with `BSP_ENABLE_KV` (no KV, no store).  A backend in
+neither list stops the build; an unstaged image that holds the
+staging symbols, or a staged one that does not, is refused too, and the table
+is read either way (NOT APPLICABLE is said, never assumed).  Both boards keep
+the table's two symbols with `-Wl,--require-defined`.  The tests are
+`fixtures/run_blob_staging_tests.py`, run from each board's
+`test/host_tests.sh` with `--board-dir`, so the header unit `board.cmake`
+passes and the table entry layout the script restates are compared with that
+board's `src/blob.h` and `svc/blob/blob_map.h`; the synthetic-image cases need
+the cross toolchain and SKIP loudly without it.
 
 # Plugin image gate: the stack bound
 

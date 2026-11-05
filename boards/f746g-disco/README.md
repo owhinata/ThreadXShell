@@ -18,7 +18,7 @@ cmake -B build/f746g-disco -G Ninja \
       -DBOARD=f746g-disco
 cmake --build build/f746g-disco
 cmake --build build/f746g-disco --target flash   # ST-Link
-picocom -b 115200 /dev/ttyACM0                   # the ST-Link VCP
+picocom -b 115200 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0   # the VCP
 ```
 
 The first configure downloads the pinned ARM GNU toolchain into `tools/` and
@@ -35,21 +35,26 @@ downloads its third-party dependencies); its build needs no network.
 [Build options](#build-options)).
 
 The firmware carries no model (issue #159 Step 4c): after boot `nn info` says
-`model : (none)`. To run the face detector, build its container, copy it to
-the root of the microSD card and load it:
+`model : (none)`. To run the face detector, build its container, send it over
+the VCP into the [QSPI asset store](#the-qspi-asset-store-blob-issue-194) and
+load it by name (since issue #194; until then it was a file on the microSD
+card):
 
 ```bash
 cmake --build build/f746g-disco --target asset-blazeface   # fetches the pinned model
-# copy build/f746g-disco/asset/blazeface.nnc to the card as /blazeface.nnc
 ```
 
 ```
-nn model load --path /blazeface.nnc
+blob erase 12                    # the slot must be empty first
+blob write blazeface 12          # then, in picocom: C-a C-s and
+                                 # build/f746g-disco/asset/blazeface.nnc
+blob list                        # slot 12's crc32 must be the receipt's
+nn model load --name blazeface
 ```
 
-The load prints the CRC32 of the bytes it read; compare it with the one in the
-receipt the asset build printed (see [Building this board's
-containers](#building-this-boards-containers)).
+The CRC32 `blob list` shows is the one the store computed over the bytes it
+received; compare it with the one in the receipt the asset build printed (see
+[Building this board's containers](#building-this-boards-containers)).
 
 CMSIS core stays at `v5.6.0_cm7`, newer than the 5.4.0 STM32CubeF7 pairs with its
 HAL. Going down to 5.4.0 would give up four properties for nothing but matching
@@ -206,8 +211,9 @@ knowing:
 
 `tflm` runs tflite-micro with CMSIS-NN kernels.  [!] **It carries no model**
 (issue #159 Step 4c): a model -- a bare `.tflite`, or a plugin container that
-brings the decoder for it -- is copied to the microSD card and loaded with `nn
-model load --path`.  The pinned BlazeFace front 128 int8 that wio-lite-ai and
+brings the decoder for it -- is sent into the QSPI asset store with `blob
+write` and loaded with `nn model load --name` (issue #194; a file on the
+microSD card and `--path` before).  The pinned BlazeFace front 128 int8 that wio-lite-ai and
 grove-vision-ai-v2 ship (ST model zoo, `STMicroelectronics/stm32ai-modelzoo`,
 commit `1423c78953a830903485135febe1dd98ff31aed8`,
 `face_detection/facedetect_front/.../blazeface_front_128_int8.tflite`, SHA256
@@ -250,7 +256,7 @@ issue #163, see svc/README.md):
 | File | Thread or context | Hardware reason |
 |---|---|---|
 | `port/nn/nn_svc_f746.c` | console | The thin adapter over the `nn.h` API (`svc/nn/nn.h`, implemented by `svc/nn/nn.c`, shared with wio-lite-ai); it adds no state. `nn thresh` is `svc/nn/nn_svc_common`'s and the refusals' words are `svc/nn/nn_refusal`'s (issue #174); this file passes its lease and its teardown clause. |
-| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | `nn info`'s model section is `svc/nn/nn_svc_common`'s (issue #174), given this file's counter read. The steps of the shared load order on this board: the SD-card model buffer in SDRAM (on `tflm` asked for only after the open model went down, issue #191); on `tflm`, the plugin policy, the container split and the open container's claims (issue #159; the claims' store and their `nn info` lines are `svc/plugin/plugin_claims`, read under this file's critical section). |
+| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | `nn info`'s model section is `svc/nn/nn_svc_common`'s (issue #174), given this file's counter read. The steps of the shared load order on this board: the blob named by `--name`, found and read under the store's busy flag (issue #194), with its length checked before the read and its CRC after; the model staging buffer in SDRAM (on `tflm` asked for only after the open model went down, issue #191); on `tflm`, the plugin policy, the container split and the open container's claims (issue #159; the claims' store and their `nn info` lines are `svc/plugin/plugin_claims`, read under this file's critical section). |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) and the camera sink's open / close of the nn step | Binds the shared frame path to this board's camera as the nn step of the one camera sink, and holds nn's place among the camera's holders (issue #142); owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
 | `port/nn/nn_producer.c` | camera producer (the nn step of the camera sink's `consume()`) | Prepares a frame straight into the model's input tensor (nearest-neighbour resize + RGB565 expansion on the CPU, each value through the shared conversion `svc/nn/nn_input_contract.h`) and hands it over; it does not put the frame -- the sink does, last. |
 | `port/camera/cam_sink.c` | camera producer (`consume()`), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one RGB565 subscriber of the base capture, running the GUIX display step and then the nn step, with `camera_frame_put()` last. Each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
@@ -264,8 +270,8 @@ issue #163, see svc/README.md):
 | `port/nn/nn_model_board.c` | worker (run), console (open / bench / info) | The state and hooks of the shared model API (`svc/nn/nn.c`): its state as plain CPU-only `.bss`, the PRIMASK critical section, the one-tick ThreadX wait, and the DWT cycle counter, enabled here with the CoreSight lock key (TRCENA, LAR unlock, CYCCNTENA). |
 | `port/nn/nn_null.c` | as `svc/nn/nn.c` | The `null` backend: a BlazeFace-shaped stub with no runtime, present without a load. Its input is int8, scale 1/128, zero point 0, so under the default `nn norm 0` the camera writes 0..127 into it (issue #162; the old `v - 128`, -128..127, comes back with `nn norm 1`); its run does nothing, so the tensor's contents are the only visible effect. |
 | `port/nn/nn_stedgeai.c`, `nn_stedgeai_reloc.c` | as `svc/nn/nn.c` | The non-default ST Edge AI Core backends (a model baked into Flash, or a relocatable one); they need a local ST install. |
-| `port/nn/tflm/nn_tflm_board.cc` | as `svc/nn/tflm/nn_tflm.cc` (worker: invoke; console: load / info) | The state object of the default backend, the shared tflite-micro one (`svc/nn/tflm/`, CMSIS-NN kernels; one implementation with wio-lite-ai since issue #161), as plain `.bss` in internal SRAM, and this board's fact that a model is named `sd:<path>` (it comes off the SD card). C++ only because the state holds TFLM objects' storage. |
-| `port/nn/tflm/nn_tflm_bufs.c` | as above | The arena and the one SD model buffer (1 MB since issue #191; two 512 KB slots before, the same bytes) in SDRAM bank3 (`.sdram.ai`, CPU-only), defined in C so `check_f746_layout.py` requires them by their plain names, and `nn_tflm_stage_cap`, the read limit the asset build reads back. |
+| `port/nn/tflm/nn_tflm_board.cc` | as `svc/nn/tflm/nn_tflm.cc` (worker: invoke; console: load / info) | The state object of the default backend, the shared tflite-micro one (`svc/nn/tflm/`, CMSIS-NN kernels; one implementation with wio-lite-ai since issue #161), as plain `.bss` in internal SRAM, and this board's fact that a model is named by its blob name with no prefix (`sd:<path>` until issue #194, when it came off the SD card). C++ only because the state holds TFLM objects' storage. |
+| `port/nn/tflm/nn_tflm_bufs.c` | as above | The arena and the one model staging buffer (1 MB since issue #191; two 512 KB slots before, the same bytes) in SDRAM bank3 (`.sdram.ai`, CPU-only), defined in C so `check_f746_layout.py` requires them by their plain names, and `nn_tflm_stage_cap`, the capacity `check_blob_staging.py` reads back against the slot table (issue #194). |
 
 [!] **`nn run`'s driver (`nn_svc_run_once()`) stays in this board's adapter** (issue #174 D7).  Its policy is shared already: the refusals and the base words of how a run ends (`svc/nn/nn_refusal`), when the wait ends (`svc/nn/nn_run_wait`) and how one run ended (`svc/nn/nn_shot`).  What is left is the camera API (the start's arguments and refusals, how a lost stream is read, the decode read-out), the teardown's clause, and ThreadX's sleep and clock -- `svc/` cannot include `tx_api.h`, so a shared driver would need a hook table as large as the loop itself.
 
@@ -416,7 +422,7 @@ ten `nn run` in a row):
 | `nn run` | | 0.66-0.71 s, one inference each |
 | stack peaks | | `cam_prod` 548 / 1,024 B, `nn-worker` 1,512 / 4,096 B, `cli` 2,524 / 4,096 B (unchanged) |
 
-### The model: loaded from SD, or nothing (issue #131, #159 Step 4c)
+### The model: loaded by name from the QSPI store, or nothing (issue #131, #159 Step 4c, #194)
 
 The backend can hold no model at all: `nn info` then prints `model : (none)`
 and, in place of the tensor lines, `note : nothing loaded -- `nn model load
@@ -424,9 +430,34 @@ and, in place of the tensor lines, `note : nothing loaded -- `nn model load
 `no model is loaded`). On `tflm` that is the state after boot (Step 4c: there
 is no built-in model) and after `nn model unload`.
 
-- `nn model load builtin` is refused before anything is acquired: `not a model
-  source this board takes` (this board loads a model from the SD card
-  (--path); it has no built-in model). The usage lists `--path` only.
+- `nn model load builtin` is refused before anything is acquired: `this board
+  loads a model from a QSPI asset by name (--name); it has no built-in model`
+  (SPEC). The usage lists `--name` only.
+- [!] **There is no SD load any more** (issue #194).  `nn model load --path
+  <p>` is refused the same way (`... it has no filesystem load (send the file
+  with `blob write`)`), `--slot <n>` too (`... no load by slot number (`blob
+  list` names them)`), and a bare word by the shared grammar (`nn: '<word>' is
+  not a model source.  Say which kind it is ...`).  A model that used to sit on
+  the card is sent again into a slot -- see [Moving models off the SD
+  card](#moving-models-off-the-sd-card).
+- **`nn model load --name <name>`** (`port/nn/nn_svc_f746_model.c`) refuses a
+  name the store could never have stored before it takes anything (`'<name>' is
+  not a blob name (...)`), then holds the store's busy flag from the name
+  lookup to the end of the payload read, so no `blob write` / `blob erase` /
+  `qspi erase` / `qspi test` can change the slot between the two (a held flag:
+  BUSY, `blob busy (...)`, before the swap, so the open model stays).  Under
+  it: no VALID slot or two VALID slots under the name are ARG (`'<name>': ...
+  (`blob list` shows what is where)`), headers that cannot be read are HW; a
+  length of 0 or past the staging buffer is ARG (`slot <n> is <len> B,
+  staging holds <cap> B`) before a payload byte is read; then the whole
+  payload is read (in 64 KB pieces, `BLOB_READ_CHUNK`) and the flag given
+  back.  A failed read is HW (`QSPI read failed (<rc>)`); a copy whose CRC-32
+  disagrees with the header is HW too (`CRC32 mismatch -- stored <X>, in
+  memory <Y>; the blob is intact on the QSPI only if `blob verify <slot>`
+  passes, the copy is not`).  Only then is a container split.  All of it is
+  `test/test_nn_model_life.c` and `test/test_nn_model_container.c` over a
+  stand-in store (`test/nn_blob_stub.c`), including that the flag is taken
+  and given back once on every path.
 - [!] **Only the first open after boot can build anything**, and on `tflm` it
   builds nothing: the #131 latch is kept for the backends with a model in the
   image (`null`'s stub, `stedgeai`'s generated model), which adopt it there.
@@ -438,21 +469,24 @@ is no built-in model) and after `nn model unload`.
   holding the previous model's bytes, which the destructor calls as a function
   pointer. The cost is one memset of `nn_tflm_arena` (524,288 B, SDRAM) per
   load (until issue #191 the restore of a previous model paid it too).
-- [!] **On `tflm` a refused `nn model load --path` leaves no model** (issue
-  #191).  The backend stages into one 1 MB buffer, the bytes the open model
-  lives in, so the shared order takes the plugin lease and takes the open model
-  and its plugin down before the SD read, and the backend hands the buffer out
-  only then.  Every refusal from the read on ends `nothing is loaded now` --
-  a file that does not exist or cannot be read too, because the reader opens
-  and reads in one call and is not split (the SD load itself goes in issue
-  #194) -- and the operator loads the previous file again.  Only the refusals
-  before it (a running stream, SDRAM down, the NN session, the plugin lease)
-  leave the previous model.  From empty a refusal stays empty.  The answer
+- [!] **On `tflm` a refused `nn model load` that got as far as the read
+  leaves no model** (issue #191).  The backend stages into one 1 MB buffer,
+  the bytes the open model lives in, so the shared order takes the plugin
+  lease and takes the open model and its plugin down before the payload is
+  read, and the backend hands the buffer out only then.  Every refusal from
+  the read on (a failed read, a CRC mismatch, a container refused, a model the
+  backend refuses) ends `nothing is loaded now`, and the operator loads the
+  previous blob again by its name.  The refusals before it (a running stream,
+  SDRAM down, the NN session, the plugin lease, and since issue #194 the
+  name's rules, the busy flag, the lookup and the length) leave the previous
+  model.  From empty a refusal stays empty.  The answer
   comes from the reload itself (whether a model is left), not from whether the
   handle is open.  `stedgeai_reloc` keeps its two slots and still restores the
-  previous model.  A model up to 1,048,576 B now fits (`nn_tflm_stage_cap`,
-  which the asset build reads back); measured on hardware with the pinned
-  blazeface padded to 600 KB.  Cost on `build/f746-tflm`: -64 B of Flash
+  previous model.  A model up to 1,048,576 B fits the buffer
+  (`nn_tflm_stage_cap`); measured on hardware with the pinned blazeface padded
+  to 600 KB, from the SD card at the time.  Since issue #194 the largest slot's
+  payload, 1,044,480 B, is the limit in practice, and
+  `cmake/check_blob_staging.py` keeps every slot within the buffer.  Cost on `build/f746-tflm`: -64 B of Flash
   (text + data 621,508 -> 621,444 B, `shell.bin` 621,548 -> 621,484 B), 8 B
   less `.bss`.
 - [!] **A model whose input or output has a dimension outside 0..65535 is
@@ -632,7 +666,13 @@ is no built-in model) and after `nn model unload`.
   545,688 B, `.rodata` unchanged; `shell.bin` 621,012 -> 621,140 B); the `null`
   tree is byte-identical.
 - `stedgeai_reloc` is the same: it starts empty, and `builtin` used to mean
-  "unload" there before #131 (use `nn model unload`).
+  "unload" there before #131 (use `nn model unload`).  Since issue #194 it
+  loads a `.bin` by blob name like `tflm`, into its inactive 448 KB model slot
+  (`load_region()`): a blob longer than that is refused at the length check,
+  before it is read (ARG, `slot <n> is <len> B, staging holds 458752 B`), so
+  a `.bin` for this backend goes into a 512 KB slot (3-8).  The staging check
+  says NOT APPLICABLE for it (its slot is not the tflm buffer).  Not run on
+  hardware: the backend needs a local ST Edge AI Core install.
 - `stedgeai_reloc` refuses the same dimension with the same `-13` (issue
   #176). Its `reloc_map()` (`port/nn/nn_stedgeai_reloc.c`) maps each I/O
   `ai_buffer` through `nn_reloc_shape_map()` (`port/nn/nn_reloc_shape.h`,
@@ -664,7 +704,7 @@ backend. What that changed here:
   instead of copying a name and a size that may come from
   two different models. The same transition counter as wio-lite-ai and
   grove-vision-ai-v2: it is odd only while the backend is being changed --
-  on `tflm` that includes the SD read, because the open model goes down
+  on `tflm` that includes the payload read, because the open model goes down
   before it (issue #191); on the other backends the read happens before it --
   and a stream, which holds the NN session
   but never moves it, still gets the full report. Not exercised on hardware:
@@ -716,7 +756,7 @@ the resident decoder's candidate scratch (`nn_dec_scratch`, 1,536 B):
 
 | Object | Address | Size | Owner |
 |---|---|---|---|
-| `nn_tflm_model_buf` | `0xC0600000` | 1,048,576 B (one buffer since issue #191; 2 x 512 KB before, the same bytes) | `port/nn/tflm/nn_tflm_bufs.c`, SD model buffer |
+| `nn_tflm_model_buf` | `0xC0600000` | 1,048,576 B (one buffer since issue #191; 2 x 512 KB before, the same bytes) | `port/nn/tflm/nn_tflm_bufs.c`, model staging buffer |
 | `nn_tflm_arena` | `0xC0700000` | 524,288 B | `port/nn/tflm/nn_tflm_bufs.c`, activation arena (holds the input tensor) |
 | free | `0xC0780000` | 524,288 B | |
 
@@ -793,7 +833,8 @@ avg 635,996 / max 638,293 us at 216 MHz.  [!] Since #163 the bench fills its
 input with `0x5A` (`svc/nn/nn_bench.c`, the byte every board uses) where this
 board filled `0x00`, so bench figures from before and after #163 are not
 strictly comparable.  The `cli` stack high-water was 1,216 / 4,096 B at boot
-and 2,748 / 4,096 B after `nn model load --path /blazeface.nnc`, unchanged by
+and 2,748 / 4,096 B after `nn model load --path /blazeface.nnc` (from the SD
+card, before issue #194), unchanged by
 `nn bench 10` and by a stream start / stop: the container load is the deepest
 console path, not the bench (the 2,156 B in the table above was taken after
 `nn bench 10` with the built-in model, before containers).
@@ -832,6 +873,168 @@ bank 3 known to be CPU-only.  The two `stedgeai` backends get the same
 region 1 attribute, but that their generated code and the X-CUBE-AI runtime
 never hand bank 3 to a DMA has not been checked.
 
+## The QSPI asset store (`blob`, issue #194)
+
+Models and containers live on the on-board 16 MB QSPI NOR (N25Q128A) in named
+slots, the same store wio-lite-ai has on its external NOR: the same slot table,
+the same header format and the same `blob` command, so `blob write` and `nn
+model load --name` mean the same thing on both.  Until issue #194 the QSPI NOR
+was a LevelX + FileX volume (the `fs` command) and models were files on the
+microSD card; both are gone (see [Moving models off the SD
+card](#moving-models-off-the-sd-card)).
+
+What is shared and what is this board's:
+
+| Part | Where | What |
+|---|---|---|
+| the command | `shell/cmds/cmd_blob.c` | every `blob` subcommand, its refusals and its words, one file for all three boards ([svc/README.md](../../svc/README.md#the-asset-stores-shared-parts-issue-192)) |
+| the store's rules | `svc/blob/` | the header format, the name and slot rules, the order of one `blob write` (`blob_write.c`), the result codes (`blob_err.h`), the contract the command calls (`blob_svc.h`) |
+| store side | `src/blob.c`, `src/blob.h`, `src/blob_slots.c` | the interval and the slot table, the header and payload reads, the erases, the name lookup and the busy flag |
+| write side | `src/blob_writer.c` | the functions `blob_svc.h` names: the 1 KB staging buffer, the reservation (the busy flag), the program and the read-back, each held to the store's interval, and the log lines a transfer leaves |
+| console side | `cmds/cmd_blob_board.c` | YMODEM over the VCP, the refusal on the telnet console, the busy and driver-down words, the VCP's RX ring high-water |
+| the driver | `port/qspi/qspi_flash.c` | indirect-mode reads, page programs and erases, one mutex per call |
+
+| QSPI range | What |
+|---|---|
+| `0x000000 .. 0x100000` | reserved, no slot (kept free to match wio-lite-ai's layout; `qspi erase` / `qspi test` reach it) |
+| `0x100000 .. 0x800000` | the blob store: 13 slots, below |
+| `0x800000 .. 0x1000000` | unallocated, no slot |
+
+| Slots | Base | Size | Payload |
+|---|---|---|---|
+| 0-2 | `0x100000`, `0x200000`, `0x300000` | 1 MB | 1,044,480 B |
+| 3-8 | `0x400000` .. `0x680000`, every 512 KB | 512 KB | 520,192 B |
+| 9-12 | `0x700000`, `0x740000`, `0x780000`, `0x7C0000` | 256 KB | 258,048 B |
+
+The first 4 KB subsector of a slot is its header (the shared format's two
+256 B pages, magic page first and written last); the rest is the payload.
+`test/test_blob_slots.c` pins every entry.  The largest class is 1 MB because
+that is the tflm staging buffer (`NN_TFLM_MODEL_KB`): the shared
+`cmake/check_blob_staging.py` at the repository root (wio-lite-ai's until
+#194) reads the table and the buffer's capacity back out of the linked image
+and stops the build if any slot's payload is larger.  With `null`,
+`stedgeai` and `stedgeai_reloc` it says NOT APPLICABLE and checks the image
+has no tflm staging buffer (`test/host_tests.sh` runs its shared tests,
+`cmake/fixtures/run_blob_staging_tests.py`, with this board's directory, so the
+4 KB header unit `board.cmake` passes is compared with `src/blob.h`);
+`stedgeai_reloc`'s own 448 KB limit is enforced
+at load time instead (see [the model](#the-model-loaded-by-name-from-the-qspi-store-or-nothing-issue-131-159-step-4c-194)).
+The host checker `verify_tflite` is built with the same table.
+
+### Commands
+
+The `blob` subcommands and their rules are the shared command's, described
+once in [svc/README.md](../../svc/README.md#the-blob-command-is-shared-issue-194):
+
+```
+blob list | info <slot> | read <slot> [off] [len] | free
+blob write <name> [slot]     erase the slot, receive a file over YMODEM, verify
+blob verify <slot> | erase <slot>
+nn model load --name <name>  load the blob stored under <name>
+```
+
+What is this board's:
+
+- **[!] The store's reads answer busy while its busy flag is held**, unlike
+  wio-lite-ai's: `blob list`, `blob info`, `blob read`, `blob verify` and
+  `blob free` answer `blob: another QSPI operation is running (...)` while a
+  `blob write` / `blob erase`, a `qspi erase` / `qspi test` or an `nn model
+  load --name` (lookup to end of read) runs on another console or in the
+  background, rather than describe flash that is being changed.  They only
+  look at the flag, so two readers do not refuse each other.  `qspi erase` and
+  `qspi test` take the flag for their whole run (`qspi: busy -- ...` when they
+  cannot); `qspi probe`, `qspi info` and `qspi read` do not look at it.
+- **The erase is one 64 KB sector at a time** where a whole sector is left,
+  4 KB subsectors elsewhere (`blob_erase_span()`; every slot is whole 64 KB
+  sectors, so in practice all sectors), one erase per driver call, so the
+  driver's mutex is given back between them and Ctrl+C stops the erase between
+  sectors.  The announcement uses the datasheet's 64 KB figures
+  (`svc/blob_svc_config.h`: 0.7 s typical, 3 s at most): about 3 / 6 / 12 s
+  for a 256 KB / 512 KB / 1 MB slot, at most 12 / 24 / 48 s.  `blob erase
+  <slot>` erases the header subsector only.
+- **`blob write` is VCP only.**  From the telnet console it is refused before
+  anything is touched (`ymodem: refused on the telnet console -- it would
+  destroy this session. Run it from the VCP console.`; YMODEM over telnet is
+  issue #197), and a background `blob write ... &` is refused by the shared
+  command.
+- **[!] The VCP's RX ring is 4,096 B** (`CLI_UART_RX_BUFFER_SIZE` in
+  `board.cmake`; 256 B before #194).  At 115200 baud that is about 355 ms of
+  line time, against a 1 KB YMODEM block while the same thread programs the
+  QSPI.  `blob write` ends with one line about it:
+
+  ```
+  rx drops : 0, ring high-water <n> of 4096 B  (clean)
+  ```
+
+  `rx drops` is what the ring dropped during this transfer (`<-- NOT CLEAN`
+  when it is not 0), and the high-water is the fullest the ring got during it
+  (restarted at the transfer's start from what the ring held then).  **The
+  pass line is 0 drops and a high-water at or below half the ring (2,047 B,
+  as `board.cmake` states it)**; a clean transfer near the top says the
+  margin is gone even though nothing was lost.  The drop count also goes to
+  `dmesg`, with the transfer's result.
+- **The write side** (`src/blob_writer.c`) follows the shared order (body
+  page, payload, read-back of the whole payload against the CRC of the
+  stream, magic page last).  Every program and read-back it is asked for is
+  checked to lie inside `0x100000 .. 0x800000` first (wio-lite-ai's writer has
+  no such check), so a wrong address cannot reach the reserved first megabyte
+  or the top.  A program is not read back page by page: `qspi_flash_write()`
+  checks the flag status register after every page, and the body page carries
+  its own CRC, so a body that programmed wrongly reads `invalid`.
+- **[!] A plugin may not define the store's writers**: `F746_PLUGIN_FORBIDDEN`
+  in `board.cmake` adds `qspi_flash_write`, `qspi_flash_erase_sector`,
+  `qspi_flash_erase_subsector`, `qspi_flash_erase_chip`, `blob_erase_header`,
+  `blob_erase_span`, `blob_svc_erase_header`, `blob_svc_erase_span` and
+  `blob_svc_program` to the internal-flash, clock and MPU entries, and the
+  plugin image gate refuses a plugin that defines any of them.
+- `empty` means "no header", not "blank flash": the payload underneath may
+  still hold old data.
+
+### Moving models off the SD card
+
+A board updated in place still has whatever the LevelX volume left on the
+QSPI NOR: the volume covered the whole part in 64 KB blocks, so a slot base is
+where a LevelX block header sat, and such a slot is expected to read `invalid`
+(`magic page is neither erased nor a header`) until `blob erase <slot>`.  A
+part that never held a formatted volume reads `empty`.  Read `blob list`
+first.
+
+The models that used to be on the card are sent again, one slot each (the
+assignment below is provisional):
+
+| File on the card | Size | Slot | How |
+|---|---|---|---|
+| `/blazeface.nnc` | 194,232 B | 12 (256 KB) | rebuild it (`--target asset-blazeface`) and follow the receipt; its CRC moves with the build id, so a copy from the card is compared with nothing |
+| `/pinned.tflite` (the bare pinned blazeface) | 189,816 B | 11 (256 KB) | `verify_tflite` it (`--target verify-model`), then `blob erase 11`, `blob write pinned 11` and send it; compare `blob list` with the CRC `verify_tflite` printed |
+| a `stedgeai_reloc` `.bin` | up to 448 KB | one of 3-8 (512 KB) | `blob write <name> <slot>`; the load refuses a blob longer than 448 KB |
+
+A file that is only on the card can be brought to the PC with `xfer send sd
+<path>` first.  The name a blob is loaded by is the one typed at `blob write`,
+not the file's.
+
+### Measured
+
+| | before #194 (`c4ebdd6`) | after (`dce051d`) |
+|---|---|---|
+| `shell.bin` (`tflm`) | 621,492 B | 629,436 B (+7,944 B: the store, the shared command, YMODEM receive; the LevelX + FileX volume -8,408 B) |
+| `shell.bin` (`null`) | 417,164 B | 424,404 B |
+| internal SRAM `.data` + `.bss` (`tflm`) | 110,768 B | 101,624 B (-9,144 B: the volume's buffers out, the 4 KB RX ring and the 1 KB staging buffer in) |
+| `nn model load --name` deepest stack | | about 2.0 KB of the 4 KB console stack (from the `.su` files; the QSPI read side) |
+
+A 1 MB payload is read for a load in sixteen 64 KB pieces (`BLOB_READ_CHUNK`),
+about 250 ms at the 4 KB/ms `qspi test` measured, each piece far below the
+driver's 5 s timeout, with interrupts on and the IWDG fed by its own thread.
+
+Not yet measured on hardware (to be filled in after the first run):
+
+| | Value |
+|---|---|
+| 64 KB sector erase, as `blob write` sees it (one 256 KB / 512 KB / 1 MB slot) | not measured |
+| 1 MB `blob write` transfer at 115200 baud | not measured |
+| RX ring high-water during `blob write` (idle; with `nn stream`, GUIX, telnet and MJPEG running) | not measured |
+| `nn model load --name` of a 1 MB-class blob | not measured |
+| `blob list` on the first boot of the #194 firmware (updated in place) | not seen |
+
 ## Plugin containers (issue #159 = #78 Step 4)
 
 A **container** carries a model together with the code that interprets its
@@ -856,25 +1059,28 @@ M4/FPv4 firmware image and watches it refused under `0x1101`.
 
 ### Loading one (Step 4a, `tflm` only)
 
-There is no blob store here: a container reaches the board as a file the
-operator copies to the microSD card with a PC card reader, and loads with
-`nn model load --path /<name>.nnc`.
+Since issue #194 a container reaches the board the way it reaches
+wio-lite-ai: sent into a slot of the [QSPI asset
+store](#the-qspi-asset-store-blob-issue-194) with `blob write`, and loaded
+with `nn model load --name <name>`.  (Until then it was a file the operator
+copied to the microSD card and loaded with `nn model load --path`, and the
+reader, `cmds/cmd_nn_board.c` with `svc/nn/nn_container.c`, printed the CRC of
+the bytes it read; both are gone.)
 
-- The reader (`cmds/cmd_nn_board.c`) reads the whole file into the backend's
-  staging buffer, which the backend hands out only once the open model is down
-  (issue #191).  If the bytes probe as a container it prints
-  `nn: read <path>: plugin container, <n> B, crc32 <CRC>` -- the CRC-32 of
-  every byte read, **the closing check**: it must equal the asset receipt's
-  CRC, because nothing on the PC checks that the file copied is the file the
-  build published.  A bare `.tflite` prints nothing new.
-  Measured at Step 4a on hardware: reading and validating a container on the
-  console thread raised the `cli` stack peak from 2,096 B to 2,652 B of 4,096
-  (`thread`, the wio container refused by target word); the inference worker's
-  peak (1,516 B) did not move.
+- The adapter reads the whole blob into the backend's staging buffer, which
+  the backend hands out only once the open model is down (issue #191), and
+  compares the CRC-32 of the copy with the header's before it probes it.
+  **The closing check** is now the store's: `blob list`'s crc32 for the slot
+  must equal the asset receipt's CRC, because nothing on the PC checks that
+  the file sent is the file the build published.  The load prints no CRC.
+  Measured at Step 4a on hardware (from the SD card): reading and validating a
+  container on the console thread raised the `cli` stack peak from 2,096 B to
+  2,652 B of 4,096 (`thread`, the wio container refused by target word); the
+  inference worker's peak (1,516 B) did not move.
 - The container goes through `svc/plugin/plugin_load.c` -- the validator the
   host asset build runs -- with this board's policy (target word `0x1101`, link
   address `0x20048000`, capacity 32 KB, the stack table in `board.cmake`).  A
-  refusal names its reason (`<path> is a container this firmware refuses:
+  refusal names its reason (`slot <n> is a container this firmware refuses:
   built for another target`, `... size disagrees with payload`, `... digest
   mismatch`, ...) and ends with no model and no claims: since issue #191 the
   open model went down before the read (before, it changed nothing).
@@ -893,15 +1099,16 @@ operator copies to the microSD card with a PC card reader, and loads with
 
   ```
   plugin  : <name> (build <id>, crc <plugin digest>), running
-    from  : <path>, <n> B, file crc32 <CRC>
+    from  : slot <n>, blob '<name>'
     image : ...
     stack : ...
     decl  : ...
   ```
 
-  `file crc32` is the same value the read printed (one function over the same
-  bytes; `test/test_nn_model_container.c` pins it against an independent CRC).
-  The plugin line's `crc` is the plugin section's digest, a different number.
+  The `from` line names the slot and the blob the claims came with, as on
+  wio-lite-ai (until issue #194 it was `<path>, <n> B, file crc32 <CRC>`; the
+  whole container's CRC is now `blob list`'s).  The plugin line's `crc` is the
+  plugin section's digest, a different number.
   `running` is the loader's own state, read in the same critical section as the
   claims; `validated, not loaded` is a container whose plugin the loader
   refused (the model stays open -- issue #122 D6).  A model-only container
@@ -1043,19 +1250,26 @@ built-in model) with this board's blazeface plugin -- through every gate, and pr
 
 ```
   asset blazeface    .../build/f746-tflm/asset/blazeface.nnc
-  file blazeface.nnc 194232 B   crc32 <CRC>
+  slot 12            194232 B   crc32 <CRC>
 
-  on the board:  nn model load --path /blazeface.nnc   (once the file is on the card)
-  on the PC:     copy the path above to the card's root as blazeface.nnc
-  the load:      must print crc32 <CRC> -- that is how you know the bytes
-                 that were built are the bytes that were read.
+  on the board:  blob erase 12   (the slot must be empty first)
+                 blob write blazeface 12   (erases the slot, then waits for the file)
+  in picocom:    C-a C-s, then the path above
+  afterwards:    `blob list` must show crc32 <CRC> -- that is how you know
+                 the bytes that were built are the bytes that were stored.
+  then:          nn model load --name blazeface
 ```
 
-The destination is a FILE (`cmake/add_asset.cmake`): its fit is checked
-against `nn_tflm_stage_cap`, the object the backend's `load_region()` hands out
-as the read limit, read back out of the shipped `shell.elf`.  The CRC moves
-with the build id (the HEAD the tree was configured at), so compare with the
-receipt of the build that produced the file you copied.  The `cifar10` plugin
+The destination is a SLOT (`cmake/add_asset.cmake`, issue #194), the same
+receipt as wio-lite-ai's: its fit is checked against that slot's payload in
+the table the firmware links (`plugin/slot_table.json`, compiled on the host
+from `src/blob_slots.c` with the shared lookups, `scripts/slot_table.c`), and `blazeface` goes to slot 12, the last 256 KB slot, as on
+wio-lite-ai (provisional; the slot is one argument in `board.cmake`).  Until
+#194 the destination was a FILE checked against `nn_tflm_stage_cap`, and the
+receipt said to copy it to the card and compare with the CRC the load
+printed.  The CRC moves with the build id (the HEAD the tree was configured
+at), so compare with the receipt of the build that produced the file you
+sent.  The `cifar10` plugin
 is built and gated too, but no asset carries it: no CIFAR-10 model this
 backend runs is pinned in the tree (Grove's is a Vela model for the Ethos-U).
 
@@ -1075,7 +1289,7 @@ face 0 x 230 y 78 w 63 h 47 px score 859
 
 Before #160 the first SD read of a large file could fail while the GUIX
 camera preview ran (`sd: read failed: I/O error`, an SDMMC RX overrun, about 1
-load in 3).  The cause was the display flip, not the SD driver or the container
+load in 3; models still came off the card then).  The cause was the display flip, not the SD driver or the container
 path: see "The flip writes only the layer address" below.  SD hardware flow
 control stays off.
 
@@ -1084,7 +1298,11 @@ for that asset build: the tree's own `VerifyModelBuffer()` with the limits the
 firmware's on-board verifier (`NN_TFLM_VERIFY=1`) and grove-vision-ai-v2 use --
 depth 16, 4,096 table visits, `nn_tflm_verify_model_buffer()` in
 `svc/nn/tflm/nn_tflm_model_check.h` (issue #175; a model the board would refuse
-as malformed is refused here first) -- the staging capacity (512 KB), the I/O check the backend runs before planning (issue
+as malformed is refused here first) -- the length (since issue #194: the largest
+payload of the slot table it is compiled with, `src/blob_slots.c`, then the
+staging buffer's `NN_TFLM_MODEL_KB`; it names the smallest slot class that
+holds the file, and `cmake/fixtures/run_verify_tflite_size_tests.py` pins both
+sides, including the old 1 MB limit, now refused), the I/O check the backend runs before planning (issue
 #175, #178, #180, #181, #183, #185, #188: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing,
 too long (> 64) or out-of-range I/O or operator list, a subgraph without
 tensors, quantization vectors too long or inconsistent, a buffer index past the
@@ -1172,8 +1390,8 @@ audit replays its producer's compile command. See the
 ## Commands
 
 ```
-camera    console   coremark  crash     devmem    dmesg
-echo      free      fs        gui       help      jobs
+blob      camera    console   coremark  crash     devmem
+dmesg     echo      free      gui       help      jobs
 kill      lcd       membench  net       nn        qspi
 reboot    sd        sdram     sleep     thread    touch
 uptime    usleep    version   watch     wdt       xfer
@@ -1183,9 +1401,10 @@ uptime    usleep    version   watch     wdt       xfer
 `help <cmd> <sub>` walk the tree.
 
 Subsystems behind them: LTDC + GUIX (`gui`, `lcd`), OV5640 over DCMI
-(`camera`), QSPI NOR with LevelX + FileX (`fs`, `qspi`), microSD (`sd`),
-FT5336 touch (`touch`), Ethernet with NetX Duo (`net`), the NN backends (`nn`),
-and YMODEM transfer over the console (`xfer`).
+(`camera`), the QSPI NOR as the asset store (`blob`, `qspi`; a LevelX + FileX
+volume with an `fs` command until issue #194), microSD (`sd`), FT5336 touch
+(`touch`), Ethernet with NetX Duo (`net`), the NN backends (`nn`), and YMODEM
+transfer over the console (`xfer send` to the PC, `blob write` from it).
 
 This board runs two shell instances -- `sh>` on the VCP and `net>` on telnet --
 each with its own line editor, history and RX/TX drop counters, so `console`
@@ -1274,7 +1493,7 @@ already running`.
 > last published decode after a `nn run`, during a stream and after its stop;
 > only a `nn model load` that changed what is open (a new model, or a refusal
 > whose rollback left nothing, which on `tflm` since issue #191 is every refusal
-> from the SD read on -- a refusal that kept the previous model keeps its
+> from the payload read on -- a refusal that kept the previous model keeps its
 > result; the reload reports which, issue #122 P1) and `nn model unload` clear it. `nn run` waits on
 > the record's accepted-publish count, not the worker's inference counter, which
 > this board bumps before the decode is published. `nn stream stats` reads
@@ -1351,7 +1570,7 @@ contract in `svc/camera/camera_svc.h` (the layers are in
 [svc/README.md](../../svc/README.md#the-camera-command-is-shared-issue-143)).
 What only this board has stays in `cmds/cmd_camera_board.c` and is appended to
 the shared table.  This board's capabilities (`svc/camera_svc_config.h`): power,
-info, test pattern, save (`sd`, `fs`), send; `camera off` stops the operator's
+info, test pattern, save (`sd`; `fs` too until issue #194), send; `camera off` stops the operator's
 stream first.
 
 ```
@@ -1359,7 +1578,7 @@ camera probe                    power up + read the OV5640 chip ID
 camera on | off                 bring-up / cut the module's power
 camera info                     driver / sensor state and the ISP settings
 camera capture [test]           snapshot the current mode + statistics
-camera save [sd|fs] <path>      write the LAST capture raw (default sd)
+camera save [sd] <path>         write the LAST capture raw to the microSD
 camera send [name]              send the LAST capture over YMODEM
 camera stream start [test] | stop | stats
 camera res | format | fps | set   (this board's own)
@@ -1443,7 +1662,7 @@ Measured / derived for this board:
 | Item | Value |
 |---|---|
 | Console stack high water after save / capture (`thread`) | 2,728 of 4,096 B (at the shared command's first version) |
-| `camera save` deepest path (from the disassembly, dispatch included) | about 3.18 KB to the microSD, about 3.43 KB on the QSPI write-error path |
+| `camera save` deepest path (from the disassembly, dispatch included) | about 3.18 KB to the microSD (the 3.43 KB QSPI write-error path went with the QSPI volume in issue #194) |
 | `CAMERA_SVC_DETAIL_MAX` (the contract's failure text) | 319 B |
 
 ### [!] Two subscribers share one capture, and each has to drain

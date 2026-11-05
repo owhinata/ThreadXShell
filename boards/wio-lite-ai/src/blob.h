@@ -31,7 +31,8 @@
  * the order of one `blob write` is svc/blob/blob_write.c.  This board provides
  * the table (src/blob_slots.c), the interval and erase unit below, the reads
  * and the name lookup over them (src/blob.c) and the write's operations
- * (cmds/cmd_blob.c).
+ * (src/blob_writer.c, for the shared command shell/cmds/cmd_blob.c; this
+ * board's cmds/cmd_blob.c until issue #194).
  *
  * Slot layout.  The first 4 KB sector of a slot holds the header -- the shared
  * format's two 256 B pages, magic page first and written last -- and the rest
@@ -71,7 +72,7 @@
  * busy flag below: YMODEM only runs on the USB CDC console, but a telnet session
  * can still type `blob erase` into the middle of a `blob write`, and `nn model
  * load` holds it from reading a header to reading the payload that header
- * describes.  The flag is the shared write's reservation (cmds/cmd_blob.c).
+ * describes.  The flag is the shared write's reservation (src/blob_writer.c).
  *
  * THREAD CONTEXT ONLY, after the scheduler is running: erases and programs
  * sleep.

@@ -743,7 +743,8 @@ set(F746_PLUGIN_MEMORY_LD "${BOARD_DIR}/ldscript/plugin_memory.ld")
 # Plugin containers: deliver, validate, RUN (issue #159 Steps 4a and 4b)
 # ---------------------------------------------------------------------------
 #
-# `nn model load --path <x.nnc>` recognises a container, validates it with this
+# `nn model load --name <blob>` (a file and `--path` until issue #194)
+# recognises a container, validates it with this
 # board's policy (svc/plugin/plugin_load.c -- the validator the host asset build
 # runs too), hands its model section to the backend in place and, since Step
 # 4b, copies its plugin into .plugin and starts it: the plugin then decodes on
@@ -1186,10 +1187,11 @@ endif()
 # (issue #194 D4); `stedgeai` has its model linked in.  Each is checked against
 # the image (no tflm staging symbols in it).
 #
-# [!] KEEP THE TABLE AND ITS COUNT AS SYMBOLS.  Until the `blob` command and the
-# nn reader exist, nothing in the image refers to either, and --gc-sections
-# drops them; --require-defined keeps both and fails the link, naming the
-# symbol, if the board stops defining either.
+# [!] KEEP THE TABLE AND ITS COUNT AS SYMBOLS.  The gate reads both out of the
+# image by name; --require-defined fails the link, naming the symbol, if the
+# board stops defining either -- and keeps them in a build where nothing refers
+# to them (before the `blob` command and the nn reader arrived in issue #194,
+# --gc-sections dropped them).
 target_link_options(shell PRIVATE
     "-Wl,--require-defined=blob_map_slots"
     "-Wl,--require-defined=blob_map_slots_count")

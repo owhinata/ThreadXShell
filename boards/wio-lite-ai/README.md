@@ -200,9 +200,10 @@ functions, so LTO has nothing to rename.  They are still the linker checking its
 own script, which is why `cmake/check_plugin_reservation.py` checks the image as
 well.
 
-`cmake/check_blob_staging.py` (issue #193) reads the blob slot table and the
-tflm staging capacity back out of the linked image and refuses a slot whose
-payload the buffer could not hold -- see
+The shared `cmake/check_blob_staging.py` at the repository root (issue #193;
+under this board's `cmake/` until #194, when f746g-disco took it up too)
+reads the blob slot table and the tflm staging capacity back out of the linked
+image and refuses a slot whose payload the buffer could not hold -- see
 [the NOR asset store](#the-nor-asset-store-blob-issue-193).
 
 Since issue #97 there is one more, and it protects something less obvious.  The
@@ -726,10 +727,16 @@ Models and containers live on the 16 MB external NOR, above the `kv` partition,
 in named slots.  Since issue #193 the store is built on the shared parts in
 `svc/blob/` (the header format, the name and slot rules, the order of one
 `blob write`; see [svc/README.md](../../svc/README.md#the-asset-stores-shared-parts-issue-192)),
-the same ones grove-vision-ai-v2 uses.  What is this board's: the slot table
-(`src/blob_slots.c`), the interval and erase unit (`src/blob.h`), the indirect
-NOR reads and erases and the busy flag (`src/blob.c`), and the write's operations
-and words (`cmds/cmd_blob.c`).
+the same ones grove-vision-ai-v2 and f746g-disco use, and since issue #194 the
+`blob` command itself is the shared `shell/cmds/cmd_blob.c` (it was this
+board's `cmds/cmd_blob.c` before).  What is this board's:
+
+| Part | Where | What |
+|---|---|---|
+| store side | `src/blob.c`, `src/blob.h`, `src/blob_slots.c` | the interval and erase unit, the slot table, the indirect NOR reads and erases, the name lookup and the busy flag |
+| write side | `src/blob_writer.c` | the functions `svc/blob/blob_svc.h` names: the 1 KB DTCM staging buffer, the reservation (the busy flag), one `nor_erase()` per 64 KB block, the program and the read-back, and the log lines a transfer leaves |
+| console side | `cmds/cmd_blob_board.c` | YMODEM over the USB CDC console, the refusal on the telnet console, the busy and NOR-down words |
+| words and limits | `svc/blob_svc_config.h` | the part's name, the address format, the erase estimate (W25Q128JV: 150 ms typical, 2 s at most per 64 KB block), the sender (`sb`), `blob read`'s 1,024 B |
 
 | NOR range | What |
 |---|---|
@@ -746,60 +753,47 @@ and words (`cmds/cmd_blob.c`).
 The first 4 KB sector of a slot is its header; the rest is the payload.  The
 largest class is 1 MB because that is the tflm staging buffer
 (`NN_TFLM_MODEL_KB`): a payload is copied into it whole before it is parsed.
-`cmake/check_blob_staging.py` reads the table and the buffer's size back out of
-the linked image and stops the build if any slot's payload is larger (with the
-`null` backend it says NOT APPLICABLE, and checks the image has no staging
-buffer).  Its tests are `cmake/fixtures/run_blob_staging_tests.py`, which also
-compare the header size and the table entry layout it restates with
-`src/blob.h`.  The host checker `verify_tflite` is built with the same table
+The shared `cmake/check_blob_staging.py` (repository root) reads the table and
+the buffer's size back out of the linked image and stops the build if any
+slot's payload is larger (with the `null` backend it says NOT APPLICABLE, and
+checks the image has no staging buffer).  This board passes it only its own
+facts (the backend and the 4 KB header unit, `board.cmake`).  Its tests are the
+shared `cmake/fixtures/run_blob_staging_tests.py`, which `test/host_tests.sh`
+runs with this board's directory, so the header unit `board.cmake` passes is
+compared with `src/blob.h`.  The host checker `verify_tflite` is built with the same table
 (and the staging buffer's `NN_TFLM_MODEL_KB`): it refuses a file longer than
 the largest slot's payload, names the smallest slot class that would hold it,
 and was a literal 520,192 B until #193 (`cmake/fixtures/run_verify_tflite_size_tests.py`).
 
-[!] **Identity is the base address, and the table only grows by appending.**
-A stored header names its own slot's base, so a slot that moves strands what is
-in it.  #193 re-carved the table whole once (six 512 KB slots at
-`0x100000 .. 0x400000` before it), at the same moment the header format changed;
-`test/test_blob_slots.c` pins every entry.
+[!] **Identity is the base address, and the table only grows by appending**
+(the rule is every board's, [svc/README.md](../../svc/README.md#the-asset-stores-shared-parts-issue-192)).
+#193 re-carved this table whole once (six 512 KB slots at `0x100000 ..
+0x400000` before it), at the same moment the header format changed;
+`test/test_blob_slots.c` pins every entry.  f746g-disco's QSPI store has the
+same table since #194.
 
 ### Commands
 
-```
-blob list                    every slot: base, size, state, length, crc32, name
-blob info <slot>             one slot in full, and why an invalid one is
-blob read <slot> [off] [len] hexdump of the payload (up to 1,024 B)
-blob free                    the slots `blob write` accepts with no `blob erase` first
-blob write <name> [slot]     erase the slot, receive a file over YMODEM, verify
-blob verify <slot>           re-read the payload against its stored crc32
-blob erase <slot>            retire a blob: erase its header sector only
-nn model load --name <name>  load the blob stored under <name>
-```
+The `blob` subcommands and their rules are the shared command's, described
+once in [svc/README.md](../../svc/README.md#the-blob-command-is-shared-issue-194)
+(`blob list | info | read | free | write <name> [slot] | verify | erase`, and
+`nn model load --name <name>`).  What is this board's:
 
-- **The name is the one typed, not the sender's filename** (which only goes to
-  `dmesg`).  Printable ASCII with no space, at most 64 characters; anything
-  else is refused before anything is touched.
-- **A name already stored goes back to its own slot** (`blob write <name>`
-  needs no slot then).  Naming a different slot for it is refused (`that name
-  is in another slot`), and a new name has to say which slot.
-- **A slot holding a VALID blob under another name, or bytes this firmware
-  cannot read (`invalid`), is refused** (`that slot holds something else`):
-  `blob erase <slot>` first, on purpose.  An `empty` or `incomplete` slot is
-  taken as it is.  The refusals happen before anything is erased; a file that
-  turns out empty or larger than the slot is found only once the sender's first
-  block arrives, after the erase.
 - **The erase is one 64 KB block at a time** (`nor_erase()` per block), so the
-  NOR mutex is given back between blocks and `kv` gets a turn, and **Ctrl+C
-  stops it between blocks**: nothing is sent, the amount erased is printed (and
-  logged -- after a Ctrl+C the shell discards what the command prints, so
-  `dmesg` has it), and `blob list` shows what is left.  A cancel before the
-  first block leaves the slot as it was; after it, the header is gone.
+  NOR mutex is given back between blocks and `kv` gets a turn, and Ctrl+C
+  stops it between blocks.
 - **[!] The console is claimed after the erase** (the shared order), where the
   store before #193 claimed it before.  The claim waits for the output lock
   without a limit, so on a healthy ThreadX it waits rather than refuses; a
   background `blob write ... &` is refused before anything is taken, and so is
   `blob write` from the telnet console.
-- `empty` means "no header", not "blank flash": the payload underneath may
-  still hold old data.
+- **The store's reads do not look at the busy flag** (f746g-disco's answer
+  busy while it is held): `blob list` during another console's `blob write`
+  shows the slot as the erase and the program leave it.
+- **Since issue #194 the magic page goes down after the read-back** (the
+  shared order): a read-back that disagrees leaves the slot `incomplete`, no
+  longer `valid` over a payload that did not match, and a 2-digit slot keeps
+  its colon in the column of every other label (`slot 12  : ...`).
 
 ### [!] Blobs written before issue #193 read `invalid`
 
@@ -823,6 +817,10 @@ be sent again.
 
 The deepest `blob write` path is about 1.3 KB of the 4 KB console stack and the
 `nn model load` path about 2.0 KB (from the LTO `.su` files).
+
+At issue #194 (the shared command, the shared results, the magic page after
+the read-back): the app partition is 384,280 B (8,936 B free, +72 B); the
+KV-off build is byte-identical to before.
 
 Seen on the board at the first DFU of the #193 firmware (2026-11-05, before the
 store was re-filled): `blob list` showed slots 0-2 `invalid` -- their bases
@@ -1022,8 +1020,8 @@ model is busy, and `nn thresh` waits for the lease and then answers busy.
 
 The capacity the backend reports is 1,048,576 B, and the largest blob slot's
 payload is 1,044,480 B (a 1 MB slot less its 4 KB header, issue #193), so any
-blob the store holds fits; `cmake/check_blob_staging.py` keeps it that way at
-build time.  Until #193 the slots were 512 KB and a model was bounded by their
+blob the store holds fits; the shared `cmake/check_blob_staging.py` keeps it
+that way at build time.  Until #193 the slots were 512 KB and a model was bounded by their
 520,192 B.
 
 [!] **Every build of an interpreter zeroes the whole arena first** (issue #167,

@@ -37,16 +37,17 @@
  * each other, with the busy flag below: two consoles (the VCP and telnet), a
  * background job, `qspi erase` / `qspi test` (cmds/cmd_qspi.c takes the flag
  * too), `blob write` / `blob erase` (src/blob_writer.c's reservation), and
- * later `nn model load`.  The flag is taken by the CALLER for the span only it
- * knows.
+ * `nn model load --name` (port/nn/nn_svc_f746_model.c, from the name lookup
+ * to the end of the payload read).  The flag is taken by the CALLER for the
+ * span only it knows.
  *
  * [!] AND THE PUBLIC READS REFUSE WHILE IT IS HELD (issue #194), unlike
  * wio-lite-ai's: blob_stat(), blob_read() and blob_verify() answer
  * BLOB_ERR_BUSY rather than describe flash a raw `qspi erase` / `qspi test`
  * or a write is half-way through changing.  They only look at the flag and
  * never take it, so two readers do not refuse each other.  What runs under the
- * flag -- the write's own stat (blob_stat_reserved) and blob_find() -- does not
- * look.
+ * flag -- the write's own stat (blob_stat_reserved), blob_find() and the nn
+ * reader's blob_read_reserved() -- does not look.
  *
  * THREAD CONTEXT ONLY, after the scheduler is running: the QSPI driver sleeps
  * while it waits for an erase or a program.

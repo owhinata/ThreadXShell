@@ -42,9 +42,6 @@
  *   4. claim the console -- AFTER the erase, so that the erase's progress and
  *      its cancel work normally, and so a long erase does not happen with the
  *      line editor already handed over.
- *
- * (The board's own measurements and writer are described with its caller:
- * grove-vision-ai-v2: cmds/cmd_blob.c.)
  *   5. receive.  The sink accumulates into the staging buffer and programs a
  *      chunk at a time; a program that does not report OK latches, and no
  *      further program or header follows it.
@@ -72,6 +69,10 @@
  *      (INVALID) or whole (VALID, over a payload that did match) -- so the
  *      caller says so and points at `blob list`.
  *   9. give the reservation back.  ONE exit, whatever happened.
+ *
+ * The ops are built by the shared command (shell/cmds/cmd_blob.c) over each
+ * board's src/blob_writer.c (svc/blob/blob_svc.h); a board's measurements are
+ * in its README's store section.
  *
  * [!] WHAT THE CONTRACT DOES NOT COVER: tx_thread_terminate().  The shell's
  * kill is co-operative -- cli_read_byte() returns -2 and this unwinds -- but a

@@ -4,10 +4,13 @@
 # stedgeai_reloc backend (Epic owhinata/stm32f746g-disco#80 P5, owhinata/stm32f746g-disco#92).
 #
 # The output network_rel.bin is a single, position-independent blob (PIC code +
-# embedded weights) that the firmware loads from the microSD card at runtime and
-# runs XIP -- no reflash to swap models.  It is NOT committed (ST-SLA / model-zoo
-# licensed; see .gitignore).  Copy the produced .bin to the SD card root, then on
-# the board:  ai model load network_rel.bin
+# embedded weights) that the firmware loads from the QSPI asset store at runtime
+# and runs XIP -- no reflash to swap models.  It is NOT committed (ST-SLA /
+# model-zoo licensed; see .gitignore).  Send the produced .bin into a 512 KB
+# slot (it must be at most 448 KB), then on the board:
+#   blob write <name> <slot>   (picocom C-a C-s, the .bin)
+#   nn model load --name <name>
+# (Until issue #194 it was copied to the microSD card root and loaded by path.)
 #
 # `stedgeai generate --relocatable` invokes arm-none-eabi-gcc to compile the PIC
 # network, so this script puts the project's own toolchain on PATH first.
@@ -59,4 +62,6 @@ BIN="${OUT}/network_rel.bin"
 [ -f "${BIN}" ] || { echo "error: ${BIN} was not produced"; exit 1; }
 echo
 echo "OK: $(ls -l "${BIN}" | awk '{print $5, $9}')"
-echo "Copy it to the microSD card root, then on the board:  ai model load network_rel.bin"
+echo "Send it into a 512 KB slot (at most 448 KB), then on the board:"
+echo "  blob write <name> <slot>   (picocom C-a C-s, this .bin)"
+echo "  nn model load --name <name>"

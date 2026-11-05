@@ -34,7 +34,7 @@ shell をボード非依存コアとして統合する当初の目標は達成�
 ## アーキテクチャ / レイヤリング
 
 一方向依存を守る: **HAL/CMSIS/ThreadX（`lib/`）← port（ボード別グルー）← shell ← app**。
-構成は `shell/` / `svc/`（freestanding サービス層: 汎用 + `nn/` `plugin/` `camera/`）/ `asset/`（plugin ソースと container ツール）/
+構成は `shell/` / `svc/`（freestanding サービス層: 汎用 + `nn/` `plugin/` `camera/` `blob/`）/ `asset/`（plugin ソースと container ツール）/
 `lib/`（upstream、read-only）/ `cmake/`（共有ビルド規則とゲート）/ `boards/<board>/`（port ldscript
 src cmds svc cmake test README。wio のみ boot も）。
 
@@ -48,11 +48,11 @@ src cmds svc cmake test README。wio のみ boot も）。
   fetch、複数ボードが同じ版を使う物は `lib/` submodule）。**boot ツリー（`boards/wio-lite-ai/boot/`）は独立**で app / shell とソースを共有しない。
 - **[!] カメラは持ち主（`svc/camera/cam_holders`: manual / nn）が居る間だけ流れ、camera は持ち主の名前しか知らない**（nn を include しない。lcd は持ち主ではない）。**表が空でも teardown の許可ではなく**資源はボードの確認済み停止の後だけ、stop の待ちは自分の stream の世代で照合する（#142、`svc/README.md`）。
 
-### [!] `nn` と `camera` は 3 ボード共有の 1 コマンド（各 1 つ）
+### [!] `nn`・`camera`・`blob` は 3 ボード共有の 1 コマンド（各 1 つ）
 
-`shell/cmds/cmd_nn.c` + 契約 `svc/nn/nn_svc.h` + `nn_svc_*.c`、`cmd_camera.c` + `svc/camera/camera_svc.h` + `camera_svc_*.c`（下は nn の規則）。
+`shell/cmds/cmd_nn.c` + 契約 `svc/nn/nn_svc.h` + `nn_svc_*.c`、`cmd_camera.c` + `svc/camera/camera_svc.h` + `camera_svc_*.c`、`cmd_blob.c` + `svc/blob/blob_svc.h` + `src/blob.c`・`src/blob_writer.c`・`cmds/cmd_blob_board.c`（下は nn の規則）。
 
-- **共有 TU（nn・camera とも）は可変記憶域を 1 バイトも持たない**（状態はアダプタ、バッファは持ち主が配置属性つきで注入）。
+- **共有 TU（nn・camera・blob とも）は可変記憶域を 1 バイトも持たない**（状態はアダプタ、バッファは持ち主が配置属性つきで注入）。
   強制は `cmake/check_no_mutable_storage.py` の**ボードごとの監査コンパイル**（ホストの答えは別物）。
 - **ファーム監査は列挙せずビルドから導出する**（`cmake/shared_storage_gate.cmake`。例外は
   `svc/ymodem.c` のみ）。**導出・両方向照合・失敗伝播を弱めない。**
@@ -92,7 +92,7 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
   「実行しない」は型の性質なので関数ポインタを足さない。
 - **ゲートは plugin ELF にも適用する**（対象外にしない）。**ダイジェストは署名ではない**。
 - **container は組んでから検査し、その同一ファイルを送る**（ホストは `verify_container` で**デバイスと
-  同じ `svc/plugin/plugin_load.c`** を走らせる）。**通るまで公開しない**（private path で組む）。**asset の行き先はちょうど 1 つ**（slot ボードは `--slot` と slot 表、file ボードは出荷 ELF から読み戻した staging 容量に公開前に照合し、無し・両方・半分は拒否。#159）。
+  同じ `svc/plugin/plugin_load.c`** を走らせる）。**通るまで公開しない**（private path で組む）。**asset の行き先はちょうど 1 つ**（全ボード `--slot` と slot 表に公開前に照合。出荷 ELF の staging 容量に照合するファイル宛ては使うボードが無いが道具に残る（#194・#195）。無し・両方・半分は拒否。#159）。
 - **モデル区画は 16 バイト整列**（flatbuffer の 4 ではなく Ethos-U ドライバの要求）。
 - **オフセット → アドレスの変換は `plugin_run_slot()` の 1 箇所**で、**実行前に MPU を読み戻して
   fail-closed**（純関数・ホストテスト必須）。**窓を守る新しい機構は作らない**。
@@ -107,8 +107,9 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
   `add_plugin()` の**必須引数**で、**ゲートに告げる予約は MEMORY fragment と別の宣言**。TU の ABI も照合。**スタック計算は veneer 検査と同じ `cmake/thumb_stack_analysis.py` の 1 実装で、違うのは止まる場所だけ**（別実装を戻さない）。
 - **target word は 2 端で検査する**（firmware の `_Static_assert` + gate の `.ARM.attributes`）。
 - **[!] ゲートは送信時ではなくビルド時にある**（`--target asset-<name>`）。送信は打ったパスをそのまま送る
-  ので**閉じ手は receipt の CRC32 とボードの保存バイトの CRC（slot ボードは `blob list`、f746 は load が印字する採用済み全バイトの CRC）の照合**。「ビルド時に検査済み」を「何も起きない」と書き換えない。**配送 target（DELIVERY）は build.ninja から導出した使用者と両方向照合する**（`check_delivery_gate.py`、全 target が先に待つ）。
+  ので**閉じ手は receipt の CRC32 とボードの保存バイトの CRC（全ボード `blob list`）の照合**。「ビルド時に検査済み」を「何も起きない」と書き換えない。**配送 target（DELIVERY）は build.ninja から導出した使用者と両方向照合する**（`check_delivery_gate.py`、全 target が先に待つ）。
 - **モデルは commit と SHA256 で pin**し、消えたら **fail closed**。fetch は build 時で `asset-*` は ALL 外。
+- **[!] slot 表は出荷後 append のみ**（identity は基底アドレス、全面の作り直しは各ボード一度きり: Grove #94・wio #193、f746 は #194 で wio の表から）。**置き場に入らない slot はリンク後に共有の `check_blob_staging.py` が拒む**（wio・f746、外さない）。`empty` は「ヘッダが無い」で「空きフラッシュ」ではない。
 - **ファームと plugin は別成果物で間違いは両方向**（焼いても container は更新されず、逆も焼き直し不要）。
 - **[!] 同じ plugin の callback は 2 つ同時に走らない**: plugin に入る全経路（param・admission・report・load/unload も）がボードの lease を取り、worker とコンソールは有界に待ち、panel は try だけ。**入口は保持を検査し、無ければ「plugin 無し」と別の答え**（#127）。
 - **[!] デコーダは 3 ボードとも container でしか届かない（常駐デコーダを戻さない）**。素の `.tflite` は `nn run` がテンソルを報告、`nn stream start` は拒否、`nn thresh` は none、非 tflm backend も同じ答え。
@@ -216,6 +217,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   構造的に成立しない。#137）。**teardown は stop とエラーだけ、復帰は producer の in-place resync 1 本。**
 - **DCMI の LINE / VSYNC 割込みを有効に戻さない**（消費者が無く、試した構成では有効だと 40 s 周期 overrun の必要条件だった。`HAL_DCMI_Init` が足すので Init 直後に切る。#144）
 - **LTDC の pixel-clock 域レジスタ（RM0385 Table 117）を flip / 毎フレーム経路で触らない**（1 アクセスで APB2 が約 1.1 us 止まり SDMMC / DCMI が溢れる。flip は LxCFBAR だけ書く、#160）
+- **QSPI の消去・書込みは blob の busy flag の下だけ**（`qspi erase/test`・`nn model load` も取り、保持中の読みは BUSY。64 KB 消去は含む sector を消すので 64 KB 境界でだけ。plugin 禁止表の `qspi_flash_*`・blob 書込みを外さない。#194）
 - **camera sink（表示 + nn の step）と MJPEG の 2 購読者は各自 drain する**（`camera_frame_put()` は全 `consume()` の
   最後の文、購読者の終わりは `_pins == 0 && _callbacks == 0`）。**step の停止は印を落として使用中 0**（`svc/camera/cam_step`）。
 - リファレンス: RM0385 / UM1907（`_ref/f746g-disco/`、read-only）。
@@ -238,8 +240,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   **DMA は TCM に届かず、fault せず無言で転送されない**。**例外は AXI-SRAM 上端の `.plugin` 予約 1 つ**
   （prelink なので動かすと全 container 無効）で、**4 箇所で独立に宣言**し 1 変数から生成しない。
   heap の天井は `__heap_end` で `__ram_end` を再定義しない（1 シンボルに 2 事実を載せない）。
-- [!] **リンカスクリプトの `ASSERT` は LTO 下で空振りする**。最終ガードはポストリンクの residency
-  チェック 4 本（`check_{itcm,dtcm,psram_ai}_residency.py` / `check_plugin_reservation.py`）と置き場に入らない slot を拒む `check_blob_staging.py` で、外さない。**slot 表も出荷後は append のみ**（identity は基底アドレス、全面の作り直しは #193 の一度きり）。
+- [!] **リンカスクリプトの `ASSERT` は LTO 下で空振りする**。最終ガードはポストリンクの residency チェック 4 本（`check_{itcm,dtcm,psram_ai}_residency.py` / `check_plugin_reservation.py`）と共有の `check_blob_staging.py`（asset 節）で、外さない。
 - **panel は `valid` だけでなく kind も見る**（「誰も解釈していない」の publish は共有 `nn` 節）。
 - **decode と draw を隔てるものが無い**ので**結果リース**で囲う: **常にリース → フレームロック**、
   worker は decode と publish の全体を保持、**パネルは待たない**。**リース保持は「描いてよい」ではない**。
@@ -267,8 +268,6 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - [!] **工場データは最初の書込みで恒久的に消える**。占有確認は**書く前の read-only 走査**で。
 - **XIP 窓を読む者は全員リースを持ち、`nor` に生オペコードを足さない。ライフサイクルと IRQ wrapset は
   `port/nor/` の所有で NPU 側へ戻さない。「read-only」と書かない**（bring-up が QE ビットを書く）。
-- **blob の identity は基底アドレス**で、表の**全面 re-carve は一度きり・以後 append のみ**。
-  **`empty` は「ヘッダが無い」であって「空きフラッシュ」ではない。**
 - **flash geometry は実測値でノブではない**（非キャッシュ。**CACHE 化に戻さない** — 規則と検査が同じ値
   から出る）。**消去粒度とヘッダ複製数は束ね直さない。**
 - **`check_flash_partitions.py` は成果物ゼロでも予約の非重複を検査し、存在必須は今から書く物だけ**（全

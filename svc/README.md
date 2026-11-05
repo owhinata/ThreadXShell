@@ -15,7 +15,7 @@ The files are grouped by the feature they serve (issue #153):
 | `svc/nn/` | The `nn` command's contract and shared core (`nn_*`, described below), the neutral tensor descriptor (`tensor.h`), the inference API `nn.h`, its one implementation `nn.c` (the dispatcher over the compiled-in backend, `nn_backend.h`) and its translation into that descriptor `nn_desc` (every board: issue #161, grove-vision-ai-v2 since issue #169), the tflm and Ethos-U backends (`tflm/`, `ethosu/`), and the BlazeFace decoder (`blazeface`), which reaches every board only inside a plugin container (no board links it into its firmware since issue #159 Step 4c). |
 | `svc/plugin/` | The plugin container's ABI, loader, executor and the checks around them (`plugin_*`, below). |
 | `svc/camera/` | The camera frame pipeline (`frame`, `frame_pipeline`), the camera stream's holder table, sink steps and stream generations (`cam_holders`, `cam_step`, `cam_gen`, below) and the `camera` command's contract (`camera_svc`, below). |
-| `svc/blob/` | The asset store's board-independent parts (issue #192): the header format and a transfer's decisions (`blob_state`), the slot table's rules and lookups (`blob_map`) and the `blob write` coordinator (`blob_write`); see [The asset store's shared parts](#the-asset-stores-shared-parts-issue-192). No file here is named `blob.h` (wio-lite-ai has a `src/blob.h` of its own). |
+| `svc/blob/` | The asset store's board-independent parts (issue #192): the header format and a transfer's decisions (`blob_state`), the slot table's rules and lookups (`blob_map`), the `blob write` coordinator (`blob_write`), and since issue #194 the one set of store results (`blob_err.h`) and the store contract of the shared `blob` command (`blob_svc.h`); see [The asset store's shared parts](#the-asset-stores-shared-parts-issue-192). No file here is named `blob.h` (every board has a `src/blob.h` of its own). |
 
 Every one of the five directories is on the include path wherever `svc/` is, so
 a source names a header by its file name alone (`#include "nn_core.h"`), and the
@@ -89,7 +89,7 @@ counts and stack depths, is the board README's:
 | Subcommand | Meaning | Capability | What differs by board |
 |---|---|---|---|
 | `nn info` | The backend (`nn_backend()`'s name and version), the model and where it came from, the arena reserved and used, the input and output tensors, then the board's plugin lines; answered in full while a stream runs, busy while a load is in flight. | always | f746g-disco: `sdram test` holding `.sdram.ai` answers busy.  grove-vision-ai-v2: also busy while a `nn run` or `nn bench` holds its gate; the `source` line says the NPU runs secure and privileged. |
-| `nn model load --name / --slot / --path / --addr` | Point the model at bytes from the board's one store and swap it in as one transaction (the plugin after the backend succeeds; the order is `nn/nn_core_model`). | `MODEL_LOAD` and the tag's | grove-vision-ai-v2: a NOR blob by name, or a raw window with its length, read in place through the XIP window.  wio-lite-ai: a NOR blob by name (since issue #193) copied to PSRAM, the CRC checked on the copy.  f746g-disco: a microSD file into SDRAM; prints the CRC32 of every byte it adopted. |
+| `nn model load --name / --slot / --path / --addr` | Point the model at bytes from the board's one store and swap it in as one transaction (the plugin after the backend succeeds; the order is `nn/nn_core_model`). | `MODEL_LOAD` and the tag's | grove-vision-ai-v2: a NOR blob by name, or a raw window with its length, read in place through the XIP window.  wio-lite-ai: a NOR blob by name (since issue #193) copied to PSRAM, the CRC checked on the copy.  f746g-disco: a QSPI blob by name (since issue #194; a microSD file before) copied to SDRAM, the CRC checked on the copy; `stedgeai_reloc` refuses a blob past its 448 KB slot.  On every board the closing check of a delivered asset is `blob list`'s crc32 against the receipt. |
 | `nn model unload` | Unload the plugin and the model; nothing is loaded afterwards. | `MODEL_LOAD` | grove-vision-ai-v2: also powers the NPU down and gives back the NOR lease. |
 | `nn bench [n]` | One hold: fill every input with `0x5A`, n timed runs, min / avg / max (`nn/nn_bench`). | `BENCH` | grove-vision-ai-v2: the 1 ms ThreadX tick and no `@MHz` (the DWT stops in WFI); the other two count DWT cycles. |
 | `nn run` | One frame through the same producer and worker as a stream; ends one of five ways (`nn/nn_run_wait`) and prints its own result. | `CAMERA` | grove-vision-ai-v2: int8 input only (the Ethos-U55 fills a byte per element), and the first frames after a camera bring-up are skipped.  wio-lite-ai: the input must tile onto the 60-row DCMI bands; PSRAM must be up and OCTOSPI1 not held by a retuner.  f746g-disco: the camera must stream RGB565; `sdram test` holding `.sdram.ai` answers busy. |
@@ -110,16 +110,19 @@ counters (`nn/nn_decode_count`, the same rule on every board since issue #164).
 | Capability | grove-vision-ai-v2 | wio-lite-ai | f746g-disco |
 |---|---|---|---|
 | `NN_SVC_HAS_MODEL_LOAD` | yes | `tflm` with the KV store | `tflm` or `stedgeai_reloc` |
-| `NN_SVC_HAS_MODEL_NAME` / `_ADDR` | yes | -- | -- |
-| `NN_SVC_HAS_MODEL_SLOT` | -- | as `MODEL_LOAD` | -- |
-| `NN_SVC_HAS_MODEL_PATH` | -- | -- | as `MODEL_LOAD` |
+| `NN_SVC_HAS_MODEL_NAME` | yes | as `MODEL_LOAD` (since issue #193) | as `MODEL_LOAD` (since issue #194) |
+| `NN_SVC_HAS_MODEL_ADDR` | yes | -- | -- |
+| `NN_SVC_HAS_MODEL_SLOT` / `_PATH` | -- | -- (`--slot` until #193) | -- (`--path` until #194) |
 | `NN_SVC_HAS_CAMERA`, `_BENCH`, `_STREAM` | yes | yes | yes |
 | `NN_SVC_HAS_NORM` | -- | yes | yes |
 | `NN_SVC_HAS_STREAM_TEST` | -- | yes | -- |
 
 The declarations are `boards/<board>/svc/nn_svc_config.h`; a capability that is
 0 leaves its subcommand or tag unregistered.  `NN_SVC_HAS_MODEL_BUILTIN` (`nn
-model load builtin`) is declared by no board.
+model load builtin`) is declared by no board, and since issue #194 neither are
+`_SLOT` and `_PATH`: the parser still takes every tag, and a board refuses one
+it has no source for in its own words (`shell/cmds/cmd_nn.c` keeps its `--path`
+reader branch until issue #196).
 
 The lifecycle's refusals of `nn run`, `nn stream start` and `nn stream stop`
 (a stream already running, a `nn run` holding the camera, a start or stop in
@@ -427,7 +430,7 @@ that is a fact about its memory or its core, bound at link time (the callers of
 | What the board gives | Where | Why it is the board's |
 |---|---|---|
 | `nn_model_board_state` and four hooks: critical section (restores the mask it found), one-tick wait, cycle-counter start and read (`nn_dispatch_state.h`) | `port/nn/nn_model_board.c` | PRIMASK, the ThreadX tick and the DWT are the core's and the RTOS's; f746g-disco unlocks the DWT, wio-lite-ai's timebase already owns it |
-| `nn_tflm_board_state` and the facts (the model-name prefix) (`nn_tflm_state.h`) | `port/nn/tflm/nn_tflm_board.cc` | which RAM the interpreter's state lives in, and how this board names a model (`sd:<path>` or a blob name) |
+| `nn_tflm_board_state` and the facts (the model-name prefix) (`nn_tflm_state.h`) | `port/nn/tflm/nn_tflm_board.cc` | which RAM the interpreter's state lives in, and how this board names a model (by its blob name with no prefix on both boards since issue #194; f746g-disco said `sd:<path>` before) |
 | `nn_tflm_arena`, `nn_tflm_model_buf`, `nn_tflm_stage_cap` (`nn_tflm_mem.h`) | `port/nn/tflm/nn_tflm_bufs.c` | placement: SDRAM bank3 on f746g-disco, the PSRAM carve-out on wio-lite-ai, each under that board's residency gate |
 | `NN_TFLM_ARENA_KB`, `NN_TFLM_MODEL_KB`, `NN_TFLM_VERIFY`, the op profile | `cmake/tflite-micro.cmake` (compile definitions) | sizes the board's memory can hold, whether the board can afford the on-board flatbuffer verifier, and which kernels fit its flash |
 
@@ -647,7 +650,7 @@ and, on f746g-disco and wio-lite-ai, the stream generations
 | `CAMERA_SVC_OFF_STOPS_STREAM` (`off` stops the operator's stream first) | 1 | 1 | -- (no `off`) |
 | `CAMERA_SVC_HAS_INFO` | 1 | 1 | 1 |
 | `CAMERA_SVC_HAS_TEST` (colour bar) | 1 | 1 | 0 |
-| `CAMERA_SVC_HAS_SAVE` (`save [<medium>] <path>`) | 1 (sd, fs) | `BSP_ENABLE_SD` (sd) | 0 |
+| `CAMERA_SVC_HAS_SAVE` (`save [<medium>] <path>`) | 1 (sd; fs until issue #194) | `BSP_ENABLE_SD` (sd) | 0 |
 | `CAMERA_SVC_HAS_SEND` | 1 | 1 | 1 |
 | `CAMERA_SVC_BOARD_SUBCMDS` | res format fps set | scan reg | raw profile vts bench exposure gain auto black sat gamma bayer wb |
 
@@ -709,7 +712,6 @@ relative to `svc/`.
 | `nn/nn_svc_common` | The parts of the adapter that were the same word for word (issue #174): `nn info`'s backend / model / arena section for wio-lite-ai and f746g-disco (the name copied under the NN session when it is free, else kept only if the shared load order's counter did not move; BUSY while another command holds the backend's memory), with the board passing only its read of that counter; and `nn thresh` on all three boards, in one order on every exit (count in, lease, the decoder's entry, lease back, count out) with the board's hooks in a const `struct nn_svc_thresh_ops` (the count is grove-vision-ai-v2's only; a build with no decoder passes no entries and answers NONE / STATE). Each board keeps one-line wrappers. Pure, no mutable storage. Host-tested (`shell/test/test_nn_svc_common.c`). |
 | `nn/nn_param_calls` | The `nn` gate's holder and the count of console calls inside the plugin from outside the gate (`nn thresh`, `nn dets`), each transition run in the board's critical section; grove-vision-ai-v2 only (wio-lite-ai and f746g-disco protect those plugin entries with the lease alone). Moved from that board in issue #163; `nn thresh` reaches it through `nn_svc_common`'s count hooks since issue #174. |
 | `nn/nn_decode_count` | How a decoder's answer is counted in `nn stream stats` (`model_errors`, `decoder_errors`) and the tally of one publish: only a stream's publish the record took counts, a raw one as an inference, a refused decode as an error and not an inference, a one-shot (`nn run`) as nothing; all three boards since issue #164 (wio-lite-ai and f746g-disco since #163; enum order MODEL = 1, DECODER = 2). |
-| `nn/nn_container` | Whether a file read for `nn model load --path` is a plugin container, and the CRC-32 of exactly the bytes read, the one function both of f746g-disco's printers call (its only consumer; moved in issue #163). |
 | `nn/nn_sess_release` | When `nn stream`'s hold on the nn session may be given back: a pure function of the sink drain and the worker; f746g-disco's (moved in issue #163). |
 | `nn/nn_bench` | The one `nn bench` procedure on every board (issue #163): acquire -> fill every input with `0x5A` -> N timed runs, each after a cancel question -> release, in one hold. The board passes its hold (acquire / release) and its clock as hooks in a const `struct nn_bench_ops`; the shared side never waits, takes no lock and has no mutable storage. Host-tested (`shell/test/test_nn_bench.c`). |
 | `plugin/plugin_abi.h` | The wire ABI between the firmware and a plugin shipped with its model. |
@@ -737,16 +739,36 @@ relative to `svc/`.
 
 ## The asset store's shared parts (issue #192)
 
-grove-vision-ai-v2 and, since issue #193, wio-lite-ai link `svc/blob/`
-(f746g-disco has it on its include path and compiles none of it until #194).
+All three boards link `svc/blob/` (grove-vision-ai-v2 since issue #192,
+wio-lite-ai since #193, f746g-disco since #194), and one `blob` command,
+`shell/cmds/cmd_blob.c`, sits on it (next section).  The files:
+
+| File | What |
+|---|---|
+| `blob/blob_state` | The header format (two 256 B pages, magic page written last), every decision a transfer makes, the name rules and the name lookup (`blob_resolve_name()`: exactly one VALID slot under a name is FOUND, two are DUPLICATE) |
+| `blob/blob_map` | The rules a slot table has to satisfy over the board's interval, and the lookups over it |
+| `blob/blob_write` | The coordinator of one `blob write`, over a const `struct blob_write_ops` (`blob_write.h` has the order and why) |
+| `blob/blob_err.h` | The one set of results every board's store answers (OK 0, PARAM -1, IO -2, STATE -3, BUSY -4, EMPTY -5, CRC -6, MAP -7, CANCEL -8, DUPLICATE -9, FAULT -10); wio-lite-ai's numbers kept, grove-vision-ai-v2's busy / table / fault moved (issue #194).  BUSY (retry), FAULT (terminal, reset only) and STATE (never came up) stay apart.  Pinned by `shell/test/test_blob_err.c` |
+| `blob/blob_svc.h` | The store contract the shared command calls, by fixed names (below) |
+
 What a board provides, and how:
 
 | The board provides | How the shared code takes it |
 |---|---|
-| Its slot table and the number of slots | Const data under fixed names, `blob_map_slots[]` and `blob_map_slots_count` (declared in `blob_map.h`), plus `blob_map_table()` / `blob_map_count()`; `blob_map_slot()` and `blob_map_index_of()` read the table by name, so no caller can hand them another; the board asserts the count against `BLOB_MAX_SLOTS` at build time. Both boards: `src/blob_slots.c` |
-| The writable interval and the erase unit | Arguments to `blob_map_check()` and the payload arithmetic; nothing here states a boundary (grove-vision-ai-v2: the NOR seam's limits; wio-lite-ai: `src/blob.h`) |
-| Every operation of a write (reserve, erase, program, console, receive, read back, stat, geometry) | A const `struct blob_write_ops`; both boards: `cmds/cmd_blob.c` (wio-lite-ai's reservation is its busy flag, its erase one `nor_erase()` per 64 KB block) |
-| The staging buffer | `blob_write_run()`'s buffer and length, at least one header page and a whole number of them, refused before anything is taken otherwise; grove-vision-ai-v2 passes `blob_stage_buf` / `BLOB_STAGE_BYTES`, wio-lite-ai a 1 KB DTCM buffer in `cmds/cmd_blob.c` |
+| Its slot table and the number of slots | Const data under fixed names, `blob_map_slots[]` and `blob_map_slots_count` (declared in `blob_map.h`), plus `blob_map_table()` / `blob_map_count()`; `blob_map_slot()` and `blob_map_index_of()` read the table by name, so no caller can hand them another; the board asserts the count against `BLOB_MAX_SLOTS` at build time. Every board: `src/blob_slots.c` |
+| The writable interval and the erase unit | Arguments to `blob_map_check()` and the payload arithmetic, and `blob_svc_interval()`; nothing here states a boundary (grove-vision-ai-v2: the NOR seam's limits; wio-lite-ai and f746g-disco: `src/blob.h`) |
+| The reads (`blob_stat`, `blob_read`, `blob_verify`, `blob_check_map`, `blob_slot_geometry`, `blob_svc_ready`) | The board's store side, `src/blob.c`; each read takes and gives back what its board needs for one call (grove-vision-ai-v2: a NOR lease; wio-lite-ai: nothing; f746g-disco: nothing, but it answers BUSY while the busy flag is held) |
+| The write side: the reservation, the erases, the program, the read-back, the stat under the reservation, the staging buffer (`blob_svc_*`) | The board's `src/blob_writer.c`.  The shared command turns them into the coordinator's `struct blob_write_ops`.  The reservation is grove-vision-ai-v2's NOR writer reservation and the other two boards' busy flag; the erase is one `nor_write.c` transaction (grove-vision-ai-v2), one `nor_erase()` per 64 KB block (wio-lite-ai) or one QSPI sector erase per 64 KB (f746g-disco); the staging buffer is grove-vision-ai-v2's 64 KB `blob_stage_buf`, a 1 KB buffer on the other two |
+| The console pieces (receive, may this console carry a raw transfer, the board's own sentence for a result, the RX ring's high-water) | `shell/cmds/blob_cmd_board.h`, defined in the board's `cmds/cmd_blob_board.c` |
+| The words and numbers the command prints | `boards/<board>/svc/blob_svc_config.h` (the part's name, the address format, the erase estimate, the sender, `blob read`'s limit, the listing's note; `BLOB_SVC_HAS_RX_LEVEL` where the console reports its ring) |
+
+**Whether a program is read back is the board writer's** (`blob_write.h` step
+6): grove-vision-ai-v2's `nor_write.c` re-reads every transaction and a
+mismatch is a terminal fault; wio-lite-ai's `nor_write()` and f746g-disco's
+`qspi_flash_write()` report a failed page (f746g-disco from the flag status
+register) and do not re-read it.  On every board the payload is read back whole
+against the CRC of the stream before the magic page goes down, and the body
+page carries its own CRC, so a body that went down wrong reads `invalid`.
 
 **The header page is a fact of the format, not of a part.**  `BLOB_HDR_PAGE`
 (256 B, `blob_state.h`) is the size of each of the header's two pages wherever
@@ -755,14 +777,80 @@ time that its program page is that size (grove-vision-ai-v2: `src/blob.c`,
 against `NOR_PROGRAM_PAGE`; wio-lite-ai: `src/blob.c`, against `NOR_PAGE_SIZE`)
 rather than the format following the board.
 
-The three translation units hold no mutable storage (the build-derived audit
-covers them like the rest of `svc/`).  The sentences of `blob_name_verdict_name()`
-and `blob_lookup_name()`, which a board's `nn` adapter copies into its
-explanation, are checked against `NN_SVC_DETAIL_MAX` by enumeration in
-`shell/test/test_nn_detail_tables.c`, not with `nn_detail.h`.  Host tests:
-`shell/test/test_blob_state.c`, `test_blob_map.c` (with a table of its own under
-the fixed names) and `test_blob_write.c`; a board's shipped table is pinned by
-that board's own test.
+[!] **A slot table only grows by appending once it has shipped.**  A stored
+header names its own slot's base address, and that base is the blob's
+identity, so moving a slot strands what is in it.  Each board's table has been
+re-carved whole once (grove-vision-ai-v2 at #94, wio-lite-ai at #193;
+f746g-disco started from wio-lite-ai's at #194), and each board pins every
+entry in its own test.
+
+The translation units hold no mutable storage (the build-derived audit covers
+them like the rest of `svc/`, and `shell/cmds/cmd_blob.c` with the shared
+commands).  The sentences of `blob_name_verdict_name()` and `blob_lookup_name()`,
+which a board's `nn` adapter copies into its explanation, are checked against
+`NN_SVC_DETAIL_MAX` by enumeration in `shell/test/test_nn_detail_tables.c`, not
+with `nn_detail.h`.  Host tests: `shell/test/test_blob_state.c`,
+`test_blob_map.c` (with a table of its own under the fixed names),
+`test_blob_write.c`, `test_blob_err.c` and `test_blob_cmd.c` (the shared
+command over a stand-in store); a board's shipped table and its store and
+writer are pinned by that board's own tests.
+
+### The `blob` command is shared (issue #194)
+
+One file for all three boards, registered when the board's
+`svc/blob_svc_config.h` sets both `BLOB_SVC_HAS_STORE` and
+`BLOB_SVC_HAS_RECEIVE` (a store that cannot be filled from the console would
+offer `blob erase` with no way back; wio-lite-ai's KV-off build registers
+nothing, and still compiles it for the audit).
+
+```
+blob list                    every slot: base, size, state, length, crc32, name
+blob info <slot>             one slot in full, and why an invalid one is
+blob read <slot> [off] [len] hexdump of the payload (the board's limit)
+blob free                    the slots `blob write` accepts with no `blob erase` first
+blob write <name> [slot]     erase the slot, receive a file over YMODEM, verify
+blob verify <slot>           re-read the payload against its stored crc32
+blob erase <slot>            retire a blob: erase its header sector only
+nn model load --name <name>  load the blob stored under <name>
+```
+
+- **The name is the one typed, not the sender's filename** (which only goes to
+  `dmesg`).  Printable ASCII with no space, at most 64 characters; anything
+  else is refused before anything is touched.
+- **A name already stored goes back to its own slot** (`blob write <name>`
+  needs no slot then).  Naming a different slot for it is refused (`that name
+  is in another slot`), and a new name has to say which slot.
+- **A slot holding a VALID blob under another name, or bytes this firmware
+  cannot read (`invalid`), is refused** (`that slot holds something else`):
+  `blob erase <slot>` first, on purpose.  An `empty` or `incomplete` slot is
+  taken as it is.  The refusals happen before anything is erased; a file that
+  turns out empty or larger than the slot is found only once the sender's first
+  block arrives, after the erase.
+- **The erase stops between sectors on Ctrl+C**: nothing is sent, the amount
+  erased is printed and logged (after a Ctrl+C the shell discards what the
+  command prints, so `dmesg` has it), and `blob list` shows what is left.  A
+  cancel before the first sector leaves the slot as it was; after it, the
+  header is gone.  There is no local Ctrl+C during the receive (0x03 is data
+  then); cancel from the sender.
+- **The console is claimed after the erase**, so the erase keeps a live line
+  editor for its cancel; a background `blob write ... &` is refused before
+  anything is taken, and so is a console the board says cannot carry a raw
+  transfer (the telnet console on wio-lite-ai and f746g-disco).
+- **The magic page goes down only after the payload was read back and
+  matched** (issue #194; it went first before).  A read-back that disagrees
+  leaves the slot `incomplete` with its name and CRC readable (`blob: verify
+  FAIL -- ... Slot N is left incomplete (not valid); `blob write <name> N`
+  sends it again`); a magic program that reports failure says the slot may
+  read valid, invalid or incomplete and points at `blob list`.
+- A finished transfer prints the YMODEM counters, then `rx drops : N (clean)`
+  -- with the ring's high-water on a board that reports it (f746g-disco) --
+  then `stored :` and `verify : PASS (read back <crc>)`.
+- `empty` means "no header", not "blank flash": the payload underneath may
+  still hold old data.
+
+What stays a board's: its words and limits (above), which operations hold its
+busy flag or reservation, and how the part behaves (each board README's store
+section).
 
 ## Why the lock and the threads are the board's
 

@@ -69,12 +69,13 @@ cmake/                toolchain file (fetches ARM GNU on first configure), versi
 shell/                board-independent: core/ include/ backend/ cmds/ test/
 svc/                  board-independent services: generic ones (fmt, crc32, ymodem,
                       gfx) at the top, nn/ (the nn core and the BlazeFace decoder
-                      the boards share -- linked by f746g-disco's firmware,
-                      delivered inside a container on the other two), plugin/
-                      (container ABI, loader, executor) and camera/ (frame
-                      pipeline, holders, the camera contract); svc/README.md has
-                      the nn and camera commands' layering (one shared command
-                      each, over a board adapter)
+                      the boards share, delivered inside a container on every
+                      board), plugin/ (container ABI, loader, executor), camera/
+                      (frame pipeline, holders, the camera contract) and blob/
+                      (the asset store's format, slot rules, write order and
+                      store contract); svc/README.md has the nn, camera and
+                      blob commands' layering (one shared command each, over
+                      the board's side)
 asset/                board-independent plugin sources and the container toolchain --
                       common/ (veneers and the ABI's section layout), plugins/<name>/,
                       tools/ (packer, ABI layout, container verifier)

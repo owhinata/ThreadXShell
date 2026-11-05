@@ -34,8 +34,10 @@
  * not invent it):
  *
  *   PARAM STATE IO BUSY EMPTY CRC MAP CANCEL DUPLICATE  wio-lite-ai, f746g-disco
- *   PARAM       -  BUSY EMPTY CRC MAP                   grove-vision-ai-v2
- *                                                        (+ FAULT)
+ *   PARAM       IO BUSY EMPTY CRC MAP                   grove-vision-ai-v2
+ *                                                        (+ FAULT; IO only from
+ *                                                        src/blob_writer.c's
+ *                                                        header erase, #194)
  *
  * Plain macros, not an enum, because every store function returns an int that
  * is either one of these or BLOB_OK, and the boards compare them as ints.

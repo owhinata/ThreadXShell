@@ -892,6 +892,29 @@ for shape in FULL BARE MIN DUP; do
     "$out/test_camera_cmd"
 done
 
+# issue #194 -- the shared `blob` command (shell/cmds/cmd_blob.c) through the
+# REAL dispatcher and the REAL write coordinator, over a stub store
+# (blob_svc_stub.c), once per shape a board may declare
+# (blob_cfg/blob_svc_config.h).  Nothing gates what a command prints, so the
+# sentences are pinned here: each store result's refusal, each write outcome
+# (the incomplete slot after a failed verify, the unknown state after a failed
+# magic page), no slot number in the log for a write refused before a slot was
+# chosen, one colon column for 2-digit slots, `blob erase` only under the
+# reservation -- and, without a store or a receiver, nothing registered.
+for shape in FULL NOSTORE NORECV; do
+    gcc $CFLAGS -DCLI_USE_COLOR=0 -DBLOB_TEST_SHAPE_$shape \
+        $glue_inc -I "$here/shim" -I "$here/blob_cfg" \
+        -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" -I "$svc/blob" \
+        "$here/test_blob_cmd.c" "$here/blob_svc_stub.c" \
+        "$here/../cmds/cmd_blob.c" "$svc/blob/blob_write.c" \
+        "$svc/blob/blob_state.c" "$svc/blob/blob_map.c" "$svc/crc32.c" \
+        "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
+        "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
+        $glue \
+        $LDFLAGS -o "$out/test_blob_cmd_$shape"
+    "$out/test_blob_cmd_$shape"
+done
+
 # issue #99 -- the shared stream lifecycle (svc/nn/nn_stream_life.c).
 #
 # A `--frames` waiter and a second console racing over one stream: the waiter

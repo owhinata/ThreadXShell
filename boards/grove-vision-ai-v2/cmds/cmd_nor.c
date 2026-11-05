@@ -402,9 +402,6 @@ static int nor_cmd_bring_up(struct cli_instance *sh)
  */
 int nor_cmd_writer_enter(struct cli_instance *sh, uint32_t *token)
 {
-	struct nor_report r;
-	const char *who;
-
 	*token = 0u;
 	if (nor_cmd_bring_up(sh) != 0)
 		return -1;
@@ -416,19 +413,28 @@ int nor_cmd_writer_enter(struct cli_instance *sh, uint32_t *token)
 		          nor_fail_reason() ? nor_fail_reason() : "faulted");
 		return -1;
 	}
+	nor_cmd_say_busy(sh, "nor");
+	return -1;
+}
+
+void nor_cmd_say_busy(struct cli_instance *sh, const char *who_asks)
+{
+	struct nor_report r;
+	const char *who;
+
 	/* Name the holder when there is exactly one and we know it; the operator
 	 * can act on "close `nn`" and cannot act on "busy". */
 	nor_report(&r);
 	who = lease_holder(r.live);
 	if (who != NULL)
-		cli_error(sh, "nor: busy -- %s\r\n", who);
+		cli_error(sh, "%s: busy -- %s\r\n", who_asks, who);
 	else if (r.readers != 0u)
-		cli_error(sh, "nor: busy -- %lu reader(s) hold the window "
-		              "(mask 0x%lx)\r\n", (unsigned long)r.readers,
-		          (unsigned long)r.live);
+		cli_error(sh, "%s: busy -- %lu reader(s) hold the window "
+		              "(mask 0x%lx)\r\n", who_asks,
+		          (unsigned long)r.readers, (unsigned long)r.live);
 	else
-		cli_error(sh, "nor: busy -- another writer holds the part\r\n");
-	return -1;
+		cli_error(sh, "%s: busy -- another writer holds the part\r\n",
+		          who_asks);
 }
 
 /* Everything a transaction reports, in one shape, so the three subcommands

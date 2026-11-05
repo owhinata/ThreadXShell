@@ -36,6 +36,16 @@ struct cli_instance;
  */
 int nor_cmd_writer_enter(struct cli_instance *sh, uint32_t *token);
 
+/**
+ * @brief  Say who holds the part, in the words nor_cmd_writer_enter() uses.
+ *
+ * One cli_error line, "<who_asks>: busy -- <holder>", naming the holder when
+ * there is exactly one this file knows.  Exported for the shared `blob`
+ * command's busy refusal (cmds/cmd_blob_board.c, issue #194), so that `blob`
+ * and `nor` name a holder from one mapping.
+ */
+void nor_cmd_say_busy(struct cli_instance *sh, const char *who_asks);
+
 #ifdef __cplusplus
 }
 #endif

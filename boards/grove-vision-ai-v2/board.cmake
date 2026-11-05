@@ -398,7 +398,10 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
     "${BOARD_DIR}/cmds/cmd_nor.c"
-    "${BOARD_DIR}/cmds/cmd_blob.c"
+    # The shared `blob` command (#194) and this board's console pieces of it
+    # (UART receive, who holds the NOR, why the port is faulted).
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_blob.c"
+    "${BOARD_DIR}/cmds/cmd_blob_board.c"
     # YMODEM receive over the console (issue #92).  The protocol core is the
     # shared svc/ one; cmd_xfer.c is the twenty lines that wire it to the raw
     # console API.  Receive only -- nothing on this board produces a file to
@@ -683,11 +686,16 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/src/blob_slots.c"
     "${CMAKE_SOURCE_DIR}/svc/blob/blob_state.c"
     "${BOARD_DIR}/src/blob.c"
+    # The write side the shared `blob` command reaches (svc/blob/blob_svc.h,
+    # issue #194): the reservation, the slot erase and the program, as thin
+    # wraps of port/nor/nor_write.c's one transaction, with no console.
+    "${BOARD_DIR}/src/blob_writer.c"
     # The write coordinator (issue #92; shared since issue #192).  Takes its
     # operations as a vtable so that shell/test/test_blob_write.c can fail each
     # of them and watch the reservation and the console claim come back
     # exactly once -- which is the part of a transfer hardware cannot
-    # demonstrate.  This board's operations are in cmds/cmd_blob.c.
+    # demonstrate.  The operations are shell/cmds/cmd_blob.c's, over
+    # src/blob_writer.c.
     "${CMAKE_SOURCE_DIR}/svc/blob/blob_write.c"
     "${BOARD_DIR}/port/threadx/fp_enforce.c"
     "${BOARD_DIR}/port/threadx/tx_glue.c"

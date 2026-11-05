@@ -30,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 # by every board (a board that lost one would otherwise pass with less audited).
 # `camera` joined `nn` in issue #143.
 SHARED_COMMANDS = ("shell/cmds/cmd_nn.c", "shell/cmds/nn_cmd_core.c",
-                   "shell/cmds/cmd_camera.c")
+                   "shell/cmds/cmd_camera.c", "shell/cmds/cmd_blob.c")
 # Existing protocol staging buffers and last-run diagnostics; moving these out
 # would change ownership/reentrancy and is not part of the stateless nn contract.
 EXCEPTIONS = {"svc/ymodem.c": "existing s_block, s_rdata and s_diag (non-reentrant protocol)"}

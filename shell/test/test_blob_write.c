@@ -404,6 +404,7 @@ static void t_stored(void)
 	CHECK(rep.received == 4096u && rep.declared == 4096u, "received %lu B",
 	      (unsigned long)rep.received);
 	CHECK(rep.crc == rep.verified, "the read-back CRC does not match");
+	CHECK(rep.magic_failed == 0, "a stored blob reports a failed magic");
 	/* 1 erase + 1 payload program + body + magic. */
 	CHECK(rep.transactions == 4u, "%lu transaction(s), expected 4",
 	      (unsigned long)rep.transactions);
@@ -613,6 +614,8 @@ static void t_failures(void)
 	m.declared = m.sent = MOCK_CAP;      /* two chunks, so the first flushes */
 	m.program_fail_at = 1;
 	CHECK(run("x", 0, &rep) == BLOB_WRITE_PROG_FAILED, "a failed program is not");
+	CHECK(rep.magic_failed == 0, "a failed payload program is reported as "
+	      "the magic");
 	check_unwound("program failed", 1, 1);
 
 	/* The body page refused: no magic follows, so the slot reads INCOMPLETE
@@ -620,6 +623,7 @@ static void t_failures(void)
 	reset();
 	m.program_fail_at = 2;
 	CHECK(run("x", 0, &rep) == BLOB_WRITE_PROG_FAILED, "a failed body is not");
+	CHECK(rep.magic_failed == 0, "a failed body is reported as the magic");
 	CHECK(m.flash[MOCK_BASE] == 0xFFu, "the magic went down anyway");
 	check_unwound("body failed", 1, 1);
 
@@ -652,6 +656,8 @@ static void t_failures(void)
 			      "%s: the payload was not verified before the magic",
 			      mf[j].what);
 			check_magic_after_verify(mf[j].what);
+			CHECK(rep.magic_failed == 1, "%s: the report does not say the "
+			      "magic failed", mf[j].what);
 			st = slot_state(&info);
 			CHECK(st == mf[j].st, "%s: reads %s, expected %s", mf[j].what,
 			      blob_slot_state_name(st),

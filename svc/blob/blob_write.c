@@ -366,8 +366,12 @@ enum blob_write_result blob_write_run(const struct blob_write_ops *ops,
 	/* A magic program that reports failure says nothing certain about the
 	 * page: it may be still erased, part-written or whole.  The payload under
 	 * it has been read back and matched either way. */
-	res = (write_magic(&w, base) == 0) ? BLOB_WRITE_STORED
-	                                   : BLOB_WRITE_PROG_FAILED;
+	if (write_magic(&w, base) == 0) {
+		res = BLOB_WRITE_STORED;
+	} else {
+		res = BLOB_WRITE_PROG_FAILED;
+		rep->magic_failed = 1;
+	}
 
 out:
 	/* THE ONE EXIT.  Both claims are given back here and nowhere else, in the

@@ -764,6 +764,7 @@ if(BSP_ENABLE_KV)
         "${BOARD_DIR}/src/kv.c"
         "${BOARD_DIR}/src/kv_boot.c"
         "${BOARD_DIR}/src/blob.c"
+        "${BOARD_DIR}/src/blob_writer.c"   # the shared `blob`'s store (#194)
         "${BOARD_DIR}/src/blob_slots.c"
         # The asset store's shared parts (issue #193): the header format and a
         # transfer's decisions, the slot table's rules and lookups, and the
@@ -778,7 +779,7 @@ if(BSP_ENABLE_KV)
         "${BOARD_DIR}/port/nn/crc32_fdb.c"
         "${BOARD_DIR}/cmds/cmd_nor.c"
         "${BOARD_DIR}/cmds/cmd_kv.c"
-        "${BOARD_DIR}/cmds/cmd_blob.c"
+        "${BOARD_DIR}/cmds/cmd_blob_board.c"  # the shared `blob`'s console pieces
         "${FDB_DIR}/src/fdb.c"
         "${FDB_DIR}/src/fdb_kvdb.c"
         "${FDB_DIR}/src/fdb_utils.c"
@@ -825,6 +826,10 @@ list(APPEND SHELL_SOURCES
     "${BOARD_DIR}/port/nn/nn_producer.c"   # ...its camera producer thread (#140)
     "${BOARD_DIR}/port/nn/nn_worker.c"     # ...its inference worker thread (#140)
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_camera.c"  # the one shared command (#143)
+    # The shared `blob` command (#194), compiled in every configuration so the
+    # storage audit covers it; with BSP_ENABLE_KV off it registers nothing
+    # (svc/blob_svc_config.h).
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_blob.c"
     "${BOARD_DIR}/cmds/cmd_camera_board.c")
 # The LCD preview needs the LCD as well as the camera, so it is the one
 # source gated on BSP_ENABLE_LCD here.  With the LCD off there is nothing to

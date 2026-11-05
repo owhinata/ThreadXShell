@@ -514,6 +514,10 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_qspi.c"
     "${BOARD_DIR}/cmds/cmd_sd.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_camera.c"  # the one shared command (#143)
+    # The shared `blob` command (#194): compiled so the storage audit covers
+    # it, registering nothing until this board receives over YMODEM
+    # (svc/blob_svc_config.h BLOB_SVC_HAS_RECEIVE).
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_blob.c"
     "${BOARD_DIR}/cmds/cmd_camera_board.c"
     "${BOARD_DIR}/cmds/cmd_lcd.c"
     "${BOARD_DIR}/cmds/cmd_touch.c"

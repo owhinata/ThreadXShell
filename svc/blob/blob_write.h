@@ -121,6 +121,11 @@ struct blob_write_report {
 	uint32_t verified;    /**< CRC-32 read back, when a verify ran          */
 	uint32_t transactions;/**< board write transactions this run spent      */
 	int      vendor_rc;   /**< the last writer status, for the log          */
+	/** Non-zero when the result is BLOB_WRITE_PROG_FAILED because the MAGIC
+	 *  page's program failed -- after the payload was read back and matched.
+	 *  The slot may then read incomplete, invalid or valid, and the caller
+	 *  has to say so rather than guess (#194). */
+	int      magic_failed;
 };
 
 /**

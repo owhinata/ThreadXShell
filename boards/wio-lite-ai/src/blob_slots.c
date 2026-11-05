@@ -27,7 +27,9 @@
  * WHY THESE CLASSES.  The largest is 1 MB because that is what the tflm
  * staging buffer holds (NN_TFLM_MODEL_KB, one buffer since issue #191): a
  * model is copied out of its slot into that buffer before it is parsed, so a
- * slot larger than it would store something `nn model load` could never take.
+ * slot larger than it would store something `nn model load` could never take
+ * (cmake/check_blob_staging.py reads this table and that buffer's size back out
+ * of the linked image and stops the build if any slot's payload is larger).
  * The 512 KB class (520,192 B of payload) is what four of the five MLPerf Tiny
  * models need -- IC02 (512,024 B), VWW (333,288), AD (276,976) and IC
  * (260,648) -- and the 256 KB class (258,048 B) takes the small models and the

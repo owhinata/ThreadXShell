@@ -298,6 +298,22 @@ else
          "$HOST_TEST_REPO/tools/ (configure a wio build once to fetch it)" >&2
 fi
 
+# issue #193 -- tests for cmake/check_blob_staging.py, the post-link gate that
+# reads the slot table and the model staging capacity back out of the image and
+# refuses a slot whose payload the buffer could not hold.  The two numbers the
+# gate restates (the header sector, the table entry size) are compared with the
+# real src/blob.h on the host every time; the synthetic images -- one rule
+# broken in each, both sides of the boundary, and the null backend's NOT
+# APPLICABLE with the image checked against it -- need the pinned toolchain and
+# SKIP loudly without it, like the reservation tests above.
+if [ -n "$gate_cc" ] && [ -x "$gate_cc" ]; then
+    python3 "$board/cmake/fixtures/run_blob_staging_tests.py" --cc "$gate_cc"
+else
+    python3 "$board/cmake/fixtures/run_blob_staging_tests.py"
+    echo "run_blob_staging_tests image cases: SKIPPED -- no arm-none-eabi" \
+         "toolchain under $HOST_TEST_REPO/tools/" >&2
+fi
+
 # issue #112 -- negative tests for cmake/check_veneer_base_cost.py, the gate that
 # derives the stack the FIRMWARE spends below a plugin veneer from the shipped
 # image and refuses a VENEER_BASE_COST below it.  The fixtures link small

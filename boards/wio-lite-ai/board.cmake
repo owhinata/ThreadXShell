@@ -1319,6 +1319,34 @@ add_custom_command(TARGET shell POST_BUILD
     COMMENT "check the plugin target word against the firmware image"
     VERBATIM)
 
+# --- every blob slot fits the model staging buffer (issue #193) ---------------
+#
+# `nn model load --name` copies a whole payload into the tflm backend's one
+# staging buffer, so a slot larger than that buffer would store models this
+# firmware can never load.  The slot table (src/blob_slots.c) and the buffer
+# (NN_TFLM_MODEL_KB, private to the tflm library) are in different places, so
+# this reads both back out of the LINKED IMAGE (cmake/check_blob_staging.py).
+# The backend is passed so that `null` -- no buffer, no `nn model load` -- is
+# reported NOT APPLICABLE, and the script checks the image agrees with it.
+# Negative tests: cmake/fixtures/run_blob_staging_tests.py.  A POST_BUILD of the
+# link, like the gates above, so flash and the assets never see an image that
+# failed it.  With BSP_ENABLE_KV off there is no store, and nothing to check.
+if(BSP_ENABLE_KV)
+    # [!] KEEP THE TABLE AND ITS COUNT AS SYMBOLS.  LTO folds every use of
+    # blob_map_slots_count into code and drops the object; --require-defined
+    # marks both referenced for the LTO plugin and for --gc-sections, and fails
+    # the link, naming the symbol, if the board stops defining either.
+    target_link_options(shell PRIVATE
+        "-Wl,--require-defined=blob_map_slots"
+        "-Wl,--require-defined=blob_map_slots_count")
+    add_custom_command(TARGET shell POST_BUILD
+        COMMAND "${Python3_EXECUTABLE}"
+                "${BOARD_DIR}/cmake/check_blob_staging.py"
+                $<TARGET_FILE:shell> --backend "${CONFIG_NN_BACKEND}"
+        COMMENT "check every blob slot's payload fits the model staging buffer"
+        VERBATIM)
+endif()
+
 # --- the .plugin reservation's own gate (every backend) ----------------------
 #
 # The reservation is in the linker script whatever the backend, so it is checked

@@ -15,6 +15,12 @@
  * for every combination, every write the rule asks for is run through a
  * model of the RM's start rule (written here, independently of the header):
  * the value written must not start a command.
+ *
+ * The third decision is about the flash part, not the controller: may an
+ * erase / program / register write start after WRITE ENABLE.  Only with the
+ * write-enable latch set and no earlier operation in progress -- a part still
+ * erasing also shows the latch set, and accepting that would let an ignored
+ * erase or program report success.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -187,11 +193,44 @@ static void walk_idle_ok(void)
 	                    forms[5].ccr | FMODE(1)));
 }
 
+/* Status-register bits (N25Q128A, restated here independently of the
+ * header): bit 0 write in progress, bit 1 write-enable latch, bits 2..7 block
+ * protect / top-bottom / write disable, which this decision does not own. */
+#define PART_WIP   0x01u
+#define PART_WEL   0x02u
+#define PART_OTHER 0xFCu
+
+static void walk_part_write_may_start(void)
+{
+	unsigned wel, wip, other;
+
+	for (wel = 0; wel < 2; wel++)
+		for (wip = 0; wip < 2; wip++)
+			for (other = 0; other < 2; other++) {
+				uint32_t sr = (wel ? PART_WEL : 0u) | (wip ? PART_WIP : 0u) |
+				              (other ? PART_OTHER : 0u);
+				int want = wel && !wip;
+				int got  = qspi_part_write_may_start(sr) != 0;
+
+				if (got != want) {
+					fprintf(stderr, "test_qspi_idle: part status 0x%02x "
+					        "(latch %u, in progress %u): may start %d, "
+					        "want %d\n", sr, wel, wip, got, want);
+					g_fail = 1;
+				}
+			}
+	/* The case the rule exists for: an erase still running after its wait
+	 * failed shows latch AND in-progress -- that is not a go. */
+	CHECK(!qspi_part_write_may_start(PART_WEL | PART_WIP));
+	CHECK(qspi_part_write_may_start(PART_WEL));
+}
+
 int main(void)
 {
 	walk_ccr_step();
 	walk_four_forms();
 	walk_idle_ok();
+	walk_part_write_may_start();
 	if (g_fail)
 		return 1;
 	printf("test_qspi_idle: OK\n");

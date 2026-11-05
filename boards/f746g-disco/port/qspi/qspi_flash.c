@@ -49,6 +49,7 @@
 #define CMD_WRITE_VCR      0x81u
 
 #define SR_WIP             0x01u
+#define SR_WEL             0x02u
 #define FSR_PROT_ERR       0x02u
 #define FSR_VPP_ERR        0x08u
 #define FSR_PGM_ERR        0x10u
@@ -128,6 +129,8 @@ _Static_assert(QSPI_IDLE_SR_BUSY == QUADSPI_SR_BUSY, "SR.BUSY");
 _Static_assert(QSPI_IDLE_CCR_ADMODE == QUADSPI_CCR_ADMODE, "CCR.ADMODE");
 _Static_assert(QSPI_IDLE_CCR_DMODE == QUADSPI_CCR_DMODE, "CCR.DMODE");
 _Static_assert(QSPI_IDLE_CCR_FMODE == QUADSPI_CCR_FMODE, "CCR.FMODE");
+_Static_assert(QSPI_PART_SR_WIP == SR_WIP, "flash SR.WIP");
+_Static_assert(QSPI_PART_SR_WEL == SR_WEL, "flash SR.WEL");
 
 /* Controller registers without side effects (DR is deliberately not read).
  * Through QUADSPI directly: valid before init too (they read as reset values
@@ -387,6 +390,15 @@ static int check_flag_status(void)
 	return 0;
 }
 
+/*
+ * The single entry of every erase, program and VCR write: WRITE ENABLE, then
+ * read the status register back and start only if qspi_part_write_may_start()
+ * says so.  WEL clear catches a write-protected / absent device early; WIP set
+ * means the part is still finishing an earlier operation (one whose wait
+ * failed or timed out, which the controller recovery cannot see) -- the new
+ * one is not started, the caller gets the error, and nothing waits or retries
+ * here: a later attempt, once the part is done, succeeds.
+ */
 static int write_enable(void)
 {
 	uint8_t sr;
@@ -395,11 +407,15 @@ static int write_enable(void)
 	rc = send_simple(CMD_WRITE_ENABLE);
 	if (rc != 0)
 		return rc;
-	/* Confirm WEL latched (catches a write-protected/absent device early). */
 	rc = read_reg(CMD_READ_SR, &sr, 1);
 	if (rc != 0)
 		return rc;
-	return (sr & 0x02u) ? 0 : QSPI_FLASH_ERR_FLASH;
+	if (qspi_part_write_may_start(sr))
+		return 0;
+	if (sr & SR_WIP)
+		LOG_ERR("flash still busy with an earlier erase/program (status "
+		        "0x%02x); not started, try again later", sr);
+	return QSPI_FLASH_ERR_FLASH;
 }
 
 /* Verified register write (1 data byte): WREN (WEL checked) -> instruction +

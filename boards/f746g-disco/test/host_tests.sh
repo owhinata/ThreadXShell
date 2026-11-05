@@ -184,7 +184,9 @@ fi
 # failed HAL call (port/qspi/qspi_idle.h): whether the CCR may be rewritten to
 # put the functional mode back to indirect write (only for a form with a data
 # phase -- rewriting one without sends its instruction again), and whether the
-# controller reads idle (no abort pending, not busy, not in indirect read).
+# controller reads idle (no abort pending, not busy, not in indirect read);
+# and before every erase / program / register write, whether the flash part
+# allows it to start (write-enable latch set, no earlier operation running).
 # The controller decides when it is busy, so no console command reaches these
 # combinations; the driver around them is seen on the board only.
 gcc $CFLAGS -I "$board/port/qspi" \

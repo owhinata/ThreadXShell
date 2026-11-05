@@ -212,6 +212,7 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.input = st_tensor, .output = st_tensor, .activations_bytes = st_acts,
 	.run = st_run, .load_region = st_region, .reload = st_reload,
 	.release = st_release, .arena_reserved = 524288u, .has_builtin = 0u,
+	.staging_is_open = 1u,   /* the tflm backend's one buffer (issue #200) */
 };
 
 /* ---- the file on the card ------------------------------------------------ */

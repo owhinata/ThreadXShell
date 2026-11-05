@@ -440,8 +440,9 @@ Where `nn_model_reload()` may adopt a model from is the backend's to declare
 (`nn.h`, issue #169).  A staging backend (tflm) adopts only from the buffer
 `load_region()` handed out, aligned and not while the live model is in it.
 Since issue #191 tflm has one 1 MB buffer, the open model's: `load_region()`
-refuses while a model is open and writes nothing, a board sets
-`staging_is_open` so the shared load order takes the open model down first, and
+refuses while a model is open and writes nothing, the backend's table says so
+(`staging_is_open`, answered by `nn_model_staging_is_open()`, issue #200) so the
+shared load order takes the open model down first, and
 a refused reload ends with no model (there is nothing to restore).  The capacity
 alone is `nn_model_stage_capacity()`, answered whatever is open, for a board
 that checks a length before the model goes down.  An in-place backend
@@ -695,7 +696,7 @@ relative to `svc/`.
 | `nn/nn_core_frame` | The frame path: what the producer, worker and panel do with each frame. |
 | `nn/nn_handoff` | The hand-over word that says who may touch the model's input and when. |
 | `nn/nn_det_record` | The published decode record and the generation rule that keeps a stale decode out. |
-| `nn/nn_core_model` | The order of `nn model load` and `nn model unload`. A backend whose staging is the open model's own place says so in its table (`staging_is_open`, issue #191): the load then takes the plugin lease and moves the transition counter to odd before fetch, takes the open model down in unload's order (no hardware down), and goes on as a load from empty -- so once that ran every failure ends EMPTY, a BUSY from fetch is reported as HW, and a lease refused before it still changes nothing. wio-lite-ai and f746g-disco set it on a tflm build (their one staging buffer); Grove and f746g-disco's other backends do not. |
+| `nn/nn_core_model` | The order of `nn model load` and `nn model unload`. A backend whose staging is the open model's own place says so (`staging_is_open`, issue #191): the load then takes the plugin lease and moves the transition counter to odd before fetch, takes the open model down in unload's order (no hardware down), and goes on as a load from empty -- so once that ran every failure ends EMPTY, a BUSY from fetch is reported as HW, and a lease refused before it still changes nothing. The fact is the backend's (issue #200): every board hands the table `nn_model_staging_is_open()`, which answers from `struct nn_backend_vt` -- 1 on tflm (its one staging buffer), 0 on ethosu, null, stedgeai and stedgeai_reloc -- and no board writes it itself. |
 | `nn/nn_swap` | Where a model load ended up and what that obliges (the ending table). |
 | `nn/nn_active_core` | Whether a plugin decodes, and every call into its decoder slots. |
 | `nn/nn_active_lease` | The lease-checked entries above that branch, for a board whose model is a `struct nn_model` (wio-lite-ai, f746g-disco); the board supplies its facts (`nn_active_facts`). |

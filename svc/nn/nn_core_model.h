@@ -153,12 +153,13 @@ struct nn_core_model_backend {
 	uint32_t (*used)(void);
 	/** Non-zero when the place a load's bytes are fetched into is the open
 	 *  model's own (one staging buffer, issue #191): this file then takes
-	 *  the open model down BEFORE fetch (step 9a above).  A property of the
-	 *  backend, not of the board: a board that can build more than one
-	 *  backend sets it for the one that has it (wio-lite-ai and f746g-disco
-	 *  on tflm).  0 (left out): the open model stands until the swap
-	 *  (grove-vision-ai-v2, f746g-disco's other backends). */
-	int staging_is_open;
+	 *  the open model down BEFORE fetch (step 9a above).  Asked once, at
+	 *  the start of a load.  A property of the backend, not of the board
+	 *  (issue #200): every board hands over nn_model_staging_is_open()
+	 *  (svc/nn/nn.h), which answers from the backend's own table -- 1 on
+	 *  tflm only -- so no board writes the fact itself.  NULL answers 0:
+	 *  the open model stands until the swap. */
+	int (*staging_is_open)(void);
 };
 
 /** The bit for @p tag in @ref nn_core_model_board::tags. */

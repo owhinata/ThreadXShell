@@ -23,8 +23,9 @@
  * is the pure inference call -- it must NOT time itself; nn.c owns timing.
  *
  * OPTIONAL ENTRIES.  load_region, reload, release and stage_capacity may be
- * NULL (a backend that cannot swap its model leaves them all that way).  nn.c checks for NULL
- * and returns NN_ERR_NOSUP itself, so no caller ever reads a vtable field:
+ * NULL (a backend that cannot swap its model leaves them all that way), and
+ * staging_is_open is 0 unless written.  nn.c checks for NULL and returns
+ * NN_ERR_NOSUP itself, so no caller ever reads a vtable field:
  * "this backend cannot do that" is a value the public API returns, not a
  * branch to address 0 -- which on these parts is ITCM / vector code rather
  * than a clean fault.
@@ -128,6 +129,18 @@ struct nn_backend_vt {
 	 * and last so no other entry moves.
 	 */
 	int  (*stage_capacity)(uint32_t *cap);
+
+	/**
+	 * 1 when the place load_region() hands out is the open model's own (one
+	 * staging buffer: tflm, issue #191), so a load must take the open model
+	 * down before it writes a byte there; 0 (left out) when the open model
+	 * stands until the reload (stedgeai_reloc's two buffers) or the backend
+	 * stages nothing (null, stedgeai, ethosu).  The one source of this fact
+	 * (issue #200): the shared load order asks it through
+	 * nn_model_staging_is_open() (nn.h), no board writes it again.  Last, so
+	 * no other entry moves.
+	 */
+	uint8_t staging_is_open;
 };
 
 /** The one backend selected at build time (provided by exactly one backend TU). */

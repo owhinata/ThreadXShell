@@ -222,10 +222,11 @@ static void nn_life_release(void)
 }
 
 /*
- * [!] staging_is_open ON tflm ONLY (issue #191): its one staging buffer is where
- * the open model lives, so the shared order takes that model down before fetch()
- * reads the file over it.  stedgeai_reloc keeps its own two slots and its
- * restore; null and stedgeai stage nothing.
+ * [!] staging_is_open IS THE BACKEND'S ANSWER (issues #191, #200), 1 on tflm
+ * only: its one staging buffer is where the open model lives, so the shared
+ * order takes that model down before fetch() reads the file over it.
+ * stedgeai_reloc keeps its own two slots and its restore; null and stedgeai
+ * stage nothing.  The fact is in the backend's table, not written here.
  */
 static const struct nn_core_model_backend nn_life_backend = {
 	.swap      = nn_life_swap,
@@ -234,9 +235,7 @@ static const struct nn_core_model_backend nn_life_backend = {
 	.strerror  = NULL,     /* a refusal is worded by the swap itself */
 	.reserved  = nn_arena_reserved,
 	.used      = NULL,     /* `nn info` asks the open model */
-#if defined(CONFIG_NN_BACKEND_TFLM)
-	.staging_is_open = 1,
-#endif
+	.staging_is_open = nn_model_staging_is_open,
 };
 
 /* ---- the board ------------------------------------------------------------ */

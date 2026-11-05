@@ -208,10 +208,13 @@ static const struct nn_core_model_board board_nolease = {
 };
 
 /* The same boards over a backend that stages into the open model's own place
- * (issue #191): the open model goes down before fetch. */
+ * (issue #191): the open model goes down before fetch.  The fact is the
+ * backend's answer to a question (issue #200), as nn_model_staging_is_open()
+ * gives it on a board; `backend` above leaves it NULL, which answers 0. */
+static int b_staging_is_open(void) { return 1; }
 static const struct nn_core_model_backend backend_staged = {
 	.swap = b_swap, .release = b_release, .has_model = b_has,
-	.staging_is_open = 1,
+	.staging_is_open = b_staging_is_open,
 };
 
 static const struct nn_core_model_board board_staged = {

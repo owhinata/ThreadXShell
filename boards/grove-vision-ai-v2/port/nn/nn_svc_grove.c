@@ -868,6 +868,7 @@ static const struct nn_core_model_backend nn_life_backend = {
 	.strerror  = nn_ethosu_strerror,
 	.reserved  = nn_life_reserved,
 	.used      = nn_life_used,
+	.staging_is_open = nn_model_staging_is_open,   /* 0 on ethosu (#200) */
 };
 
 /* Refused in this board's own words, before anything is acquired. */

@@ -169,6 +169,9 @@ void nn_core_model_load(struct nn_core_model *m,
 	struct nn_swap_verdict v;
 	enum nn_swap_end end;
 	int status = NN_SVC_OK, leased = 0;
+	/* Asked once: one answer orders the whole load (issue #200). */
+	const int staged = (b->backend->staging_is_open != NULL &&
+	                    b->backend->staging_is_open()) ? 1 : 0;
 
 	j->had_open = 0;
 	j->bare     = 0;
@@ -217,7 +220,7 @@ void nn_core_model_load(struct nn_core_model *m,
 	 * refused here still changed nothing.  From the take-down on, the load
 	 * is one from empty -- had_open is 0 for the table.
 	 */
-	if (b->backend->staging_is_open) {
+	if (staged) {
 		leased = (b->lease_take == NULL) ? 1 : b->lease_take(j);
 		if (!leased) {
 			status = NN_SVC_ERR_BUSY;
@@ -234,7 +237,7 @@ void nn_core_model_load(struct nn_core_model *m,
 	status = b->fetch(j);
 	if (status != NN_SVC_OK) {
 		/* [!] Past the take-down a BUSY is not "nothing changed". */
-		if (b->backend->staging_is_open && status == NN_SVC_ERR_BUSY)
+		if (staged && status == NN_SVC_ERR_BUSY)
 			status = NN_SVC_ERR_HW;
 		end = NN_SWAP_REFUSED;
 		goto settle;
@@ -247,7 +250,7 @@ void nn_core_model_load(struct nn_core_model *m,
 	 * old model; so this is the last moment at which a refusal still leaves
 	 * everything as it was.  The lookup above stays outside it.
 	 */
-	if (!b->backend->staging_is_open) {
+	if (!staged) {
 		leased = (b->lease_take == NULL) ? 1 : b->lease_take(j);
 		if (!leased) {
 			status = NN_SVC_ERR_BUSY;

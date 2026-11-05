@@ -473,6 +473,7 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.arena_reserved    = NN_TFLM_ARENA_BYTES,     /* nn_tflm_arena */
 	.has_builtin       = 0u,                      /* empty until a load */
 	.stage_capacity    = tflm_bk_stage_capacity,  /* nn_tflm_stage_cap */
+	.staging_is_open   = 1u,                      /* one buffer: tflm_bk_load_region */
 };
 
 }  /* extern "C" */

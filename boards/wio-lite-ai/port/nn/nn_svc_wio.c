@@ -435,9 +435,10 @@ static void nn_life_release(void)
 }
 
 /*
- * [!] staging_is_open ON tflm (issue #191): its one staging buffer is where the
- * open model lives, so the shared order takes that model down before fetch()
- * writes over it.  The null backend stages nothing.
+ * [!] staging_is_open IS THE BACKEND'S ANSWER (issues #191, #200): tflm's one
+ * staging buffer is where the open model lives, so the shared order takes that
+ * model down before fetch() writes over it; the null backend stages nothing.
+ * The fact is in the backend's table, not written here.
  */
 static const struct nn_core_model_backend nn_life_backend = {
 	.swap      = nn_life_swap,
@@ -446,9 +447,7 @@ static const struct nn_core_model_backend nn_life_backend = {
 	.strerror  = nn_model_strerror,
 	.reserved  = nn_arena_reserved,
 	.used      = NULL,     /* `nn info` asks the open model */
-#if defined(CONFIG_NN_BACKEND_TFLM)
-	.staging_is_open = 1,
-#endif
+	.staging_is_open = nn_model_staging_is_open,
 };
 
 /* Every tag but a slot, refused before anything is acquired. */

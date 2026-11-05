@@ -241,6 +241,11 @@ int nn_model_stage_capacity(uint32_t *cap)
 	return nn_backend_vt_selected.stage_capacity(cap);
 }
 
+int nn_model_staging_is_open(void)
+{
+	return nn_backend_vt_selected.staging_is_open ? 1 : 0;
+}
+
 int nn_model_reload(const void *data, uint32_t len, const char *name,
                     int *model_after)
 {

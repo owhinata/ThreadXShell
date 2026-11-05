@@ -337,8 +337,9 @@ uint32_t nn_last_cycles(const struct nn_model *m);
  *     model is not in, so filling it is safe while a model is loaded.
  *   - A backend with ONE (tflm, issue #191): it is where the open model lives, so
  *     it is handed out only while no model is open.  The caller takes the open
- *     model down first (svc/nn/nn_core_model.h, staging_is_open); while one is
- *     open the answer is NN_MODEL_ERR_SLOT and neither out-parameter is written.
+ *     model down first (nn_model_staging_is_open() below, which the shared load
+ *     order in svc/nn/nn_core_model.h asks); while one is open the answer is
+ *     NN_MODEL_ERR_SLOT and neither out-parameter is written.
  *
  * Returns 0 or <0.
  */
@@ -351,6 +352,16 @@ int nn_model_load_region(void **buf, uint32_t *cap);
  * (NN_ERR_NOSUP on a backend that cannot stage; NN_ERR_ARG for NULL).
  */
 int nn_model_stage_capacity(uint32_t *cap);
+
+/**
+ * 1 when the compiled-in backend stages a load into the open model's own place
+ * (one staging buffer: tflm), so the open model must go down before a byte is
+ * written there; 0 otherwise (stedgeai_reloc's two buffers, or a backend that
+ * stages nothing).  The backend's own answer (issue #200), the same whatever is
+ * open: a board hands this function to svc/nn/nn_core_model.h's backend table
+ * rather than writing the fact itself.
+ */
+int nn_model_staging_is_open(void);
 
 /**
  * Adopt the model now sitting in the staging buffer: @p len bytes at @p data,

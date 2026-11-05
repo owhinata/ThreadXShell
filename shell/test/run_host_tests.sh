@@ -313,6 +313,22 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
     $LDFLAGS -o "$out/test_blob_state"
 "$out/test_blob_state"
 
+# issue #92 (#49 Step 2), shared since issue #192 -- the rules an asset slot
+# table has to satisfy and the lookups over one (svc/blob/blob_map.c).  A
+# firmware ships one table, so every table that breaks a rule -- a base half a
+# unit off the erase grid, a slot running past the writable interval, two slots
+# claiming the same flash -- exists here or nowhere; on a board the seam bounds
+# the WRITER and not the table, so an overlapping slot would erase a neighbour's
+# payload with nothing out of the ordinary happening.  The test defines its own
+# small table under the fixed names the lookups read; a board's shipped table is
+# pinned by that board's own test (grove-vision-ai-v2: test/test_blob_map.c).
+# Built as test_blob_map_svc: that board's test owns test_blob_map in this
+# scratch dir.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
+    "$here/test_blob_map.c" "$svc/blob/blob_map.c" \
+    $LDFLAGS -o "$out/test_blob_map_svc"
+"$out/test_blob_map_svc"
+
 # issue #101 (#78 Step 1a) -- container and manifest validation (svc/plugin/plugin_load.c):
 # everything that must hold BEFORE a plugin's first instruction is fetched.
 #

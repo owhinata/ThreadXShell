@@ -6,11 +6,12 @@
  * @file    blob_map.h
  * @brief   How the writable NOR interval is carved into asset slots (#92).
  *
- * [!] THIS FILE DECLARES NO BOUNDARY.  The writable interval is
- * nor_seam_limits (port/sdk_seam/nor_seam.h), which board.cmake compiles in and
- * cmake/check_nor_seam.py reads back out of the linked image; the table here is
- * a CONSUMER of those three numbers, and blob_map_check() takes them as
- * arguments so it cannot quietly grow a second opinion about them.  That
+ * [!] THIS FILE DECLARES NO BOUNDARY.  The writable interval is the board's
+ * (grove-vision-ai-v2: nor_seam_limits in port/sdk_seam/nor_seam.h, which its
+ * board.cmake compiles in and its cmake/check_nor_seam.py reads back out of the
+ * linked image); the board's table is a CONSUMER of those three numbers, and
+ * blob_map_check() takes them as arguments so it cannot quietly grow a second
+ * opinion about them.  That
  * matters twice over: a table that disagreed with the seam would be refused by
  * the seam anyway (the slots are where the writer aims, not what bounds it),
  * and when #49 Step 4b moved the models into blob and the interval grew to
@@ -66,9 +67,11 @@
  * re-sending.  There is no second cheap moment; the next re-carve pays whatever
  * is stored then.
  *
- * Pure arithmetic -- no hardware, no ThreadX -- so test/test_blob_map.c
- * compiles this exact file on the host and feeds blob_map_check() the broken
- * tables that the firmware, which ships one table, could never produce.
+ * Pure arithmetic -- no hardware, no ThreadX -- so shell/test/test_blob_map.c
+ * compiles svc/blob/blob_map.c on the host and feeds blob_map_check() the
+ * broken tables that a firmware, which ships one table, could never produce.
+ * The table itself is the board's (grove-vision-ai-v2: src/blob_slots.c, pinned
+ * entry by entry by that board's test/test_blob_map.c).
  */
 #ifndef BLOB_MAP_H
 #define BLOB_MAP_H
@@ -159,7 +162,20 @@ enum blob_map_verdict blob_map_check(uint32_t lo, uint32_t hi, uint32_t unit,
                                      const struct blob_slot *slots,
                                      unsigned count, unsigned *bad);
 
-/** The table this firmware ships, and how many slots it has. */
+/**
+ * The table this firmware ships, and how many slots it has.
+ *
+ * [!] DEFINED BY THE BOARD, UNDER THESE NAMES, AS CONST DATA (issue #192).
+ * The table is the board's fact; the lookups below (blob_map_slot(),
+ * blob_map_index_of()) are shared and read it by name, so there is no argument
+ * through which a caller could hand them a different table from the one the
+ * board links.  A board without a blob store defines neither and links none of
+ * this.
+ */
+extern const struct blob_slot blob_map_slots[];
+extern const unsigned blob_map_slots_count;
+
+/** The same table and count through a call; also defined by the board. */
 const struct blob_slot *blob_map_table(void);
 unsigned blob_map_count(void);
 

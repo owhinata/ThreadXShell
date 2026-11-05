@@ -6,11 +6,11 @@
  * @file    slot_table.c
  * @brief   Emit the blob slot table as JSON, for the sender (issue #101).
  *
- * [!] THE SENDER MUST NOT SCRAPE blob_map.c WITH A REGULAR EXPRESSION.  It needs
- * one number -- how many payload bytes the slot the operator named can hold --
- * and the only correct source is the map the firmware uses, through the same
- * accessors, with the same payload arithmetic (the header unit is subtracted,
- * which a text scan of the array would silently miss).
+ * [!] THE SENDER MUST NOT SCRAPE src/blob_slots.c WITH A REGULAR EXPRESSION.  It
+ * needs one number -- how many payload bytes the slot the operator named can
+ * hold -- and the only correct source is the map the firmware uses, through
+ * the same accessors, with the same payload arithmetic (the header unit is
+ * subtracted, which a text scan of the array would silently miss).
  *
  * Why the sender needs it at all: the DEVICE chooses nothing here.  `blob write`
  * picks a target and ERASES THE WHOLE SLOT before the YMODEM size header

@@ -6,11 +6,12 @@
  * @file    blob.h
  * @brief   The asset store's read side: what is in each slot (#92).
  *
- * The store itself is three files.  blob_map.c carves the writable interval
- * into slots, svc/blob/blob_state.c says what the bytes at the top of one mean,
- * and this is where those two meet the flash: it takes the lease, invalidates,
- * decodes and hands back an answer.  The write side (#49 Step 2,
- * implementation order items 6 and 7) lands on top of it.
+ * The store itself is three files.  src/blob_slots.c carves the writable
+ * interval into slots (checked and looked up by svc/blob/blob_map.c),
+ * svc/blob/blob_state.c says what the bytes at the top of one mean, and this
+ * is where those meet the flash: it takes the lease, invalidates, decodes and
+ * hands back an answer.  The write side (#49 Step 2, implementation order
+ * items 6 and 7) lands on top of it.
  *
  * [!] EVERY READ IS UNDER A LEASE, and taking one is also what brings the window
  * up.  Reading the memory-mapped alias without one is issue #90: a window that

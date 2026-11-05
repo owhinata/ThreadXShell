@@ -507,18 +507,15 @@ gcc $CFLAGS \
     $LDFLAGS -lm -o "$out/test_cam_mipi_calc"
 "$out/test_cam_mipi_calc"
 
-# issue #92 (#49 Step 2) -- the asset slot table (src/blob_map.c).  The firmware
-# ships one table, so every table that breaks a rule -- a base half a unit off
-# the erase grid, a slot running past the writable interval, two slots claiming
-# the same flash -- exists here or nowhere.  Nor would the board refuse one: the
-# seam bounds the WRITER and not the table, so an overlapping slot would erase a
-# neighbour's payload with nothing out of the ordinary happening.  The ten
-# entries are also pinned base by base, because #49 Step 4 appends to this table
-# and an append that reordered it would move every stored blob to a different
-# slot number.
+# issue #92 (#49 Step 2) -- this board's asset slot table (src/blob_slots.c).
+# The entries are pinned base by base, because an edit that reordered the table
+# would move every stored blob to a different slot number, and the table is
+# checked against this board's writable interval.  The rules themselves, fed
+# the broken tables no firmware ships, are svc/blob/blob_map.c since issue #192
+# and tested by shell/test/test_blob_map.c.
 gcc $CFLAGS \
-    -I "$board/src" \
-    "$here/test_blob_map.c" "$board/src/blob_map.c" \
+    -I "$board/src" -I "$svc/blob" \
+    "$here/test_blob_map.c" "$svc/blob/blob_map.c" "$board/src/blob_slots.c" \
     $LDFLAGS -o "$out/test_blob_map"
 "$out/test_blob_map"
 

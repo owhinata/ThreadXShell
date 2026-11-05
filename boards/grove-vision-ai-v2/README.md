@@ -4160,7 +4160,9 @@ register, exactly as `nor info` does.
 declaration of it.**  `blob_map_check()` takes `lo`, `hi` and `unit` as
 arguments and they come from `nor_seam_limits` -- so when #49 Step 4b deleted
 the model reservations and the interval grew to `0x200000..0xFFE000`, the only
-thing that changed here was the table.  Eleven slots in five size classes,
+thing that changed here was the table (since issue #192 the table is
+`src/blob_slots.c` and the rules and lookups over it are `svc/blob/blob_map.c`).
+Eleven slots in five size classes,
 13 MB, running from `0x200000` to `0xF00000` with the classes in descending
 order and no gaps:
 

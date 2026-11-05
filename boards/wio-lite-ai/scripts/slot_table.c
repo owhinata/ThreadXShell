@@ -10,7 +10,7 @@
  * The same schema Grove's scripts/slot_table.c emits -- {"unit", "slots":
  * [{"index", "base", "payload_max"}]} -- so cmake/build_asset.py reads ONE shape
  * for both boards and neither restates its geometry there.  What differs is only
- * where the numbers come from: Grove carves an irregular table in blob_map.c;
+ * where the numbers come from: Grove carves an irregular table in src/blob_slots.c;
  * this board has six equal slots declared in src/blob.h.
  *
  * [!] THIS INCLUDES blob.h AND NEVER SCRAPES IT.  BLOB_PAYLOAD_MAX reaches

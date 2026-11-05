@@ -671,14 +671,16 @@ add_library(shell_objs OBJECT
     # region, and settling that while the window has 430 KB spare is cheaper
     # than settling it when something needs the room.
     "${BOARD_DIR}/src/blob_stage.c"
-    # The asset store (issue #92).  blob_map.c carves the seam's writable
-    # interval into slots and svc/blob/blob_state.c (shared since issue #192)
-    # decides what the bytes at the top of one mean -- both pure, walked on the
-    # host by test/test_blob_map.c and shell/test/test_blob_state.c -- and
-    # blob.c is the part that needs the board: the lease, the cache invalidate,
-    # and the arithmetic that turns a slot into a pointer into the memory-mapped
-    # window.
-    "${BOARD_DIR}/src/blob_map.c"
+    # The asset store (issue #92).  src/blob_slots.c is this board's slot
+    # table, carving the seam's writable interval; svc/blob/blob_map.c checks
+    # such a table and looks slots up in it, and svc/blob/blob_state.c decides
+    # what the bytes at the top of one mean (both shared since issue #192, and
+    # walked on the host by shell/test/test_blob_{map,state}.c, while
+    # test/test_blob_map.c pins this board's table) -- and blob.c is the part
+    # that needs the board: the lease, the cache invalidate, and the arithmetic
+    # that turns a slot into a pointer into the memory-mapped window.
+    "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+    "${BOARD_DIR}/src/blob_slots.c"
     "${CMAKE_SOURCE_DIR}/svc/blob/blob_state.c"
     "${BOARD_DIR}/src/blob.c"
     # The write coordinator (issue #92).  Takes its operations as a vtable so
@@ -2165,11 +2167,17 @@ if(HOST_CC)
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
         COMMAND "${HOST_CC}" -std=c11 -O1 -w
                 -I "${BOARD_DIR}/src" -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
-                "${BOARD_DIR}/scripts/slot_table.c" "${BOARD_DIR}/src/blob_map.c"
+                "${BOARD_DIR}/scripts/slot_table.c"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c" "${BOARD_DIR}/src/blob_slots.c"
                 -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
         COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table" "${GROVE_ERASE_GRAN}"
                 > "${GROVE_SLOT_TABLE_JSON}"
-        DEPENDS "${BOARD_DIR}/scripts/slot_table.c" "${BOARD_DIR}/src/blob_map.c"
+        # The shared lookups AND this board's table, and the header both are
+        # compiled against: a change to any of them changes the numbers.
+        DEPENDS "${BOARD_DIR}/scripts/slot_table.c"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.h"
+                "${BOARD_DIR}/src/blob_slots.c"
         COMMENT "host cc -> slot_table.json (payload capacity per blob slot)"
         VERBATIM)
 

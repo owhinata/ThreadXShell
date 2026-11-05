@@ -6,11 +6,11 @@
  * @file    blob.c
  * @brief   The asset store's read side (#92).
  *
- * Thin on purpose.  The decisions are in blob_map.c and svc/blob/blob_state.c,
- * where a host test can walk them; what is left here is the part that needs the
- * board: the lease, the invalidate, and the address arithmetic that turns a
- * slot into a pointer into the memory-mapped window.  See blob.h for why each
- * read takes a lease and invalidates before it looks.
+ * Thin on purpose.  The decisions are in svc/blob/blob_map.c and
+ * svc/blob/blob_state.c, where a host test can walk them; what is left here is
+ * the part that needs the board: the lease, the invalidate, and the address
+ * arithmetic that turns a slot into a pointer into the memory-mapped window.
+ * See blob.h for why each read takes a lease and invalidates before it looks.
  */
 #include "blob.h"
 

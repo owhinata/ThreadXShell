@@ -175,6 +175,74 @@ static void mpu_config_sdram(void)
     HAL_MPU_DisableRegion(MPU_REGION_NUMBER2);
 #endif
 
+    /* Regions 3 and 4: the unused external memory space 0x60000000-0x9FFFFFFF
+     * fenced off -- no access (privileged or not), execute-never, strongly
+     * ordered (TEX=0 C=0 B=0 S=1), 512 MB each, no sub-regions.  RASR reads back
+     * 0x10040039 for both (issue #194).
+     *
+     * Why.  The ARMv7-M default map types 0x60000000-0x9FFFFFFF as Normal
+     * memory, which the core may read speculatively, and the QUADSPI memory
+     * window (0x90000000) is inside it.  Observed on this board (issue #194):
+     * after the last indirect read the QUADSPI sat idle (SR=0) with
+     * CCR.FMODE still "indirect read"; about 4 s later, with the driver not
+     * called at all, it was BUSY with a full FIFO and AR=0, and the next
+     * command timed out.  Within one boot, with these two regions in place,
+     * three model loads, several `nn run` and a 100-frame `nn stream` gave no
+     * QSPI failure and no MemManage fault; without them three loads failed
+     * three times.  That a speculative CPU read of the window is the trigger
+     * is an INFERENCE: RM0385 14.3.13 only says that accessing the window
+     * outside memory-mapped mode is a bus error, and the errata sheet (ES0290)
+     * has nothing on it.  The driver no longer leaves the controller in
+     * indirect-read mode either (port/qspi/qspi_idle.h); this fence is the
+     * other half, for the CPU.  wio-lite-ai fences its OCTOSPI2 window for the
+     * same reason (src/mpu.c, region 2).
+     *
+     * Nothing on this board uses the space: the FMC drives only the SDRAM bank
+     * at 0xC0000000 (no NOR/SRAM bank 1 at 0x60000000, no NAND bank 3 at
+     * 0x80000000, no SYSCFG FMC bank swap), the QUADSPI is driven in indirect
+     * mode only (port/qspi/qspi_flash.c, never memory-mapped), the linker
+     * script has no MEMORY region here, and every DMA target (SDMMC, DCMI,
+     * DMA2D, LTDC, ETH) is internal SRAM or SDRAM.  The MPU stops only the
+     * CPU, so that last point is a fact this relies on, not something the
+     * fence enforces.  A real access now takes a MemManage fault, which
+     * src/fault.c records (MMFAR, PC) to the reset-persistent log -- or, from
+     * a loaded plugin, src/fault_plugin.c attributes and resets.
+     *
+     * [!] A FUTURE WINDOW IN THIS SPACE (a memory-mapped QSPI, say -- issue
+     * #190 measured and declined XIP) NEEDS ITS OWN REGION NUMBERED ABOVE 4, so
+     * that it wins over the fence on overlap (higher region number wins,
+     * PMSAv7), designed together with the window.  Do not delete or shrink
+     * these two to make room for it: that brings the speculative read back
+     * everywhere else in the space.
+     *
+     * Two plain 512 MB regions rather than ST's "4 GB background region with
+     * sub-regions": ST's sub-region set also covers 0xA0000000-0xDFFFFFFF (the
+     * QUADSPI / FMC control registers and the SDRAM), and two plain regions
+     * read back unambiguously.  0xA0000000 and up is Device in the default
+     * map (not speculatively read) and is left alone. */
+    r.Number           = MPU_REGION_NUMBER3;
+    r.BaseAddress      = 0x60000000u;
+    r.Size             = MPU_REGION_SIZE_512MB;
+    r.SubRegionDisable = 0x00;
+    r.TypeExtField     = MPU_TEX_LEVEL0;           /* TEX=0, C=0, B=0, S=1:  */
+    r.IsCacheable      = MPU_ACCESS_NOT_CACHEABLE; /* strongly ordered       */
+    r.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
+    r.IsShareable      = MPU_ACCESS_SHAREABLE;
+    r.AccessPermission = MPU_REGION_NO_ACCESS;
+    r.DisableExec      = MPU_INSTRUCTION_ACCESS_DISABLE;
+    HAL_MPU_ConfigRegion(&r);
+
+    r.Number           = MPU_REGION_NUMBER4;
+    r.BaseAddress      = 0x80000000u;           /* same attributes as region 3 */
+    HAL_MPU_ConfigRegion(&r);
+
+    /* Regions 5-7 are unused.  As for region 2 above: HAL_MPU_Disable() leaves
+     * each region's own enable bit alone, so clear them explicitly rather than
+     * carry over whatever a warm reset or a debugger left there. */
+    HAL_MPU_DisableRegion(MPU_REGION_NUMBER5);
+    HAL_MPU_DisableRegion(MPU_REGION_NUMBER6);
+    HAL_MPU_DisableRegion(MPU_REGION_NUMBER7);
+
     HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
 

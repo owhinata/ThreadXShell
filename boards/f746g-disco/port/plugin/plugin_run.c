@@ -16,7 +16,8 @@
  *   - the state, in permanently allocated static memory;
  *   - the reservation, from this board's linker script -- the top 32 KB of
  *     internal SRAM (0x20048000), executable through the default memory map:
- *     no MPU region covers it (src/bsp.c sets SDRAM banks only, PRIVDEFENA);
+ *     no MPU region covers it (src/bsp.c sets the SDRAM banks and fences
+ *     off 0x60000000-0x9FFFFFFF, issue #194; PRIVDEFENA);
  *   - cache maintenance: the M7's I- and D-caches are separate and an
  *     instruction fetch does not snoop the D-cache, and this SRAM is cached
  *     write-back through the default map;

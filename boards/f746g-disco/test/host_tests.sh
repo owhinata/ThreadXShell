@@ -283,7 +283,9 @@ gcc $CFLAGS -DPLUGIN_PAINT_COUNT_STORES -I "$board/port/plugin" \
 # issue #159 -- the shared Armv7-M MPU verdict on THIS board's region set (the
 # ones src/bsp.c programs), and the configurations that must be refused: the
 # background map off, an XN / Device / read-only region over the reservation,
-# a DREGION the snapshot cannot hold.
+# a DREGION the snapshot cannot hold.  Since issue #194 the set includes the
+# two no-access fences over 0x60000000-0x9FFFFFFF: the reservation still
+# passes, and an address inside them is refused.
 gcc $CFLAGS -I "$HOST_TEST_SVC/plugin" \
     "$here/test_plugin_mpu_f746.c" "$HOST_TEST_SVC/plugin/plugin_mpu_v7m.c" \
     $LDFLAGS -o "$out/test_plugin_mpu_f746"

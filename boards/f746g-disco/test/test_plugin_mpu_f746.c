@@ -23,8 +23,21 @@
  *   1: 0xC0600000, 2 MB, TEX=0 C=1 B=1 (Normal WB, no WA, #173), AP full, XN
  *   2: disabled (tflm / null / stedgeai), or on stedgeai_reloc
  *      0xC0700000, 1 MB, Normal WBWA, AP full, executable
+ *   3: 0x60000000, 512 MB, TEX=0 C=0 B=0 S=1 (strongly ordered), no access, XN
+ *   4: 0x80000000, the same (issue #194: the unused external memory space
+ *      fenced off, so the CPU cannot read the QUADSPI window speculatively)
+ *   5-7: disabled
  * and HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT) = ENABLE | PRIVDEFENA.  The
  * STM32F746 MPU implements 8 regions (MPU_TYPE.DREGION = 8).
+ *
+ * [!] THE SET IS WRITTEN OUT BY HAND, NOT GENERATED FROM src/bsp.c, and
+ * nothing on the host ties the two together: src/bsp.c programs the MPU
+ * through the HAL and leaves no value a host test could read.  What ties this
+ * copy to the board is the read-back with `devmem` (RNR / RBAR / RASR, region
+ * by region) after a flash; the one value measured that way, the fences' RASR
+ * 0x10040039, is stated below as its own literal and the copy must reproduce
+ * it.  The cases that place an extra region over the reservation use regions
+ * 5-7, the ones src/bsp.c leaves free, so they do not overwrite a fence.
  */
 #include "plugin_mpu_v7m.h"
 
@@ -48,6 +61,7 @@ static int fails;
 #define RES_LO 0x20048000u
 #define RES_HI 0x20050000u
 
+#define AP_NONE 0u
 #define AP_FULL 3u
 #define AP_PRIV_RO 5u
 #define ATTR_NORMAL_NC   (1u << PL_MPU7_RASR_TEX_SHIFT)
@@ -55,6 +69,11 @@ static int fails;
                           PL_MPU7_RASR_B)
 #define ATTR_NORMAL_WB_NOWA (PL_MPU7_RASR_C | PL_MPU7_RASR_B)
 #define ATTR_DEVICE      (PL_MPU7_RASR_B)
+#define ATTR_STRONGLY_ORDERED_S (PL_MPU7_RASR_S)
+
+/* The fences' RASR as read back on the board (issue #194, diagnostic build):
+ * XN, AP=000, TEX=000 S=1 C=0 B=0, SRD=0, SIZE=28 (512 MB), ENABLE. */
+#define RASR_FENCE_MEASURED 0x10040039u
 
 #define TYPE_8_REGIONS   (8u << PL_MPU7_TYPE_DREGION_SHIFT)
 #define CTRL_BSP         (PL_MPU7_CTRL_ENABLE | PL_MPU7_CTRL_PRIVDEFENA)
@@ -81,6 +100,15 @@ static void bsp_regions(struct pl_mpu7_region *r, int reloc)
 	r[1] = mk(0xC0600000u, 21u, AP_FULL, ATTR_NORMAL_WB_NOWA, 1);
 	if (reloc)
 		r[2] = mk(0xC0700000u, 20u, AP_FULL, ATTR_NORMAL_WBWA, 0);
+	r[3] = mk(0x60000000u, 29u, AP_NONE, ATTR_STRONGLY_ORDERED_S, 1);
+	r[4] = mk(0x80000000u, 29u, AP_NONE, ATTR_STRONGLY_ORDERED_S, 1);
+}
+
+static enum pl_mpu7_verdict judge(const struct pl_mpu7_region *r, uint32_t lo,
+                                  uint32_t hi)
+{
+	return pl_mpu7_judge(CTRL_BSP, TYPE_8_REGIONS, r, PL_MPU7_REGION_MAX,
+	                     lo, hi);
 }
 
 int main(void)
@@ -92,12 +120,32 @@ int main(void)
 	bsp_regions(r, 0);
 	CHECK(pl_mpu7_judge(CTRL_BSP, TYPE_8_REGIONS, r, PL_MPU7_REGION_MAX,
 	                    RES_LO, RES_HI) == PL_MPU7_OK,
-	      "src/bsp.c's regions (tflm): the reservation runs through the "
-	      "default map");
+	      "src/bsp.c's regions (tflm, with the two fences): the reservation "
+	      "runs through the default map");
 	bsp_regions(r, 1);
 	CHECK(pl_mpu7_judge(CTRL_BSP, TYPE_8_REGIONS, r, PL_MPU7_REGION_MAX,
 	                    RES_LO, RES_HI) == PL_MPU7_OK,
 	      "...and with stedgeai_reloc's executable region 2 (SDRAM, elsewhere)");
+
+	/* issue #194 -- the fences. */
+	bsp_regions(r, 0);
+	CHECK(r[3].rbar == 0x60000000u && r[3].rasr == RASR_FENCE_MEASURED &&
+	      r[4].rbar == 0x80000000u && r[4].rasr == RASR_FENCE_MEASURED,
+	      "regions 3 and 4 are the values read back on the board "
+	      "(RBAR 0x60000000 / 0x80000000, RASR 0x10040039)");
+	CHECK(judge(r, 0x60000000u, 0x60000020u) == PL_MPU7_XN,
+	      "[!] 0x60000000 (FMC bank 1, inside the fence): not a plugin window");
+	CHECK(judge(r, 0x7FFFFFE0u, 0x80000020u) == PL_MPU7_XN,
+	      "...nor the seam between the two fences");
+	CHECK(judge(r, 0x90000000u, 0x90001000u) == PL_MPU7_XN,
+	      "[!] 0x90000000 (the QUADSPI window): not a plugin window");
+	CHECK(judge(r, 0x9FFFFFE0u, 0xA0000000u) == PL_MPU7_XN,
+	      "...nor the last 32 bytes below 0xA0000000");
+	r[3].rasr = 0u;
+	r[4].rasr = 0u;
+	CHECK(judge(r, 0x90000000u, 0x90001000u) == PL_MPU7_OK,
+	      "control: without the fences the default map calls 0x90000000 "
+	      "executable Normal memory, so the fence is what refuses it");
 
 	bsp_regions(r, 0);
 	CHECK(pl_mpu7_judge(PL_MPU7_CTRL_ENABLE, TYPE_8_REGIONS, r,
@@ -106,7 +154,7 @@ int main(void)
 	      "[!] the background map off: refused (nothing covers the SRAM)");
 
 	bsp_regions(r, 0);
-	r[3] = mk(0x20040000u, 16u, AP_FULL, ATTR_NORMAL_WBWA, 1);
+	r[5] = mk(0x20040000u, 16u, AP_FULL, ATTR_NORMAL_WBWA, 1);
 	CHECK(pl_mpu7_judge(CTRL_BSP, TYPE_8_REGIONS, r, PL_MPU7_REGION_MAX,
 	                    RES_LO, RES_HI) == PL_MPU7_XN,
 	      "[!] an XN region over the reservation: refused");
@@ -118,13 +166,13 @@ int main(void)
 	      "...even one covering only its last 4 KB, in the last region");
 
 	bsp_regions(r, 0);
-	r[4] = mk(0x20040000u, 16u, AP_FULL, ATTR_DEVICE, 0);
+	r[6] = mk(0x20040000u, 16u, AP_FULL, ATTR_DEVICE, 0);
 	CHECK(pl_mpu7_judge(CTRL_BSP, TYPE_8_REGIONS, r, PL_MPU7_REGION_MAX,
 	                    RES_LO, RES_HI) == PL_MPU7_ATTR,
 	      "a Device region over it: refused");
 
 	bsp_regions(r, 0);
-	r[4] = mk(0x20040000u, 16u, AP_PRIV_RO, ATTR_NORMAL_WBWA, 0);
+	r[6] = mk(0x20040000u, 16u, AP_PRIV_RO, ATTR_NORMAL_WBWA, 0);
 	CHECK(pl_mpu7_judge(CTRL_BSP, TYPE_8_REGIONS, r, PL_MPU7_REGION_MAX,
 	                    RES_LO, RES_HI) == PL_MPU7_AP,
 	      "a read-only region over it: refused");

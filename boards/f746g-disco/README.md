@@ -95,10 +95,33 @@ option does not fail the link, it fails at runtime with an empty field.
 | SRAM | `0x20010000` | 224 KB | SRAM1: data, bss, heap, main stack |
 | Plugin | `0x20048000` | 32 KB | top 16 KB of SRAM1 + SRAM2: the `.plugin` reservation (issue #159) |
 | SDRAM | `0xC0000000` | 8 MB | FMC bank1, 16-bit bus |
+| (fenced) | `0x60000000` | 1 GB | unused external memory space (FMC NOR/SRAM and NAND banks, the QUADSPI window at `0x90000000`): MPU no access, issue #194 |
 
 ITCM placement was tried and dropped: with I-cache and D-cache enabled it was
 worth about 0.6%, because the cache already hides the flash wait states.  The
 region is left in the map as a fact about the part, not as a placement target.
+
+### MPU regions
+
+`src/bsp.c` programs the MPU once at boot, before the caches are enabled, and
+nothing reconfigures it afterwards (the plugin loader only reads it back).
+`PRIVDEFENA` is set, so every address no region covers keeps the ARMv7-M
+default map.
+
+| Region | Base | Size | Attributes | Purpose |
+|---|---|---|---|---|
+| 0 | `0xC0000000` | 8 MB | Normal non-cacheable, full access, XN | SDRAM (banks 0-2 are bus-master targets) |
+| 1 | `0xC0600000` | 2 MB | Normal write-back no write-allocate, full access, XN | SDRAM bank 3, CPU-only (#173) |
+| 2 | `0xC0700000` | 1 MB | Normal write-back write-allocate, full access, executable | `stedgeai_reloc` only; disabled in every other build |
+| 3 | `0x60000000` | 512 MB | strongly ordered, no access, XN | fence: unused FMC NOR/SRAM bank space |
+| 4 | `0x80000000` | 512 MB | strongly ordered, no access, XN | fence: unused FMC NAND bank and the QUADSPI window |
+| 5-7 | -- | -- | disabled explicitly | free |
+
+Regions 3 and 4 read back `RASR = 0x10040039`.  They keep the CPU, including
+its speculative reads, out of `0x60000000-0x9FFFFFFF`, which nothing on this
+board uses (issue #194); a real access is a MemManage fault.  A window opened
+in that space later needs its own region numbered above 4, so that it wins on
+overlap.
 
 ### [!] The top 32 KB of internal SRAM is the plugin reservation (issue #159)
 
@@ -1180,9 +1203,10 @@ What runs where, and why each piece is this board's or shared:
   under a critical section, judged by `svc/plugin/plugin_mpu_v7m.c`, and the
   D-clean + I-invalidate of the reservation.  `test/test_plugin_mpu_f746.c`
   holds the verdict on this board's real region set: SDRAM non-cacheable XN,
-  bank 3 write-back no-write-allocate XN (#173), PRIVDEFENA -- the reservation
-  is executable through the default map -- and refuses the background map off
-  and an XN / Device / read-only region placed over it.
+  bank 3 write-back no-write-allocate XN (#173), the two no-access fences
+  (#194), PRIVDEFENA -- the reservation is executable through the default map
+  -- and refuses the background map off, an XN / Device / read-only region
+  placed over it, and an address inside the fences.
 - **A plugin's fault** is attributed (`pc is in plugin '<name>' +0x<off>` in the
   RAM log) and **the board resets at once** (`src/fault_plugin.c`); under a
   debugger it halts instead.  A fault anywhere else keeps the full UART dump

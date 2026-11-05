@@ -20,9 +20,13 @@
  * The protocol core (svc/ymodem.c) is transport-agnostic; here we wire its IO
  * vtable to the new raw-console API (cli_console_claim/cli_read_byte/cli_write/
  * cli_rx_flush) and its source vtable to FileX fx_file_read.  Clean-room.
+ *
+ * Since issue #194 it also RECEIVES (xfer_recv_sink_locked(), for `blob
+ * write`), the same shape as grove-vision-ai-v2's cmd_xfer.c.
  */
 #include "cli.h"
 #include "cmd_xfer.h"
+#include "log.h"
 #include "fs_cmd_core.h"
 #include "fs_devices.h"       /* fs_sd_device() (send) */
 
@@ -41,6 +45,60 @@ static int io_getc(void *ctx, unsigned timeout_ms)
 static int io_put(void *ctx, const uint8_t *buf, size_t len)
 {
 	return cli_write((struct cli_instance *)ctx, buf, len) < 0 ? -1 : 0;
+}
+
+/* ---- receive (issue #194) ------------------------------------------------- */
+
+/* How long the line must stay quiet after a failed receive, and how much a
+ * drain may swallow before it gives up -- grove-vision-ai-v2's numbers. */
+#define XFER_DRAIN_QUIET_MS   400u
+#define XFER_DRAIN_MAX_BYTES  8192u
+
+static int io_getc_recv(void *ctx, unsigned timeout_ms)
+{
+	/* [!] 0x03 IS NOT AN ABORT HERE.  See cmd_xfer.h: while receiving, the
+	 * stream is the file, and about one byte in 256 of binary content is
+	 * 0x03.  The send direction maps it (io_getc above); this must not. */
+	return cli_read_byte((struct cli_instance *)ctx, timeout_ms);
+}
+
+static void drain_until_quiet(struct cli_instance *sh)
+{
+	uint32_t dropped = 0u;
+
+	while (dropped < XFER_DRAIN_MAX_BYTES) {
+		if (cli_read_byte(sh, XFER_DRAIN_QUIET_MS) < 0)
+			return;             /* quiet for the whole window */
+		dropped++;
+	}
+}
+
+int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
+{
+	struct ym_io io = { sh, io_getc_recv, io_put };
+	const struct ym_recv_diag *d;
+	enum ym_result res;
+
+	cli_rx_flush(sh);                /* type-ahead and the command's newline */
+	res = ymodem_recv(&io, sink);
+	cli_rx_flush(sh);                /* a trailing 'O' / CAN / garbage tail  */
+	if (res != YM_OK)
+		drain_until_quiet(sh);
+
+	/* The post-mortem goes to the log, not the console: while a transfer
+	 * runs the PC's terminal belongs to the sender. */
+	d = ymodem_recv_diag();
+	log_write(res == YM_OK ? LOG_LEVEL_INF : LOG_LEVEL_ERR, "xfer",
+	          "recv rc=%d blk=%lu crc=%lu seq=%lu shrt=%lu tmo=%lu",
+	          (int)res, (unsigned long)d->blocks, (unsigned long)d->bad_crc,
+	          (unsigned long)d->bad_seq, (unsigned long)d->short_read,
+	          (unsigned long)d->timeouts);
+	if (d->first_kind >= 0)
+		log_write(LOG_LEVEL_ERR, "xfer",
+		          "first bad blk kind=%02X seq=%d body=%lu/%lu",
+		          (unsigned)d->first_kind, d->first_seq,
+		          (unsigned long)d->first_got, (unsigned long)d->first_want);
+	return res == YM_OK ? 0 : 1;
 }
 
 int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)

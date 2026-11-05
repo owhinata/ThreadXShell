@@ -73,7 +73,9 @@ static int uart_init(struct cli_transport *tr)
 	if (u == NULL || u->huart == NULL)
 		return -1;
 
-	cli_uart_ring_init(&u->rx_ring, u->rx_buf, sizeof u->rx_buf);
+	if (u->rx_buf == NULL)
+		return -1;
+	cli_uart_ring_init(&u->rx_ring, u->rx_buf, CLI_UART_RX_BUFFER_SIZE);
 	cli_uart_ring_init(&u->tx_ring, u->tx_buf, sizeof u->tx_buf);
 	u->rx_byte       = 0;
 	u->tx_in_flight  = 0;
@@ -81,6 +83,7 @@ static int uart_init(struct cli_transport *tr)
 	u->enabled       = 0;
 	u->rx_overrun    = 0;
 	u->rx_rearm_fail = 0;
+	u->rx_high       = 0;
 	u->sh            = tr->sh;      /* cli_init() set tr->sh before calling init */
 
 	/* Become the console now so _write routes here; enabled stays 0 until
@@ -187,10 +190,15 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	if (u == NULL || huart != u->huart)
 		return;
 
-	/* Store the byte; on ring overflow drop it and count (req §9/§15, as dummy). */
+	/* Store the byte; on ring overflow drop it and count (req §9/§15, as dummy).
+	 * After a put that took, note how deep the ring now is (issue #194): one
+	 * subtraction and one compare, so `blob write` can say how close a
+	 * transfer came to a drop. */
 	if (!cli_uart_ring_put(&u->rx_ring, u->rx_byte)) {
 		if (u->sh != NULL)
 			u->sh->rx_dropped++;
+	} else {
+		cli_uart_ring_note_high(&u->rx_ring, &u->rx_high);
 	}
 
 	/* Re-arm the next 1-byte receive; surface a silent RX stall if HAL refuses. */
@@ -280,6 +288,25 @@ static struct cli_uart *uart_ctx_from_instance(struct cli_instance *sh)
 		return NULL;
 	u = (struct cli_uart *)sh->tr->ctx;
 	return (u != NULL && u->enabled) ? u : NULL;
+}
+
+int cli_uart_rx_high(struct cli_instance *sh, uint32_t *high, uint32_t *size)
+{
+	struct cli_uart *u = uart_ctx_from_instance(sh);
+
+	if (u == NULL)
+		return -1;
+	*high = u->rx_high;
+	*size = (uint32_t)CLI_UART_RX_BUFFER_SIZE;
+	return 0;
+}
+
+void cli_uart_rx_high_clear(struct cli_instance *sh)
+{
+	struct cli_uart *u = uart_ctx_from_instance(sh);
+
+	if (u != NULL)
+		cli_uart_ring_high_restart(&u->rx_ring, &u->rx_high);
 }
 
 /*

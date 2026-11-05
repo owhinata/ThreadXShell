@@ -90,6 +90,25 @@ int blob_slot_geometry(unsigned slot, uint32_t *base, uint32_t *payload_addr,
 
 /* ---- read side ------------------------------------------------------------- */
 
+/* The busy flag (defined with its acquire/release below).  Read here, never
+ * taken: see refused_while_busy(). */
+static volatile int blob_busy;
+
+/*
+ * [!] THE PUBLIC READS REFUSE WHILE THE FLAG IS HELD, without taking it (issue
+ * #194).  On this board the flag is held by a `blob write` / `blob erase` and
+ * by `qspi erase` / `qspi test` -- the raw commands erase and program wherever
+ * they are pointed, so a listing taken while one runs would describe flash that
+ * is half-way through changing.  Not taken, because two consoles listing at
+ * once must not refuse each other.  What runs UNDER the flag (the write's own
+ * stat, the name lookup the nn reader does while it holds it) uses the
+ * unchecked stat_slot().
+ */
+static int refused_while_busy(void)
+{
+	return blob_busy ? BLOB_ERR_BUSY : BLOB_OK;
+}
+
 /* [addr, addr + len) in pieces of at most BLOB_READ_CHUNK (blob.h says why). */
 static int read_split(uint32_t addr, uint8_t *buf, uint32_t len)
 {
@@ -107,7 +126,9 @@ static int read_split(uint32_t addr, uint8_t *buf, uint32_t len)
 	return BLOB_OK;
 }
 
-int blob_stat(unsigned slot, struct blob_info *out, enum blob_hdr_reject *why)
+/* The header read, with no check of the flag: for callers that hold it. */
+static int stat_slot(unsigned slot, struct blob_info *out,
+                     enum blob_hdr_reject *why)
 {
 	/* The two header pages, on the caller's stack: 512 B against a 4 KB
 	 * console stack.  Not static: two consoles can list at once, and nothing
@@ -133,6 +154,25 @@ int blob_stat(unsigned slot, struct blob_info *out, enum blob_hdr_reject *why)
 	return BLOB_OK;
 }
 
+int blob_stat(unsigned slot, struct blob_info *out, enum blob_hdr_reject *why)
+{
+	int rc = refused_while_busy();
+
+	if (rc != BLOB_OK) {
+		if (why != NULL)
+			*why = BLOB_REJECT_NONE;
+		if (out != NULL)
+			memset(out, 0, sizeof *out);
+		return rc;
+	}
+	return stat_slot(slot, out, why);
+}
+
+int blob_stat_reserved(unsigned slot, struct blob_info *out)
+{
+	return stat_slot(slot, out, NULL);
+}
+
 int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len)
 {
 	const struct blob_slot *s;
@@ -143,6 +183,9 @@ int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len)
 		return BLOB_ERR_PARAM;
 	s = checked_slot(slot, &err);
 	if (s == NULL)
+		return err;
+	err = refused_while_busy();
+	if (err != BLOB_OK)
 		return err;
 	cap = blob_map_payload_max(s, BLOB_ERASE_UNIT);
 	if (off >= cap || len > cap - off)
@@ -163,7 +206,7 @@ int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed)
 
 	if (computed != NULL)
 		*computed = 0u;
-	rc = blob_stat(slot, &info, NULL);
+	rc = blob_stat(slot, &info, NULL);   /* refuses while the flag is held */
 	if (out != NULL)
 		*out = info;
 	if (rc != BLOB_OK)
@@ -211,7 +254,8 @@ int blob_find(const char *name, unsigned *slot, struct blob_info *out,
 
 	memset(&hit, 0, sizeof hit);
 	for (i = 0u; i < count; i++) {
-		rc = blob_stat(i, &info, NULL);
+		/* Unchecked: the caller holds the flag (blob.h). */
+		rc = stat_slot(i, &info, NULL);
 		if (rc != BLOB_OK)
 			return rc;
 		v[i].state = info.state;
@@ -250,8 +294,6 @@ int blob_find(const char *name, unsigned *slot, struct blob_info *out,
  * critical sections (TX_PORT_USE_BASEPRI is not defined), so it nests
  * consistently.  It guards the CALLERS, not the functions below.
  */
-static volatile int blob_busy;
-
 int blob_busy_acquire(void)
 {
 	uint32_t primask = __get_PRIMASK();

@@ -176,8 +176,19 @@ target_compile_definitions(bsp_iface INTERFACE USE_HAL_DRIVER STM32F746xx
     #   in cli_core.c, keeping the concurrency window exactly as narrow as it was
     #   on the donor.  Turning slicing on belongs with the re-entrancy work, not
     #   with the port.
+    #
+    # CLI_UART_RX_BUFFER_SIZE=4096 (issue #194, decision D6): the VCP's RX ring.
+    #   `blob write` receives YMODEM 1 KB blocks at 115200 baud while the shell
+    #   thread also programs the QSPI.  The 256 B default is ~22 ms of line
+    #   time, shorter than a 1 KB block arrives in, so any stall of the shell
+    #   thread past that drops bytes; 4 KB is ~355 ms (not yet measured on
+    #   hardware).  The pass line on hardware is 0 drops and a
+    #   high-water at or below half the ring (2,047 B), which `blob write`
+    #   prints.  Here, not in the backend header, because cli_backend_uart.h
+    #   is included by more than one TU and all of them must agree.
     CLI_CPU_CYCLES_PER_US=108
-    CLI_INSTANCE_TIME_SLICE=0)
+    CLI_INSTANCE_TIME_SLICE=0
+    CLI_UART_RX_BUFFER_SIZE=4096)
 target_compile_options(bsp_iface INTERFACE
     ${MCU_OPTS} -Wall -fdata-sections -ffunction-sections -g -gdwarf-2)
 target_link_options(bsp_iface INTERFACE
@@ -514,10 +525,11 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_qspi.c"
     "${BOARD_DIR}/cmds/cmd_sd.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_camera.c"  # the one shared command (#143)
-    # The shared `blob` command (#194): compiled so the storage audit covers
-    # it, registering nothing until this board receives over YMODEM
-    # (svc/blob_svc_config.h BLOB_SVC_HAS_RECEIVE).
+    # The shared `blob` command (#194) and this board's console pieces of it:
+    # receive over the VCP, refuse telnet, the RX ring's high-water.  In every
+    # backend: the store does not depend on nn.
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_blob.c"
+    "${BOARD_DIR}/cmds/cmd_blob_board.c"
     "${BOARD_DIR}/cmds/cmd_camera_board.c"
     "${BOARD_DIR}/cmds/cmd_lcd.c"
     "${BOARD_DIR}/cmds/cmd_touch.c"
@@ -543,9 +555,11 @@ add_executable(shell
     # format and table rules.  svc/crc32.c is here for the store's verify, and
     # serves the plugin loader's digest too.
     "${BOARD_DIR}/src/blob.c"
+    "${BOARD_DIR}/src/blob_writer.c"   # the shared `blob`'s write side (#194)
     "${BOARD_DIR}/src/blob_slots.c"
     "${CMAKE_SOURCE_DIR}/svc/blob/blob_state.c"
     "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+    "${CMAKE_SOURCE_DIR}/svc/blob/blob_write.c"   # the `blob write` coordinator
     "${CMAKE_SOURCE_DIR}/svc/crc32.c"
     "${BOARD_DIR}/port/sd/sd_card.c"
     "${BOARD_DIR}/port/camera/camera.c"
@@ -806,7 +820,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # firmware code at all (-nostdlib, and the gate refuses an undefined
     # symbol), so this matters for what a plugin might DEFINE under one of these
     # names: the internal-flash and option-byte writers, the QSPI NOR writers
-    # (the board's stored data on the external flash), the clock and supply
+    # (the board's stored data on the external flash) and the blob store's
+    # erases and program over them (issue #194), the clock and supply
     # configuration, and the MPU / cache / NVIC state the base owns.
     set(F746_PLUGIN_FORBIDDEN
         HAL_FLASH_Unlock
@@ -819,6 +834,11 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         qspi_flash_erase_sector
         qspi_flash_erase_subsector
         qspi_flash_erase_chip
+        blob_erase_header
+        blob_erase_span
+        blob_svc_erase_header
+        blob_svc_erase_span
+        blob_svc_program
         HAL_RCC_OscConfig
         HAL_RCC_ClockConfig
         HAL_RCCEx_PeriphCLKConfig

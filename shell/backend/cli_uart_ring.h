@@ -120,6 +120,34 @@ static inline size_t cli_uart_ring_contig(const struct cli_uart_ring *r,
 	return run;
 }
 
+/**
+ * Raise *@p high to the ring's current fill if it is above it (issue #194): the
+ * deepest the ring has been since *@p high was last cleared.  For a producer
+ * that wants to know how close it came to dropping -- call it right after a
+ * successful put, in the same context (an ISR on target), so the fill it reads
+ * is the one that put produced.  The producer owns *@p high; a consumer only
+ * reads it, or clears it before a measured run.
+ */
+static inline void cli_uart_ring_note_high(const struct cli_uart_ring *r,
+                                           volatile uint32_t *high)
+{
+	uint32_t n = (uint32_t)cli_uart_ring_count(r);
+
+	if (n > *high)
+		*high = n;
+}
+
+/**
+ * Start a new measurement of *@p high: what the ring holds right now, not 0 --
+ * bytes already waiting are part of the run about to be measured.  A single
+ * word store, so a producer noting concurrently sees either value.
+ */
+static inline void cli_uart_ring_high_restart(const struct cli_uart_ring *r,
+                                              volatile uint32_t *high)
+{
+	*high = (uint32_t)cli_uart_ring_count(r);
+}
+
 /** Advance the read index by @p n bytes (consumer side of cli_uart_ring_contig). */
 static inline void cli_uart_ring_advance_tail(struct cli_uart_ring *r, size_t n)
 {

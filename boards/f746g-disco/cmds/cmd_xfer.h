@@ -33,6 +33,23 @@ struct cli_instance;
  */
 int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
 
+/**
+ * Receive one YMODEM file into @p sink (issue #194, for `blob write`).  The
+ * caller ALREADY holds the console (cli_console_claim).  Flushes RX, runs
+ * ymodem_recv(), flushes again, and drains until the line goes quiet if it
+ * failed.  Returns 0 when the batch completed, 1 otherwise.
+ *
+ * [!] FOR THE DURATION, THIS FUNCTION IS THE ONLY PERMITTED READER OF THE RX
+ * RING: nothing in the sink may call cli_cancel_requested(), whose poll drains
+ * the ring and discards every byte that is not 0x03 -- here, the file.
+ *
+ * [!] AND THERE IS NO LOCAL Ctrl+C.  While receiving, the stream is the file,
+ * so 0x03 is ordinary data; cancel from the PC (lrzsz sends CAN, which the
+ * protocol core honours).  grove-vision-ai-v2's cmd_xfer.h tells how
+ * wio-lite-ai learned this.
+ */
+int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink);
+
 #ifdef __cplusplus
 }
 #endif

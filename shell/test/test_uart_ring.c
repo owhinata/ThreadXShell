@@ -102,6 +102,38 @@ int main(void)
 	cli_uart_ring_advance_tail(&r, run);
 	assert(cli_uart_ring_count(&r) == 0);
 
-	printf("OK: uart ring count/free, FIFO, overflow, wrap, bulk, contig\n");
+	/* 7. high-water (issue #194): noted after every put that took, the way
+	 * the f746 RX ISR does; it follows the deepest fill, not the current one,
+	 * survives the consumer draining, and a restart begins at what is held
+	 * now -- not at 0 and not at the old peak. */
+	{
+		volatile uint32_t high = 0u;
+		int i;
+
+		cli_uart_ring_init(&r, buf, sizeof buf);
+		cli_uart_ring_high_restart(&r, &high);
+		assert(high == 0u);
+		for (i = 0; i < 5; i++) {
+			assert(cli_uart_ring_put(&r, (uint8_t)i) == 1);
+			cli_uart_ring_note_high(&r, &high);
+		}
+		assert(high == 5u);
+		assert(cli_uart_ring_get(&r, &b) == 1);
+		assert(cli_uart_ring_get(&r, &b) == 1);
+		assert(cli_uart_ring_put(&r, 9) == 1);
+		cli_uart_ring_note_high(&r, &high);
+		assert(high == 5u);                 /* 4 now; the peak stays 5 */
+		cli_uart_ring_high_restart(&r, &high);
+		assert(high == 4u);                 /* what is held, not 0 or 5 */
+		/* fill to the top: the high-water reaches size-1 and the put that
+		 * does not take leaves it there (the ISR notes only after a put
+		 * that took) */
+		while (cli_uart_ring_put(&r, 7) == 1)
+			cli_uart_ring_note_high(&r, &high);
+		assert(high == sizeof buf - 1u);
+	}
+
+	printf("OK: uart ring count/free, FIFO, overflow, wrap, bulk, contig, "
+	       "high-water\n");
 	return 0;
 }

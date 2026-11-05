@@ -36,8 +36,17 @@
  * serialised is the operations that change or depend on the store, against
  * each other, with the busy flag below: two consoles (the VCP and telnet), a
  * background job, `qspi erase` / `qspi test` (cmds/cmd_qspi.c takes the flag
- * too), and later `blob write` and `nn model load`.  The flag is taken by the
- * CALLER for the span only it knows.
+ * too), `blob write` / `blob erase` (src/blob_writer.c's reservation), and
+ * later `nn model load`.  The flag is taken by the CALLER for the span only it
+ * knows.
+ *
+ * [!] AND THE PUBLIC READS REFUSE WHILE IT IS HELD (issue #194), unlike
+ * wio-lite-ai's: blob_stat(), blob_read() and blob_verify() answer
+ * BLOB_ERR_BUSY rather than describe flash a raw `qspi erase` / `qspi test`
+ * or a write is half-way through changing.  They only look at the flag and
+ * never take it, so two readers do not refuse each other.  What runs under the
+ * flag -- the write's own stat (blob_stat_reserved) and blob_find() -- does not
+ * look.
  *
  * THREAD CONTEXT ONLY, after the scheduler is running: the QSPI driver sleeps
  * while it waits for an erase or a program.
@@ -104,7 +113,7 @@ enum blob_map_verdict blob_check_map(unsigned *bad);
 int blob_slot_geometry(unsigned slot, uint32_t *base, uint32_t *payload_addr,
                        uint32_t *payload_max);
 
-/* ---- read side (no exclusion of its own: see the locking note above) ------ */
+/* ---- read side (refused while the busy flag is held; see above) ----------- */
 
 /**
  * Decode @p slot's header into @p out (and why an INVALID one is, into @p why,
@@ -113,6 +122,10 @@ int blob_slot_geometry(unsigned slot, uint32_t *base, uint32_t *payload_addr,
  * slot is empty" apart from "the flash did not answer" (BLOB_ERR_IO).
  */
 int blob_stat(unsigned slot, struct blob_info *out, enum blob_hdr_reject *why);
+
+/** blob_stat() for a caller that HOLDS the busy flag: the same read, with no
+ *  look at the flag (a `blob write` choosing its slot under its reservation). */
+int blob_stat_reserved(unsigned slot, struct blob_info *out);
 
 /**
  * Read @p len payload bytes from @p off within @p slot, in pieces of at most

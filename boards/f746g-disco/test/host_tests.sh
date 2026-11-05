@@ -193,6 +193,20 @@ gcc $CFLAGS -I "$here/blob_shim" \
     "$HOST_TEST_SVC/crc32.c" \
     $LDFLAGS -o "$out/test_blob_store_f746"
 "$out/test_blob_store_f746"
+# issue #194 -- the whole store (src/blob.c + src/blob_writer.c) under the shared
+# write coordinator, end to end on the array: a completed write reads VALID and
+# verifies, a disagreeing read-back leaves INCOMPLETE, a cancelled erase leaves
+# no header, the busy flag is taken and given back once and refuses the public
+# reads while held (`qspi test` holds it too), and the writer stays inside the
+# store's interval.  blob_shim/log.h stands in for svc/log.h.
+gcc $CFLAGS -I "$here/blob_shim" \
+    -I "$board/src" -I "$board/port/qspi" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/blob" \
+    "$here/test_blob_writer.c" "$board/src/blob.c" "$board/src/blob_writer.c" \
+    "$board/src/blob_slots.c" "$HOST_TEST_SVC/blob/blob_map.c" \
+    "$HOST_TEST_SVC/blob/blob_state.c" "$HOST_TEST_SVC/blob/blob_write.c" \
+    "$HOST_TEST_SVC/crc32.c" \
+    $LDFLAGS -o "$out/test_blob_writer_f746"
+"$out/test_blob_writer_f746"
 
 # issue #194 -- tests for cmake/check_blob_staging.py (shared with
 # wio-lite-ai), the post-link gate that reads the slot table and the model

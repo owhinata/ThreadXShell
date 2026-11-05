@@ -42,8 +42,16 @@
  *   BLOB_SVC_READ_MAX      the longest `blob read`
  *   BLOB_SVC_LIST_NOTE     the board's note under `blob list`
  *   BLOB_SVC_HELP          the command's one line in `help`
+ * and one optional property:
+ *   BLOB_SVC_HAS_RX_LEVEL  1 when the console reports its RX ring's high-water
+ *                          (blob_board_rx_level*()): `blob write` then prints
+ *                          it on the drops line.  0 when not defined.
  */
 #include "blob_svc_config.h"
+
+#ifndef BLOB_SVC_HAS_RX_LEVEL
+#define BLOB_SVC_HAS_RX_LEVEL 0
+#endif
 
 #if BLOB_SVC_HAS_STORE && BLOB_SVC_HAS_RECEIVE
 
@@ -549,6 +557,9 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 	 * once one has been CHOSEN, under the reservation; op_announce() says it
 	 * at that moment. */
 	stage = blob_svc_stage(&stage_len);
+#if BLOB_SVC_HAS_RX_LEVEL
+	blob_board_rx_level_clear(sh);   /* this transfer's high-water only */
+#endif
 	drops0 = sh->rx_dropped;
 	res = blob_write_run(&ops, stage, stage_len, argv[1], want, &rep);
 	drops = sh->rx_dropped - drops0;
@@ -580,6 +591,19 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 		          (unsigned long)d->blocks, (unsigned long)d->bad_crc,
 		          (unsigned long)d->bad_seq, (unsigned long)d->short_read,
 		          (unsigned long)d->timeouts);
+#if BLOB_SVC_HAS_RX_LEVEL
+		uint32_t high = 0u, ring = 0u;
+
+		/* The drops and how close the ring came to them, on one line: the
+		 * pass line on hardware is "0 drops and a high-water at or below
+		 * half the ring". */
+		if (blob_board_rx_level(sh, &high, &ring) == 0)
+			cli_print(sh, "rx drops : %lu, ring high-water %lu of %lu B%s"
+			              "\r\n", (unsigned long)drops,
+			          (unsigned long)high, (unsigned long)ring,
+			          drops ? "  <-- NOT CLEAN" : "  (clean)");
+		else
+#endif
 		cli_print(sh, "rx drops : %lu%s\r\n", (unsigned long)drops,
 		          drops ? "  <-- NOT CLEAN" : "  (clean)");
 	}

@@ -63,7 +63,11 @@ struct cli_uart {
 
 	/* RX: producer = USART1 ISR, consumer = shell thread (SPSC, lock-free). */
 	struct cli_uart_ring rx_ring;
-	uint8_t  rx_buf[CLI_UART_RX_BUFFER_SIZE];
+	/** The RX ring's storage, CLI_UART_RX_BUFFER_SIZE bytes.  [!] A pointer
+	 *  to a separate zero-initialised array, not an array member: the context
+	 *  is defined WITH an initializer (.huart), so a member would put the
+	 *  whole 4 KB in .data and its zeros in the flash image (issue #194). */
+	uint8_t *rx_buf;
 	uint8_t  rx_byte;             /**< landing byte for HAL_UART_Receive_IT(1) */
 
 	/* TX: producers = shell thread + _write, consumer = TxComplete ISR (PRIMASK). */
@@ -75,10 +79,23 @@ struct cli_uart {
 	volatile uint8_t enabled;      /**< enable() obtained HAL_OK and RX is armed */
 	uint32_t rx_overrun;           /**< HW overrun (ORE) events; distinct from ring drops */
 	uint32_t rx_rearm_fail;        /**< RX re-arm failures (surfaces silent RX stalls) */
+	/** Deepest the RX ring has been since it was last cleared, in bytes
+	 *  (issue #194).  Written by the RX ISR, cleared by
+	 *  cli_uart_rx_high_clear() before a measured run (`blob write`). */
+	volatile uint32_t rx_high;
 };
 
 /** The UART transport vtable (init/enable/write/read/uninit; update is NULL). */
 extern const struct cli_transport_api cli_uart_api;
+
+/**
+ * The RX ring's high-water mark on @p sh's UART (issue #194): how close a burst
+ * came to the drops sh->rx_dropped counts.  Returns 0 and fills @p high and
+ * @p size (the ring's buffer in bytes; it holds one less), or -1 when @p sh is
+ * not a live UART console.  cli_uart_rx_high_clear() starts a new measurement.
+ */
+int  cli_uart_rx_high(struct cli_instance *sh, uint32_t *high, uint32_t *size);
+void cli_uart_rx_high_clear(struct cli_instance *sh);
 
 /**
  * Statically define a UART transport @p _name over the HAL handle @p _huart_ptr
@@ -86,7 +103,9 @@ extern const struct cli_transport_api cli_uart_api;
  * CLI_INSTANCE_DEFINE(inst, &_name, "prompt> ").
  */
 #define CLI_BACKEND_UART_DEFINE(_name, _huart_ptr)                            \
-	static struct cli_uart      _name##_ctx = { .huart = (_huart_ptr) };  \
+	static uint8_t _name##_rx_buf[CLI_UART_RX_BUFFER_SIZE];                \
+	static struct cli_uart      _name##_ctx = { .huart = (_huart_ptr),    \
+	                                            .rx_buf = _name##_rx_buf };\
 	static struct cli_transport _name = { &cli_uart_api, NULL, &_name##_ctx }
 
 /* Guard config overrides: a ring needs >= 2 bytes (one slot is the full/empty

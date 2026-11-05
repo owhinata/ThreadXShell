@@ -41,6 +41,16 @@ int blob_board_raw_console(struct cli_instance *sh);
  */
 int blob_board_say(struct cli_instance *sh, int rc);
 
+/**
+ * Only on a board whose svc/blob_svc_config.h sets BLOB_SVC_HAS_RX_LEVEL:
+ * start measuring @p sh's RX ring high-water (before a `blob write` erases),
+ * and read it with the ring's size in bytes (0, or -1 when @p sh's console has
+ * no such ring).
+ */
+void blob_board_rx_level_clear(struct cli_instance *sh);
+int  blob_board_rx_level(struct cli_instance *sh, uint32_t *high,
+                         uint32_t *size);
+
 #ifdef __cplusplus
 }
 #endif

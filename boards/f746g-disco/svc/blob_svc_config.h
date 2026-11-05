@@ -13,14 +13,21 @@
 
 /** The store is the QSPI NOR (src/blob.c). */
 #define BLOB_SVC_HAS_STORE    1
-/** [!] Not yet: the VCP has no YMODEM receiver until issue #194 step 4c, so
- *  the shared command compiles and registers nothing. */
-#define BLOB_SVC_HAS_RECEIVE  0
+/** The VCP (USART1) receives YMODEM (cmds/cmd_xfer.c); telnet is refused
+ *  (cmds/cmd_blob_board.c). */
+#define BLOB_SVC_HAS_RECEIVE  1
+/** The VCP's RX ring reports its high-water (backend/cli_backend_uart.c), and
+ *  `blob write` prints it next to the drops (decision D6). */
+#define BLOB_SVC_HAS_RX_LEVEL 1
 
 #define BLOB_SVC_PART         "QSPI"
 #define BLOB_SVC_ADDR_FMT     "0x%06lx"
 #define BLOB_SVC_BASE_HEAD    "base    "    /* as wide as BLOB_SVC_ADDR_FMT */
-/* N25Q128A 64 KB sector erase, typical and maximum (port/qspi/qspi_flash.h). */
+/* N25Q128A 64 KB SECTOR ERASE (0xD8): 0.7 s typical, the figure
+ * port/qspi/qspi_flash.h quotes from the part's data sheet (tSE), and 3 s
+ * maximum, which is also ST's N25Q128A_SECTOR_ERASE_MAX_TIME (3000 ms) in the
+ * Cube BSP's n25q128a.h.  An expectation printed before the wait, nothing
+ * else; the measured figure belongs in the board README (issue #194). */
 #define BLOB_SVC_ERASE_MS_TYP 700u
 #define BLOB_SVC_ERASE_MS_MAX 3000u
 #define BLOB_SVC_CANCEL_UNIT  "64 KB sectors"

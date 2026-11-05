@@ -2,8 +2,9 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Wio Lite AI ThreadX Shell Project
  *
- * Host unit test for fdb_calc_crc32() AS app/blob.c USES IT
- * (owhinata/wio-lite-ai#10 / #9 P2b).
+ * Host unit test for fdb_calc_crc32() AS THE BLOB STORE USES IT
+ * (owhinata/wio-lite-ai#10 / #9 P2b; through crc32_update(), port/nn/crc32_fdb.c,
+ * since issue #193).
  *
  * The blob region stamps every stored asset with a CRC-32 computed from the YMODEM
  * stream as it arrives, chunk by chunk, and `blob verify` re-reads the flash and
@@ -25,8 +26,9 @@
  * host with no way to tell whether the CRC, the transfer or the flash was at fault.
  * Case D pins the trap so nobody re-adds the wrapper.
  *
- * This is also the ONLY part of the blob work that can be verified without the
- * board, which is why it exists at all.  Vectors cross-checked against zlib.crc32.
+ * The rest of the blob work is verified without the board elsewhere since issue
+ * #193 (shell/test/test_blob_*.c, test/test_blob_slots.c); this pins the CRC
+ * underneath it.  Vectors cross-checked against zlib.crc32.
  */
 #include <assert.h>
 #include <stddef.h>
@@ -90,7 +92,8 @@ static void test_chain_all_splits(void)
 /* ---- C: chaining over a blob-sized stream in YMODEM-sized blocks ---------- */
 
 /* The real shape: ~189 KB delivered as 1024-byte blocks with a short final one,
- * accumulated exactly the way blob_sink_write() does, versus one call over the
+ * accumulated the way the `blob write` coordinator does (svc/blob/blob_write.c,
+ * one call per arriving piece), versus one call over the
  * whole buffer. */
 #define STREAM_LEN   193456u          /* 188 x 1024 + 944: a short final block */
 #define BLOCK_LEN    1024u
@@ -137,7 +140,8 @@ static void test_chain_stream(void)
 
 /* Documents the double-inversion trap by asserting that the "standard" idiom is
  * wrong HERE.  If this ever starts matching, fdb_calc_crc32() has changed its own
- * inversion and app/blob.c's comment (and this test) have to be revisited. */
+ * inversion and port/nn/crc32_fdb.c's comment (and this test) have to be
+ * revisited. */
 static void test_no_double_inversion(void)
 {
 	uint32_t wrapped = ~fdb_calc_crc32(0xFFFFFFFFu, "123456789", 9u);

@@ -31,8 +31,9 @@ CFLAGS="$HOST_TEST_CFLAGS"
 LDFLAGS="$HOST_TEST_LDFLAGS"
 fdb="$HOST_TEST_REPO/lib/flashdb"   # third-party FlashDB (its CRC-32 is used by src/blob.c)
 
-# issue #10 (#9 P2b) -- the CRC-32 the blob region stamps assets with.  app/blob.c
-# does not implement one: it reuses FlashDB's fdb_calc_crc32(), which is already in
+# issue #10 (#9 P2b) -- the CRC-32 the blob region stamps assets with.  The store
+# does not implement one: it reuses FlashDB's fdb_calc_crc32() (through
+# crc32_update(), port/nn/crc32_fdb.c, since issue #193), which is already in
 # the build and already accumulating.  Two properties it relies on are invisible in
 # that function's signature -- that starting from 0 gives standard CRC-32/ISO-HDLC
 # (so the board and the PC agree) and that feeding the result back in continues the
@@ -45,6 +46,21 @@ gcc $CFLAGS -Wno-unused-parameter \
     "$here/test_crc32.c" "$fdb/src/fdb_utils.c" \
     $LDFLAGS -o "$out/test_crc32"
 "$out/test_crc32"
+
+# issue #193 -- this board's asset slot table (src/blob_slots.c), pinned entry by
+# entry and checked against the interval src/blob.h compiles into the firmware,
+# and the header format this board wrote until #193: a finished or interrupted
+# old one-page header must decode as INVALID at every new slot base, refused at
+# the magic page (three of the new bases are where old headers sit on a board
+# updated in place).  The rules and the codec themselves are svc/blob/ and
+# tested in shell/test/test_blob_map.c and test_blob_state.c.  The binary is
+# named for the board: the scratch directory is shared with the other boards'.
+gcc $CFLAGS \
+    -I "$board/src" -I "$board/port/nor" -I "$svc" -I "$svc/blob" \
+    "$here/test_blob_slots.c" "$board/src/blob_slots.c" \
+    "$svc/blob/blob_map.c" "$svc/blob/blob_state.c" "$svc/crc32.c" \
+    $LDFLAGS -o "$out/test_blob_slots_wio"
+"$out/test_blob_slots_wio"
 
 # issue #130 step 6c (#122 P8) -- how a decode's answer is counted in `nn stream
 # stats`: in svc/ since issue #163 (svc/nn/nn_decode_count.c, one copy with

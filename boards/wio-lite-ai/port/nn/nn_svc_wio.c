@@ -471,9 +471,9 @@ static int nn_life_check_spec(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
 
-	if (j->spec->slot >= BLOB_SLOT_COUNT) {
+	if (j->spec->slot >= blob_map_count()) {
 		nn_detail_set("slot must be 0 .. %u (see `blob list`)",
-		              (unsigned)BLOB_SLOT_COUNT - 1u);
+		              blob_map_count() - 1u);
 		return NN_SVC_ERR_ARG;
 	}
 	return NN_SVC_OK;
@@ -581,7 +581,7 @@ static int nn_life_prepare(struct nn_core_model_job *j)
 		return NN_SVC_ERR_BUSY;
 	}
 	nn_life_blob = 1u;
-	if (blob_stat(spec->slot, &w->info) != BLOB_OK) {
+	if (blob_stat(spec->slot, &w->info, NULL) != BLOB_OK) {
 		nn_detail_set("cannot read slot %lu's header (see `nor info`)",
 		              (unsigned long)spec->slot);
 		nn_life_blob_give();

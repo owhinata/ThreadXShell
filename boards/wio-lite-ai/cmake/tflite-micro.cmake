@@ -280,8 +280,8 @@ target_compile_definitions(tflm
 # Our own knobs, consumed by svc/nn/tflm/ and port/nn/tflm/nn_tflm_bufs.c.  Each size
 # is ONE definition that svc/nn/tflm/nn_tflm_mem.h requires (no fallback there).
 # NN_TFLM_MODEL_KB is the one staging buffer (issue #191: 2 x 512 KB before, the
-# same bytes): it swallows a whole blob payload (BLOB_PAYLOAD_MAX, src/blob.h), so
-# no blob is ever refused for its size.
+# same bytes): it swallows a whole payload of the largest blob slot (1 MB slots,
+# src/blob_slots.c since issue #193), so no blob is ever refused for its size.
 target_compile_definitions(tflm PRIVATE
     NN_TFLM_ARENA_KB=${NN_TFLM_ARENA_KB}
     NN_TFLM_MODEL_KB=1024

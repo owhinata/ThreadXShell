@@ -22,13 +22,14 @@
  * Partition layout of the 16 MB device.  Only the first megabyte is claimed:
  *
  *   0x000000  kv        1 MB   FlashDB KVDB, 4 KB sectors x 256
- *   0x100000  blob      3 MB   the read-only asset region (owhinata/wio-lite-ai#10,
- * widened by owhinata/wio-lite-ai#55): 6 slots of 512 KB, owned by app/blob.c.
+ *   0x100000  blob      7 MB   the read-only asset region (owhinata/wio-lite-ai#10,
+ * widened by owhinata/wio-lite-ai#55 and re-carved by issue #193): 13 slots of
+ * 1 MB / 512 KB / 256 KB (src/blob_slots.c), owned by src/blob.c.
  *                              It STILL has no partition entry, which is the point
  *                              -- blob.c addresses the device directly, so FAL (and
  *                              through it FlashDB) has no route out of the first
  *                              megabyte no matter what it is asked for.
- *   0x400000  (unused) 12 MB   unallocated, and likewise unreachable from here.
+ *   0x800000  (unused)  8 MB   unallocated, and likewise unreachable from here.
  *
  * The store sits at offset 0 so the asset region could grow upward without moving
  * -- and therefore without reformatting -- the configuration.

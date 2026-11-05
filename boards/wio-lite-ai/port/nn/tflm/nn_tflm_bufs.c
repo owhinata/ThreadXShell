@@ -38,11 +38,11 @@
  * The linker script ASSERTs the total fits (_psram_ai_end <= 0x90800000);
  * cmake/check_psram_ai_residency.py checks that these are the objects in there.
  *
- * The buffer swallows a WHOLE blob payload (BLOB_PAYLOAD_MAX = 520,192 B, src/blob.h)
- * with room to spare: any blob that fits a slot on the NOR fits here, and
- * `nn model load` is never refused for a reason `blob list` cannot show.  Until the
- * blob store's slots grow (issue #193) a model is still bounded by the slot, not by
- * this buffer.
+ * The buffer swallows a WHOLE blob payload of the largest slot class (1 MB, so
+ * 1,044,480 B of payload; src/blob_slots.c since issue #193) with 4 KB to spare: any
+ * blob that fits a slot on the NOR fits here, and `nn model load` is never refused
+ * for a reason `blob list` cannot show.  A model is bounded by its slot, not by this
+ * buffer.
  */
 #include "nn_tflm_mem.h"
 

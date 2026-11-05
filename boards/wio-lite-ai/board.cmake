@@ -764,6 +764,18 @@ if(BSP_ENABLE_KV)
         "${BOARD_DIR}/src/kv.c"
         "${BOARD_DIR}/src/kv_boot.c"
         "${BOARD_DIR}/src/blob.c"
+        "${BOARD_DIR}/src/blob_slots.c"
+        # The asset store's shared parts (issue #193): the header format and a
+        # transfer's decisions, the slot table's rules and lookups, and the
+        # `blob write` coordinator.  This board provides the table, the
+        # interval, the reads and the write's operations.
+        "${CMAKE_SOURCE_DIR}/svc/blob/blob_state.c"
+        "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+        "${CMAKE_SOURCE_DIR}/svc/blob/blob_write.c"
+        # svc/crc32.h's crc32_update(), served by FlashDB's CRC-32 (the store
+        # stamps every asset with it, and the plugin loader checks a container's
+        # digest with it); here with FlashDB because that is what it calls.
+        "${BOARD_DIR}/port/nn/crc32_fdb.c"
         "${BOARD_DIR}/cmds/cmd_nor.c"
         "${BOARD_DIR}/cmds/cmd_kv.c"
         "${BOARD_DIR}/cmds/cmd_blob.c"
@@ -1417,9 +1429,10 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # into a caller-owned buffer, so a ceiling small enough to fire.
     set(WIO_PLUGIN_SBUF_WRITE_MAX 64)
 
-    # The device's validator -- the same file verify_container runs on the host
-    # -- and the CRC-32 it checks the plugin digest with, which on this board is
-    # the one FlashDB already provides (port/nn/crc32_fdb.c says why).
+    # The device's validator -- the same file verify_container runs on the host.
+    # The CRC-32 it checks the plugin digest with is the one FlashDB already
+    # provides (port/nn/crc32_fdb.c says why), compiled with the blob store in
+    # the BSP_ENABLE_KV block above since issue #193.
     target_sources(shell PRIVATE
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
         # Its firmware entry: the board's policy by name (issue #165).
@@ -1427,8 +1440,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         # `nn info`'s plugin stack lines, shared with Grove (issue #111).
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"
         # ...and the open model's claims around them, shared with f746 (#159).
-        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c"
-        "${BOARD_DIR}/port/nn/crc32_fdb.c")
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c")
 
     target_compile_definitions(shell PRIVATE
         WIO_PLUGIN_BASE=${WIO_PLUGIN_BASE}u
@@ -1461,7 +1473,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         HAL_FLASHEx_OBProgram
         nor_write
         nor_erase
-        blob_erase
+        blob_erase_header
+        blob_erase_span
         HAL_RCC_OscConfig
         HAL_RCC_ClockConfig
         HAL_RCCEx_PeriphCLKConfig
@@ -1605,7 +1618,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # The same three Grove builds, the same way (explicit host-compiler commands,
     # because every CMake target in this project cross-compiles):
     #   abi_layout        svc/plugin/plugin_abi.h's layout as JSON, for the packer
-    #   slot_table        THIS board's slot capacities, from src/blob.h
+    #   slot_table        THIS board's slot capacities, from src/blob_slots.c
     #   verify_container  svc/plugin/plugin_load.c -- the device's validator -- on the
     #                     host, so a container cannot pass here and fail there
     set(WIO_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
@@ -1628,11 +1641,17 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
             COMMENT "host cc -> abi_layout.json (the packer's view of the ABI)"
             VERBATIM)
 
-        # [!] THE TABLE COMES FROM THE HEADER THE FIRMWARE COMPILES AGAINST, AND
-        # ITS WHOLE CLOSURE IS TRACKED.  BLOB_PAYLOAD_MAX reaches NOR_SECTOR_SIZE
-        # through nor_flash.h, so depending on blob.h alone would let a stale table
-        # survive a change the firmware itself recompiles for.  The compiler's own
-        # depfile lists every header it opened.
+        # [!] THE TABLE IS THE ONE THE FIRMWARE LINKS, RUN THROUGH THE SAME
+        # LOOKUPS (issue #193): the tool compiles this board's src/blob_slots.c
+        # with svc/blob/blob_map.c, as grove-vision-ai-v2's does, and takes the
+        # interval and the erase unit from src/blob.h -- whose closure reaches
+        # nor_flash.h -- so the compiler's own depfile lists every header it
+        # opened and a stale table cannot survive a change the firmware itself
+        # recompiles for.  [!] slot_table.c is the LAST source on the line:
+        # with several inputs gcc writes the depfile of the last one only, and
+        # that is the one whose closure has the interval in it (the other two
+        # are DEPENDS, and their one header is in that closure).  It refuses
+        # (and the build stops) on a table the store would refuse at run time.
         add_custom_command(
             OUTPUT "${WIO_SLOT_TABLE_JSON}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
@@ -1641,12 +1660,16 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
                     -MT "${WIO_SLOT_TABLE_JSON}"
                     -I "${BOARD_DIR}/src" -I "${BOARD_DIR}/port/nor"
                     -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
+                    "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+                    "${BOARD_DIR}/src/blob_slots.c"
                     "${BOARD_DIR}/scripts/slot_table.c"
                     -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
             COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table"
                     > "${WIO_SLOT_TABLE_JSON}"
             DEPFILE "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
             DEPENDS "${BOARD_DIR}/scripts/slot_table.c"
+                    "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+                    "${BOARD_DIR}/src/blob_slots.c"
             COMMENT "host cc -> slot_table.json (payload capacity per blob slot)"
             VERBATIM)
 
@@ -1737,8 +1760,11 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         # No ingest: float32 I/O as the zoo ships it, no strip, no vela.
         asset_model_source(${_name}
             OVERRIDE_VAR WIO_ASSET_${_name}_FILE OUT_VAR _src ${_pin})
-        # The receipt's commands are THIS board's: `blob write` takes a slot
-        # and no name, and erases that slot itself before it receives.
+        # The receipt's commands are THIS board's: since issue #193 `blob
+        # write` takes the name and the slot, refuses a slot that holds a blob
+        # under another name (hence the erase first), and erases the slot
+        # itself before it receives.  The load still names the slot until
+        # `nn model load --name` (the next step of #193).
         add_asset(${_name}
             # No ingest, so the packer is the pin's first consumer and
             # re-checks it on the bytes it packs (issue #132).
@@ -1752,7 +1778,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
             TARGET_ID "${WIO_PLUGIN_TARGET_ID}"
             LINK_ADDR "${WIO_PLUGIN_BASE}"
             CAPACITY "${WIO_PLUGIN_MAX}"
-            RECEIPT_STEPS "blob write {slot}   (erases the slot, then waits for the file)"
+            RECEIPT_STEPS "blob erase {slot}   (the slot must be empty first)"
+                          "blob write {name} {slot}   (erases the slot, then waits for the file)"
             RECEIPT_THEN  "nn model load --slot {slot}"
             # How the file gets there and how the stored bytes are compared
             # with the receipt's CRC -- this board's, since issue #159.
@@ -1772,10 +1799,12 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # tree only, never committed.
     #
     # [!] THE SLOT IS A DECLARATION THE BOARD CANNOT CHECK.  The build refuses a
-    # container too large for it; nothing refuses the WRONG slot, and `blob
-    # write` erases the whole slot before the transfer.  Read `blob list` first.
+    # container too large for it; nothing refuses the WRONG slot -- the
+    # receipt's `blob erase` retires whatever is there, and `blob write` erases
+    # the whole slot before the transfer.  Read `blob list` first.  Slot 12 is
+    # the last 256 KB slot (src/blob_slots.c; 258,048 B of payload).
     wio_add_asset(blazeface
-        PLUGIN  blazeface  SLOT 5
+        PLUGIN  blazeface  SLOT 12
         URL     "https://github.com/STMicroelectronics/stm32ai-modelzoo.git"
         COMMIT  "1423c78953a830903485135febe1dd98ff31aed8"
         PATH_IN "face_detection/facedetect_front/Public_pretrainedmodel_public_dataset/widerface/blazeface_front_128/blazeface_front_128_int8.tflite"

@@ -28,9 +28,10 @@
  *
  * EVERY SUBCOMMAND HERE REACHES THE BARE DEVICE, past both of its tenants.  Two
  * ranges hold live data and nothing in this file will stop you from erasing them:
- * [0, 1 MB) is the `kv` configuration partition (app/kv.c) and [1 MB, 4 MB) is the
- * blob region's six asset slots (app/blob.c).  Use `kv` and `blob` for those; this
- * is the tool for looking at the device itself, and it is deliberately unguarded.
+ * [0, 1 MB) is the `kv` configuration partition (app/kv.c) and [1 MB, 8 MB) is the
+ * blob region's asset slots (src/blob.c, src/blob_slots.c).  Use `kv` and `blob` for
+ * those; this is the tool for looking at the device itself, and it is deliberately
+ * unguarded.
  *
  * Clean-room design; no third-party code reused.
  */
@@ -56,18 +57,19 @@
 #define NOR_WRITE_MAX     NOR_PAGE_SIZE
 
 /*
- * Default scratch sector for `nor test`.  At 4 MB -- the first sector ABOVE the
+ * Default scratch sector for `nor test`.  At 8 MB -- the first sector ABOVE the
  * blob region (owhinata/wio-lite-ai#10 put asset slots at 1 MB .. 3 MB;
- * owhinata/wio-lite-ai#55 widened them to six 512 KB slots ending at 4 MB), in the 12 MB
- * that is still unallocated -- so running the acceptance test destroys neither a live
- * configuration nor a stored model.
+ * owhinata/wio-lite-ai#55 widened them to six 512 KB slots ending at 4 MB; issue
+ * #193 re-carved them into thirteen slots of three sizes ending at 8 MB), in the
+ * 8 MB that is still unallocated -- so running the acceptance test destroys
+ * neither a live configuration nor a stored model.
  *
  * [!] THIS ADDRESS IS TIED TO THE BLOB REGION'S END, so it moves whenever the region
- * does.  It was 0x00300000 until owhinata/wio-lite-ai#55, which is exactly where the region
- * now ends -- had it stayed, a bare `nor test` would have programmed the header sector
- * of the new slot 4.  (Boards that ran `nor test` under the old default still have
- * that residue there: it decodes as `invalid` rather than as a blob, and one
- * `blob erase 4` clears it.)
+ * does.  It was 0x00300000 until owhinata/wio-lite-ai#55 and 0x00400000 until issue
+ * #193 -- each time exactly where the next region put a slot header (0x400000 is
+ * now the first 512 KB slot's).  Boards that ran `nor test` under an old default
+ * may still have that residue there: it decodes as `invalid` rather than as a
+ * blob, and one `blob erase <slot>` clears it.
  *
  * It used to be 0x00100000, chosen when everything past the KV partition was spare;
  * the blob region moved in on top of it, which would have made a bare `nor test`
@@ -77,7 +79,7 @@
  * `nor write` would be) -- it is the argument-less form, the one that gets typed
  * without thinking, that has to land somewhere harmless.
  */
-#define NOR_TEST_DEFAULT_HEX   0x400000
+#define NOR_TEST_DEFAULT_HEX   0x800000
 #define NOR_TEST_DEFAULT_ADDR  ((uint32_t)NOR_TEST_DEFAULT_HEX)
 
 /*
@@ -94,7 +96,7 @@
 
 _Static_assert(NOR_TEST_DEFAULT_ADDR >= BLOB_REGION_END,
                "the `nor test` default must stay above the blob region -- "
-               "owhinata/wio-lite-ai#55 "
+               "owhinata/wio-lite-ai#55 and issue #193 "
                "moved the region's end and this address has to follow it");
 
 static const char *nor_strerror(int rc)

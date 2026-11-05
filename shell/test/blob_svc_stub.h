@@ -22,6 +22,11 @@ struct blob_stub {
 	uint32_t length[STUB_SLOTS], crc[STUB_SLOTS];
 	/* answers */
 	int stat_rc, read_rc, verify_rc, reserve_rc, erase_hdr_rc;
+	/* the write's question under the reservation (blob_svc_stat_reserved()):
+	 * answers stat_reserved_rc for every slot from stat_reserved_from on */
+	int      stat_reserved_rc;
+	unsigned stat_reserved_from;
+	uint32_t stage_len;      /* blob_svc_stage()'s length when non-zero */
 	int ready;               /* blob_svc_ready() */
 	int raw_refuse;          /* blob_board_raw_console() refuses */
 	int say_rc;              /* blob_board_say() speaks for this rc, or 0 */

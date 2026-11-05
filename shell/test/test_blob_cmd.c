@@ -12,6 +12,8 @@
  *    magic-failed wording (#194 step 1's leftovers);
  *  - that a write refused before a slot was chosen says no slot number in the
  *    log, and one that chose a slot says it;
+ *  - that a header which could not be read while choosing names its slot and
+ *    the store's answer, and that no other early refusal gains a reason;
  *  - that 2-digit slots keep every label's colon in one column;
  *  - that `blob erase` erases only under the reservation and gives it back;
  *  - and, in the NOSTORE / NORECV shapes, that nothing is registered at all.
@@ -287,6 +289,52 @@ static void t_write(void)
 	       has("blob: the last header page did not take -- slot 5 may read "
 	           "valid, invalid or\r\n      incomplete; `blob list` says "
 	           "which (the payload was read back and matched)\r\n"));
+
+	/* [!] A HEADER THAT COULD NOT BE READ WHILE CHOOSING (#194): the write
+	 * ends refused before any slot is chosen.  Slot 4 fails, after 0..3 were
+	 * read, so the number printed is the one that failed and not slot 0.
+	 * Two answers: one only the shared sentence has, one the board speaks
+	 * for. */
+	reset();
+	blob_stub.stat_reserved_rc = BLOB_ERR_IO;
+	blob_stub.stat_reserved_from = 4u;
+	run("blob write model 5\r");
+	expect("an unreadable header names its slot and the store's answer",
+	       has("blob: refused -- the header of slot 4 could not be read; "
+	           "nothing was erased\r\n"
+	           "blob: TESTNOR read/program/erase failed\r\n"));
+	expect("... with no generic counters line",
+	       !has("declared") && !has("ymodem   :"));
+	expect("... its log line has the slot, the answer and no slot chosen",
+	       logged("blob: write 'model': refused, slot 4's header could not "
+	              "be read (store answered -2), no slot chosen"));
+	expect("... nothing erased, reserved and given back once",
+	       blob_stub.erase_spans == 0u && blob_stub.reserves == 1u &&
+	       blob_stub.unreserves == 1u);
+
+	reset();
+	blob_stub.stat_reserved_rc = BLOB_ERR_STATE;
+	blob_stub.stat_reserved_from = 0u;
+	blob_stub.say_rc = BLOB_ERR_STATE;
+	run("blob write model 5\r");
+	expect("a driver-down answer on slot 0 is the board's sentence",
+	       has("blob: refused -- the header of slot 0 could not be read; "
+	           "nothing was erased\r\n"
+	           "blob: the board's own sentence for -3\r\n") &&
+	       !has("TESTNOR device down") &&
+	       logged("slot 0's header could not be read (store answered -3)") &&
+	       blob_stub.unreserves == 1u);
+
+	/* Any other refusal before the choice keeps the line it had: a staging
+	 * buffer the coordinator refuses says no slot and no reason. */
+	reset();
+	blob_stub.stage_len = 1u;
+	run("blob write model 5\r");
+	expect("another refusal before the choice prints what it did",
+	       has("blob: refused (0 B erased, 0 B received of 0 declared, 0 tx)"
+	           "\r\n") && !has("header of slot") &&
+	       logged("blob: write 'model': refused, no slot chosen") &&
+	       !logged("could not be read") && blob_stub.reserves == 0u);
 
 	reset();
 	blob_stub.raw_refuse = 1;

@@ -365,6 +365,14 @@ struct wr_ctx {
 	struct cli_instance *sh;
 	int console_bg;      /**< the claim was refused because we are a bg job */
 	int reserve_rc;      /**< why the reservation was refused (BUSY / FAULT) */
+	/* The one slot whose header could not be read under the reservation, and
+	 * what the store answered.  Set only when that question failed: the
+	 * coordinator leaves at the first failure and calls it BLOB_WRITE_REFUSED
+	 * before any slot is chosen, so without this the operator learns neither
+	 * which slot nor why (#194). */
+	int      stat_failed;
+	unsigned stat_slot;
+	int      stat_rc;
 };
 
 /* Before each erase unit.  The console has not been handed to the protocol
@@ -506,8 +514,15 @@ static unsigned op_slot_count(void *ctx)
  * choice it takes from these headers still true when the erase runs. */
 static int op_stat(void *ctx, unsigned slot, struct blob_info *info)
 {
-	(void)ctx;
-	return blob_svc_stat_reserved(slot, info) == BLOB_OK ? 0 : -1;
+	struct wr_ctx *c = (struct wr_ctx *)ctx;
+	int rc = blob_svc_stat_reserved(slot, info);
+
+	if (rc == BLOB_OK)
+		return 0;
+	c->stat_failed = 1;
+	c->stat_slot = slot;
+	c->stat_rc = rc;
+	return -1;
 }
 
 static int op_geometry(void *ctx, unsigned slot, uint32_t *base,
@@ -528,7 +543,7 @@ static int op_geometry(void *ctx, unsigned slot, uint32_t *base,
  */
 static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 {
-	struct wr_ctx ctx = { sh, 0, BLOB_OK };
+	struct wr_ctx ctx = { sh, 0, BLOB_OK, 0, 0u, BLOB_OK };
 	const struct blob_write_ops ops = {
 		&ctx, op_reserve, op_unreserve, op_erase, op_program,
 		op_console_ready, op_claim_console, op_release_console,
@@ -583,6 +598,11 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 		          blob_write_result_name(res), (unsigned long)rep.erased,
 		          (unsigned long)rep.received,
 		          (unsigned long)rep.transactions, (unsigned long)drops);
+	else if (res == BLOB_WRITE_REFUSED && ctx.stat_failed)
+		log_write(LOG_LEVEL_ERR, "blob", "write '%s': %s, slot %u's header "
+		          "could not be read (store answered %d), no slot chosen",
+		          argv[1], blob_write_result_name(res), ctx.stat_slot,
+		          ctx.stat_rc);
 	else
 		log_write(LOG_LEVEL_ERR, "blob", "write '%s': %s, no slot chosen",
 		          argv[1], blob_write_result_name(res));
@@ -640,6 +660,18 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 		 * instruction -- a faulted port.  What the store answered. */
 		return blob_complain(sh, ctx.reserve_rc != BLOB_OK ? ctx.reserve_rc
 		                                                   : BLOB_ERR_BUSY);
+	case BLOB_WRITE_REFUSED:
+		/* The choice reads every slot's header under the reservation, and
+		 * one that could not be read ends the write before anything is
+		 * erased.  Which slot, and the store's answer in the board's words.
+		 * Any other refusal before the choice keeps the generic line. */
+		if (!rep.slot_chosen && ctx.stat_failed) {
+			cli_error(sh, "blob: refused -- the header of slot %u could not "
+			              "be read; nothing was erased\r\n", ctx.stat_slot);
+			(void)blob_complain(sh, ctx.stat_rc);
+			return 1;
+		}
+		break;
 	case BLOB_WRITE_NO_CONSOLE:
 		if (ctx.console_bg) {
 			cli_error(sh, "blob: cannot run in the background -- drop "

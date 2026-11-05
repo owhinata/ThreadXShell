@@ -218,12 +218,17 @@ int blob_svc_read_back(uint32_t addr, void *buf, uint32_t len)
 
 int blob_svc_stat_reserved(unsigned slot, struct blob_info *out)
 {
+	if (blob_stub.stat_reserved_rc != BLOB_OK &&
+	    slot >= blob_stub.stat_reserved_from) {
+		blob_stub.store_calls++;
+		return blob_stub.stat_reserved_rc;
+	}
 	return blob_stat(slot, out, NULL);
 }
 
 uint8_t *blob_svc_stage(uint32_t *len)
 {
-	*len = sizeof stage;
+	*len = blob_stub.stage_len != 0u ? blob_stub.stage_len : sizeof stage;
 	return stage;
 }
 

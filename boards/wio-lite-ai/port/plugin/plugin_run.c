@@ -30,8 +30,9 @@
  *
  * [!] svc/nn/nn.h IS DELIBERATELY NOT INCLUDED.  It was, for
  * nn_model_load_region(), and asking that question inside the loader is the bug
- * svc/plugin/plugin_run_core.h describes: the backend is double-slotted and the
- * answer changes under the very operation this runs after.
+ * svc/plugin/plugin_run_core.h describes: the answer depends on what is open, and
+ * changes under the very operation this runs after (two slots then; one buffer
+ * that is refused while a model is open since issue #191).
  */
 #define LOG_TAG "plugin"
 #include "log.h"

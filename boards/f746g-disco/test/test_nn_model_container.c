@@ -30,13 +30,18 @@
  *     (nn_container_crc() over the bytes it returned, as cmds/cmd_nn_board.c
  *     does) is what `nn info` prints beside the claims, and both equal an
  *     independent bitwise CRC-32/ISO-HDLC of the file;
- *   - a container built for another target, a truncated one and one whose
- *     plugin section was damaged are refused before the backend is touched,
- *     each with its own reason, and leave the previous model and its claims;
+ *   - [!] ONE STAGING BUFFER (issue #191): the backend hands its buffer out only
+ *     with no model open (the stub refuses otherwise, as nn_tflm.cc does), and
+ *     the file is read only after the shared order took the open model and its
+ *     plugin down -- so a container built for another target, a truncated one
+ *     and one whose plugin section was damaged, each refused with its own
+ *     reason before the backend is touched, now end with NO model and no
+ *     claims (EMPTY), and so does a container the backend refuses;
  *   - a damaged container magic is not a container: it falls through as a bare
- *     model and the backend decides (here: refuses);
- *   - a bare load and an unload clear the claims; a refused reload that
- *     restored the previous model keeps the previous claims.
+ *     model and the backend decides (here: refuses, EMPTY);
+ *   - a lease that cannot be had still refuses before anything changes: the
+ *     model, its plugin and its claims stay;
+ *   - a bare load and an unload clear the claims.
  */
 #include <assert.h>
 #include <stdalign.h>
@@ -136,7 +141,8 @@ int plugin_run_active(void)
 static alignas(16) uint8_t slot[SLOT_CAP];
 
 static struct {
-	int adopted, has, reloads, refuse_next;
+	int adopted, has, reloads, refuse_next, releases;
+	int region_refused;   /* load_region() asked with a model open */
 	const void *data;
 	uint32_t len;
 	struct nn_tensor in;
@@ -159,8 +165,14 @@ static struct nn_tensor *st_tensor(void *impl, int idx)
 }
 static uint32_t st_acts(void *impl) { (void)impl; return stub.has ? 1234u : 0u; }
 static int st_run(void *impl) { (void)impl; return 0; }
+/* The tflm backend's one buffer (issue #191): refused while a model is open,
+ * nothing written. */
 static int st_region(void **buf, uint32_t *cap)
 {
+	if (stub.has) {
+		stub.region_refused++;
+		return NN_MODEL_ERR_SLOT;
+	}
 	*buf = slot;
 	*cap = SLOT_CAP;
 	return 0;
@@ -188,6 +200,7 @@ static int st_reload(const void *data, uint32_t len, const char *name,
 }
 static int st_release(void)
 {
+	stub.releases++;
 	stub.has = 0;
 	return 0;
 }
@@ -332,6 +345,9 @@ static int st_read(void *ctx, const char *path, void *buf, uint32_t cap,
 {
 	(void)ctx; (void)path;
 	assert(buf == slot && cap == SLOT_CAP && file_len <= cap);
+	/* [!] Read only once the open model and its plugin are down (issue
+	 * #191), under the lease. */
+	assert(!stub.has && !pl_active && lease_held_now);
 	memcpy(buf, file, file_len);
 	*len = file_len;
 	reader_said_container = nn_container_crc(buf, *len, &reader_crc);
@@ -418,51 +434,60 @@ int main(void)
 	assert(strstr(out, "  image : 256 B file / 320 B mem") != NULL);
 	assert(strstr(out, "link 0x20048000") != NULL);
 
-	/* Refusals before the backend: their own reasons; the previous model and
-	 * its claims stay. */
+	/* [!] Refusals before the backend, each with its own reason (issue #191):
+	 * the file is read over the open model's buffer, so the model, its plugin
+	 * and its claims are already down -- EMPTY, and the release runs again. */
 	rl = (uint32_t)stub.reloads;
 	build_container(0x1201u);   /* wio's word */
 	load("/wio.nnc");
-	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
+	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_EMPTY);
 	assert(strcmp(res.detail, "/wio.nnc is a container this firmware "
 	                          "refuses: built for another target") == 0);
 	assert(reader_said_container && reader_crc == crc_ref(file, TOTAL));
+	assert(!stub.has && !pl_active);
+	assert(strstr(info_extra(), "plugin  : (none) -- reservation") != NULL);
 
 	build_container(F746_PLUGIN_TARGET_ID);
 	file_len = TOTAL - 32u;     /* truncated on the card */
 	load("/short.nnc");
-	assert(res.status == NN_SVC_ERR_ARG);
+	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_EMPTY);
 	assert(strstr(res.detail, "size disagrees with payload") != NULL);
 
 	build_container(F746_PLUGIN_TARGET_ID);
 	file[PL_OFF + MAN_SZ + 10u] ^= 0xFFu;   /* a damaged plugin byte */
 	load("/bad.nnc");
-	assert(res.status == NN_SVC_ERR_ARG);
+	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_EMPTY);
 	assert(strstr(res.detail, "digest mismatch") != NULL);
 	assert((uint32_t)stub.reloads == rl);
-	info_extra();
-	assert(strstr(out, "  from  : /fixture.nnc,") != NULL);
+	assert(strstr(info_extra(), "plugin  : (none) -- reservation") != NULL);
 
 	/* A damaged magic is not a container: a bare model, which the backend
-	 * then refuses -- the previous model and its claims stay. */
+	 * then refuses -- over an open model, EMPTY, and the claims go. */
+	build_container(F746_PLUGIN_TARGET_ID);
+	load("/fixture.nnc");
+	assert(res.status == NN_SVC_OK && stub.has && pl_active);
+	rl = (uint32_t)stub.releases;
 	build_container(F746_PLUGIN_TARGET_ID);
 	file[0] ^= 0xFFu;
 	stub.refuse_next = 1;
 	load("/magic.nnc");
 	assert(!reader_said_container);
-	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
+	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_EMPTY);
 	assert(stub.data == slot + MODEL_OFF);
-	info_extra();
-	assert(strstr(out, "  from  : /fixture.nnc,") != NULL);
+	/* the take-down's release, then the EMPTY ending's */
+	assert((uint32_t)stub.releases == rl + 2u && !stub.has);
+	assert(strstr(info_extra(), "plugin  : (none) -- reservation") != NULL);
 
-	/* A container the backend refuses (it restores the previous one, which is
-	 * this same fixture's model): the previous claims stay. */
+	/* A container the backend refuses, over an open model: EMPTY, no claims. */
+	build_container(F746_PLUGIN_TARGET_ID);
+	load("/fixture.nnc");
+	assert(res.status == NN_SVC_OK && stub.has);
 	build_container(F746_PLUGIN_TARGET_ID);
 	stub.refuse_next = 1;
 	load("/again.nnc");
-	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
-	info_extra();
-	assert(strstr(out, "  from  : /fixture.nnc,") != NULL);
+	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_EMPTY);
+	assert(!stub.has && !pl_active);
+	assert(strstr(info_extra(), "plugin  : (none) -- reservation") != NULL);
 
 	/* [!] The loader refuses the plugin: the model IS open (no rollback), the
 	 * load says it did not give what was asked, and `nn info` says the plugin
@@ -487,7 +512,7 @@ int main(void)
 	lease_free = 1;
 	assert(res.status == NN_SVC_ERR_BUSY);
 	assert(strstr(res.detail, "busy") != NULL);
-	assert((uint32_t)stub.reloads == rl && pl_active);
+	assert((uint32_t)stub.reloads == rl && pl_active && stub.has);
 	info_extra();
 	assert(strstr(out, "  from  : /fixture.nnc,") != NULL);
 
@@ -509,6 +534,8 @@ int main(void)
 	assert(!pl_active);
 	assert(strstr(info_extra(), "plugin  : (none) -- reservation") != NULL);
 	assert(lease_takes == lease_gives && !lease_held_now);
+	/* [!] The buffer was never asked for with a model open. */
+	assert(stub.region_refused == 0);
 
 	printf("test_nn_model_container: OK\n");
 	return 0;

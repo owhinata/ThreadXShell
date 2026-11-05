@@ -185,8 +185,9 @@ target_compile_definitions(tflm
 # This board's facts for the shared backend (svc/nn/tflm/, issue #161), each ONE
 # definition there is no fallback for:
 #   NN_TFLM_ARENA_KB / NN_TFLM_MODEL_KB   the arena (512 KB; BlazeFace plans ~470 KB)
-#       and one SD staging slot (512 KB) -- svc/nn/tflm/nn_tflm_mem.h.  1.5 MB of the
-#       2 MB bank3; the linker ASSERT enforces the fit.
+#       and the one SD staging buffer (1 MB, issue #191) --
+#       svc/nn/tflm/nn_tflm_mem.h.  1.5 MB of the 2 MB bank3; the linker ASSERT
+#       enforces the fit.
 #   NN_TFLM_VERIFY=1   the flatbuffer verifier runs on the board before a model is
 #       built, as it always has here: a file copied to the card by hand has not
 #       necessarily been through verify_tflite, and this 1 MB flash can afford it.
@@ -197,7 +198,7 @@ target_compile_definitions(tflm
 set(F746_TFLM_OPS_DEFINE "NN_TFLM_OPS_EXTENDED=1")
 target_compile_definitions(tflm PRIVATE
     NN_TFLM_ARENA_KB=512
-    NN_TFLM_MODEL_KB=512
+    NN_TFLM_MODEL_KB=1024
     NN_TFLM_VERIFY=1
     ${F746_TFLM_OPS_DEFINE})
 

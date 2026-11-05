@@ -330,10 +330,27 @@ uint32_t nn_last_cycles(const struct nn_model *m);
 
 /**
  * Ask the backend where a model should be staged.  On success @p *buf points at a
- * backend-owned buffer of @p *cap bytes that is NOT in use by the running model, so
- * filling it is safe even while inference is loaded.  Returns 0 or <0.
+ * backend-owned buffer of @p *cap bytes that is NOT in use by a running model.
+ * Two kinds:
+ *
+ *   - A backend with two buffers (stedgeai_reloc) hands out the one the open
+ *     model is not in, so filling it is safe while a model is loaded.
+ *   - A backend with ONE (tflm, issue #191): it is where the open model lives, so
+ *     it is handed out only while no model is open.  The caller takes the open
+ *     model down first (svc/nn/nn_core_model.h, staging_is_open); while one is
+ *     open the answer is NN_MODEL_ERR_SLOT and neither out-parameter is written.
+ *
+ * Returns 0 or <0.
  */
 int nn_model_load_region(void **buf, uint32_t *cap);
+
+/**
+ * The staging capacity alone (issue #191), answered whatever is open and touching
+ * no buffer: what a board checks a model's length against before the open model
+ * goes down, when nn_model_load_region() itself would refuse.  0 or <0
+ * (NN_ERR_NOSUP on a backend that cannot stage; NN_ERR_ARG for NULL).
+ */
+int nn_model_stage_capacity(uint32_t *cap);
 
 /**
  * Adopt the model now sitting in the staging buffer: @p len bytes at @p data,
@@ -350,7 +367,8 @@ int nn_model_load_region(void **buf, uint32_t *cap);
  *
  *   - A STAGING backend (tflm): any range that lies wholly inside a buffer
  *     load_region() handed out, starts on NN_MODEL_ALIGN -- not only its base --
- *     and is not the slot the live model is in.  A container's model section is
+ *     and is not the slot the live model is in (with one buffer, a range there
+ *     while a model is open is refused and nothing changes).  A container's model section is
  *     adopted in place, at its offset inside the staged container; copying it
  *     down would overwrite the container whose bytes were validated with bytes
  *     nobody validated.  Anything else is NN_MODEL_ERR_SLOT / NN_MODEL_ERR_ALIGN.
@@ -372,10 +390,14 @@ int nn_model_load_region(void **buf, uint32_t *cap);
  * another console asks without the session, so any read after this returns may
  * see a state this call did not leave.
  *
- * TRANSACTIONAL.  A model the backend cannot build is reported without
- * disturbing the one already loaded, so a truncated file costs nothing but the
+ * A model the backend cannot build is reported, and what is left depends on
+ * where the previous model was.  A backend that staged apart from it
+ * (stedgeai_reloc) rebuilds it, so a truncated file costs nothing but the
  * message; when there was none, or even it could not be rebuilt, the backend is
- * left with no model.  Returns 0 or the <0 reason for the rejection.
+ * left with no model.  A backend with one staging buffer (tflm, issue #191) was
+ * reached with the previous model already down, so a refusal always leaves no
+ * model; the previous one is loaded again from the board's store.  Returns 0 or
+ * the <0 reason for the rejection.
  */
 int nn_model_reload(const void *data, uint32_t len, const char *name,
                     int *model_after);

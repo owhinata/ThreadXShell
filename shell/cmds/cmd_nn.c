@@ -456,22 +456,26 @@ static int cmd_nn_model_load(struct cli_instance *sh, int argc, char **argv)
 #endif
 
 	/*
-	 * [!] THE RESULTING MODEL STATE IS ITS OWN ANSWER.  A refused load
-	 * normally leaves the previous model active, but both STM32 backends
-	 * document that if even rebuilding the previous one fails the model is
-	 * left CLOSED.  An operator told only "rejected" would go on believing
+	 * [!] THE RESULTING MODEL STATE IS ITS OWN ANSWER.  A refusal before the
+	 * model was touched leaves the previous one active, but a refusal after
+	 * can leave nothing: a backend that keeps the previous model apart
+	 * (f746g-disco's stedgeai_reloc) may fail to rebuild it, and the tflm
+	 * backend of both STM32 boards has one staging buffer, so the shared
+	 * order took the previous model down before reading the new one (issue
+	 * #191).  An operator told only "rejected" would go on believing
 	 * something is loaded when nothing is.
 	 */
 	if (res.status != NN_SVC_OK) {
 		nn_report(sh, "model load", &res);
 		/* [!] A BUSY REFUSAL NEVER REPLACES OR LOSES THE OPEN MODEL, SO IT
 		 * HAS NO STATE TO REPORT (issue #131 P19).  The shared order
-		 * (svc/nn/nn_core_model.h) answers BUSY only before the swap -- claim,
-		 * lease, the board's admit / prepare / fetch; staging into an
-		 * inactive buffer or an empty-state cleanup may have run, the model
-		 * that was open has not moved -- and maps a swap's or a plugin
-		 * start's BUSY to a hardware failure; test_nn_core_model.c pins
-		 * that.  Reading the state here anyway is what printed "nothing is
+		 * (svc/nn/nn_core_model.h) answers BUSY only before the swap and
+		 * before a one-buffer backend's model is taken down -- claim, lease,
+		 * the board's admit / prepare / fetch; staging into a buffer the open
+		 * model is not in or an empty-state cleanup may have run, the model
+		 * that was open has not moved -- and maps a swap's, a plugin start's
+		 * or a post-take-down fetch's BUSY to a hardware failure;
+		 * test_nn_core_model.c pins that.  Reading the state here anyway is what printed "nothing is
 		 * loaded" on wio while another load had the model down for a
 		 * moment: the line would describe someone else's operation. */
 		if (res.status == NN_SVC_ERR_BUSY)

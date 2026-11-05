@@ -338,14 +338,37 @@ void nn_svc_info(struct nn_svc_info *out)
  * slot into PSRAM and checks it, how a container is split, how its backend
  * replaces one model with another, and what the open container claimed.
  *
- * [!] THE PSRAM GUARD OF A LOAD IS TAKEN LATE AND GIVEN BACK WITH THE SESSION.
- * Everything up to the read is backend state or NOR traffic, and holding the
- * PSRAM across a header decode buys nothing while refusing an `lcd on` for the
- * duration -- so fetch() takes it just before the read, and claim_give() gives
- * it back, after the session's last use.  Whether it is held is this flag,
- * written and read only by the holder of the NN session.
+ * [!] THE PSRAM GUARD OF A LOAD IS TAKEN IN prepare() AND GIVEN BACK WITH THE
+ * SESSION.  On a tflm build the shared order takes the open model down before
+ * fetch() (issue #191, staging_is_open), and destroying the interpreter reads
+ * the arena -- PSRAM -- so the guard must be held by then.  prepare() takes it
+ * last, after the read-only checks of the slot, so a refusal there still costs
+ * no `lcd on` anything; claim_give() gives it back, after the session's last
+ * use.  Whether it is held is this flag, written and read only by the holder of
+ * the NN session.
  */
 static uint8_t nn_life_psram;
+
+/*
+ * [!] THE BLOB MUTATION LOCK OF A LOAD, HELD FROM prepare()'s HEADER READ TO
+ * fetch()'s PAYLOAD READ (issue #191), so the length and CRC checked before the
+ * open model went down belong to the same generation of the slot as the bytes
+ * read after.  fetch() gives it back as soon as the NOR is done with; every
+ * other exit -- a refusal in prepare(), a lease the order could not take, any
+ * failure in between -- gives it back in claim_give().  Same ownership rule as
+ * nn_life_psram.  The lock is a try-acquire with interrupts masked, never a
+ * wait, so holding it while the order waits for the plugin lease orders no
+ * lock against another.
+ */
+static uint8_t nn_life_blob;
+
+static void nn_life_blob_give(void)
+{
+	if (nn_life_blob) {
+		nn_life_blob = 0u;
+		blob_busy_release();
+	}
+}
 
 /** One load's resolution, on the console's stack: nothing in it is the
  *  adapter's until commit(). */
@@ -360,8 +383,10 @@ struct nn_wio_job {
 };
 
 /*
- * The backend's own transaction: nn_model_reload() replaces the model and
- * restores the previous one -- or leaves none -- if the new one is refused.
+ * The backend's reload: nn_model_reload() adopts the new model, or leaves none
+ * if it is refused.  On a tflm build the shared order took the previous model
+ * down before the bytes were read (issue #191), so there is nothing to restore;
+ * the null backend refuses every load.
  *
  * [!] THE RESULTING MODEL STATE IS THE RELOAD'S OWN OUTCOME, NOT A QUESTION
  * ASKED AFTERWARDS.  This board's dispatcher adopts whatever handle the backend
@@ -409,6 +434,11 @@ static void nn_life_release(void)
 	(void)nn_model_release();
 }
 
+/*
+ * [!] staging_is_open ON tflm (issue #191): its one staging buffer is where the
+ * open model lives, so the shared order takes that model down before fetch()
+ * writes over it.  The null backend stages nothing.
+ */
 static const struct nn_core_model_backend nn_life_backend = {
 	.swap      = nn_life_swap,
 	.release   = nn_life_release,
@@ -416,6 +446,9 @@ static const struct nn_core_model_backend nn_life_backend = {
 	.strerror  = nn_model_strerror,
 	.reserved  = nn_arena_reserved,
 	.used      = NULL,     /* `nn info` asks the open model */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	.staging_is_open = 1,
+#endif
 };
 
 /* Every tag but a slot, refused before anything is acquired. */
@@ -468,12 +501,12 @@ static int nn_life_admit(struct nn_core_model_job *j)
  * PSRAM is not ready (STATE), the OCTOSPI1 guard is busy -- and a refusal holds
  * nothing (nn_guards_take() unwinds itself).  claim_give gives it back.
  *
- * A LOAD takes the session only: which staging slot is "the inactive one" is
- * a function of backend state, so a slot number handed out before the claim
- * can be stale by the time it is used -- two consoles both ask, both are told
- * slot 1, the first wins the session and makes slot 1 ACTIVE, and the second
- * then writes its download straight over the flatbuffer the live interpreter
- * is reading.  Its PSRAM guard comes later (see nn_life_psram).
+ * A LOAD takes the session only: whether the staging buffer is free is a
+ * function of backend state, so an answer had before the claim can be stale by
+ * the time it is used -- two consoles both ask, the first wins the session and
+ * opens a model there, and the second then writes its download straight over
+ * the flatbuffer the live interpreter is reading.  Its PSRAM guard and the blob
+ * lock come later (see nn_life_psram, nn_life_blob).
  *
  * An UNLOAD takes both guards.
  */
@@ -496,9 +529,10 @@ static int nn_life_claim_take(struct nn_core_model_job *j)
 }
 
 /* Hardware claim first, software claim second -- the reverse of taking them
- * (nn_guards_give()). */
+ * (nn_guards_give()).  The blob lock, if a load still holds it, before both. */
 static void nn_life_claim_give(void)
 {
+	nn_life_blob_give();
 	if (nn_life_psram) {
 		nn_life_psram = 0u;
 		psram_release_shared();
@@ -506,23 +540,86 @@ static void nn_life_claim_give(void)
 	nn_session_release();
 }
 
-/* Ask the backend for staging BEFORE touching the NOR, so a backend that cannot
-   swap models costs no flash traffic to find out about -- and it is the only
-   honest way to learn the capacity. */
+/*
+ * Everything a load can be refused for WITHOUT CHANGING ANYTHING, before the
+ * shared order takes the open model down (issue #191): the backend's capacity,
+ * the slot's header, that it holds a valid blob that fits, and the PSRAM guard.
+ * A refusal here leaves the previous model as it was (the order answers
+ * PREVIOUS), and gives back what it took.  On success the blob lock and the
+ * PSRAM guard stay held for fetch(); claim_give() returns whichever is left.
+ *
+ * The capacity is asked apart from the buffer (nn_model_stage_capacity()):
+ * the tflm backend hands its one buffer out only once no model is open, so
+ * fetch() asks for it after the order took the model down.  The null backend
+ * stages nothing and is refused first, as before, at no NOR traffic.
+ */
 static int nn_life_prepare(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
 	struct nn_wio_job *w = j->board;
+	const struct nn_spec *spec = j->spec;
 	int rc;
 
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	rc = nn_model_stage_capacity(&w->cap);
+#else
 	rc = nn_model_load_region(&w->stage, &w->cap);
+#endif
 	if (rc != 0) {
 		nn_detail_set("%s", nn_model_strerror(rc));
 		return NN_SVC_ERR_NOSUP;
 	}
+
+	/*
+	 * Hold the blob mutation lock from the header decode to the payload read
+	 * (nn_life_blob), so the length and CRC validated against belong to the
+	 * same generation of the slot as the bytes read.  The CRC in fetch() would
+	 * catch a mid-sequence `blob erase` anyway -- this turns a mysterious
+	 * "CRC32 mismatch" into an accurate "blob busy".
+	 */
+	if (blob_busy_acquire() != BLOB_OK) {
+		nn_detail_set("blob busy (a blob write or erase is running)");
+		return NN_SVC_ERR_BUSY;
+	}
+	nn_life_blob = 1u;
+	if (blob_stat(spec->slot, &w->info) != BLOB_OK) {
+		nn_detail_set("cannot read slot %lu's header (see `nor info`)",
+		              (unsigned long)spec->slot);
+		nn_life_blob_give();
+		return NN_SVC_ERR_HW;
+	}
+	if (w->info.state != BLOB_VALID) {
+		nn_detail_set("slot %lu holds no valid blob -- `blob list`",
+		              (unsigned long)spec->slot);
+		nn_life_blob_give();
+		return NN_SVC_ERR_ARG;
+	}
+	if (w->info.length == 0u || w->info.length > w->cap) {
+		nn_detail_set("slot %lu is %lu B, staging holds %lu B",
+		              (unsigned long)spec->slot,
+		              (unsigned long)w->info.length, (unsigned long)w->cap);
+		nn_life_blob_give();
+		return NN_SVC_ERR_ARG;
+	}
+
+	/* From here the PSRAM is written and interpreted -- and on tflm the open
+	   model's interpreter is destroyed, which reads the arena -- so take the
+	   hardware guard too, software claim first, as nn_guards_take() explains. */
+	if (!psram_ready() || !psram_acquire_shared()) {
+		nn_detail_set("OCTOSPI1 busy or PSRAM not ready");
+		nn_life_blob_give();
+		return NN_SVC_ERR_BUSY;
+	}
+	nn_life_psram = 1u;
 	return NN_SVC_OK;
 }
 
+/*
+ * The bytes: into the staging buffer, the CRC over the copy, the container
+ * split.  On a tflm build the open model is already down (issue #191), so a
+ * failure here ends with no model; the operator loads the previous one again
+ * from its slot.
+ */
 static int nn_life_fetch(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
@@ -533,51 +630,29 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 
 	j->bare = 1;
 
-	/*
-	 * Hold the blob mutation lock across the header decode AND the payload
-	 * read, so the length and CRC validated against belong to the same
-	 * generation of the slot as the bytes read.  The CRC below would catch a
-	 * mid-sequence `blob erase` anyway -- this turns a mysterious "CRC32
-	 * mismatch" into an accurate "blob busy".
-	 */
-	if (blob_busy_acquire() != BLOB_OK) {
-		nn_detail_set("blob busy (a blob write or erase is running)");
-		return NN_SVC_ERR_BUSY;
-	}
-	if (blob_stat(spec->slot, &w->info) != BLOB_OK) {
-		nn_detail_set("cannot read slot %lu's header (see `nor info`)",
-		              (unsigned long)spec->slot);
-		blob_busy_release();
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/* [!] ONLY NOW, WITH NO MODEL OPEN, IS THE BUFFER HANDED OUT: it is the
+	 * one the previous model lived in, and the backend refuses it while a
+	 * model is open -- which is what stops a load that skipped the take-down
+	 * before a byte is written. */
+	rc = nn_model_load_region(&w->stage, &w->cap);
+	if (rc != 0) {
+		nn_detail_set("%s", nn_model_strerror(rc));
 		return NN_SVC_ERR_HW;
 	}
-	if (w->info.state != BLOB_VALID) {
-		nn_detail_set("slot %lu holds no valid blob -- `blob list`",
-		              (unsigned long)spec->slot);
-		blob_busy_release();
-		return NN_SVC_ERR_ARG;
+	if (w->info.length > w->cap) {
+		/* prepare() checked against the same object; a different answer
+		 * now is the backend's fault, not the slot's. */
+		nn_detail_set("the staging capacity changed (%lu B)",
+		              (unsigned long)w->cap);
+		return NN_SVC_ERR_HW;
 	}
-	if (w->info.length == 0u || w->info.length > w->cap) {
-		nn_detail_set("slot %lu is %lu B, staging holds %lu B",
-		              (unsigned long)spec->slot,
-		              (unsigned long)w->info.length, (unsigned long)w->cap);
-		blob_busy_release();
-		return NN_SVC_ERR_ARG;
-	}
-
-	/* From here the PSRAM is written and then interpreted, so take the hardware
-	   guard too -- software claim first, as nn_guards_take() explains. */
-	if (!psram_ready() || !psram_acquire_shared()) {
-		nn_detail_set("OCTOSPI1 busy or PSRAM not ready");
-		blob_busy_release();
-		return NN_SVC_ERR_BUSY;
-	}
-	nn_life_psram = 1u;
+#endif
 
 	rc = blob_read(spec->slot, 0u, w->stage, w->info.length);
-	blob_busy_release();          /* the NOR is done with; the rest is PSRAM */
+	nn_life_blob_give();          /* the NOR is done with; the rest is PSRAM */
 	if (rc != BLOB_OK) {
-		nn_detail_set("NOR read failed (%d) -- the previous model is "
-		              "untouched", rc);
+		nn_detail_set("NOR read failed (%d)", rc);
 		return NN_SVC_ERR_HW;
 	}
 
@@ -611,8 +686,8 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 	 *
 	 * A container's MODEL section is handed to the backend IN PLACE, at its offset
 	 * inside the staged container: the backend adopts any 16-byte-aligned range
-	 * inside the slot it handed out (nn.h, NN_MODEL_ALIGN).  Copying it down to the
-	 * slot's start would overwrite the checked container with unchecked bytes.
+	 * inside the buffer it handed out (nn.h, NN_MODEL_ALIGN).  Copying it down to
+	 * the buffer's start would overwrite the checked container with unchecked bytes.
 	 *
 	 * [!] SINCE ISSUE #110 THE PLUGIN SECTION IS ACTUALLY RUN, and since issue
 	 * #116 a container's plugin is the ONLY thing that reads a model's outputs;
@@ -626,8 +701,7 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 
 		pr = plugin_parse(w->stage, w->info.length, &w->claims.view);
 		if (pr != PLUGIN_OK) {
-			nn_detail_set("slot %lu is a container this firmware refuses: %s "
-			              "-- the previous model is untouched",
+			nn_detail_set("slot %lu is a container this firmware refuses: %s",
 			              (unsigned long)spec->slot, plugin_result_name(pr));
 			return NN_SVC_ERR_ARG;
 		}
@@ -698,10 +772,10 @@ static int nn_life_plugin_start(struct nn_core_model_job *j)
 
 	/* entry()'s depth is sampled in the loader's exec_ok hook (issue #126),
 	 * several frames below this one. */
-	/* [!] THE STAGING REGION IS PASSED, NOT LOOKED UP.  The backend is
-	 * double-slotted: nn_model_load_region() hands out the INACTIVE slot, so
-	 * now that the reload has adopted the staged model, asking again would
-	 * answer with the OTHER slot. */
+	/* [!] THE STAGING REGION IS PASSED, NOT LOOKED UP: the buffer fetch() was
+	 * handed.  Now that the reload has adopted the staged model, asking the
+	 * backend again would be refused -- its one buffer is the open model's
+	 * (issue #191; with two slots it answered with the other one). */
 	pr = plugin_run_start(&w->claims.view, w->stage, w->stage, w->cap);
 	if (pr == PLUGIN_RUN_OK || pr == PLUGIN_RUN_NO_PLUGIN)
 		return NN_SVC_OK;

@@ -14,7 +14,7 @@
  * and the backend reaches it through the extern declaration here -- resolved at link
  * time, the way nn_backend_vt_selected and nn_model_board_state are.  Nothing is
  * registered at init: a pointer the shared file remembered would itself be mutable
- * storage in the shared file.  The arena and the model slots are not in it: they are
+ * storage in the shared file.  The arena and the model buffer are not in it: they are
  * placed by the board in C (nn_tflm_mem.h says why).
  *
  * C++, because the state holds TFLM objects' storage, whose sizes only C++ knows.
@@ -61,13 +61,10 @@ struct nn_tflm_state {
 	nn_tflm_model tm;
 	char          model_name[64];
 
-	/* The flatbuffer the live interpreter is reading, or nullptr when no model is
-	 * loaded; `active_slot` is which nn_tflm_model_buf slot it lies in, and means
-	 * something only while `active_model` is set (zero is the boot state of every
-	 * field, so "none" is the null pointer, not a -1 a zeroed object cannot hold). */
+	/* The flatbuffer the live interpreter is reading, inside nn_tflm_model_buf, or
+	 * nullptr when no model is loaded (zero is the boot state).  While it is set the
+	 * staging buffer is the live model's and load_region() refuses (issue #191). */
 	const void *active_model;
-	uint32_t    active_len;
-	uint32_t    active_slot;
 
 	/* The interpreter, constructed in place on each successful build; nullptr when
 	 * none exists.  ~MicroInterpreter() is not trivial, so a rebuild destroys the

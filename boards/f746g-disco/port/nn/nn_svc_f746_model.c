@@ -186,8 +186,10 @@ struct nn_f746_job {
 };
 
 /*
- * The backend's own transaction: nn_model_reload() closes, opens the new model,
- * and restores the previous one -- or leaves the backend EMPTY -- if that fails.
+ * The backend's reload: nn_model_reload() adopts the new model, or -- if it is
+ * refused -- restores the previous one (stedgeai_reloc, whose two slots keep
+ * it apart) or leaves the backend EMPTY (tflm, issue #191: the shared order
+ * took the previous model down before its one buffer was written).
  *
  * [!] THE STATE IS THE RELOAD'S OWN OUTCOME, NOT A QUESTION ASKED AFTERWARDS
  * (issue #122 P1).  @p model_after is whether a MODEL is left (issue #131 P16):
@@ -219,6 +221,12 @@ static void nn_life_release(void)
 	(void)nn_model_release();
 }
 
+/*
+ * [!] staging_is_open ON tflm ONLY (issue #191): its one staging buffer is where
+ * the open model lives, so the shared order takes that model down before fetch()
+ * reads the file over it.  stedgeai_reloc keeps its own two slots and its
+ * restore; null and stedgeai stage nothing.
+ */
 static const struct nn_core_model_backend nn_life_backend = {
 	.swap      = nn_life_swap,
 	.release   = nn_life_release,
@@ -226,6 +234,9 @@ static const struct nn_core_model_backend nn_life_backend = {
 	.strerror  = NULL,     /* a refusal is worded by the swap itself */
 	.reserved  = nn_arena_reserved,
 	.used      = NULL,     /* `nn info` asks the open model */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	.staging_is_open = 1,
+#endif
 };
 
 /* ---- the board ------------------------------------------------------------ */
@@ -300,10 +311,11 @@ static int nn_life_admit(struct nn_core_model_job *j)
 /*
  * THE CLAIM, worded.  claim_give gives it back.
  *
- * [!] THE SESSION IS CLAIMED BEFORE THE SLOT IS CHOSEN, so slot selection,
- * the SD read and the swap are atomic against another console: otherwise
- * a second shell could flip the chosen (inactive) slot to active between
- * load_region() and the read, and the live flatbuffer would be corrupted.
+ * [!] THE SESSION IS CLAIMED BEFORE THE BUFFER IS ASKED FOR, so the answer,
+ * the SD read and the swap are atomic against another console: otherwise a
+ * second shell could open a model in the buffer handed out (tflm's one buffer,
+ * or stedgeai_reloc's inactive slot) between load_region() and the read, and
+ * the live flatbuffer would be corrupted.
  */
 static int nn_life_claim_take(struct nn_core_model_job *j)
 {
@@ -323,16 +335,26 @@ static int nn_life_claim_take(struct nn_core_model_job *j)
 	return NN_SVC_OK;
 }
 
-/* What the read needs, asked before the SD card is touched. */
+/*
+ * What the read needs, asked before the SD card is touched.  [!] On tflm the
+ * buffer is NOT asked for here (issue #191): it is the open model's until the
+ * shared order takes that model down, and the backend refuses it until then,
+ * so fetch() asks.  The other backends ask here, as they always did -- moving
+ * their refusal (null's NOSUP) into fetch() would change how it ends.  The SD
+ * read is one call that opens and reads, so it is not split: on tflm a file
+ * that is not there also ends with no model.
+ */
 static int nn_life_prepare(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
 	struct nn_f746_job *f = j->board;
 
+#if !defined(CONFIG_NN_BACKEND_TFLM)
 	if (nn_model_load_region(&f->buf, &f->cap) != 0) {
 		nn_detail_set("this backend has no runtime model loader");
 		return NN_SVC_ERR_NOSUP;
 	}
+#endif
 	if (f->read == NULL) {
 		nn_detail_set("no filesystem reader was supplied for --path");
 		return NN_SVC_ERR_NOSUP;
@@ -341,16 +363,17 @@ static int nn_life_prepare(struct nn_core_model_job *j)
 }
 
 /*
- * The file, into the staging slot the backend handed out -- and, on tflm, split
+ * The file, into the staging buffer the backend handed out -- and, on tflm, split
  * if it is a plugin container (issue #159).
  *
  * A payload that is not a container is a bare model and takes the old path
  * unchanged.  A container goes through svc/plugin/plugin_load.c -- the same
  * validator the host asset build runs -- with this board's policy, and its
  * MODEL SECTION is handed to the backend IN PLACE, at its offset inside the
- * staged file (nn.h, NN_MODEL_ALIGN): copying it down to the slot's start would
- * overwrite the validated container with bytes nobody validated.  A refused
- * container is a refused load (REFUSED: nothing changed).
+ * staged file (nn.h, NN_MODEL_ALIGN): copying it down to the buffer's start
+ * would overwrite the validated container with bytes nobody validated.  A
+ * refused container is a refused load (REFUSED; on tflm the previous model is
+ * already down, so it ends with none, issue #191).
  *
  * j->bare = 0 for a container is the truth, and in Step 4a changes nothing:
  * the plugin hooks are unset, so the shared order touches no plugin either way
@@ -362,6 +385,15 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 	struct nn_f746_job *f = j->board;
 
 	j->bare = 1;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/* [!] ONLY NOW, WITH NO MODEL OPEN, IS THE BUFFER HANDED OUT (issue
+	 * #191): the backend refuses it while a model is open, which stops a load
+	 * that skipped the take-down before a byte is written. */
+	if (nn_model_load_region(&f->buf, &f->cap) != 0) {
+		nn_detail_set("the model buffer was not handed out");
+		return NN_SVC_ERR_HW;
+	}
+#endif
 	/* The reader prints its own failure: it is the board's shell-layer file
 	   and it has the console this command came in on. */
 	if (f->read(f->ctx, j->spec->path, f->buf, f->cap, &f->len) != 0) {
@@ -476,9 +508,10 @@ static int nn_life_lease_take(struct nn_core_model_job *j)
  * it (Step 4c: no resident decoder), and the status says the load did not
  * give what was asked for.  plugin_run_start() also logs its own reason.
  *
- * [!] THE STAGING REGION IS PASSED, NOT LOOKED UP: the slot the reader filled
+ * [!] THE STAGING REGION IS PASSED, NOT LOOKED UP: the buffer the reader filled
  * (f->buf, f->cap) is the region the container lies in, and the backend's
- * load_region() would now answer with the other slot.
+ * load_region() would now refuse -- its one buffer is the open model's (issue
+ * #191; with two slots it answered with the other one).
  */
 static int nn_life_plugin_start(struct nn_core_model_job *j)
 {

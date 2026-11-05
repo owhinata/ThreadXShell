@@ -232,6 +232,15 @@ int nn_model_load_region(void **buf, uint32_t *cap)
 	return nn_backend_vt_selected.load_region(buf, cap);
 }
 
+int nn_model_stage_capacity(uint32_t *cap)
+{
+	if (!cap)
+		return NN_ERR_ARG;
+	if (!nn_backend_vt_selected.stage_capacity)
+		return NN_ERR_NOSUP;
+	return nn_backend_vt_selected.stage_capacity(cap);
+}
+
 int nn_model_reload(const void *data, uint32_t len, const char *name,
                     int *model_after)
 {
@@ -252,10 +261,11 @@ int nn_model_reload(const void *data, uint32_t len, const char *name,
 	if (data == NULL)
 		return NN_ERR_ARG;            /* an unload is nn_model_release() */
 
-	/* The backend is transactional and reports the resulting handle in *impl:
-	 * the new model (rc == 0), the restored previous one, or the empty handle
-	 * when there was nothing to restore or even the restore failed (issue #131
-	 * P16).  NULL breaks that contract; it is still mirrored -- the singleton
+	/* The backend reports the resulting handle in *impl: the new model (rc ==
+	 * 0), the restored previous one (a backend that keeps it apart), or the
+	 * empty handle when there was nothing to restore or even the restore
+	 * failed (issue #131 P16) -- every refusal of a backend with one staging
+	 * buffer (issue #191).  NULL breaks that contract; it is still mirrored -- the singleton
 	 * closes and the next open asks the backend again -- rather than kept as a
 	 * dangling impl. */
 	rc = nn_backend_vt_selected.reload(data, len, name, &impl);

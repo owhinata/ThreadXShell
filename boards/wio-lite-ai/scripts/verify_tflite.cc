@@ -91,7 +91,7 @@
  * because those sources belong to the firmware's world; the numbers are checked against
  * their sources by the message this prints when a model is too big. */
 static const uint32_t kBlobPayloadMax = 520192u;
-static const uint32_t kStagingMax     = 512u * 1024u;
+static const uint32_t kStagingMax     = 1024u * 1024u;
 
 /* CRC-32/ISO-HDLC, bit by bit -- the same value FlashDB's fdb_calc_crc32() produces on
  * the board and Python's zlib.crc32() produces on this machine.  Written out rather

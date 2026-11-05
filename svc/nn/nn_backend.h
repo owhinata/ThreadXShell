@@ -22,8 +22,8 @@
  * in the public `struct nn_model` and adds the cross-backend concerns.  run()
  * is the pure inference call -- it must NOT time itself; nn.c owns timing.
  *
- * OPTIONAL ENTRIES.  load_region, reload and release may be NULL (a backend
- * that cannot swap its model leaves all three that way).  nn.c checks for NULL
+ * OPTIONAL ENTRIES.  load_region, reload, release and stage_capacity may be
+ * NULL (a backend that cannot swap its model leaves them all that way).  nn.c checks for NULL
  * and returns NN_ERR_NOSUP itself, so no caller ever reads a vtable field:
  * "this backend cannot do that" is a value the public API returns, not a
  * branch to address 0 -- which on these parts is ITCM / vector code rather
@@ -75,9 +75,11 @@ struct nn_backend_vt {
 	/**
 	 * Hand out the staging buffer a model should be read into, and its
 	 * capacity.  The caller fills [*buf, *buf + cap) and passes a range inside
-	 * it to reload().  The buffer is BACKEND-OWNED and must be the one NOT
-	 * currently in use, so that filling it cannot disturb a model that is
-	 * still running.  0 on success.
+	 * it to reload().  The buffer is BACKEND-OWNED and never one a running
+	 * model is in: a backend with two hands out the one NOT in use
+	 * (stedgeai_reloc); one whose only buffer is the open model's (tflm, issue
+	 * #191) refuses while a model is open and writes neither out-parameter.
+	 * 0 on success.
 	 */
 	int  (*load_region)(void **buf, uint32_t *cap);
 
@@ -85,9 +87,11 @@ struct nn_backend_vt {
 	 * Rebuild the model from @p data (@p len bytes), naming it @p name for
 	 * display.  nn.c never passes @p data == NULL (an unload is release()).
 	 *
-	 * TRANSACTIONAL: on failure the previously active model is restored -- or,
-	 * when nothing was loaded before or even the restore failed, the backend
-	 * stays open and EMPTY (issue #131 P16).  *@p impl_out is ALWAYS set to the
+	 * On failure a backend that staged into a buffer the previous model was not
+	 * in restores it (stedgeai_reloc) -- or, when nothing was loaded before or
+	 * even the restore failed, the backend stays open and EMPTY (issue #131
+	 * P16).  A backend with one staging buffer (tflm, issue #191) is only ever
+	 * reached with no model open, so it always ends EMPTY.  *@p impl_out is ALWAYS set to the
 	 * resulting handle: the new model (returns 0), the restored previous one
 	 * (returns <0), or the empty handle (returns <0).  Returns 0, or the <0
 	 * code for why the NEW model was rejected (NN_MODEL_ERR_*), unchanged.
@@ -115,6 +119,15 @@ struct nn_backend_vt {
 	 * backend that is empty until a load (tflm, stedgeai_reloc).
 	 */
 	uint8_t has_builtin;
+
+	/**
+	 * The staging capacity load_region() would hand out, answered whatever is
+	 * open and touching nothing (issue #191): a board with one staging buffer
+	 * checks a model's length against it before the open model is taken
+	 * down, while load_region() itself would refuse.  0 on success.  Optional,
+	 * and last so no other entry moves.
+	 */
+	int  (*stage_capacity)(uint32_t *cap);
 };
 
 /** The one backend selected at build time (provided by exactly one backend TU). */

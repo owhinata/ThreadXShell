@@ -14,12 +14,13 @@
  * at configure time.
  *
  * WHAT IS THE BOARD'S.  Three things, and only these: where the arena and the model
- * slots live (nn_tflm_mem.h, defined in the board's nn_tflm_bufs.c), the state object
+ * buffer live (nn_tflm_mem.h, defined in the board's nn_tflm_bufs.c), the state object
  * (nn_tflm_state.h, defined in the board's nn_tflm_board.cc together with its facts --
- * the display-name prefix), and compile definitions: the arena and slot sizes, the op
+ * the display-name prefix), and compile definitions: the arena and buffer sizes, the op
  * profile (nn_tflm_ops.h) and NN_TFLM_VERIFY.  Everything else -- the validation
- * order, the error codes, the double buffering, the transactional reload, the
- * descriptor publication order -- is one policy here.  This file owns no storage.
+ * order, the error codes, the one staging buffer and when it is handed out, the
+ * reload's endings, the descriptor publication order -- is one policy here.  This
+ * file owns no storage.
  *
  * The pieces the Ethos-U backend needs in the same shape (descriptors, the display
  * name, the empty state, the op resolver, the interpreter's destruction) are in
@@ -37,8 +38,8 @@
  *     `nn info` is called with the external memory down -- is satisfied structurally:
  *     with no model there are no tensors to touch, and the arena is first written by
  *     AllocateTensors() inside a load, which brings that memory up.
- *   - "Empty" is a steady state, so a refused load with nothing to restore, and a
- *     restore that failed too (issue #131 P16), both end there, open.
+ *   - "Empty" is a steady state, so a refused load (since issue #191 every refused
+ *     load: the one staging buffer held the previous model) ends there, open.
  *
  * WHAT RUNS WHEN.  Nothing here has a global constructor: the interpreter and the op
  * resolver are placement-new'd into the board's state object (raw storage) on first
@@ -54,9 +55,9 @@
 
 #include "nn.h"
 #include "nn_backend.h"
-#include "nn_tflm_fit.h"     /* which slot a model range may be adopted from */
+#include "nn_tflm_fit.h"     /* whether a model range may be adopted from the buffer */
 #include "nn_tflm_model_check.h" /* the bounded verifier and the I/O dims rule, shared with the host gates */
-#include "nn_tflm_mem.h"     /* the board-placed arena, slots and capacity */
+#include "nn_tflm_mem.h"     /* the board-placed arena, buffer and capacity */
 #include "nn_tflm_ops.h"     /* the op list, shared with verify_tflite */
 #include "nn_tflm_state.h"   /* the board-defined state and facts */
 
@@ -270,25 +271,48 @@ static void tflm_bk_close(void *impl)
 	(void)impl;   /* singleton: the interpreter and its arena outlive any one command */
 }
 
-/* Hand out the slot that is NOT live, so filling it cannot touch the flatbuffer the
- * running interpreter still holds pointers into.  With one slot a corrupt download
- * would take the working model down with it; with two, the worst case is a message.
- * The read limit is the board's capacity object (nn_tflm_mem.h), read through a
- * volatile so it is that object and not a folded constant. */
+/* The staging capacity: the board's object (nn_tflm_mem.h), read through a volatile so
+ * the limit is that object and not a constant folded beside it.  One reader for
+ * load_region() and stage_capacity(), so the two answers cannot differ. */
+static uint32_t tflm_stage_cap(void)
+{
+	return *(const volatile uint32_t *)&nn_tflm_stage_cap;
+}
+
+/*
+ * Hand out the one staging buffer -- [!] ONLY WHILE NO MODEL IS OPEN (issue #191).
+ * The buffer is where the open model's flatbuffer lies, and the live interpreter holds
+ * pointers into it, so a caller handed it with a model open would write its download
+ * over that model.  The caller takes the open model down first (svc/nn/nn_core_model.h,
+ * staging_is_open); one that did not is refused here, BEFORE it can write a byte, and
+ * nothing is written to *buf or *cap.  NN_MODEL_ERR_SLOT is the reload's answer for a
+ * range in the live model's slot, which is the same fault one step earlier.
+ */
 static int tflm_bk_load_region(void **buf, uint32_t *cap)
 {
 	const nn_tflm_state &s = nn_tflm_board_state;
-	const unsigned inactive = (s.active_model != nullptr && s.active_slot == 0u) ? 1u : 0u;
 
-	*buf = nn_tflm_model_buf[inactive];
-	*cap = *(const volatile uint32_t *)&nn_tflm_stage_cap;
+	if (s.active_model != nullptr)
+		return NN_MODEL_ERR_SLOT;
+	*buf = nn_tflm_model_buf;
+	*cap = tflm_stage_cap();
+	return 0;
+}
+
+/* The capacity alone, whatever is open: a board checks a length against it before
+ * the open model goes down (nn.h, nn_model_stage_capacity()). */
+static int tflm_bk_stage_capacity(uint32_t *cap)
+{
+	*cap = tflm_stage_cap();
 	return 0;
 }
 
 /*
- * Unload (svc/nn/nn.c calls this for `nn model unload`, issue #131 P16): destroy the
- * interpreter and stay open with no model.  The slots keep their bytes, but none of
- * them is ACTIVE any more, so the next load_region() hands out slot 0.
+ * Unload (svc/nn/nn.c calls this for `nn model unload`, and the shared load order
+ * before it stages a new model, issue #191): destroy the interpreter and stay open
+ * with no model.  The buffer keeps its bytes, but no model is ACTIVE in it any more,
+ * so the next load_region() hands it out.  Called again over nothing it does nothing
+ * that touches memory: no interpreter, so no arena read.
  */
 static int tflm_bk_release(void)
 {
@@ -296,46 +320,40 @@ static int tflm_bk_release(void)
 
 	nn_tflm_destroy_interp();
 	s.active_model = nullptr;
-	s.active_len   = 0u;
-	s.active_slot  = 0u;
 	nn_tflm_publish_empty();
 	s.tm.open = true;
 	return 0;
 }
 
 /*
- * Adopt a model.  Transactional: on any rejection the previously active model is
- * rebuilt and reported, so a bad file costs a message and nothing else.  When nothing
- * was loaded before, or even the restore fails, the backend stays open and EMPTY
- * (issue #131 P16).  *impl_out is ALWAYS the resulting handle -- there is only one.
+ * Adopt a model.  On any rejection the backend is left open and EMPTY (issue #131
+ * P16): since issue #191 there is nothing to restore -- the previous model lay in
+ * the one staging buffer and the caller took it down before writing this one there.
+ * The previous model is still in the board's store; the operator loads it again.
+ * *impl_out is ALWAYS the resulting handle -- there is only one.
  */
 static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
                           void **impl_out)
 {
 	nn_tflm_state &s = nn_tflm_board_state;
-	const void *old_model = s.active_model;
-	const uint32_t old_len  = s.active_len;
-	const uint32_t old_slot = s.active_slot;
-	int slot;
 	int rc;
 
 	*impl_out = &s.tm;
 	if (data == nullptr)                      /* nn.c never asks; release() unloads */
 		return NN_ERR_ARG;
 
-	/* Only our own staging slots are accepted, by containment, aligned, and never the
-	 * live one: nn_tflm_fit.h, the rule its host test walks.  Interpreting from
-	 * wherever the caller points would put the flatbuffer's lifetime and alignment in
-	 * the caller's hands, and TFLM keeps pointers INTO the model for as long as the
-	 * interpreter lives.  Nothing has changed on a refusal here. */
+	/* Only our own staging buffer is accepted, by containment, aligned, and never
+	 * while the live model is in it: nn_tflm_fit.h, the rule its host test walks.
+	 * Interpreting from wherever the caller points would put the flatbuffer's lifetime
+	 * and alignment in the caller's hands, and TFLM keeps pointers INTO the model for
+	 * as long as the interpreter lives.  Nothing has changed on a refusal here: it
+	 * reports a caller that did not take the open model down, which load_region()
+	 * already refused before anything was written. */
 	{
-		uintptr_t bases[NN_TFLM_MODEL_SLOTS];
-
-		for (unsigned i = 0u; i < NN_TFLM_MODEL_SLOTS; i++)
-			bases[i] = (uintptr_t)nn_tflm_model_buf[i];
-		slot = nn_tflm_pick_slot(bases, NN_TFLM_MODEL_SLOTS, NN_TFLM_MODEL_MAX,
-		                         (uintptr_t)data, len, NN_MODEL_ALIGN,
-		                         old_model != nullptr ? (int)old_slot : -1);
+		const uintptr_t base = (uintptr_t)nn_tflm_model_buf;
+		int slot = nn_tflm_pick_slot(&base, 1u, NN_TFLM_MODEL_MAX,
+		                             (uintptr_t)data, len, NN_MODEL_ALIGN,
+		                             s.active_model != nullptr ? 0 : -1);
 		if (slot < 0)
 			return slot;
 	}
@@ -344,44 +362,23 @@ static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
 	if (rc == 0) {
 		/* Published only after the interpreter exists AND its I/O was accepted. */
 		s.active_model = data;
-		s.active_len   = len;
-		s.active_slot  = (uint32_t)slot;
 		nn_tflm_set_model_name(name);
 		s.tm.open = true;
 		return 0;
 	}
 
-	/* Rejected.  build_interp() has destroyed the interpreter, so the handle currently
-	 * describes tensors that no longer exist -- something must be published before
-	 * returning, whatever the outcome. */
-	if (old_model != nullptr) {
-		/* The previous model's bytes are untouched (it lives in the OTHER slot), so
-		 * this rebuild should not fail.  The name buffer still holds its name -- only
-		 * success paths overwrite it -- so re-pointing the handle is all the naming
-		 * needed. */
-		if (build_interp(old_model, old_len) == 0) {
-			s.active_model = old_model;
-			s.active_len   = old_len;
-			s.active_slot  = old_slot;
-			s.tm.name      = s.model_name;
-			s.tm.open      = true;
-			return rc;                    /* report why the NEW model was refused */
-		}
-	}
-
-	/* Nothing was loaded before -- or, catastrophically, even the known-good model
-	 * could not be rebuilt.  Empty, and open (issue #131 P16): closing would make the
-	 * next open start over and hand out descriptors nobody loaded.
+	/* Rejected: empty, and open (issue #131 P16) -- closing would make the next open
+	 * start over and hand out descriptors nobody loaded.  build_interp() may have
+	 * destroyed the interpreter and left the handle describing tensors that no longer
+	 * exist, so the empty state is published whatever the outcome.
 	 *
 	 * [!] EMPTY MEANS NO INTERPRETER EITHER -- the same clean-up as release().  A
 	 * refusal in validation (identifier, verifier, version) returns before
-	 * build_interp() destroys anything, so when both the new model and the restore
-	 * are refused there, the previous interpreter is still alive: left alone, run()
-	 * would Invoke() it on a slot load_region() is now free to hand out. */
+	 * build_interp() destroys anything; the caller released the previous model
+	 * first, so there is none to find, and destroying here keeps it that way should
+	 * a caller ever not have. */
 	nn_tflm_destroy_interp();
 	s.active_model = nullptr;
-	s.active_len   = 0u;
-	s.active_slot  = 0u;
 	nn_tflm_publish_empty();
 	s.tm.open = true;
 	return rc;
@@ -475,6 +472,7 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.release           = tflm_bk_release,
 	.arena_reserved    = NN_TFLM_ARENA_BYTES,     /* nn_tflm_arena */
 	.has_builtin       = 0u,                      /* empty until a load */
+	.stage_capacity    = tflm_bk_stage_capacity,  /* nn_tflm_stage_cap */
 };
 
 }  /* extern "C" */

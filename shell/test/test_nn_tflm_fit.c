@@ -14,7 +14,8 @@
  * pointer at the end or before the base, an empty range, a length that would
  * wrap, and a slot at the top of the address space.  Then the two-slot choice
  * (nn_tflm_pick_slot()): which slot, each refusal's code in its order, and
- * never the live slot.
+ * never the live slot; and the one-slot form the backend calls since issue
+ * #191, where the only slot is the live one whenever a model is open.
  */
 #include <assert.h>
 #include <stdint.h>
@@ -97,6 +98,35 @@ int main(void)
 		assert(nn_tflm_pick_slot(slots, 2u, CAP, base, 0u, ALIGN, 0) == NN_MODEL_ERR_SLOT);
 		assert(nn_tflm_pick_slot(slots, 2u, CAP, base, 0u, ALIGN, 1) == NN_MODEL_ERR_EMPTY);
 		assert(nn_tflm_pick_slot(slots, 2u, CAP, base, 0u, ALIGN, -1) == NN_MODEL_ERR_EMPTY);
+	}
+
+	/* [!] ONE slot, as the backend has it since issue #191: the slot is the
+	 * live model's whenever a model is open, so with one open every range in
+	 * it is refused -- base, offset, whole -- and with none it is adopted.
+	 * The order of the reasons is the two-slot one. */
+	{
+		const uintptr_t one[1] = { base };
+		const uint32_t cap1 = 2u * CAP;   /* the 1 MB buffer */
+
+		assert(nn_tflm_pick_slot(one, 1u, cap1, base, cap1, ALIGN, -1) == 0);
+		assert(nn_tflm_pick_slot(one, 1u, cap1, base + 4304u, cap1 - 4304u, ALIGN, -1) == 0);
+		/* a range longer than the old 512 KB slot now fits */
+		assert(nn_tflm_pick_slot(one, 1u, cap1, base, CAP + 16u, ALIGN, -1) == 0);
+		assert(nn_tflm_pick_slot(one, 1u, cap1, base, 16u, ALIGN, 0) == NN_MODEL_ERR_SLOT);
+		assert(nn_tflm_pick_slot(one, 1u, cap1, base + 4304u, 16u, ALIGN, 0) ==
+		       NN_MODEL_ERR_SLOT);
+		assert(nn_tflm_pick_slot(one, 1u, cap1, base, cap1, ALIGN, 0) == NN_MODEL_ERR_SLOT);
+		/* off the end, outside, misaligned, empty: their own codes */
+		assert(nn_tflm_pick_slot(one, 1u, cap1, base, cap1 + 1u, ALIGN, -1) ==
+		       NN_MODEL_ERR_SLOT);
+		assert(nn_tflm_pick_slot(one, 1u, cap1, base + cap1, 16u, ALIGN, -1) ==
+		       NN_MODEL_ERR_SLOT);
+		assert(nn_tflm_pick_slot(one, 1u, cap1, base + 1u, 16u, ALIGN, -1) ==
+		       NN_MODEL_ERR_ALIGN);
+		assert(nn_tflm_pick_slot(one, 1u, cap1, base + 1u, 16u, ALIGN, 0) ==
+		       NN_MODEL_ERR_ALIGN);
+		assert(nn_tflm_pick_slot(one, 1u, cap1, base, 0u, ALIGN, -1) == NN_MODEL_ERR_EMPTY);
+		assert(nn_tflm_pick_slot(one, 1u, cap1, base, 0u, ALIGN, 0) == NN_MODEL_ERR_SLOT);
 	}
 
 	printf("test_nn_tflm_fit: OK\n");

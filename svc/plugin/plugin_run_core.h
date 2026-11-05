@@ -32,10 +32,12 @@
  *
  * [!] THE CALLER STATES THE STAGING REGION; NOTHING HERE ASKS FOR IT.  The first
  * wio-lite-ai version re-queried the backend's load region from inside the
- * check, and the backend is DOUBLE-SLOTTED: it hands out the INACTIVE slot, so
- * once a reload adopted the staged model the query answered with the other one
- * and every container was refused on hardware.  The fact travels from the
- * caller that was handed it.
+ * check, and the backend was then DOUBLE-SLOTTED: it handed out the INACTIVE
+ * slot, so once a reload adopted the staged model the query answered with the
+ * other one and every container was refused on hardware.  Since issue #191 it
+ * has one buffer and refuses to hand it out while a model is open -- which is
+ * exactly when this runs -- so asking is still wrong, for the opposite reason.
+ * The fact travels from the caller that was handed it.
  *
  * No mutable storage: the state is the board's.
  */

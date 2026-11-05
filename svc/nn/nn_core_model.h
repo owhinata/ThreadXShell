@@ -155,8 +155,9 @@ struct nn_core_model_backend {
 	 *  model's own (one staging buffer, issue #191): this file then takes
 	 *  the open model down BEFORE fetch (step 9a above).  A property of the
 	 *  backend, not of the board: a board that can build more than one
-	 *  backend sets it for the one that has it.  0 (left out): the open
-	 *  model stands until the swap, as every backend did before. */
+	 *  backend sets it for the one that has it (wio-lite-ai and f746g-disco
+	 *  on tflm).  0 (left out): the open model stands until the swap
+	 *  (grove-vision-ai-v2, f746g-disco's other backends). */
 	int staging_is_open;
 };
 

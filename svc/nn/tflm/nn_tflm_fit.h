@@ -7,7 +7,7 @@
  * @brief   Which staging slot may adopt a model range -- the tflm backend's one
  *          decision about where a model lies, as a pure function (issue #159;
  *          shared by wio-lite-ai and f746g-disco, with wio-lite-ai's live-slot
- *          refusal, since issue #161).
+ *          refusal, since issue #161; called with one slot since issue #191).
  *
  * svc/nn/tflm/nn_tflm.cc accepts a model pointer by CONTAINMENT, not equality: a
  * plugin container's model section is handed over in place, at an offset inside the
@@ -17,13 +17,17 @@
  * model for as long as the interpreter lives -- and it starts on the alignment the
  * flatbuffer was laid out against.
  *
- * [!] AND NEVER THE LIVE SLOT.  load_region() hands out the slot the running model is
- * NOT in.  A range inside the live one means the caller used an answer from before
- * some other swap -- and by then it has already written its download over the
- * flatbuffer the interpreter is reading, so the model is gone either way.  Refusing
- * says so, rather than rebuilding from bytes that are half one model and half
- * another (the transactional restore would otherwise "succeed" on corrupt input).
- * The caller-side rule that prevents it is nn.h's: hold the NN session across
+ * [!] AND NEVER THE LIVE SLOT.  The backend has one slot since issue #191, and
+ * load_region() hands it out only while no model is open: the caller takes the
+ * open model down first.  So a range inside the slot while a model is still open
+ * means the caller skipped that -- and by then it has already written its download
+ * over the flatbuffer the interpreter is reading, so the model is gone either way.
+ * Refusing says so, rather than building from bytes that are half one model and
+ * half another; the refusal changes nothing, and is a report of the broken
+ * contract, not the protection (that is load_region()'s refusal, before anything
+ * is written).  The form below still takes @p n slots and a live index, so the
+ * rule reads the same whatever the slot count; the backend calls it with one.
+ * The caller-side rule is nn.h's: hold the NN session across
  * nn_model_load_region() AND nn_model_reload().
  *
  * [!] ONE COPY, USED BY THE BACKEND AND BY ITS HOST TEST

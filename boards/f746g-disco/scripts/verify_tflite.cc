@@ -72,10 +72,10 @@
 #include <string>
 #include <vector>
 
-/* Mirrors NN_TFLM_MODEL_KB, one staging slot (cmake/tflite-micro.cmake ->
+/* Mirrors NN_TFLM_MODEL_KB, the one staging buffer (cmake/tflite-micro.cmake ->
  * svc/nn/tflm/nn_tflm_mem.h).  Restated rather than included because that header
  * needs the firmware's compile definitions; the message below names its source. */
-static const uint32_t kStagingMax = 512u * 1024u;
+static const uint32_t kStagingMax = 1024u * 1024u;
 
 /* CRC-32/ISO-HDLC, bit by bit -- the same value svc/crc32.c produces on the board
  * and Python's zlib.crc32() produces on this machine.  Written out rather

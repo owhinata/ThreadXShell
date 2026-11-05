@@ -17,16 +17,16 @@
  * (owhinata/stm32f746g-disco#6) -- no DMA writes either, so no cache
  * maintenance is ever owed.  The section is NOLOAD (the FMC is not up at reset), so
  * neither buffer may assume it starts as zeros, and neither does: TFLM's allocator
- * writes the arena before any kernel reads it, and a slot is only read over the range
- * the SD read just wrote.  Since issue #130 the camera producer writes the model's
+ * writes the arena before any kernel reads it, and the model buffer is only read over
+ * the range the SD read just wrote.  Since issue #130 the camera producer writes the model's
  * input tensor straight into the arena, so the arena's bank3 require is also the
  * placement guarantee for those writes.
  *
- * Bank3 under tflm: the slots at 0xC0600000 (2 x 512 KB), then the arena at
- * 0xC0700000 (512 KB), 1.5 MB of 2 MB; the linker ASSERT enforces the fit.  [!] The
- * compiler emits these two in the REVERSE of their order here, which is what puts the
- * slots first -- the addresses the README lists; check them in shell.map after any
- * edit of this file.
+ * Bank3 under tflm: the model buffer at 0xC0600000 (1 MB, one buffer since issue
+ * #191; 2 x 512 KB before, the same bytes), then the arena at 0xC0700000 (512 KB),
+ * 1.5 MB of 2 MB; the linker ASSERT enforces the fit.  [!] The compiler emits these
+ * two in the REVERSE of their order here, which is what puts the buffer first -- the
+ * addresses the README lists; check them in shell.map after any edit of this file.
  */
 #include "nn_tflm_mem.h"
 
@@ -35,11 +35,11 @@
 uint8_t nn_tflm_arena[NN_TFLM_ARENA_BYTES]
 	__attribute__((aligned(32), section(".sdram.ai")));
 
-/* The two SD model slots (owhinata/stm32f746g-disco#89 P2), 16-aligned for
- * tflite::GetModel() (NN_MODEL_ALIGN). */
-uint8_t nn_tflm_model_buf[NN_TFLM_MODEL_SLOTS][NN_TFLM_MODEL_MAX]
+/* The SD model buffer (owhinata/stm32f746g-disco#89 P2; one buffer since issue #191),
+ * 16-aligned for tflite::GetModel() (NN_MODEL_ALIGN). */
+uint8_t nn_tflm_model_buf[NN_TFLM_MODEL_MAX]
 	__attribute__((aligned(16), section(".sdram.ai")));
 
 /* The staging capacity load_region() hands out, and the object the asset build reads
- * back out of shell.elf (board.cmake STAGE_SYMBOL nn_tflm_stage_cap): one slot. */
+ * back out of shell.elf (board.cmake STAGE_SYMBOL nn_tflm_stage_cap): the buffer. */
 const uint32_t nn_tflm_stage_cap = NN_TFLM_MODEL_MAX;

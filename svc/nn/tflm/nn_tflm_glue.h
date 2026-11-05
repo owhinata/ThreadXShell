@@ -10,7 +10,7 @@
  *          the arena, issue #167) and destruction.
  *
  * Two backends include it: svc/nn/tflm/nn_tflm.cc (the CPU-kernel backend of
- * wio-lite-ai and f746g-disco, which adopts models from staging slots) and the
+ * wio-lite-ai and f746g-disco, which adopts models from its staging buffer) and the
  * Ethos-U backend under svc/nn/ethosu/ (which interprets a model in place).  WHERE a
  * model may come from, and what is checked before the interpreter sees it, is each
  * backend's own policy and is NOT here -- that is the part that differs.

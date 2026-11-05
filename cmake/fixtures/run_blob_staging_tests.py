@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""Tests for cmake/check_blob_staging.py (issue #193).
+"""Tests for cmake/check_blob_staging.py (issue #193; shared by wio-lite-ai
+and f746g-disco since issue #194, run from each board's test/host_tests.sh with
+--board-dir).
 
 Two halves:
 
-  1. THE TWO NUMBERS THE GATE RESTATES ARE THE FIRMWARE'S.  The gate subtracts
-     HEADER_BYTES from a slot's size and reads the table in ENTRY_BYTES strides.
-     Both are facts of the C side (src/blob.h's BLOB_ERASE_UNIT and
-     sizeof(struct blob_slot), base first), so the host compiler is asked for
-     them through the real headers and each is compared with the gate's.  Change one
-     side alone and this fails -- which is what keeps a smaller header from
-     quietly loosening the gate.  Needs only the host gcc, so it always runs.
+  1. THE NUMBERS THE GATE IS GIVEN OR RESTATES ARE THE FIRMWARE'S.  The gate
+     subtracts the --header-bytes the board's board.cmake passes from a slot's
+     size and reads the table in ENTRY_BYTES strides.  Both are facts of the C
+     side (the board's src/blob.h BLOB_ERASE_UNIT and sizeof(struct blob_slot),
+     base first), so the host compiler is asked for them through the real
+     headers and each is compared with what the board passes and with the
+     gate's.  Change one side alone and this fails -- which is what keeps a
+     smaller header from quietly loosening the gate.  The backend lists the
+     board passes must also cover every CONFIG_NN_BACKEND it offers.  Needs only
+     the host gcc, so it always runs.
 
   2. SYNTHETIC IMAGES, one rule broken in each (needs --cc, the pinned
      arm-none-eabi-gcc).  The control PASSES; every refusal is asserted on its
@@ -20,14 +25,14 @@ Two halves:
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CMAKE_DIR = os.path.dirname(HERE)
-BOARD = os.path.dirname(CMAKE_DIR)
-REPO = os.path.dirname(os.path.dirname(BOARD))
+REPO = os.path.dirname(CMAKE_DIR)
 GATE = os.path.join(CMAKE_DIR, "check_blob_staging.py")
 sys.path.insert(0, CMAKE_DIR)
 import check_blob_staging  # noqa: E402
@@ -59,15 +64,42 @@ int main(void)
 '''
 
 
-def const_cases(work, host_cc):
+def board_gate_args(board):
+    """What the board's board.cmake passes the gate: (header, staged, unstaged,
+    offered backends).  [!] Read from the one call: a board.cmake that calls the
+    gate twice, or not at all, or passes no --header-bytes, is a failure."""
+    with open(os.path.join(board, "board.cmake")) as fh:
+        text = fh.read()
+    calls = [m.start() for m in re.finditer(
+        r"\$\{CMAKE_SOURCE_DIR\}/cmake/check_blob_staging\.py\"", text)]
+    if len(calls) != 1:
+        return None, "board.cmake calls check_blob_staging.py %d times" % len(
+            calls)
+    # The call's arguments run to the end of its add_custom_command(...).
+    end = text.find("VERBATIM", calls[0])
+    call = text[calls[0]:end]
+    hdr = re.findall(r"--header-bytes\s+(\d+)", call)
+    staged = re.findall(r"--staged-backend\s+([A-Za-z0-9_]+)", call)
+    unstaged = re.findall(r"--unstaged-backend\s+([A-Za-z0-9_]+)", call)
+    offered = re.search(r"set_property\(CACHE CONFIG_NN_BACKEND PROPERTY "
+                        r"STRINGS([^)]*)\)", text)
+    if len(hdr) != 1:
+        return None, "the gate call passes --header-bytes %d times" % len(hdr)
+    if offered is None:
+        return None, "board.cmake declares no CONFIG_NN_BACKEND STRINGS"
+    return (int(hdr[0]), staged, unstaged, offered.group(1).split()), ""
+
+
+def const_cases(work, host_cc, board, includes):
     c = os.path.join(work, "consts.c")
     exe = os.path.join(work, "consts")
     with open(c, "w") as fh:
         fh.write(CONSTS_SRC)
-    r = subprocess.run([host_cc, "-std=c11",
-                        "-I", os.path.join(BOARD, "src"),
-                        "-I", os.path.join(BOARD, "port", "nor"),
-                        "-I", os.path.join(REPO, "svc"),
+    inc = ["-I", os.path.join(board, "src")]
+    for d in includes:
+        inc += ["-I", os.path.join(board, d)]
+    r = subprocess.run([host_cc, "-std=c11"] + inc +
+                       ["-I", os.path.join(REPO, "svc"),
                         "-I", os.path.join(REPO, "svc", "blob"),
                         c, "-o", exe], capture_output=True, text=True)
     if r.returncode != 0:
@@ -75,9 +107,6 @@ def const_cases(work, host_cc):
         return
     unit, entry, off_base, off_size = (int(x) for x in subprocess.run(
         [exe], capture_output=True, text=True, check=True).stdout.split())
-    judge("header_is_erase_unit", unit == check_blob_staging.HEADER_BYTES,
-          "src/blob.h BLOB_ERASE_UNIT is %d, the gate's HEADER_BYTES %d"
-          % (unit, check_blob_staging.HEADER_BYTES))
     judge("entry_is_struct_size", entry == check_blob_staging.ENTRY_BYTES,
           "sizeof(struct blob_slot) is %d, the gate's ENTRY_BYTES %d"
           % (entry, check_blob_staging.ENTRY_BYTES))
@@ -86,6 +115,19 @@ def const_cases(work, host_cc):
     judge("entry_is_base_then_size", (off_base, off_size) == (0, 4),
           "struct blob_slot has base at %d and size at %d, the gate reads "
           "them at 0 and 4" % (off_base, off_size))
+    got, why = board_gate_args(board)
+    judge("board_gate_call", got is not None, why)
+    if got is None:
+        return
+    header, staged, unstaged, offered = got
+    judge("header_is_erase_unit", unit == header,
+          "src/blob.h BLOB_ERASE_UNIT is %d, board.cmake passes "
+          "--header-bytes %d" % (unit, header))
+    judge("every_backend_listed",
+          set(offered) == set(staged) | set(unstaged) and
+          not set(staged) & set(unstaged) and bool(staged),
+          "the board offers %s; the gate is told staged %s, unstaged %s"
+          % (offered, staged, unstaged))
 
 
 # --- 2. synthetic images ----------------------------------------------------
@@ -122,12 +164,25 @@ def staging(cap=MB, buf=MB, capname="nn_tflm_stage_cap",
 
 STD = [MB, MB, 512 * 1024, 256 * 1024]
 
-# (name, backend, source, want rc, substring the output must carry)
+# What every image case tells the gate unless it says otherwise: the header
+# unit and the two backend lists, written out (not read from any board).
+STD_ARGS = ["--header-bytes", str(HDR), "--staged-backend", "tflm",
+            "--unstaged-backend", "null"]
+RELOC_ARGS = STD_ARGS + ["--unstaged-backend", "stedgeai_reloc"]
+
+# (name, backend, source, want rc, substring the output must carry[, args])
 CASES = [
     ("control_tflm", "tflm", table(STD) + staging(), 0, "OK -- 4 slots"),
     ("edge_exact_fit", "tflm", table([MB + HDR]) + staging(), 0,
      "0 B to spare"),
     ("slot_too_big", "tflm", table([MB + 2 * HDR]) + staging(), 1,
+     "could never be loaded"),
+    # The same slot as edge_exact_fit against a buffer ONE BYTE smaller: slot
+    # sizes move in header units, so only the capacity can walk the boundary
+    # byte by byte, and a comparison loosened by one would pass every case
+    # above.
+    ("cap_one_byte_short", "tflm",
+     table([MB + HDR]) + staging(cap=MB - 1, buf=MB - 1), 1,
      "could never be loaded"),
     ("big_slot_last", "tflm", table(STD + [2 * MB]) + staging(), 1,
      "slot 4 (0x003c0000"),
@@ -156,11 +211,37 @@ CASES = [
      "0 symbols named nn_tflm_stage_cap"),
     ("null_table_missing", "null", table(STD, name="other_table"), 1,
      "0 symbols named blob_map_slots;"),
+    # issue #194: the header unit is the board's argument, and it is USED -- a
+    # slot one unit over the buffer passes only when the unit is two.
+    ("header_arg_used", "tflm", table([MB + 2 * HDR]) + staging(), 0,
+     "0 B to spare", ["--header-bytes", str(2 * HDR),
+                      "--staged-backend", "tflm"]),
+    # issue #194 D4: a backend the board says loads elsewhere is not applicable,
+    # checked against the image like null.
+    ("reloc_not_applicable", "stedgeai_reloc", table(STD), 0,
+     "NOT APPLICABLE -- backend stedgeai_reloc", RELOC_ARGS),
+    ("reloc_but_buffer", "stedgeai_reloc", table(STD) + staging(), 1,
+     "the build and the image disagree", RELOC_ARGS),
+    ("reloc_table_missing", "stedgeai_reloc",
+     table(STD, name="other_table"), 1, "0 symbols named blob_map_slots;",
+     RELOC_ARGS),
+    ("reloc_unlisted", "stedgeai_reloc", table(STD), 2, "unknown backend"),
+    ("header_zero", "tflm", table(STD) + staging(), 2, "is not a size",
+     ["--header-bytes", "0", "--staged-backend", "tflm"]),
+    ("header_absent", "tflm", table(STD) + staging(), 2, "bad arguments",
+     ["--staged-backend", "tflm"]),
+    ("no_staged_backend", "null", table(STD), 2, "names no staged backend",
+     ["--header-bytes", str(HDR), "--unstaged-backend", "null"]),
+    ("backend_both_ways", "tflm", table(STD) + staging(), 2,
+     "both staged and unstaged",
+     STD_ARGS + ["--unstaged-backend", "tflm"]),
 ]
 
 
 def image_cases(cc, work):
-    for name, backend, src, want, needle in CASES:
+    for case in CASES:
+        name, backend, src, want, needle = case[:5]
+        args = case[5] if len(case) > 5 else STD_ARGS
         c = os.path.join(work, name + ".c")
         elf = os.path.join(work, name + ".elf")
         with open(c, "w") as fh:
@@ -173,8 +254,8 @@ def image_cases(cc, work):
         if r.returncode != 0:
             judge(name, False, "did not link: " + r.stderr[:200])
             continue
-        r = subprocess.run([sys.executable, GATE, elf, "--backend", backend],
-                           capture_output=True, text=True)
+        r = subprocess.run([sys.executable, GATE, elf, "--backend", backend]
+                           + args, capture_output=True, text=True)
         out = r.stdout + r.stderr
         judge(name, r.returncode == want and needle in out,
               "rc %d (want %d): %s" % (r.returncode, want, out.strip()))
@@ -200,8 +281,8 @@ def image_cases(cc, work):
     if r.returncode != 0:
         judge("table_twice", False, "did not link: " + r.stderr[:200])
     else:
-        r = subprocess.run([sys.executable, GATE, elf, "--backend", "tflm"],
-                           capture_output=True, text=True)
+        r = subprocess.run([sys.executable, GATE, elf, "--backend", "tflm"]
+                           + STD_ARGS, capture_output=True, text=True)
         judge("table_twice", r.returncode == 1 and
               "2 symbols named blob_map_slots;" in r.stderr, r.stderr)
 
@@ -209,26 +290,32 @@ def image_cases(cc, work):
     junk = os.path.join(work, "junk.elf")
     with open(junk, "wb") as fh:
         fh.write(b"not an elf")
-    r = subprocess.run([sys.executable, GATE, junk, "--backend", "tflm"],
-                       capture_output=True, text=True)
+    r = subprocess.run([sys.executable, GATE, junk, "--backend", "tflm"]
+                       + STD_ARGS, capture_output=True, text=True)
     judge("not_an_elf", r.returncode == 2 and "CANNOT CHECK" in r.stderr,
           r.stderr)
     r = subprocess.run([sys.executable, GATE,
                         os.path.join(work, "control_tflm.elf"),
-                        "--backend", "stedgeai"], capture_output=True,
-                       text=True)
+                        "--backend", "stedgeai"] + STD_ARGS,
+                       capture_output=True, text=True)
     judge("unknown_backend", r.returncode == 2 and "CANNOT CHECK" in r.stderr,
           r.stderr)
 
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--board-dir", required=True,
+                    help="boards/<board>: its src/blob.h and board.cmake")
+    ap.add_argument("--include", action="append", default=[],
+                    help="another include directory blob.h needs, relative to "
+                         "the board (port/nor, port/qspi)")
     ap.add_argument("--host-cc", default="gcc")
     ap.add_argument("--cc", help="arm-none-eabi-gcc, for the image cases")
     args = ap.parse_args()
-    print("run_blob_staging_tests:")
+    board = os.path.abspath(args.board_dir)
+    print("run_blob_staging_tests (%s):" % os.path.basename(board))
     with tempfile.TemporaryDirectory() as work:
-        const_cases(work, args.host_cc)
+        const_cases(work, args.host_cc, board, args.include)
         if args.cc:
             image_cases(args.cc, work)
         else:

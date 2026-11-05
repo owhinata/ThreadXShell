@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Post-link guard: every blob slot's payload fits the model staging buffer
-(issue #193).
+(issue #193; shared by wio-lite-ai and f746g-disco since issue #194).
 
 WHY THIS EXISTS
 ---------------
@@ -9,37 +9,49 @@ tflm backend's one staging buffer before anything parses it, and refuses a blob
 longer than the buffer.  So a slot whose payload area is larger than the buffer
 is space the store will happily fill -- `blob write` takes the file -- with a
 model this firmware can never load, and the operator finds out only after the
-transfer.  The two numbers live in different places (the slot table is
-src/blob_slots.c, the buffer is NN_TFLM_MODEL_KB in cmake/tflite-micro.cmake,
-private to the tflm library), so no C _Static_assert can see both without
-wiring one into the other.  This reads BOTH out of the SHIPPED IMAGE and
-requires
+transfer.  The two numbers live in different places (the slot table is the
+board's src/blob_slots.c, the buffer is NN_TFLM_MODEL_KB in the board's
+cmake/tflite-micro.cmake, private to the tflm library), so no C _Static_assert
+can see both without wiring one into the other.  This reads BOTH out of the
+SHIPPED IMAGE and requires
 
-    staging capacity >= the largest slot's size - HEADER_BYTES
+    staging capacity >= the largest slot's size - the header unit
 
 [!] READ BACK, NOT RESTATED.  The table is the const `blob_map_slots[]` and its
 `blob_map_slots_count` (the fixed names svc/blob/blob_map.h declares, kept in
-the image by -Wl,--require-defined in board.cmake, since LTO folds the count
-into code and would otherwise drop the symbol); the capacity is the const
+the image by -Wl,--require-defined in board.cmake: LTO folds the count into
+code, and without a reader --gc-sections drops both); the capacity is the const
 `nn_tflm_stage_cap` the backend hands out (svc/nn/tflm/nn_tflm_mem.h), and the
 buffer behind it is `nn_tflm_model_buf`, which must be at least that long.  The
 words are read from the image's loaded bytes, like cmake/build_asset.py's
 stage_capacity() and check_policy_probe.py.
 
-[!] TWO NUMBERS ARE RESTATED HERE, AND THE HOST TEST TIES THEM TO THE FIRMWARE.
-HEADER_BYTES is src/blob.h's BLOB_ERASE_UNIT (the slot's header sector) and
-ENTRY_BYTES is sizeof(struct blob_slot), read as <base, size>.  The host test
-(cmake/fixtures/run_blob_staging_tests.py, from test/host_tests.sh) compiles
-blob.h and blob_map.h and refuses when any of the three differs from this file,
-so a change to one side alone fails the suite rather than quietly loosening this
-gate.  (ENTRY_BYTES is also checked against the image: the table's size must be
+THE BOARD PASSES ITS OWN FACTS, AND ONLY THOSE (issue #194).
+  --header-bytes      the header unit at the top of every slot (the board's
+                      src/blob.h BLOB_ERASE_UNIT)
+  --backend           what board.cmake compiled (CONFIG_NN_BACKEND)
+  --staged-backend    each backend of the board that loads a model through the
+                      tflm staging buffer (and so must hold it)
+  --unstaged-backend  each backend that does not (and so must not)
+A backend in neither list could not be checked, which stops the build.
+
+[!] TWO NUMBERS ARE RESTATED, AND THE HOST TEST TIES THEM TO THE FIRMWARE.
+--header-bytes is a literal in the board's board.cmake and ENTRY_BYTES (here)
+is sizeof(struct blob_slot), read as <base, size>.  The host test
+(cmake/fixtures/run_blob_staging_tests.py, from each board's test/host_tests.sh)
+compiles the board's blob.h and blob_map.h, reads the --header-bytes the
+board.cmake passes, and refuses when any of them differs, so a change to one
+side alone fails the suite rather than quietly loosening this gate.
+(ENTRY_BYTES is also checked against the image: the table's size must be
 exactly count x ENTRY_BYTES.)
 
 [!] "NOT APPLICABLE" IS DECIDED BY THE BUILD AND CHECKED AGAINST THE IMAGE.
---backend says what board.cmake compiled (CONFIG_NN_BACKEND).  `null` has no
-staging buffer and no `nn model load`, so there is nothing to fit -- but this
-does not take that on trust: a `null` image that holds the staging symbols, or
-a `tflm` image that does not, is a refusal.  Reading nothing is never a pass.
+An unstaged backend (`null`; on f746g-disco also `stedgeai`, whose model is
+linked in, and `stedgeai_reloc`, which loads through its own loader into its
+own 448 KB slots and refuses at load what does not fit) has nothing to fit --
+but this does not take that on trust: an unstaged image that holds the staging
+symbols, or a staged one that does not, is a refusal.  The table is read either
+way.  Reading nothing is never a pass.
 
 Exit status 0 = pass (or not applicable, said so); 1 = a slot does not fit or
 the image contradicts itself; 2 = the check could not be performed.  The build
@@ -52,15 +64,12 @@ import os
 import struct
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "..", "..", "cmake"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from thumb_stack_analysis import Elf, InputError  # noqa: E402
 
 CANNOT_CHECK = 2
 
-# src/blob.h BLOB_ERASE_UNIT -- the header sector at the top of every slot.
-HEADER_BYTES = 4096
-# sizeof(struct blob_slot) -- { uint32_t base; uint32_t size; }.
+# sizeof(struct blob_slot) -- { uint32_t base; uint32_t size; }, svc/blob/blob_map.h.
 ENTRY_BYTES = 8
 
 TABLE = "blob_map_slots"
@@ -113,7 +122,7 @@ def const_bytes(elf, name):
     return elf.raw[off:off + size]
 
 
-def read_table(elf):
+def read_table(elf, header):
     raw = const_bytes(elf, TABLE)
     if len(raw) % ENTRY_BYTES:
         raise Refuse("%s is %d B, not a whole number of %d-byte entries"
@@ -130,9 +139,9 @@ def read_table(elf):
     slots = [struct.unpack_from("<II", raw, i * ENTRY_BYTES)
              for i in range(count)]
     for i, (base, size) in enumerate(slots):
-        if size <= HEADER_BYTES:
+        if size <= header:
             raise Refuse("slot %d (0x%08x) is %d B, no payload after its "
-                         "%d B header" % (i, base, size, HEADER_BYTES))
+                         "%d B header" % (i, base, size, header))
     return slots
 
 
@@ -149,21 +158,22 @@ def stage(elf):
     return cap, buf
 
 
-def check(elf, backend):
+def check(elf, backend, staged, header):
     """(status, message) -- 0 pass / n.a., 1 refusal."""
-    slots = read_table(elf)
+    slots = read_table(elf, header)
     i, (base, size) = max(enumerate(slots), key=lambda e: e[1][1])
-    payload = size - HEADER_BYTES
+    payload = size - header
     present = [n for n in (CAP, BUF) if named(elf, n)]
-    if backend == "null":
+    if not staged:
         if present:
-            raise Refuse("built as backend null, but the image holds %s -- "
+            raise Refuse("built as backend %s, but the image holds %s -- "
                          "the build and the image disagree about whether "
-                         "there is a staging buffer" % ", ".join(present))
-        return 0, ("NOT APPLICABLE -- backend null has no staging buffer and "
-                   "no `nn model load`; the table was read (%d slots, largest "
-                   "payload %d B in slot %d) and nothing is loaded from it"
-                   % (len(slots), payload, i))
+                         "there is a staging buffer"
+                         % (backend, ", ".join(present)))
+        return 0, ("NOT APPLICABLE -- backend %s does not load through the "
+                   "tflm staging buffer; the table was read (%d slots, largest "
+                   "payload %d B in slot %d) and nothing here is loaded from "
+                   "it through that buffer" % (backend, len(slots), payload, i))
     cap, buf = stage(elf)
     if payload > cap:
         raise Refuse("slot %d (0x%08x, %d B) holds %d B of payload, and the "
@@ -180,10 +190,38 @@ def main(argv=None):
     ap.add_argument("elf")
     ap.add_argument("--backend", required=True,
                     help="CONFIG_NN_BACKEND the image was built with")
-    args = ap.parse_args(argv)
-    if args.backend not in ("tflm", "null"):
+    ap.add_argument("--staged-backend", action="append", default=[],
+                    help="a backend that loads through the staging buffer")
+    ap.add_argument("--unstaged-backend", action="append", default=[],
+                    help="a backend that does not")
+    ap.add_argument("--header-bytes", type=int, required=True,
+                    help="the board's header unit (src/blob.h BLOB_ERASE_UNIT)")
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit:
+        print("check_blob_staging: CANNOT CHECK -- bad arguments",
+              file=sys.stderr)
+        return CANNOT_CHECK
+    if not args.staged_backend:
+        print("check_blob_staging: CANNOT CHECK -- the board names no staged "
+              "backend", file=sys.stderr)
+        return CANNOT_CHECK
+    both = set(args.staged_backend) & set(args.unstaged_backend)
+    if both:
+        print("check_blob_staging: CANNOT CHECK -- %s is both staged and "
+              "unstaged" % ", ".join(sorted(both)), file=sys.stderr)
+        return CANNOT_CHECK
+    if args.backend in args.staged_backend:
+        staged = True
+    elif args.backend in args.unstaged_backend:
+        staged = False
+    else:
         print("check_blob_staging: CANNOT CHECK -- unknown backend %r"
               % args.backend, file=sys.stderr)
+        return CANNOT_CHECK
+    if args.header_bytes <= 0:
+        print("check_blob_staging: CANNOT CHECK -- --header-bytes %d is not a "
+              "size" % args.header_bytes, file=sys.stderr)
         return CANNOT_CHECK
     try:
         elf = Elf(args.elf)
@@ -191,7 +229,7 @@ def main(argv=None):
         print("check_blob_staging: CANNOT CHECK -- %s" % exc, file=sys.stderr)
         return CANNOT_CHECK
     try:
-        rc, msg = check(elf, args.backend)
+        rc, msg = check(elf, args.backend, staged, args.header_bytes)
     except Refuse as exc:
         print("check_blob_staging: FAIL -- %s" % exc, file=sys.stderr)
         return 1

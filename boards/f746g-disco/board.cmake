@@ -533,6 +533,16 @@ add_executable(shell
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_report.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/fs_cmd_core.c"
     "${BOARD_DIR}/port/qspi/qspi_flash.c"
+    # The blob store on the QSPI NOR (issue #194), the same split as
+    # wio-lite-ai's: this board's interval, reads, erases and busy flag
+    # (src/blob.c) and its slot table (src/blob_slots.c) over the shared header
+    # format and table rules.  svc/crc32.c is here for the store's verify, and
+    # serves the plugin loader's digest too.
+    "${BOARD_DIR}/src/blob.c"
+    "${BOARD_DIR}/src/blob_slots.c"
+    "${CMAKE_SOURCE_DIR}/svc/blob/blob_state.c"
+    "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+    "${CMAKE_SOURCE_DIR}/svc/crc32.c"
     "${BOARD_DIR}/port/sd/sd_card.c"
     "${BOARD_DIR}/port/camera/camera.c"
     "${BOARD_DIR}/port/camera/camera_svc_f746.c"  # the shared `camera` command's adapter (#143)
@@ -575,6 +585,7 @@ target_include_directories(shell PRIVATE
     "${TX_DIR}/utility/execution_profile_kit"   # EPK header (`thread` cpu%)
     "${BOARD_DIR}/port/threadx"
     "${BOARD_DIR}/port/qspi"
+    "${BOARD_DIR}/src"             # blob.h, the store's interface (cmd_qspi.c)
     "${BOARD_DIR}/port/sd"
     "${BOARD_DIR}/port/camera"
     "${BOARD_DIR}/port/ltdc"
@@ -759,7 +770,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_board.c" # its firmware entry
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"   # `nn info`'s stack lines
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c" # ...and the claims around them
-        "${CMAKE_SOURCE_DIR}/svc/crc32.c"                # the digest and the load CRC
+        # (svc/crc32.c, the digest and the load CRC, is in the main sources
+        # since issue #194: the blob store uses it in every backend.)
         "${CMAKE_SOURCE_DIR}/svc/nn/nn_container.c"      # ...over the bytes read
         # Step 4b: the loader, the lease, the painter and the decoder branch.
         # What is board-independent is svc/'s (shared with wio-lite-ai); what
@@ -903,9 +915,12 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     #   abi_layout        svc/plugin/plugin_abi.h's layout as JSON, for the packer
     #   verify_container  svc/plugin/plugin_load.c -- the device's validator -- on
     #                     the host, so a container cannot pass here and fail there
-    # (No slot table: this board's destination is a file on the card, fit-checked
-    # against the staging capacity read back from shell.elf.)
+    #   slot_table        THIS board's slot capacities, from src/blob_slots.c
+    #                     (issue #194; no asset reads it yet -- the destination
+    #                     is still a file on the card, fit-checked against the
+    #                     staging capacity read back from shell.elf)
     set(F746_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
+    set(F746_SLOT_TABLE_JSON "${CMAKE_BINARY_DIR}/plugin/slot_table.json")
     set(F746_CONTAINER_VERIFIER "${CMAKE_BINARY_DIR}/verify_container")
     set(F746_PACKER "${CMAKE_SOURCE_DIR}/asset/tools/pack_container.py")
 
@@ -922,6 +937,34 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
             DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
                     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
             COMMENT "host cc -> abi_layout.json (the packer's view of the ABI)"
+            VERBATIM)
+        # The table the firmware links, through the same lookups, the same way
+        # as wio-lite-ai's: the tool compiles src/blob_slots.c with
+        # svc/blob/blob_map.c and takes the interval and the erase unit from
+        # src/blob.h (whose closure reaches port/qspi/qspi_flash.h), and the
+        # compiler's depfile lists every header it opened.  [!] slot_table.c is
+        # the LAST source: gcc writes the depfile of the last input only, and
+        # that is the one whose closure has the interval in it.  It refuses (and
+        # the build stops) on a table the store would refuse at run time.
+        add_custom_command(
+            OUTPUT "${F746_SLOT_TABLE_JSON}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
+            COMMAND "${F746_HOST_CC}" -std=c11 -O1 -Wall -Wextra -Werror
+                    -MD -MF "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
+                    -MT "${F746_SLOT_TABLE_JSON}"
+                    -I "${BOARD_DIR}/src" -I "${BOARD_DIR}/port/qspi"
+                    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/blob"
+                    "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+                    "${BOARD_DIR}/src/blob_slots.c"
+                    "${BOARD_DIR}/scripts/slot_table.c"
+                    -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
+            COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table"
+                    > "${F746_SLOT_TABLE_JSON}"
+            DEPFILE "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
+            DEPENDS "${BOARD_DIR}/scripts/slot_table.c"
+                    "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+                    "${BOARD_DIR}/src/blob_slots.c"
+            COMMENT "host cc -> slot_table.json (payload capacity per blob slot)"
             VERBATIM)
         add_custom_command(
             OUTPUT "${F746_CONTAINER_VERIFIER}"
@@ -942,7 +985,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
             COMMENT "host cc -> verify_container (the device's own validator)"
             VERBATIM)
         add_custom_target(container-tools ALL
-            DEPENDS "${F746_ABI_LAYOUT_JSON}" "${F746_CONTAINER_VERIFIER}")
+            DEPENDS "${F746_ABI_LAYOUT_JSON}" "${F746_SLOT_TABLE_JSON}"
+                    "${F746_CONTAINER_VERIFIER}")
     else()
         message(STATUS "f746g-disco: no host C compiler -- asset-* targets will refuse")
     endif()
@@ -1093,6 +1137,37 @@ if(CONFIG_NN_BACKEND STREQUAL "stedgeai_reloc")
 endif()
 
 # Shared service storage checks are derived after this file by the root CMake.
+
+# --- every blob slot fits the model staging buffer (issue #194) ---------------
+#
+# `nn model load --name` copies a whole payload into the tflm backend's one
+# staging buffer, so a slot larger than that buffer would store models this
+# firmware can never load.  cmake/check_blob_staging.py (shared with
+# wio-lite-ai) reads the slot table and the buffer's capacity back out of the
+# LINKED IMAGE.  This board passes its own facts only: the backend it compiled
+# and the header unit at the top of every slot (src/blob.h BLOB_ERASE_UNIT;
+# test/host_tests.sh compares the two).  `null` has no buffer and is NOT
+# APPLICABLE; `stedgeai_reloc` loads through its own loader into its own slots
+# (448 KB) and is OUT OF SCOPE here -- its load refuses what does not fit
+# (issue #194 D4); `stedgeai` has its model linked in.  Each is checked against
+# the image (no tflm staging symbols in it).
+#
+# [!] KEEP THE TABLE AND ITS COUNT AS SYMBOLS.  Until the `blob` command and the
+# nn reader exist, nothing in the image refers to either, and --gc-sections
+# drops them; --require-defined keeps both and fails the link, naming the
+# symbol, if the board stops defining either.
+target_link_options(shell PRIVATE
+    "-Wl,--require-defined=blob_map_slots"
+    "-Wl,--require-defined=blob_map_slots_count")
+add_custom_command(TARGET shell POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/cmake/check_blob_staging.py"
+            $<TARGET_FILE:shell> --backend "${CONFIG_NN_BACKEND}"
+            --staged-backend tflm --unstaged-backend null
+            --unstaged-backend stedgeai --unstaged-backend stedgeai_reloc
+            --header-bytes 4096
+    COMMENT "check every blob slot's payload fits the model staging buffer"
+    VERBATIM)
 
 add_custom_command(TARGET shell POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"

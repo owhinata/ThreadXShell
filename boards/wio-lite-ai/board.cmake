@@ -1325,9 +1325,12 @@ add_custom_command(TARGET shell POST_BUILD
 # staging buffer, so a slot larger than that buffer would store models this
 # firmware can never load.  The slot table (src/blob_slots.c) and the buffer
 # (NN_TFLM_MODEL_KB, private to the tflm library) are in different places, so
-# this reads both back out of the LINKED IMAGE (cmake/check_blob_staging.py).
-# The backend is passed so that `null` -- no buffer, no `nn model load` -- is
-# reported NOT APPLICABLE, and the script checks the image agrees with it.
+# this reads both back out of the LINKED IMAGE (cmake/check_blob_staging.py,
+# shared with f746g-disco since issue #194).  This board passes its own facts:
+# the backend it compiled, which of its backends load through the staging
+# buffer (tflm) and which do not (null, reported NOT APPLICABLE and checked
+# against the image), and the header unit at the top of every slot (src/blob.h
+# BLOB_ERASE_UNIT; test/host_tests.sh compares the two).
 # Negative tests: cmake/fixtures/run_blob_staging_tests.py.  A POST_BUILD of the
 # link, like the gates above, so flash and the assets never see an image that
 # failed it.  With BSP_ENABLE_KV off there is no store, and nothing to check.
@@ -1341,8 +1344,10 @@ if(BSP_ENABLE_KV)
         "-Wl,--require-defined=blob_map_slots_count")
     add_custom_command(TARGET shell POST_BUILD
         COMMAND "${Python3_EXECUTABLE}"
-                "${BOARD_DIR}/cmake/check_blob_staging.py"
+                "${CMAKE_SOURCE_DIR}/cmake/check_blob_staging.py"
                 $<TARGET_FILE:shell> --backend "${CONFIG_NN_BACKEND}"
+                --staged-backend tflm --unstaged-backend null
+                --header-bytes 4096
         COMMENT "check every blob slot's payload fits the model staging buffer"
         VERBATIM)
 endif()

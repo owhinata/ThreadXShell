@@ -75,6 +75,11 @@ int qspi_flash_read(uint32_t addr, void *buf, uint32_t len);
 /** Nonzero when reads run on 4 data lines (0x6B); 0 = 1-line fallback. */
 int qspi_flash_quad_enabled(void);
 
+/** Nonzero once qspi_flash_init() brought the part up; every other call
+ *  returns QSPI_FLASH_ERR_STATE until then.  No flash transaction (issue #194:
+ *  the blob store asks before it acts, as wio-lite-ai's asks nor_flash_ready()). */
+int qspi_flash_ready(void);
+
 /**
  * Program @p len bytes at @p addr.  Split internally at 256 B page boundaries;
  * each page runs WREN -> PAGE PROGRAM (0x02) -> WIP wait -> flag-status check.

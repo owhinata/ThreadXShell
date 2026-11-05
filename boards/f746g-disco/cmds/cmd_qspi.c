@@ -20,11 +20,14 @@
  *
  * erase/test rewrite flash content, so they compile in only with
  * CLI_ENABLE_DANGEROUS_CMDS, like devmem.  They used to be refused while the
- * QSPI FileX/LevelX volume was mounted; issue #194 removed that filesystem, and
- * nothing else in this firmware writes the QSPI NOR.
+ * QSPI FileX/LevelX volume was mounted; since issue #194 the QSPI NOR is the
+ * blob store, and they take the store's busy flag (src/blob.h) for as long as
+ * they run -- so they are refused while a blob operation, or another erase/test
+ * from the other console or a background job, has it.
  *
  * Clean-room design; no third-party code reused.
  */
+#include "blob.h"            /* blob_busy_acquire / _release */
 #include "cli.h"
 #include "qspi_flash.h"
 
@@ -185,6 +188,19 @@ static int parse_subsector(struct cli_instance *sh, const char *s, uint32_t *add
 	return 0;
 }
 
+/* The store's busy flag, for the whole of one erase or test.  Without it two
+ * consoles could each run one on the same subsector, and a raw erase could land
+ * between a blob operation's header read and its use of it. */
+static int qspi_busy_gate(struct cli_instance *sh)
+{
+	if (blob_busy_acquire() != BLOB_OK) {
+		cli_error(sh, "qspi: busy -- a blob operation or another qspi "
+		              "erase/test is running; try again\r\n");
+		return -1;
+	}
+	return 0;
+}
+
 static int cmd_qspi_erase(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t addr;
@@ -194,7 +210,10 @@ static int cmd_qspi_erase(struct cli_instance *sh, int argc, char **argv)
 
 	if (parse_subsector(sh, argv[1], &addr) != 0)
 		return 1;
+	if (qspi_busy_gate(sh) != 0)
+		return 1;
 	rc = qspi_flash_erase_subsector(addr);
+	blob_busy_release();
 	if (rc != 0) {
 		cli_error(sh, "qspi: erase failed: %s\r\n", qspi_strerror(rc));
 		return 1;
@@ -283,12 +302,17 @@ static int qspi_test_run(struct cli_instance *sh, uint32_t addr)
 static int cmd_qspi_test(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t addr;
+	int rc;
 
 	(void)argc;
 
 	if (parse_subsector(sh, argv[1], &addr) != 0)
 		return 1;
-	return qspi_test_run(sh, addr);
+	if (qspi_busy_gate(sh) != 0)
+		return 1;
+	rc = qspi_test_run(sh, addr);
+	blob_busy_release();
+	return rc;
 }
 
 #endif /* CLI_ENABLE_DANGEROUS_CMDS */

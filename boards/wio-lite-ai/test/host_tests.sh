@@ -312,18 +312,23 @@ else
          "$HOST_TEST_REPO/tools/ (configure a wio build once to fetch it)" >&2
 fi
 
-# issue #193 -- tests for cmake/check_blob_staging.py, the post-link gate that
+# issue #193 -- tests for cmake/check_blob_staging.py (shared with f746g-disco
+# since issue #194), the post-link gate that
 # reads the slot table and the model staging capacity back out of the image and
 # refuses a slot whose payload the buffer could not hold.  The two numbers the
-# gate restates (the header sector, the table entry size) are compared with the
-# real src/blob.h on the host every time; the synthetic images -- one rule
+# gate is given or restates (the header sector this board's board.cmake passes,
+# the table entry size) are compared with the real src/blob.h on the host every
+# time, and so are the backend lists against the backends this board offers;
+# the synthetic images -- one rule
 # broken in each, both sides of the boundary, and the null backend's NOT
 # APPLICABLE with the image checked against it -- need the pinned toolchain and
 # SKIP loudly without it, like the reservation tests above.
 if [ -n "$gate_cc" ] && [ -x "$gate_cc" ]; then
-    python3 "$board/cmake/fixtures/run_blob_staging_tests.py" --cc "$gate_cc"
+    python3 "$repo/cmake/fixtures/run_blob_staging_tests.py" \
+        --board-dir "$board" --include port/nor --cc "$gate_cc"
 else
-    python3 "$board/cmake/fixtures/run_blob_staging_tests.py"
+    python3 "$repo/cmake/fixtures/run_blob_staging_tests.py" \
+        --board-dir "$board" --include port/nor
     echo "run_blob_staging_tests image cases: SKIPPED -- no arm-none-eabi" \
          "toolchain under $HOST_TEST_REPO/tools/" >&2
 fi

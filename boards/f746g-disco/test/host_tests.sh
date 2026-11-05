@@ -171,6 +171,46 @@ else
          "$HOST_TEST_REPO/tools/ (configure an f746 build once to fetch it)" >&2
 fi
 
+# issue #194 -- the blob store on the QSPI NOR.  First the slot table
+# (src/blob_slots.c), pinned entry by entry and checked against the interval
+# src/blob.h compiles into the firmware; then the store code itself
+# (src/blob.c), compiled unchanged against a 16 MB array for the NOR with the
+# qspi_flash_* calls replaced and counted and the PRIMASK intrinsics it takes
+# from the HAL traced (blob_shim/).  Until the `blob` command and the nn reader
+# arrive most of src/blob.c is dropped from the firmware by --gc-sections, so
+# this is where it runs.
+gcc $CFLAGS \
+    -I "$board/src" -I "$board/port/qspi" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/blob" \
+    "$here/test_blob_slots.c" "$board/src/blob_slots.c" \
+    "$HOST_TEST_SVC/blob/blob_map.c" "$HOST_TEST_SVC/blob/blob_state.c" \
+    "$HOST_TEST_SVC/crc32.c" \
+    $LDFLAGS -o "$out/test_blob_slots_f746"
+"$out/test_blob_slots_f746"
+gcc $CFLAGS -I "$here/blob_shim" \
+    -I "$board/src" -I "$board/port/qspi" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/blob" \
+    "$here/test_blob_store.c" "$board/src/blob.c" "$board/src/blob_slots.c" \
+    "$HOST_TEST_SVC/blob/blob_map.c" "$HOST_TEST_SVC/blob/blob_state.c" \
+    "$HOST_TEST_SVC/crc32.c" \
+    $LDFLAGS -o "$out/test_blob_store_f746"
+"$out/test_blob_store_f746"
+
+# issue #194 -- tests for cmake/check_blob_staging.py (shared with
+# wio-lite-ai), the post-link gate that reads the slot table and the model
+# staging capacity back out of the image.  The header unit this board's
+# board.cmake passes is compared with the real src/blob.h, and the backend
+# lists with the backends this board offers (stedgeai and stedgeai_reloc are
+# not applicable, as null is); the synthetic images need the pinned toolchain
+# and SKIP loudly without it.
+if [ -n "$gate_cc" ] && [ -x "$gate_cc" ]; then
+    python3 "$HOST_TEST_REPO/cmake/fixtures/run_blob_staging_tests.py" \
+        --board-dir "$board" --include port/qspi --cc "$gate_cc"
+else
+    python3 "$HOST_TEST_REPO/cmake/fixtures/run_blob_staging_tests.py" \
+        --board-dir "$board" --include port/qspi
+    echo "run_blob_staging_tests image cases: SKIPPED -- no arm-none-eabi" \
+         "toolchain under $HOST_TEST_REPO/tools/" >&2
+fi
+
 # issue #143 -- the `camera` table this board builds: the shared command
 # (shell/cmds/cmd_camera.c) against this board's REAL svc/camera_svc_config.h,
 # over the shared stub adapter.  A board subcommand that reuses a shared name

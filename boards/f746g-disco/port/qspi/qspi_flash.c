@@ -378,6 +378,11 @@ int qspi_flash_quad_enabled(void)
 	return quad_mode;
 }
 
+int qspi_flash_ready(void)
+{
+	return qspi_ready;
+}
+
 int qspi_flash_read_id(uint8_t id[3])
 {
 	int rc;

@@ -824,12 +824,20 @@ be sent again.
 The deepest `blob write` path is about 1.3 KB of the 4 KB console stack and the
 `nn model load` path about 2.0 KB (from the LTO `.su` files).
 
-Not yet measured on hardware (to be filled in from the first DFU of the #193
-firmware): the erase time of a 256 KB / 512 KB / 1 MB slot (the datasheet's
-64 KB block erase is 150 ms typical, 2 s maximum, so the announcement says
-about 1 s / 2 s / 3 s with 8 s / 16 s / 32 s at most), how long `kv get` waits
-on another console during an erase, and what `blob list` shows on the updated
-board before the store is re-filled.
+Seen on the board at the first DFU of the #193 firmware (2026-11-05, before the
+store was re-filled): `blob list` showed slots 0-2 `invalid` -- their bases
+0x100000 / 0x200000 / 0x300000 each held a header of the old store, and
+`blob info 0` gave "magic page is neither erased nor a header" -- slot 3
+`invalid` as well (0x400000 was the old `nor test` default address) and slots
+4-12 `empty`.  One `blob erase` per slot cleared the four; the old headers at
+0x180000 / 0x280000 / 0x380000 now lie inside a 1 MB payload and are never
+read as headers.  The six blobs were then re-sent by name and each stored CRC
+and read-back verify matched the sender's file.
+
+Not yet measured on hardware: the erase time of a 256 KB / 512 KB / 1 MB slot
+(the datasheet's 64 KB block erase is 150 ms typical, 2 s maximum, so the
+announcement says about 1 s / 2 s / 3 s with 8 s / 16 s / 32 s at most) and how
+long `kv get` waits on another console during an erase.
 
 ## Plugin containers (issues #108, #110, #116 = #78 Steps 3a, 3b and 3c)
 

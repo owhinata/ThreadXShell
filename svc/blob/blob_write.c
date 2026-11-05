@@ -130,10 +130,11 @@ static int sink_write(void *ctx, const uint8_t *data, uint32_t len)
 
 /* ---- the header ------------------------------------------------------------ */
 
-/* Body first, magic second, each its own transaction and each read back by the
- * writer.  Written together they would be one program that could land the magic
- * over a half-formed body: a slot that looks valid and is not. */
-static int write_header(struct wr *w, const char *name, uint32_t base)
+/* The body page: name, length, the payload CRC.  Its own transaction, read back
+ * by the writer.  Written together with the magic it would be one program that
+ * could land the magic over a half-formed body: a slot that looks valid and is
+ * not. */
+static int write_body(struct wr *w, const char *name, uint32_t base)
 {
 	struct blob_info info;
 
@@ -151,9 +152,14 @@ static int write_header(struct wr *w, const char *name, uint32_t base)
 	if (w->ops->program(w->ops->ctx, w->token, base + BLOB_HDR_PAGE,
 	                    w->stage, BLOB_BODY_SIZE) != 0)
 		return -1;
+	return 0;
+}
 
-	if (blob_hdr_encode_magic(w->stage, w->stage_len) !=
-	    BLOB_REJECT_NONE)
+/* The magic page, the last thing written and the only thing that makes the
+ * slot VALID.  Called only once the payload has been read back and matched. */
+static int write_magic(struct wr *w, uint32_t base)
+{
+	if (blob_hdr_encode_magic(w->stage, w->stage_len) != BLOB_REJECT_NONE)
 		return -1;
 	w->rep->transactions++;
 	if (w->ops->program(w->ops->ctx, w->token, base, w->stage,
@@ -199,10 +205,16 @@ enum blob_write_result blob_write_run(const struct blob_write_ops *ops,
 	unsigned count, i, target = 0u;
 	int cancelled = 0, claimed = 0, rc;
 
-	if (ops == NULL || rep == NULL || name == NULL ||
-	    ops->console_ready == NULL)
+	/* [!] THE REPORT IS CLEARED BEFORE ANY OTHER REFUSAL, so that every
+	 * return below leaves slot_chosen 0 until a slot really is chosen.  A
+	 * zeroed report used to read as "slot 0, reused" -- BLOB_CHOICE_REUSE is
+	 * 0 -- and the board's log said "slot 0" for writes refused long before
+	 * any slot was looked at (#194). */
+	if (rep == NULL)
 		return BLOB_WRITE_REFUSED;
 	memset(rep, 0, sizeof *rep);
+	if (ops == NULL || name == NULL || ops->console_ready == NULL)
+		return BLOB_WRITE_REFUSED;
 	/* [!] THE BUFFER BEFORE ANYTHING ELSE, the console question included.
 	 * Every use below -- a chunk, a header page, a read-back piece -- takes
 	 * whole pages out of it, so one smaller than a page could not hold a
@@ -253,6 +265,7 @@ enum blob_write_result blob_write_run(const struct blob_write_ops *ops,
 		goto out;
 	}
 	rep->slot = target;
+	rep->slot_chosen = 1;
 	if (ops->geometry(ops->ctx, target, &base, &payload_addr,
 	                  &payload_max) != 0) {
 		res = BLOB_WRITE_REFUSED;
@@ -336,12 +349,25 @@ enum blob_write_result blob_write_run(const struct blob_write_ops *ops,
 	 * may be written, and this file should ASK rather than conclude that from
 	 * its own control flow. */
 	if (blob_write_commit_check(&w.bk) != BLOB_WR_OK ||
-	    write_header(&w, name, base) != 0) {
+	    write_body(&w, name, base) != 0) {
 		res = BLOB_WRITE_PROG_FAILED;
 		goto out;
 	}
-	res = (verify_payload(&w) == 0) ? BLOB_WRITE_STORED
-	                                : BLOB_WRITE_VERIFY_FAILED;
+	/* [!] THE PAYLOAD IS READ BACK BEFORE THE MAGIC, NOT AFTER (#194).  The
+	 * magic is what makes `blob list` say valid and `nn model load` take the
+	 * slot, so a read-back that disagrees -- or cannot be done -- must leave
+	 * the slot without it: INCOMPLETE, with the name, length and CRC still
+	 * readable in the body.  Verified after the magic, a mismatch left a slot
+	 * that read valid over bytes that were not the file. */
+	if (verify_payload(&w) != 0) {
+		res = BLOB_WRITE_VERIFY_FAILED;
+		goto out;
+	}
+	/* A magic program that reports failure says nothing certain about the
+	 * page: it may be still erased, part-written or whole.  The payload under
+	 * it has been read back and matched either way. */
+	res = (write_magic(&w, base) == 0) ? BLOB_WRITE_STORED
+	                                   : BLOB_WRITE_PROG_FAILED;
 
 out:
 	/* THE ONE EXIT.  Both claims are given back here and nowhere else, in the

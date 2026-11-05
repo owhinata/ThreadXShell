@@ -9,7 +9,8 @@
  * reservation and the console claim -- and there are nine ways to leave: the
  * reservation refused, no slot to write into, the erase cancelled, the erase
  * incomplete, the console busy, the transfer cancelled or timed out, a program
- * refused, the header refused, the read-back disagreeing.  Each has to give
+ * refused, the header refused, the read-back disagreeing or failing.  Each has
+ * to give
  * back exactly what it took.  On a board perhaps two of those can be staged, each costs
  * flash cycles (on grove-vision-ai-v2, of a part whose endurance is not
  * documented, #89), and a leaked reservation does not announce itself -- it
@@ -70,6 +71,8 @@ struct mock {
 	unsigned reserves, unreserves, claims, releases, programs, erases;
 	unsigned receives, read_backs, stats, announces;
 	unsigned announce_slot;
+	unsigned magic_programs;  /* programs aimed at the magic page          */
+	unsigned read_backs_at_magic; /* read_backs when the magic was programmed */
 	uint32_t token_given, token_returned;
 	uint32_t prog_addr[LOG_PROGRAMS], prog_len[LOG_PROGRAMS];
 	/* what to break */
@@ -83,6 +86,12 @@ struct mock {
 	int reject_begin;         /* declare more than the slot can hold */
 	uint32_t declared, sent;  /* what block 0 says, and what arrives */
 	int corrupt_read_back;    /* the flash disagrees with what was written */
+	int fail_read_back;       /* the first read-back reports an error      */
+	/* What a FAILED program leaves in the flash: 0 nothing, 1 the first half
+	 * of what it was given, 2 all of it.  A program that reports failure says
+	 * nothing certain about the page, and the magic page's three outcomes
+	 * read differently (#194). */
+	int fail_writes;
 	unsigned count;           /* slots the table has */
 	/* the pretend flash and the pretend slot contents */
 	uint8_t flash[MOCK_FLASH];
@@ -141,8 +150,18 @@ static int mock_program(void *ctx, uint32_t token, uint32_t addr,
 		k->prog_len[k->programs - 1u] = len;
 	}
 	CHECK(token == MOCK_TOKEN, "program got token %08lX", (unsigned long)token);
-	if (k->program_fail_at != 0 && (unsigned)k->program_fail_at == k->programs)
+	if (addr == MOCK_BASE) {
+		k->magic_programs++;
+		k->read_backs_at_magic = k->read_backs;
+	}
+	if (k->program_fail_at != 0 && (unsigned)k->program_fail_at == k->programs) {
+		uint32_t n = (k->fail_writes == 2) ? len
+		           : (k->fail_writes == 1) ? len / 2u : 0u;
+
+		if (addr + n <= MOCK_FLASH)
+			memcpy(&k->flash[addr], data, n);
 		return -1;
+	}
 	CHECK(addr + len <= MOCK_FLASH, "program past the pretend part");
 	if (addr + len <= MOCK_FLASH)
 		memcpy(&k->flash[addr], data, len);
@@ -217,6 +236,8 @@ static int mock_read_back(void *ctx, uint32_t addr, void *buf, uint32_t len)
 
 	k->read_backs++;
 	if (addr + len > MOCK_FLASH)
+		return -1;
+	if (k->fail_read_back && k->read_backs == 1u)
 		return -1;
 	memcpy(buf, &k->flash[addr], len);
 	/* The flash disagreeing with what went into it: one byte, on the first
@@ -323,10 +344,48 @@ static void check_unwound(const char *what, int reserved, int claimed)
 	CHECK(!claimed || m.claims == 1u, "%s: claimed %u times", what, m.claims);
 }
 
+/* [!] The report is filled with 0xFF before every run, so a field the
+ * coordinator leaves unset shows up as garbage rather than as a plausible 0. */
 static enum blob_write_result run(const char *name, int want,
                                   struct blob_write_report *rep)
 {
+	memset(rep, 0xFF, sizeof *rep);
 	return blob_write_run(&OPS, g_stage, g_stage_len, name, want, rep);
+}
+
+/* Decode the pretend slot's header as `blob list` would. */
+static enum blob_slot_state slot_state(struct blob_info *info)
+{
+	return blob_hdr_decode(&m.flash[MOCK_BASE], BLOB_HDR_SPAN, MOCK_BASE,
+	                       MOCK_CAP, info, NULL);
+}
+
+/* [!] NOT CHOSEN MEANS slot_chosen IS 0 -- and slot 0 is a real slot, and
+ * BLOB_CHOICE_REUSE is 0, so a zeroed report used to read as "slot 0, reused"
+ * for writes refused before any slot was looked at (#194). */
+static void check_not_chosen(const char *what, const struct blob_write_report *rep)
+{
+	CHECK(rep->slot_chosen == 0, "%s: the report says a slot was chosen (%d, "
+	      "slot %u)", what, rep->slot_chosen, rep->slot);
+}
+
+static void check_chosen(const char *what, const struct blob_write_report *rep,
+                         unsigned slot)
+{
+	CHECK(rep->slot_chosen != 0 && rep->slot == slot,
+	      "%s: chosen %d, slot %u, expected slot %u", what, rep->slot_chosen,
+	      rep->slot, slot);
+}
+
+/* [!] The magic page is written after the WHOLE payload was read back: the
+ * first program aimed at it saw every read-back already done (#194). */
+static void check_magic_after_verify(const char *what)
+{
+	CHECK(m.magic_programs == 1u, "%s: the magic was programmed %u time(s)",
+	      what, m.magic_programs);
+	CHECK(m.read_backs > 0u && m.read_backs_at_magic == m.read_backs,
+	      "%s: the magic went down after %u of %u read-back(s)", what,
+	      m.read_backs_at_magic, m.read_backs);
 }
 
 /* ---- the path that works -------------------------------------------------- */
@@ -351,6 +410,8 @@ static void t_stored(void)
 	CHECK(m.programs == 3u, "%u program(s)", m.programs);
 	CHECK(m.announces == 1u && m.announce_slot == 1u,
 	      "announced %u time(s) for slot %u", m.announces, m.announce_slot);
+	check_chosen("stored", &rep, 1u);
+	check_magic_after_verify("stored");
 	check_unwound("stored", 1, 1);
 
 	/* The header is in the flash and decodes, magic and all -- which is the
@@ -384,6 +445,7 @@ static void t_stored(void)
 	/* 1 erase + 2 payload chunks + body + magic. */
 	CHECK(rep.transactions == 5u, "%lu transaction(s), expected 5",
 	      (unsigned long)rep.transactions);
+	check_magic_after_verify("full slot");
 	check_unwound("full slot", 1, 1);
 
 	/* One byte more than the slot holds is refused by the sink, before any of
@@ -410,6 +472,7 @@ static void t_choice(void)
 	      "a refused choice still erased or claimed");
 	CHECK(m.announces == 0u,
 	      "a refused choice still warned about destroying a slot");
+	check_not_chosen("need slot", &rep);
 	check_unwound("need slot", 1, 0);
 
 	reset();
@@ -418,6 +481,7 @@ static void t_choice(void)
 	CHECK(run("model.tflite", -1, &rep) == BLOB_WRITE_STORED &&
 	      rep.slot == 2u && rep.choice == BLOB_CHOICE_REUSE,
 	      "a known name did not go back to its slot");
+	check_chosen("reuse", &rep, 2u);
 	check_unwound("reuse", 1, 1);
 
 	reset();
@@ -428,6 +492,7 @@ static void t_choice(void)
 	      "a duplicate name was written to another slot");
 	CHECK(m.erases == 0u, "a duplicate name still erased something");
 	CHECK(m.announces == 0u, "a duplicate name still warned about a slot");
+	check_not_chosen("duplicate", &rep);
 	check_unwound("duplicate", 1, 0);
 
 	reset();
@@ -438,6 +503,7 @@ static void t_choice(void)
 	      "another blob was overwritten");
 	CHECK(m.erases == 0u, "an occupied slot was erased anyway");
 	CHECK(m.announces == 0u, "an occupied slot was announced anyway");
+	check_not_chosen("occupied", &rep);
 	check_unwound("occupied", 1, 0);
 
 	/* [!] No table, no reservation: nothing is taken before there is
@@ -447,6 +513,7 @@ static void t_choice(void)
 	CHECK(run("x", 0, &rep) == BLOB_WRITE_NO_SLOT &&
 	      rep.choice == BLOB_CHOICE_BAD_MAP, "an empty table chose a slot");
 	CHECK(m.reserves == 0u, "an empty table still reserved the part");
+	check_not_chosen("no table", &rep);
 	check_unwound("no table", 0, 0);
 }
 
@@ -461,6 +528,7 @@ static void t_failures(void)
 	CHECK(run("x", 0, &rep) == BLOB_WRITE_BUSY, "a refused reserve is not busy");
 	CHECK(m.erases == 0u && m.claims == 0u, "a refused reserve went on");
 	CHECK(m.announces == 0u, "a refused reserve still announced a slot");
+	check_not_chosen("reserve refused", &rep);
 	check_unwound("reserve refused", 0, 0);
 
 	/* [!] A cancel during the erase must not go on to program: the flash is
@@ -472,6 +540,7 @@ static void t_failures(void)
 	CHECK(m.claims == 0u && m.programs == 0u,
 	      "a cancelled erase went on to the transfer");
 	CHECK(rep.erased != 0u, "the report does not say how much was erased");
+	check_chosen("erase cancelled", &rep, 0u);
 	check_unwound("erase cancelled", 1, 0);
 
 	reset();
@@ -500,6 +569,7 @@ static void t_failures(void)
 	CHECK(m.reserves == 0u && m.stats == 0u && m.erases == 0u &&
 	      m.announces == 0u && m.claims == 0u,
 	      "a background job reserved, stat'd, announced or erased something");
+	check_not_chosen("background", &rep);
 	check_unwound("background", 0, 0);
 
 	/* Block 0 declaring more than the slot holds: the sink rejects, the
@@ -553,52 +623,111 @@ static void t_failures(void)
 	CHECK(m.flash[MOCK_BASE] == 0xFFu, "the magic went down anyway");
 	check_unwound("body failed", 1, 1);
 
-	/* The magic page refused, after the body took. */
-	reset();
-	m.program_fail_at = 3;
-	CHECK(run("x", 0, &rep) == BLOB_WRITE_PROG_FAILED, "a failed magic is not");
+	/* [!] THE MAGIC PAGE REFUSED, after the body took and the payload was
+	 * read back and matched.  A program that reports failure says nothing
+	 * certain about the page, so the coordinator reports PROG_FAILED and
+	 * nothing about the state -- and each of the three things the flash can
+	 * hold reads as itself: still erased INCOMPLETE, part-written INVALID,
+	 * whole VALID (over a payload that DID match, #194). */
 	{
-		struct blob_info info;
-		enum blob_slot_state st = blob_hdr_decode(&m.flash[MOCK_BASE],
-		                                          BLOB_HDR_SPAN, MOCK_BASE,
-		                                          MOCK_CAP, &info, NULL);
-		CHECK(st == BLOB_INCOMPLETE, "a body without a magic reads %s",
-		      blob_slot_state_name(st));
+		static const struct {
+			int writes; enum blob_slot_state st; const char *what;
+		} mf[] = {
+			{ 0, BLOB_INCOMPLETE, "magic failed, page still erased" },
+			{ 1, BLOB_INVALID,    "magic failed, page part-written" },
+			{ 2, BLOB_VALID,      "magic failed, page written whole" },
+		};
+		unsigned j;
+
+		for (j = 0u; j < sizeof mf / sizeof mf[0]; j++) {
+			struct blob_info info;
+			enum blob_slot_state st;
+
+			reset();
+			m.program_fail_at = 3;
+			m.fail_writes = mf[j].writes;
+			CHECK(run("x", 0, &rep) == BLOB_WRITE_PROG_FAILED,
+			      "%s: not PROG_FAILED", mf[j].what);
+			CHECK(rep.verified == rep.crc,
+			      "%s: the payload was not verified before the magic",
+			      mf[j].what);
+			check_magic_after_verify(mf[j].what);
+			st = slot_state(&info);
+			CHECK(st == mf[j].st, "%s: reads %s, expected %s", mf[j].what,
+			      blob_slot_state_name(st),
+			      blob_slot_state_name(mf[j].st));
+			check_chosen(mf[j].what, &rep, 0u);
+			check_unwound(mf[j].what, 1, 1);
+		}
 	}
-	check_unwound("magic failed", 1, 1);
 
 	reset();
 	m.fail_stat = 1;
 	CHECK(run("x", 0, &rep) == BLOB_WRITE_REFUSED, "an unreadable slot is not");
 	CHECK(m.erases == 0u, "an unreadable table still erased");
+	check_not_chosen("stat failed", &rep);
 	check_unwound("stat failed", 1, 0);
 
 	reset();
 	m.fail_geometry = 1;
 	CHECK(run("x", 0, &rep) == BLOB_WRITE_REFUSED, "a slot with no geometry is not");
 	CHECK(m.erases == 0u, "a slot with no geometry was erased");
+	/* Chosen and then refused: the number is true, nothing was touched. */
+	check_chosen("geometry failed", &rep, 0u);
 	check_unwound("geometry failed", 1, 0);
 
-	/* Everything went in and the flash disagrees anyway.  The blob IS stored
-	 * -- the header is down -- and the operator is told the read-back does
-	 * not match, which is a different thing from a failed write. */
-	/* Everything went in and the read-back disagrees anyway.  The blob IS
-	 * stored -- the header is down and `blob list` will show it -- and the
-	 * operator is told the flash does not match what arrived, which is a
-	 * different thing from a write that failed. */
-	reset();
-	m.corrupt_read_back = 1;
-	CHECK(run("x", 0, &rep) == BLOB_WRITE_VERIFY_FAILED,
-	      "a read-back that disagrees is not reported");
-	CHECK(rep.verified != rep.crc, "the report claims the CRCs match");
-	CHECK(m.flash[MOCK_BASE] != 0xFFu,
-	      "the magic was withheld -- the blob is stored, verify is a check");
-	check_unwound("verify mismatch", 1, 1);
+	/* [!] EVERYTHING WENT IN AND THE READ-BACK DISAGREES -- or cannot be done.
+	 * The magic is NOT written (#194): the slot reads INCOMPLETE, never
+	 * valid, and the body still says what was meant to be there.  Until #194
+	 * the magic went down first and this case left a slot `blob list` called
+	 * valid over bytes that were not the file. */
+	{
+		static const struct { int corrupt, fail; const char *what; } vf[] = {
+			{ 1, 0, "verify mismatch"  },
+			{ 0, 1, "read-back failed" },
+		};
+		unsigned j;
 
+		for (j = 0u; j < sizeof vf / sizeof vf[0]; j++) {
+			struct blob_info info;
+			enum blob_slot_state st;
+
+			reset();
+			m.corrupt_read_back = vf[j].corrupt;
+			m.fail_read_back = vf[j].fail;
+			CHECK(run("x", 0, &rep) == BLOB_WRITE_VERIFY_FAILED,
+			      "%s: not reported", vf[j].what);
+			if (vf[j].corrupt)
+				CHECK(rep.verified != rep.crc,
+				      "%s: the report claims the CRCs match", vf[j].what);
+			CHECK(m.magic_programs == 0u,
+			      "%s: the magic was programmed %u time(s)", vf[j].what,
+			      m.magic_programs);
+			/* 1 payload chunk + the body; 1 erase + those two. */
+			CHECK(m.programs == 2u && rep.transactions == 3u,
+			      "%s: %u program(s), %lu transaction(s)", vf[j].what,
+			      m.programs, (unsigned long)rep.transactions);
+			st = slot_state(&info);
+			CHECK(st == BLOB_INCOMPLETE, "%s: the slot reads %s",
+			      vf[j].what, blob_slot_state_name(st));
+			CHECK(st == BLOB_INCOMPLETE && strcmp(info.name, "x") == 0 &&
+			      info.length == 4096u && info.crc32 == rep.crc,
+			      "%s: the body does not describe what arrived", vf[j].what);
+			check_chosen(vf[j].what, &rep, 0u);
+			check_unwound(vf[j].what, 1, 1);
+		}
+	}
+
+	/* [!] Refused for its arguments: the report is still cleared, so a
+	 * caller that logs it does not read a slot out of it. */
+	memset(&rep, 0xFF, sizeof rep);
 	CHECK(blob_write_run(NULL, stage64, STAGE_BYTES, "x", 0, &rep) ==
 	      BLOB_WRITE_REFUSED, "a NULL vtable was acted on");
+	check_not_chosen("NULL vtable", &rep);
+	memset(&rep, 0xFF, sizeof rep);
 	CHECK(blob_write_run(&OPS, stage64, STAGE_BYTES, NULL, 0, &rep) ==
 	      BLOB_WRITE_REFUSED, "a NULL name was acted on");
+	check_not_chosen("NULL name", &rep);
 	CHECK(blob_write_run(&OPS, stage64, STAGE_BYTES, "x", 0, NULL) ==
 	      BLOB_WRITE_REFUSED, "a NULL report was acted on");
 }
@@ -642,6 +771,7 @@ static void t_bad_stage(void)
 		CHECK(run("x", 0, &rep) == BLOB_WRITE_REFUSED,
 		      "%s: was not refused", bad[i].what);
 		check_nothing_taken(bad[i].what);
+		check_not_chosen(bad[i].what, &rep);
 	}
 
 	/* Two pages is a whole number of them, and works. */
@@ -725,6 +855,7 @@ static void t_one_page(void)
 	      (unsigned long)m.prog_addr[ONE_CHUNKS + 1u]);
 	CHECK(m.read_backs == ONE_CHUNKS, "one page: %u read-back(s), expected %u",
 	      m.read_backs, ONE_CHUNKS);
+	check_magic_after_verify("one page");
 	{
 		struct blob_info info;
 		enum blob_slot_state st = blob_hdr_decode(&m.flash[MOCK_BASE],
@@ -756,7 +887,12 @@ static void t_one_page(void)
 			      blob_write_result_name(res));
 			CHECK(m.programs == at[i], "%s: %u program(s) ran", what,
 			      m.programs);
-			CHECK(m.read_backs == 0u, "%s: a verify ran", what);
+			/* The verify runs between the body and the magic, so only
+			 * a failed magic has it behind it (#194). */
+			if (at[i] <= ONE_CHUNKS + 1u)
+				CHECK(m.read_backs == 0u, "%s: a verify ran", what);
+			else
+				check_magic_after_verify(what);
 			if (at[i] <= ONE_CHUNKS + 1u)
 				CHECK(m.flash[MOCK_BASE] == 0xFFu,
 				      "%s: the magic went down", what);
@@ -771,6 +907,8 @@ static void t_one_page(void)
 	CHECK(run("onepage", 0, &rep) == BLOB_WRITE_VERIFY_FAILED,
 	      "one page: a read-back that disagrees is not reported");
 	CHECK(rep.verified != rep.crc, "one page: the report claims a match");
+	CHECK(m.magic_programs == 0u && m.flash[MOCK_BASE] == 0xFFu,
+	      "one page: the magic went down over a payload that did not match");
 	check_guard("one page, verify mismatch");
 	check_unwound("one page, verify mismatch", 1, 1);
 

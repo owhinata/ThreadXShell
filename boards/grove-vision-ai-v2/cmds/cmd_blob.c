@@ -528,11 +528,18 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 
 	/* The post-mortem goes to the log as well: after a cancel the console
 	 * shows none of this, and during the transfer the PC could not see it. */
-	log_write(res == BLOB_WRITE_STORED ? LOG_LEVEL_INF : LOG_LEVEL_ERR, "blob",
-	          "write '%s' slot %u: %s, %lu B, %lu tx, drops %lu",
-	          argv[1], rep.slot, blob_write_result_name(res),
-	          (unsigned long)rep.received, (unsigned long)rep.transactions,
-	          (unsigned long)(sh->rx_dropped - drops0));
+	/* A slot number only when one was chosen: a refusal before the choice
+	 * leaves rep.slot at 0, which is a real slot (#194). */
+	if (rep.slot_chosen)
+		log_write(res == BLOB_WRITE_STORED ? LOG_LEVEL_INF : LOG_LEVEL_ERR,
+		          "blob", "write '%s' slot %u: %s, %lu B, %lu tx, drops %lu",
+		          argv[1], rep.slot, blob_write_result_name(res),
+		          (unsigned long)rep.received,
+		          (unsigned long)rep.transactions,
+		          (unsigned long)(sh->rx_dropped - drops0));
+	else
+		log_write(LOG_LEVEL_ERR, "blob", "write '%s': %s, no slot chosen",
+		          argv[1], blob_write_result_name(res));
 
 	if (res == BLOB_WRITE_STORED) {
 		cli_print(sh, "stored   : '%s' in slot %u, %lu B, crc32 %08lX\r\n",

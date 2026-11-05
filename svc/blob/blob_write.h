@@ -17,11 +17,12 @@
  * A `blob write` holds two things at once.  The reservation is what keeps a
  * reader from taking the part between the erase and the last program, and the
  * console claim is what stops the shell's line editor eating the sender's
- * bytes.  Between them there are seven ways to leave: the reservation refused,
+ * bytes.  Between them there are eight ways to leave: the reservation refused,
  * the erase cancelled, the erase incomplete, the console busy, the transfer
- * timed out or cancelled, a program failed, the header failed.  Each has to
+ * timed out or cancelled, a program failed, the header failed, the read-back
+ * disagreed.  Each has to
  * unwind exactly what it took, and hardware can demonstrate perhaps two of them
- * -- so shell/test/test_blob_write.c drives all seven through this vtable and
+ * -- so shell/test/test_blob_write.c drives all of them through this vtable and
  * counts.
  *
  * THE ORDER IS THE DESIGN, and each step is here because of something learned
@@ -47,11 +48,20 @@
  *   5. receive.  The sink accumulates into the staging buffer and programs a
  *      chunk at a time; a program that does not report OK latches, and no
  *      further program or header follows it.
- *   6. release the console, then write the body page, read it back and only
- *      then write the magic page.  Split so that every outcome is either "no
- *      magic, so not valid" or "magic, so the body was read back and matched".
- *   7. verify the payload against the CRC of the stream that arrived, and give
- *      the reservation back.  ONE exit, whatever happened.
+ *   6. release the console, then write the body page (read back by the
+ *      board writer).
+ *   7. verify the payload against the CRC of the stream that arrived.
+ *   8. [!] ONLY IF IT MATCHED, write the magic page -- the one thing that
+ *      makes the slot VALID.  So every outcome is either "no magic, so not
+ *      valid" or "magic, so the body was written and the payload was read
+ *      back and matched".  A read-back that disagrees, or cannot be done,
+ *      leaves the slot INCOMPLETE with the body still readable (#194; until
+ *      then the magic went down first and a mismatch left a slot that read
+ *      valid).  A magic program that FAILS leaves the page in a state the
+ *      coordinator cannot know -- still erased (INCOMPLETE), part-written
+ *      (INVALID) or whole (VALID, over a payload that did match) -- so the
+ *      caller says so and points at `blob list`.
+ *   9. give the reservation back.  ONE exit, whatever happened.
  *
  * [!] WHAT THE CONTRACT DOES NOT COVER: tx_thread_terminate().  The shell's
  * kill is co-operative -- cli_read_byte() returns -2 and this unwinds -- but a
@@ -78,8 +88,11 @@ enum blob_write_result {
 	BLOB_WRITE_CANCELLED,    /**< the erase was interrupted between sectors */
 	BLOB_WRITE_ERASE_FAILED, /**< the erase did not finish; nothing sent    */
 	BLOB_WRITE_XFER_FAILED,  /**< the transfer did not complete             */
-	BLOB_WRITE_PROG_FAILED,  /**< a program or the header did not take      */
-	BLOB_WRITE_VERIFY_FAILED,/**< stored, and the read-back disagrees       */
+	BLOB_WRITE_PROG_FAILED,  /**< a program or the header did not take; if
+	                              it was the magic, the slot's state is not
+	                              known (`blob list` reads it)             */
+	BLOB_WRITE_VERIFY_FAILED,/**< the read-back disagrees or failed; no magic
+	                              was written, the slot reads INCOMPLETE   */
 	BLOB_WRITE_NO_SLOT,      /**< nothing to write into; see @ref choice     */
 	BLOB_WRITE_REFUSED,      /**< the request never got as far as the part  */
 };
@@ -87,9 +100,19 @@ enum blob_write_result {
 /** Short name, for the console and the log. */
 const char *blob_write_result_name(enum blob_write_result r);
 
-/** What one `blob write` did, filled in on every outcome. */
+/**
+ * What one `blob write` did, filled in on every outcome.
+ *
+ * [!] READ @ref slot ONLY WHEN @ref slot_chosen IS SET.  The report starts
+ * zeroed, and zero is a real slot number -- and BLOB_CHOICE_REUSE is 0 too --
+ * so a write refused before the choice (background job, busy part, no table,
+ * an unreadable header) would otherwise read as "slot 0, reused" (#194).
+ * @ref choice is meaningful when a slot was chosen or the result is
+ * BLOB_WRITE_NO_SLOT.
+ */
 struct blob_write_report {
-	unsigned slot;        /**< the slot chosen, when one was               */
+	unsigned slot;        /**< the slot chosen; see @ref slot_chosen       */
+	int      slot_chosen; /**< non-zero once @ref slot names a chosen slot */
 	enum blob_choice choice; /**< why it was chosen, or why nothing was    */
 	uint32_t erased;      /**< bytes the erase reported done                */
 	uint32_t received;    /**< payload bytes the sink accepted              */

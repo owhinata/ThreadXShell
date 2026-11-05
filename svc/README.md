@@ -743,7 +743,7 @@ board provides, and how:
 
 | The board provides | How the shared code takes it |
 |---|---|
-| Its slot table and the number of slots | Const data under fixed names, `blob_map_slots[]` and `blob_map_slots_count` (declared in `blob_map.h`), plus `blob_map_table()` / `blob_map_count()`; `blob_map_slot()` and `blob_map_index_of()` read the table by name, so no caller can hand them another. grove-vision-ai-v2: `src/blob_slots.c` |
+| Its slot table and the number of slots | Const data under fixed names, `blob_map_slots[]` and `blob_map_slots_count` (declared in `blob_map.h`), plus `blob_map_table()` / `blob_map_count()`; `blob_map_slot()` and `blob_map_index_of()` read the table by name, so no caller can hand them another; the board asserts the count against `BLOB_MAX_SLOTS` at build time. grove-vision-ai-v2: `src/blob_slots.c` |
 | The writable interval and the erase unit | Arguments to `blob_map_check()` and the payload arithmetic; nothing here states a boundary |
 | Every operation of a write (reserve, erase, program, console, receive, read back, stat, geometry) | A const `struct blob_write_ops`; grove-vision-ai-v2: `cmds/cmd_blob.c` |
 | The staging buffer | `blob_write_run()`'s buffer and length, at least one header page and a whole number of them, refused before anything is taken otherwise; grove-vision-ai-v2 passes `blob_stage_buf` / `BLOB_STAGE_BYTES` |

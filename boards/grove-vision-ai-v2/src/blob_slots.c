@@ -97,6 +97,13 @@ const struct blob_slot blob_map_slots[] = {
 	{ 0x00EC0000u, 0x00040000u },
 };
 
+/* More slots than BLOB_MAX_SLOTS would not overflow anything -- `blob write`
+ * and the nn adapter refuse such a table at run time -- but that refusal is
+ * first seen when somebody types the command on hardware.  Other boards ship
+ * their own tables (#193, #194), so the file that ships one stops the build. */
+_Static_assert(sizeof blob_map_slots / sizeof blob_map_slots[0] <= BLOB_MAX_SLOTS,
+               "the blob slot table has more slots than BLOB_MAX_SLOTS");
+
 const unsigned blob_map_slots_count =
 	(unsigned)(sizeof blob_map_slots / sizeof blob_map_slots[0]);
 

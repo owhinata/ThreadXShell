@@ -37,6 +37,7 @@
 #include "cli_instance.h"
 
 #include "blob.h"
+#include "blob_stage.h"   /* blob_stage_buf -- the buffer `blob write` stages in */
 #include "blob_write.h"
 #include "cmd_xfer.h"
 #include "log.h"
@@ -508,7 +509,8 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 	 * is only true once a slot has been CHOSEN, and choosing happens inside
 	 * the reservation.  op_announce() says it at that moment. */
 	drops0 = sh->rx_dropped;
-	res = blob_write_run(&ops, argv[1], want, &rep);
+	res = blob_write_run(&ops, blob_stage_buf, BLOB_STAGE_BYTES, argv[1], want,
+	                     &rep);
 
 	/* The post-mortem goes to the log as well: after a cancel the console
 	 * shows none of this, and during the transfer the PC could not see it. */

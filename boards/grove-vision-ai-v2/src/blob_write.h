@@ -164,8 +164,22 @@ struct blob_write_ops {
 /**
  * @brief  Store the file the PC is about to send, under @p name.
  *
- * @param want  the slot the operator named, or negative for none
- * @param rep   filled in on every outcome; may not be NULL
+ * @param stage      the caller's staging buffer: the payload accumulates here
+ *                   and is programmed one full buffer per transaction, the two
+ *                   header pages are laid out here, and the verify reads the
+ *                   payload back through it
+ * @param stage_len  its size in bytes: at least one header page
+ *                   (BLOB_HDR_PAGE) and a whole number of them
+ * @param want       the slot the operator named, or negative for none
+ * @param rep        filled in on every outcome; may not be NULL
+ *
+ * [!] THE BUFFER IS CHECKED BEFORE ANYTHING IS TAKEN.  A NULL @p stage, or a
+ * @p stage_len that is not a non-zero multiple of the header page, is
+ * BLOB_WRITE_REFUSED with the console never asked about, never claimed and the
+ * part never reserved -- so a caller that got the buffer wrong has destroyed
+ * nothing and has nothing to give back.  The coordinator keeps no buffer of
+ * its own and no size: the chunk one program transaction takes is whatever the
+ * caller hands over (grove-vision-ai-v2: blob_stage_buf, BLOB_STAGE_BYTES).
  *
  * The caller has validated the name (blob_name_check()); everything from the
  * reservation onwards is here, INCLUDING which slot the write goes to.  That
@@ -173,6 +187,7 @@ struct blob_write_ops {
  * blob_write_ops::stat -- so it cannot live in the caller.
  */
 enum blob_write_result blob_write_run(const struct blob_write_ops *ops,
+                                      uint8_t *stage, uint32_t stage_len,
                                       const char *name, int want,
                                       struct blob_write_report *rep);
 

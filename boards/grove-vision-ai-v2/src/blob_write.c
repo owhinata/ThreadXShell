@@ -16,7 +16,6 @@
 #include <string.h>
 
 #include "blob_map.h"     /* BLOB_MAX_SLOTS -- the views array bound */
-#include "blob_stage.h"
 #include "crc32.h"
 
 /* The run's own state.  The sink callbacks get this as their ctx, which is how
@@ -25,6 +24,8 @@ struct wr {
 	const struct blob_write_ops *ops;
 	struct blob_write_report    *rep;
 	struct blob_write            bk;   /* the phase bookkeeping (blob_state) */
+	uint8_t *stage;                    /* the caller's staging buffer...      */
+	uint32_t stage_len;                /* ...and its size: one program chunk  */
 	uint32_t token;
 	uint32_t payload_addr;
 	uint32_t staged;                   /* bytes sitting in the staging buffer */
@@ -67,7 +68,7 @@ static int flush(struct wr *w)
 	w->rep->transactions++;
 	rc = w->ops->program(w->ops->ctx, w->token,
 	                     w->payload_addr + w->programmed,
-	                     blob_stage_buf, w->staged);
+	                     w->stage, w->staged);
 	w->rep->vendor_rc = rc;
 	if (rc != 0) {
 		w->broken = 1;
@@ -113,15 +114,15 @@ static int sink_write(void *ctx, const uint8_t *data, uint32_t len)
 		return -1;
 	}
 	while (off < len) {
-		uint32_t room = BLOB_STAGE_BYTES - w->staged;
+		uint32_t room = w->stage_len - w->staged;
 		uint32_t take = len - off;
 
 		if (take > room)
 			take = room;
-		memcpy(&blob_stage_buf[w->staged], data + off, take);
+		memcpy(&w->stage[w->staged], data + off, take);
 		w->staged += take;
 		off += take;
-		if (w->staged == BLOB_STAGE_BYTES && flush(w) != 0)
+		if (w->staged == w->stage_len && flush(w) != 0)
 			return -1;
 	}
 	return 0;
@@ -143,19 +144,19 @@ static int write_header(struct wr *w, const char *name, uint32_t base)
 	info.length = w->bk.received;
 	info.crc32  = w->bk.crc;
 
-	if (blob_hdr_encode_body(blob_stage_buf, BLOB_STAGE_BYTES, base,
+	if (blob_hdr_encode_body(w->stage, w->stage_len, base,
 	                         w->bk.capacity, &info) != BLOB_REJECT_NONE)
 		return -1;
 	w->rep->transactions++;
 	if (w->ops->program(w->ops->ctx, w->token, base + BLOB_HDR_PAGE,
-	                    blob_stage_buf, BLOB_BODY_SIZE) != 0)
+	                    w->stage, BLOB_BODY_SIZE) != 0)
 		return -1;
 
-	if (blob_hdr_encode_magic(blob_stage_buf, BLOB_STAGE_BYTES) !=
+	if (blob_hdr_encode_magic(w->stage, w->stage_len) !=
 	    BLOB_REJECT_NONE)
 		return -1;
 	w->rep->transactions++;
-	if (w->ops->program(w->ops->ctx, w->token, base, blob_stage_buf,
+	if (w->ops->program(w->ops->ctx, w->token, base, w->stage,
 	                    BLOB_MAGIC_SIZE) != 0)
 		return -1;
 	return 0;
@@ -171,12 +172,12 @@ static int verify_payload(struct wr *w)
 	while (off < w->bk.received) {
 		uint32_t take = w->bk.received - off;
 
-		if (take > BLOB_STAGE_BYTES)
-			take = BLOB_STAGE_BYTES;
+		if (take > w->stage_len)
+			take = w->stage_len;
 		if (w->ops->read_back(w->ops->ctx, w->payload_addr + off,
-		                      blob_stage_buf, take) != 0)
+		                      w->stage, take) != 0)
 			return -1;
-		crc = crc32_update(crc, blob_stage_buf, take);
+		crc = crc32_update(crc, w->stage, take);
 		off += take;
 	}
 	w->rep->verified = crc;
@@ -186,6 +187,7 @@ static int verify_payload(struct wr *w)
 /* ---- the run --------------------------------------------------------------- */
 
 enum blob_write_result blob_write_run(const struct blob_write_ops *ops,
+                                      uint8_t *stage, uint32_t stage_len,
                                       const char *name, int want,
                                       struct blob_write_report *rep)
 {
@@ -201,9 +203,19 @@ enum blob_write_result blob_write_run(const struct blob_write_ops *ops,
 	    ops->console_ready == NULL)
 		return BLOB_WRITE_REFUSED;
 	memset(rep, 0, sizeof *rep);
+	/* [!] THE BUFFER BEFORE ANYTHING ELSE, the console question included.
+	 * Every use below -- a chunk, a header page, a read-back piece -- takes
+	 * whole pages out of it, so one smaller than a page could not hold a
+	 * header and one that is not a whole number of pages would start the next
+	 * chunk part-way through a page.  Refused here, nothing has been taken. */
+	if (stage == NULL || stage_len < BLOB_HDR_PAGE ||
+	    stage_len % BLOB_HDR_PAGE != 0u)
+		return BLOB_WRITE_REFUSED;
 	memset(&w, 0, sizeof w);
 	w.ops = ops;
 	w.rep = rep;
+	w.stage = stage;
+	w.stage_len = stage_len;
 
 	/* [!] FIRST, because it is the one refusal that is knowable for free.  A
 	 * background job can never claim the console, and finding that out after

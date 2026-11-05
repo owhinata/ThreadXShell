@@ -28,7 +28,6 @@
 #include <string.h>
 
 #include "blob_write.h"
-#include "blob_stage.h"
 
 static int failures;
 
@@ -42,15 +41,27 @@ static int failures;
 		}                                                              \
 	} while (0)
 
+/* The staging buffer the coordinator is handed.  The test's own, the size the
+ * board passes (blob_stage.h's BLOB_STAGE_BYTES), and NOT the board's object:
+ * since issue #192 the coordinator takes the buffer as an argument, so this
+ * links no blob_stage.c and a case can hand it a buffer of any size. */
+#define STAGE_BYTES   (64u * 1024u)
+static uint8_t stage64[STAGE_BYTES];
+
+/* What run() hands the coordinator; reset() points it back at stage64. */
+static uint8_t *g_stage;
+static uint32_t g_stage_len;
+
 /* A pretend part: one slot, a 4 KB header unit, and a payload of exactly two
  * staging buffers -- so that "the chunk filled up and was flushed" is a case
  * this test actually reaches rather than one it describes. */
 #define MOCK_BASE     0x00001000u
 #define MOCK_PAYLOAD  0x00002000u
-#define MOCK_CAP      (2u * BLOB_STAGE_BYTES)
+#define MOCK_CAP      (2u * STAGE_BYTES)
 #define MOCK_FLASH    (MOCK_PAYLOAD + MOCK_CAP)  /* modelled from address 0   */
 #define MOCK_TOKEN    0xABCD0001u
 #define SLOTS         4u
+#define LOG_PROGRAMS  64u   /* programs whose address and length are kept */
 
 struct mock {
 	/* what happened */
@@ -58,6 +69,7 @@ struct mock {
 	unsigned receives, read_backs, stats, announces;
 	unsigned announce_slot;
 	uint32_t token_given, token_returned;
+	uint32_t prog_addr[LOG_PROGRAMS], prog_len[LOG_PROGRAMS];
 	/* what to break */
 	int fail_reserve, fail_claim, fail_stat, fail_geometry;
 	int background;           /* a bg job: no console claim can ever work */
@@ -122,6 +134,10 @@ static int mock_program(void *ctx, uint32_t token, uint32_t addr,
 	struct mock *k = ctx;
 
 	k->programs++;
+	if (k->programs <= LOG_PROGRAMS) {
+		k->prog_addr[k->programs - 1u] = addr;
+		k->prog_len[k->programs - 1u] = len;
+	}
 	CHECK(token == MOCK_TOKEN, "program got token %08lX", (unsigned long)token);
 	if (k->program_fail_at != 0 && (unsigned)k->program_fail_at == k->programs)
 		return -1;
@@ -278,6 +294,8 @@ static void reset(void)
 	for (i = 0u; i < SLOTS; i++)
 		m.state[i] = BLOB_EMPTY;
 	memset(m.flash, 0xFF, sizeof m.flash);
+	g_stage = stage64;
+	g_stage_len = STAGE_BYTES;
 }
 
 /* The three questions, asked after every single case. */
@@ -306,7 +324,7 @@ static void check_unwound(const char *what, int reserved, int claimed)
 static enum blob_write_result run(const char *name, int want,
                                   struct blob_write_report *rep)
 {
-	return blob_write_run(&OPS, name, want, rep);
+	return blob_write_run(&OPS, g_stage, g_stage_len, name, want, rep);
 }
 
 /* ---- the path that works -------------------------------------------------- */
@@ -575,12 +593,204 @@ static void t_failures(void)
 	      "the magic was withheld -- the blob is stored, verify is a check");
 	check_unwound("verify mismatch", 1, 1);
 
-	CHECK(blob_write_run(NULL, "x", 0, &rep) == BLOB_WRITE_REFUSED,
-	      "a NULL vtable was acted on");
-	CHECK(blob_write_run(&OPS, NULL, 0, &rep) == BLOB_WRITE_REFUSED,
-	      "a NULL name was acted on");
-	CHECK(blob_write_run(&OPS, "x", 0, NULL) == BLOB_WRITE_REFUSED,
-	      "a NULL report was acted on");
+	CHECK(blob_write_run(NULL, stage64, STAGE_BYTES, "x", 0, &rep) ==
+	      BLOB_WRITE_REFUSED, "a NULL vtable was acted on");
+	CHECK(blob_write_run(&OPS, stage64, STAGE_BYTES, NULL, 0, &rep) ==
+	      BLOB_WRITE_REFUSED, "a NULL name was acted on");
+	CHECK(blob_write_run(&OPS, stage64, STAGE_BYTES, "x", 0, NULL) ==
+	      BLOB_WRITE_REFUSED, "a NULL report was acted on");
+}
+
+/* ---- the staging buffer the caller hands over (issue #192) --------------- */
+
+/* Nothing at all may have happened: not the console question, not the
+ * reservation, not a stat, an erase, a claim or a program. */
+static void check_nothing_taken(const char *what)
+{
+	CHECK(m.console_asks == 0u && m.reserves == 0u && m.unreserves == 0u &&
+	      m.stats == 0u && m.announces == 0u && m.erases == 0u &&
+	      m.claims == 0u && m.releases == 0u && m.receives == 0u &&
+	      m.programs == 0u && m.read_backs == 0u,
+	      "%s: something was taken (asks %u, reserves %u, stats %u, erases %u, "
+	      "claims %u, programs %u)", what, m.console_asks, m.reserves,
+	      m.stats, m.erases, m.claims, m.programs);
+}
+
+/* [!] A BUFFER THE COORDINATOR CANNOT USE IS REFUSED BEFORE ANYTHING.  NULL, a
+ * length under one header page, and a length that is not a whole number of
+ * pages -- each one BLOB_WRITE_REFUSED with every counter still at zero. */
+static void t_bad_stage(void)
+{
+	static const struct { int null; uint32_t len; const char *what; } bad[] = {
+		{ 1, STAGE_BYTES,              "NULL buffer"            },
+		{ 0, 0u,                       "zero length"            },
+		{ 0, 1u,                       "one byte"               },
+		{ 0, BLOB_HDR_PAGE - 1u,       "one byte under a page"  },
+		{ 0, BLOB_HDR_PAGE + 1u,       "a page and one byte"    },
+		{ 0, BLOB_HDR_PAGE + BLOB_HDR_PAGE / 2u, "a page and a half" },
+		{ 0, STAGE_BYTES - 1u,         "64 KB less one byte"    },
+	};
+	struct blob_write_report rep;
+	unsigned i;
+
+	for (i = 0u; i < sizeof bad / sizeof bad[0]; i++) {
+		reset();
+		g_stage = bad[i].null ? NULL : stage64;
+		g_stage_len = bad[i].len;
+		CHECK(run("x", 0, &rep) == BLOB_WRITE_REFUSED,
+		      "%s: was not refused", bad[i].what);
+		check_nothing_taken(bad[i].what);
+	}
+
+	/* Two pages is a whole number of them, and works. */
+	reset();
+	g_stage_len = 2u * BLOB_HDR_PAGE;
+	CHECK(run("two", 0, &rep) == BLOB_WRITE_STORED,
+	      "a two-page buffer was not accepted");
+	check_unwound("two pages", 1, 1);
+}
+
+/* A buffer of exactly one page, with bytes after it that must stay untouched:
+ * an overrun of the buffer the caller handed over lands in @ref guard. */
+#define GUARD_BYTES 64u
+static struct {
+	uint8_t page[BLOB_HDR_PAGE];
+	uint8_t guard[GUARD_BYTES];
+} one;
+
+/* Ten whole pages and a 100-byte tail. */
+#define ONE_SENT  (10u * BLOB_HDR_PAGE + 100u)
+#define ONE_CHUNKS 11u
+
+static void reset_one(void)
+{
+	reset();
+	memset(one.guard, 0x5A, sizeof one.guard);
+	g_stage = one.page;
+	g_stage_len = BLOB_HDR_PAGE;
+	m.declared = m.sent = ONE_SENT;
+}
+
+static void check_guard(const char *what)
+{
+	unsigned i;
+
+	for (i = 0u; i < GUARD_BYTES; i++) {
+		if (one.guard[i] != 0x5Au) {
+			CHECK(0, "%s: the byte %u past the buffer was written", what, i);
+			return;
+		}
+	}
+}
+
+static void t_one_page(void)
+{
+	struct blob_write_report rep;
+	enum blob_write_result res;
+	unsigned i;
+
+	/* The path that works: the buffer is written out again and again, the
+	 * last chunk is short, the body and the magic are separate programs, and
+	 * the verify reads the payload back through the same page. */
+	reset_one();
+	res = run("onepage", 0, &rep);
+	CHECK(res == BLOB_WRITE_STORED, "one page: %s", blob_write_result_name(res));
+	CHECK(rep.received == ONE_SENT && rep.crc == rep.verified,
+	      "one page: received %lu, crc %08lX verified %08lX",
+	      (unsigned long)rep.received, (unsigned long)rep.crc,
+	      (unsigned long)rep.verified);
+	CHECK(m.programs == ONE_CHUNKS + 2u, "one page: %u program(s), expected %u",
+	      m.programs, ONE_CHUNKS + 2u);
+	CHECK(rep.transactions == 1u + ONE_CHUNKS + 2u,
+	      "one page: %lu transaction(s)", (unsigned long)rep.transactions);
+	for (i = 0u; i < ONE_CHUNKS; i++) {
+		uint32_t want = (i + 1u < ONE_CHUNKS) ? BLOB_HDR_PAGE : 100u;
+
+		CHECK(m.prog_addr[i] == MOCK_PAYLOAD + i * BLOB_HDR_PAGE &&
+		      m.prog_len[i] == want,
+		      "one page: chunk %u is %lu B at 0x%lx", i,
+		      (unsigned long)m.prog_len[i], (unsigned long)m.prog_addr[i]);
+	}
+	CHECK(m.prog_addr[ONE_CHUNKS] == MOCK_BASE + BLOB_HDR_PAGE &&
+	      m.prog_len[ONE_CHUNKS] == BLOB_BODY_SIZE,
+	      "one page: the body went %lu B at 0x%lx",
+	      (unsigned long)m.prog_len[ONE_CHUNKS],
+	      (unsigned long)m.prog_addr[ONE_CHUNKS]);
+	CHECK(m.prog_addr[ONE_CHUNKS + 1u] == MOCK_BASE &&
+	      m.prog_len[ONE_CHUNKS + 1u] == BLOB_MAGIC_SIZE,
+	      "one page: the magic went %lu B at 0x%lx",
+	      (unsigned long)m.prog_len[ONE_CHUNKS + 1u],
+	      (unsigned long)m.prog_addr[ONE_CHUNKS + 1u]);
+	CHECK(m.read_backs == ONE_CHUNKS, "one page: %u read-back(s), expected %u",
+	      m.read_backs, ONE_CHUNKS);
+	{
+		struct blob_info info;
+		enum blob_slot_state st = blob_hdr_decode(&m.flash[MOCK_BASE],
+		                                          BLOB_HDR_SPAN, MOCK_BASE,
+		                                          MOCK_CAP, &info, NULL);
+		CHECK(st == BLOB_VALID && info.length == ONE_SENT &&
+		      info.crc32 == rep.crc, "one page: the header reads %s",
+		      blob_slot_state_name(st));
+	}
+	check_guard("one page");
+	check_unwound("one page", 1, 1);
+
+	/* Each program failing in turn: the first chunk, one in the middle, the
+	 * short last one, the body and the magic.  Nothing is programmed after
+	 * the one that failed, no magic follows a failed payload or body, and
+	 * everything taken is given back once. */
+	{
+		static const unsigned at[] = { 1u, 6u, ONE_CHUNKS, ONE_CHUNKS + 1u,
+		                               ONE_CHUNKS + 2u };
+
+		for (i = 0u; i < sizeof at / sizeof at[0]; i++) {
+			char what[48];
+
+			snprintf(what, sizeof what, "one page, program %u fails", at[i]);
+			reset_one();
+			m.program_fail_at = (int)at[i];
+			res = run("onepage", 0, &rep);
+			CHECK(res == BLOB_WRITE_PROG_FAILED, "%s: %s", what,
+			      blob_write_result_name(res));
+			CHECK(m.programs == at[i], "%s: %u program(s) ran", what,
+			      m.programs);
+			CHECK(m.read_backs == 0u, "%s: a verify ran", what);
+			if (at[i] <= ONE_CHUNKS + 1u)
+				CHECK(m.flash[MOCK_BASE] == 0xFFu,
+				      "%s: the magic went down", what);
+			check_guard(what);
+			check_unwound(what, 1, 1);
+		}
+	}
+
+	/* The read-back disagreeing, through the one page. */
+	reset_one();
+	m.corrupt_read_back = 1;
+	CHECK(run("onepage", 0, &rep) == BLOB_WRITE_VERIFY_FAILED,
+	      "one page: a read-back that disagrees is not reported");
+	CHECK(rep.verified != rep.crc, "one page: the report claims a match");
+	check_guard("one page, verify mismatch");
+	check_unwound("one page, verify mismatch", 1, 1);
+
+	/* The transfer and the console failing, once each. */
+	reset_one();
+	m.recv_rc = 1;
+	CHECK(run("onepage", 0, &rep) == BLOB_WRITE_XFER_FAILED,
+	      "one page: a dead transfer is not");
+	check_guard("one page, transfer failed");
+	check_unwound("one page, transfer failed", 1, 1);
+
+	reset_one();
+	m.fail_claim = 1;
+	CHECK(run("onepage", 0, &rep) == BLOB_WRITE_NO_CONSOLE,
+	      "one page: a refused console is not");
+	check_unwound("one page, console refused", 1, 0);
+
+	reset_one();
+	m.erase_rc = -1;
+	CHECK(run("onepage", 0, &rep) == BLOB_WRITE_ERASE_FAILED,
+	      "one page: a failed erase is not");
+	check_unwound("one page, erase failed", 1, 0);
 }
 
 int main(void)
@@ -588,6 +798,8 @@ int main(void)
 	t_stored();
 	t_choice();
 	t_failures();
+	t_bad_stage();
+	t_one_page();
 
 	if (failures != 0) {
 		printf("test_blob_write: %d failure(s)\n", failures);

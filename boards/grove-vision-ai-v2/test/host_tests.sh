@@ -534,11 +534,14 @@ gcc $CFLAGS \
 # by which time the cause is gone.  So the coordinator takes its operations as a
 # vtable, and this fails each in turn and counts the unwinding.  It drives the
 # coordinator's own sink as well, which is how a rejected block 0, a short file
-# and an empty batch happen without a PC.
+# and an empty batch happen without a PC.  Since issue #192 the staging buffer
+# is the caller's argument, so the test hands over its own (one of 64 KB, one of
+# exactly one page, and ones the coordinator must refuse before taking anything)
+# and links neither blob_stage.c nor any port/nor header.
 gcc $CFLAGS \
-    -I "$board/src" -I "$board/port/nor" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
+    -I "$board/src" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
     "$here/test_blob_write.c" "$board/src/blob_write.c" \
-    "$svc/blob/blob_state.c" "$board/src/blob_stage.c" "$svc/crc32.c" \
+    "$svc/blob/blob_state.c" "$svc/crc32.c" \
     $LDFLAGS -o "$out/test_blob_write"
 "$out/test_blob_write"
 

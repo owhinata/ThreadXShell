@@ -4,8 +4,8 @@
  */
 /**
  * @file    fx_user.h
- * @brief   FileX build configuration for the QSPI NOR filesystem
- * (owhinata/stm32f746g-disco#30).
+ * @brief   FileX build configuration (owhinata/stm32f746g-disco#30; the microSD
+ * filesystem only since issue #194).
  *
  * Pulled in by fx_port.h via FX_INCLUDE_USER_DEFINE_FILE (CMakeLists.txt).
  *

@@ -17,7 +17,7 @@
  *   sd df              filesystem capacity / free / FAT type
  *   sd umount          flush + unmount
  *
- * The filesystem commands share fs_cmd_core.c with `fs` (QSPI) via sd_dev.  The
+ * The filesystem commands are the shared fs_cmd_core.c bodies, bound via sd_dev.  The
  * low-level `info`/`read` may re-probe the card (HAL_SD_DeInit + re-identify,
  * when it is not already usable), which would corrupt a mounted FileX media, so
  * they take the raw ownership slot (refused while the SD filesystem is mounted
@@ -85,7 +85,7 @@ static int parse_u32(const char *s, uint32_t *out)
 /*
  * Take the raw slot for a card-disruptive op (re-probe).  Refused while the SD
  * filesystem is mounted or busy, so a probe (HAL_SD_DeInit) can never run under
- * a live FX_MEDIA.  Mirrors cmd_qspi.c's qspi_raw_gate.
+ * a live FX_MEDIA.
  */
 static int sd_raw_gate(struct cli_instance *sh)
 {

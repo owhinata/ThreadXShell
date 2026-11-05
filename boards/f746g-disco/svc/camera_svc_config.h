@@ -35,15 +35,15 @@
 /** `camera save`: a FileX medium to write the last capture to. */
 #define CAMERA_SVC_HAS_SAVE   1
 /**
- * The media `camera save` names, the first being the default: the microSD and
- * the QSPI NOR filesystem.  The board resolves a name to its device
- * (camera_board_medium()).
+ * The media `camera save` names, the first being the default: only the microSD
+ * since issue #194 (the QSPI NOR is no longer a filesystem).  The board resolves
+ * a name to its device (camera_board_medium()).
  *
- * An X-macro, so the one list spells the usage ("sd|fs") and the refusal
- * ("sd or fs") as string literals at compile time: @p first is applied to the
- * first name and @p more to each one after it.
+ * An X-macro, so the one list spells the usage and the refusal as string
+ * literals at compile time: @p first is applied to the first name and @p more
+ * to each one after it.
  */
-#define CAMERA_SVC_SAVE_MEDIA(first, more) first("sd") more("fs")
+#define CAMERA_SVC_SAVE_MEDIA(first, more) first("sd")
 
 /** `camera send`: the last capture to the PC over YMODEM. */
 #define CAMERA_SVC_HAS_SEND   1

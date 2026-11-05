@@ -53,9 +53,8 @@ the lists that board builds against.
     lib/threadx/LICENSE.txt
     A project of the Eclipse Foundation (donated by Microsoft from Azure RTOS);
     the sources carry both Microsoft and Eclipse copyrights.
-- Eclipse ThreadX FileX / LevelX / GUIX / NetX Duo  -- MIT
-    lib/filex/LICENSE.txt, lib/levelx/LICENSE.txt, lib/guix/LICENSE.txt,
-    lib/netxduo/LICENSE.txt
+- Eclipse ThreadX FileX / GUIX / NetX Duo  -- MIT
+    lib/filex/LICENSE.txt, lib/guix/LICENSE.txt, lib/netxduo/LICENSE.txt
 - STMicroelectronics OV5640 BSP component  -- BSD-3-Clause
     lib/ov5640/LICENSE.md
     Sensor register driver for the B-CAMS-OMV camera module on f746g-disco,

@@ -21,8 +21,8 @@
  *
  * and the two functions of shell/cmds/camera_cmd_board.h: the YMODEM send
  * (cmds/cmd_xfer.c, owhinata/stm32f746g-disco#50) and the FileX medium a
- * `camera save` names (sd = microSD FAT32, fs = QSPI NOR, whose fs_device
- * gates the save shares with the fs/sd commands).
+ * `camera save` names (sd = microSD FAT32, whose fs_device gates the save
+ * shares with the `sd` command).
  *
  * Clean-room design; no third-party code reused.
  */
@@ -32,7 +32,7 @@
 #include "camera_svc_config.h" /* CAMERA_SVC_BOARD_DECLS: the names declared */
 #include "camera_cmd_board.h"
 #include "fs_cmd_core.h"
-#include "fs_devices.h"       /* fs_sd_device() / fs_qspi_device() (camera save) */
+#include "fs_devices.h"       /* fs_sd_device() (camera save) */
 #include "cmd_xfer.h"
 
 #include <string.h>
@@ -49,11 +49,7 @@ int camera_board_send(struct cli_instance *sh, const struct ym_source *src)
 
 const struct fs_device *camera_board_medium(const char *name)
 {
-	if (strcmp(name, "sd") == 0)
-		return fs_sd_device();
-	if (strcmp(name, "fs") == 0)
-		return fs_qspi_device();
-	return NULL;
+	return (strcmp(name, "sd") == 0) ? fs_sd_device() : NULL;
 }
 
 /* ---- printing --------------------------------------------------------------- */

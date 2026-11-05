@@ -7,18 +7,17 @@
  * @brief   Lazy-mount singleton for the microSD filesystem
  * (owhinata/stm32f746g-disco#34).
  *
- * Cloned from fs_glue.c (the QSPI lazy-mount singleton) for the SD media: a
- * separate FX_MEDIA / cache / mutex set so the two filesystems are independent.
- * No LevelX (the SD card has its own FTL), and fx_system_initialize() is NOT
- * called here -- fs_glue_init() owns that.  The raw slot gates `sd info`/`sd
- * read`, which re-probe the card and must not run while the media is mounted.
+ * Originally cloned from the QSPI lazy-mount singleton, which issue #194 removed
+ * with the QSPI filesystem; this is now the board's only FileX media and owns
+ * fx_system_initialize().  The SD card has its own FTL.  The raw slot gates `sd
+ * info`/`sd read`, which re-probe the card and must not run while the media is
+ * mounted.
  *
  * The media cache is plain cached SRAM: fx_sd_driver hands every buffer to
  * sd_card_read/write_blocks, which bounces through its own SRAM1 DMA buffer and
  * does the D-cache maintenance, so no special placement is needed here.
  */
-#include "sd_fs_glue.h"
-#include "fs_glue.h"        /* FS_ERR_BUSY / FS_ERR_NO_CARD (shared sentinels) */
+#include "sd_fs_glue.h"     /* incl. the FS_ERR_* ownership sentinels */
 #include "fx_sd_driver.h"
 #include "sd_card.h"        /* present/status/deinit for hot-plug */
 
@@ -39,7 +38,9 @@ void sd_fs_glue_init(void)
 {
 	tx_mutex_create(&sd_mount_lock, "sd_mount", TX_INHERIT);
 	tx_mutex_create(&sd_dir_mutex, "sd_dir", TX_INHERIT);
-	/* fx_system_initialize() is run once by fs_glue_init(); do not repeat it. */
+	/* The only FileX media on this board, so this glue owns the one-time
+	 * system init (FileX's date/time and internal structures). */
+	fx_system_initialize();
 }
 
 FX_MEDIA *sd_glue_media(void)

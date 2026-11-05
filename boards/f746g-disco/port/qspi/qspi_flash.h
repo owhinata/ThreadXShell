@@ -17,7 +17,7 @@
  *
  * Concurrency: every public call serializes on an internal ThreadX mutex for the
  * whole flash operation (write-enable -> command -> busy-wait -> error check), so
- * callers from different threads (shell foreground, background jobs, LevelX) can
+ * callers from different threads (shell foreground, background jobs) can
  * interleave safely.  Consequently the API is **thread-context only**: never call
  * it from an ISR, and never before qspi_flash_init() ran (tx_application_define).
  *

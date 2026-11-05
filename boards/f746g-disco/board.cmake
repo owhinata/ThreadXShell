@@ -274,18 +274,15 @@ list(FILTER TX_CORE EXCLUDE REGEX "tx_misra\\.c$")
 file(GLOB TX_ASM "${TX_PORT}/src/*.S")
 list(FILTER TX_ASM EXCLUDE REGEX "tx_misra\\.S$")
 
-# --- FileX + LevelX (QSPI NOR filesystem) -----------------------------------
-# Same pattern as ThreadX: GLOB the cores, configure via port/<lib>/<x>_user.h
-# headers (FX/LX_INCLUDE_USER_DEFINE_FILE below).  NAND support and the RAM
-# simulator/demo drivers are excluded -- this firmware is NOR-only (lx_nor_*)
-# and ships its own driver glue in port/levelx + port/filex.  gc-sections
-# drops the unused FileX feature paths from the final image.
+# --- FileX (the microSD filesystem) ------------------------------------------
+# Same pattern as ThreadX: GLOB the core, configure via port/filex/fx_user.h
+# (FX_INCLUDE_USER_DEFINE_FILE below).  The RAM simulator/demo drivers are
+# excluded; the board's driver glue is port/filex.  gc-sections drops the unused
+# FileX feature paths from the final image.  The QSPI NOR is not a filesystem
+# (issue #194 makes it the blob store), so LevelX is no longer built.
 set(FX_DIR "${CMAKE_SOURCE_DIR}/lib/filex")
-set(LX_DIR "${CMAKE_SOURCE_DIR}/lib/levelx")
 file(GLOB FX_CORE "${FX_DIR}/common/src/*.c")
 list(FILTER FX_CORE EXCLUDE REGEX "simulat")            # RAM-disk demo drivers
-file(GLOB LX_CORE "${LX_DIR}/common/src/*.c")
-list(FILTER LX_CORE EXCLUDE REGEX "lx_nand|simulat")    # NOR only
 
 # --- Eclipse ThreadX GUIX (display GUI framework) ---------------------------
 # Same pattern as ThreadX/FileX: GLOB the core, configure via port/guix/gx_user.h
@@ -515,7 +512,6 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_wdt.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_jobs.c"
     "${BOARD_DIR}/cmds/cmd_qspi.c"
-    "${BOARD_DIR}/cmds/cmd_fs.c"
     "${BOARD_DIR}/cmds/cmd_sd.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_camera.c"  # the one shared command (#143)
     "${BOARD_DIR}/cmds/cmd_camera_board.c"
@@ -563,10 +559,7 @@ add_executable(shell
     "${BOARD_DIR}/ui/guix_camera_ui.c"
     "${CMAKE_SOURCE_DIR}/lib/ov5640/ov5640.c"
     "${CMAKE_SOURCE_DIR}/lib/ov5640/ov5640_reg.c"
-    "${BOARD_DIR}/port/levelx/lx_nor_qspi_driver.c"
-    "${BOARD_DIR}/port/filex/fx_lx_nor_driver.c"
     "${BOARD_DIR}/port/filex/fx_sd_driver.c"
-    "${BOARD_DIR}/port/filex/fs_glue.c"
     "${BOARD_DIR}/port/filex/sd_fs_glue.c"
     "${BOARD_DIR}/port/threadx/tx_glue.c"
     ${NN_SOURCES}                                                     # nn layer + backend
@@ -574,7 +567,6 @@ add_executable(shell
     ${TX_CORE}
     ${TX_ASM}
     ${FX_CORE}
-    ${LX_CORE}
     ${GX_CORE}
     ${NX_CORE})
 target_link_libraries(shell PRIVATE common shell_obj coremark_obj svc_obj)
@@ -593,13 +585,11 @@ target_include_directories(shell PRIVATE
     "${BOARD_DIR}/port/plugin"     # the plugin binding, lease and painter (#159)
     "${CMAKE_SOURCE_DIR}/lib/ov5640"
     "${FX_DIR}/common/inc" "${FX_DIR}/ports/cortex_m7/gnu/inc"
-    "${LX_DIR}/common/inc"
     "${GX_DIR}/common/inc" "${GX_DIR}/ports/cortex_m7/gnu/inc"
     "${NX_DIR}/common/inc" "${NX_DIR}/ports/cortex_m7/gnu/inc"
     "${NX_DIR}/addons/dhcp"
     "${BOARD_DIR}/port/netxduo"    # nx_user.h + NetX ETH driver glue
     "${BOARD_DIR}/port/filex"
-    "${BOARD_DIR}/port/levelx"
     "${BOARD_DIR}/port/guix"
     "${BOARD_DIR}/ui"              # ui/ presentation layer: guix_camera_ui.h
     "${CMAKE_SOURCE_DIR}/shell/include"
@@ -607,7 +597,7 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/shell/backend"   # CLI_BACKEND_*_DEFINE macros
     "${BOARD_DIR}/backend"                # cli_backend_uart.h
     # The shared commands' own headers.  This board's cmds/ live in a different
-    # directory from shell/cmds/ now, so cmd_fs.c / cmd_sd.c / cmd_ai.c can no
+    # directory from shell/cmds/ now, so cmd_sd.c / cmd_camera_board.c can no
     # longer reach fs_cmd_core.h through the "same directory first" rule for
     # quoted includes.  Nothing else is in there, so no existing include can be
     # shadowed by adding it.
@@ -620,7 +610,6 @@ target_include_directories(shell PRIVATE
     "${BOARD_DIR}/svc")            # this board's svc: log.h / timebase.h
 target_compile_definitions(shell PRIVATE TX_INCLUDE_USER_DEFINE_FILE
     FX_INCLUDE_USER_DEFINE_FILE           # port/filex/fx_user.h
-    LX_INCLUDE_USER_DEFINE_FILE           # port/levelx/lx_user.h
     GX_INCLUDE_USER_DEFINE_FILE           # port/guix/gx_user.h
     NX_INCLUDE_USER_DEFINE_FILE           # port/netxduo/nx_user.h
     NX_DHCP_CLIENT_USER_CREATE_PACKET_POOL  # DHCP reuses the shared pool
@@ -801,8 +790,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # firmware code at all (-nostdlib, and the gate refuses an undefined
     # symbol), so this matters for what a plugin might DEFINE under one of these
     # names: the internal-flash and option-byte writers, the QSPI NOR writers
-    # (the filesystem), the clock and supply configuration, and the MPU / cache
-    # / NVIC state the base owns.
+    # (the board's stored data on the external flash), the clock and supply
+    # configuration, and the MPU / cache / NVIC state the base owns.
     set(F746_PLUGIN_FORBIDDEN
         HAL_FLASH_Unlock
         HAL_FLASH_Program

@@ -38,7 +38,6 @@
 #include "cli_instance.h"
 #include "cli_backend_uart.h"
 #include "qspi_flash.h"
-#include "fs_glue.h"
 #include "sd_card.h"
 #include "sd_fs_glue.h"
 #include "sdram.h"
@@ -197,11 +196,6 @@ void tx_application_define(void *first_unused_memory)
 	if (qspi_flash_init() != 0)
 		printf("qspi: init failed (qspi command disabled)\r\n");
 
-	/* Filesystem glue (owhinata/stm32f746g-disco#30): mount mutex +
-    fx_system_initialize only;
-	 * the media itself mounts lazily on the first `fs` command. */
-	fs_glue_init();
-
 	/* SDMMC1 SD-card bring-up (owhinata/stm32f746g-disco#33): GPIO/DMA/NVIC +
     operation mutex and
 	 * DMA-completion semaphore only -- no card I/O, so it is safe before the
@@ -210,10 +204,9 @@ void tx_application_define(void *first_unused_memory)
 	if (sd_card_init() != 0)
 		printf("sd: init failed (sd command disabled)\r\n");
 
-	/* SD filesystem glue (owhinata/stm32f746g-disco#34): SD mount mutexes only -- the
-    media
-	 * mounts lazily on the first `sd` FS command.  fx_system_initialize() was
-	 * already run by fs_glue_init(), so this does not repeat it. */
+	/* SD filesystem glue (owhinata/stm32f746g-disco#34): SD mount mutexes and
+	 * fx_system_initialize() -- the media mounts lazily on the first `sd` FS
+	 * command.  The board's only FileX media since issue #194. */
 	sd_fs_glue_init();
 
 	/* FMC SDRAM bring-up (owhinata/stm32f746g-disco#40): GPIO/FMC controller + the

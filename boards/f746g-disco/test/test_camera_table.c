@@ -124,7 +124,7 @@ int main(void)
 	run("camera save usb /a.raw\r");
 	expect("save refuses a medium this board does not have, in its words",
 	       strstr(cli_dummy_output_str(&tr0),
-	              "camera: unknown medium 'usb' (sd or fs)\r\n") != NULL);
+	              "camera: unknown medium 'usb' (sd)\r\n") != NULL);
 
 	if (failures != 0) {
 		printf("test_camera_table: %d failure(s)\n", failures);

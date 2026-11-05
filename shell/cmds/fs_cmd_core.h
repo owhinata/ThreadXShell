@@ -92,9 +92,9 @@ int fs_core_read_file(const struct fs_device *dev, struct cli_instance *sh,
                       const char *path, void *buf, uint32_t cap, uint32_t *out_len);
 
 /* The per-device accessors (fs_sd_device() and friends) are NOT declared here.
- * Which media a board has is the board's business -- the f746 port has a
- * LevelX/QSPI NOR device as well as the microSD -- so each board declares its own
- * in boards/<board>/cmds/fs_devices.h, and this header stays media-neutral. */
+ * Which media a board has is the board's business (the f746 port carried a
+ * QSPI NOR filesystem beside the microSD until #194), so each board declares its
+ * own in boards/<board>/cmds/fs_devices.h; this header stays media-neutral. */
 
 #ifdef __cplusplus
 }

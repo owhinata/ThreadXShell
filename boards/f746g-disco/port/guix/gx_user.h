@@ -8,8 +8,8 @@
  * (owhinata/stm32f746g-disco#55, Epic owhinata/stm32f746g-disco#48).
  *
  * Pulled in by gx_port.h when GX_INCLUDE_USER_DEFINE_FILE is defined (set for
- * the `threadx` target in CMakeLists.txt), exactly like port/filex/fx_user.h
- * and port/levelx/lx_user.h.  Overrides only what this board needs; everything
+ * the `threadx` target in CMakeLists.txt), exactly like port/filex/fx_user.h.
+ * Overrides only what this board needs; everything
  * else keeps the GUIX defaults.
  */
 #ifndef GX_USER_H

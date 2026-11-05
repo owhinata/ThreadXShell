@@ -21,9 +21,6 @@
 	url = https://github.com/mlcommons/tiny.git
 	branch = v1p4_rc
 	shallow = true
-[submodule "lib/levelx"]
-	path = lib/levelx
-	url = https://github.com/eclipse-threadx/levelx
 [submodule "lib/ov5640"]
 	path = lib/ov5640
 	url = https://github.com/STMicroelectronics/stm32-ov5640

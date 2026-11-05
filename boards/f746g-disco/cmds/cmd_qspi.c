@@ -19,14 +19,13 @@
  * is left partially programmed -- it is a scratch area by contract).
  *
  * erase/test rewrite flash content, so they compile in only with
- * CLI_ENABLE_DANGEROUS_CMDS, like devmem.  Once the filesystem lands
- * (owhinata/stm32f746g-disco#27 Phase B) they will additionally be refused while
- * the FileX media is mounted.
+ * CLI_ENABLE_DANGEROUS_CMDS, like devmem.  They used to be refused while the
+ * QSPI FileX/LevelX volume was mounted; issue #194 removed that filesystem, and
+ * nothing else in this firmware writes the QSPI NOR.
  *
  * Clean-room design; no third-party code reused.
  */
 #include "cli.h"
-#include "fs_glue.h"
 #include "qspi_flash.h"
 
 #include "stm32f7xx_hal.h"   /* HAL_GetTick for the self-test timing */
@@ -186,19 +185,6 @@ static int parse_subsector(struct cli_instance *sh, const char *s, uint32_t *add
 	return 0;
 }
 
-/* Take raw ownership of the flash (owhinata/stm32f746g-disco#30): refused while
-   the filesystem
- * is mounted or any fs command/format is running -- raw erases under a live
- * FileX/LevelX volume would corrupt it. */
-static int qspi_raw_gate(struct cli_instance *sh)
-{
-	if (fs_raw_begin() != FX_SUCCESS) {
-		cli_error(sh, "qspi: filesystem mounted or busy; run `fs umount` first\r\n");
-		return -1;
-	}
-	return 0;
-}
-
 static int cmd_qspi_erase(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t addr;
@@ -208,10 +194,7 @@ static int cmd_qspi_erase(struct cli_instance *sh, int argc, char **argv)
 
 	if (parse_subsector(sh, argv[1], &addr) != 0)
 		return 1;
-	if (qspi_raw_gate(sh) != 0)
-		return 1;
 	rc = qspi_flash_erase_subsector(addr);
-	fs_raw_end();
 	if (rc != 0) {
 		cli_error(sh, "qspi: erase failed: %s\r\n", qspi_strerror(rc));
 		return 1;
@@ -300,17 +283,12 @@ static int qspi_test_run(struct cli_instance *sh, uint32_t addr)
 static int cmd_qspi_test(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t addr;
-	int rc;
 
 	(void)argc;
 
 	if (parse_subsector(sh, argv[1], &addr) != 0)
 		return 1;
-	if (qspi_raw_gate(sh) != 0)
-		return 1;
-	rc = qspi_test_run(sh, addr);
-	fs_raw_end();
-	return rc;
+	return qspi_test_run(sh, addr);
 }
 
 #endif /* CLI_ENABLE_DANGEROUS_CMDS */

@@ -9,7 +9,7 @@
  * The shared command bodies in shell/cmds/fs_cmd_core.c are parameterized over a
  * `struct fs_device` vtable and know nothing about which media exist.  WHICH ones
  * exist is a board fact -- this board has the microSD on SDMMC1 and nothing else,
- * while the F746 port has a LevelX/QSPI NOR device alongside it -- so the
+ * as on the F746 port since issue #194 removed its QSPI NOR filesystem -- so the
  * accessors are declared here, per board, rather than in the shared header.
  *
  * Each accessor is defined by the command file that owns the device instance.

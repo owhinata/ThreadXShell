@@ -7,13 +7,13 @@
  * @brief   `xfer` shell command: send a file to the PC over the VCP
  * (owhinata/stm32f746g-disco#50).
  *
- *   xfer send <sd|fs> <path>   stream a file from microSD / QSPI FS to the PC
+ *   xfer send sd <path>        stream a file from the microSD to the PC
  *                              over the same serial port as the shell, using
  *                              YMODEM (receive on the PC with lrzsz `rz`/`rb`).
  *
  * Motivation: pulling a captured camera frame (owhinata/stm32f746g-disco#42) off
  * the board used to mean `camera save sd <p>` then physically removing the microSD
- * card. This streams any fs/sd file out the VCP instead; `camera send`
+ * card. This streams any sd file out the VCP instead; `camera send`
  * (cmd_camera_board.c) streams the RAM frame directly.  Both share xfer_send_source()
  * below.
  *
@@ -24,7 +24,7 @@
 #include "cli.h"
 #include "cmd_xfer.h"
 #include "fs_cmd_core.h"
-#include "fs_devices.h"       /* fs_sd_device() / fs_qspi_device() (send / recv) */
+#include "fs_devices.h"       /* fs_sd_device() (send) */
 
 #include <string.h>
 
@@ -126,14 +126,14 @@ static int cmd_xfer_send(struct cli_instance *sh, int argc, char **argv)
 
 	(void)argc;
 
-	if (strcmp(argv[1], "sd") == 0) {
-		dev = fs_sd_device();
-	} else if (strcmp(argv[1], "fs") == 0) {
-		dev = fs_qspi_device();
-	} else {
-		cli_error(sh, "xfer: unknown medium '%s' (sd or fs)\r\n", argv[1]);
+	/* The medium stays a word on the line (only `sd` since issue #194, when
+	 * the QSPI NOR stopped being a filesystem), so `xfer send sd <path>`
+	 * keeps its meaning. */
+	if (strcmp(argv[1], "sd") != 0) {
+		cli_error(sh, "xfer: unknown medium '%s' (sd)\r\n", argv[1]);
 		return 1;
 	}
+	dev = fs_sd_device();
 
 	status = dev->op_begin();
 	if (status != FX_SUCCESS) {
@@ -168,8 +168,8 @@ static int cmd_xfer_send(struct cli_instance *sh, int argc, char **argv)
 }
 
 CLI_SUBCMD_SET_CREATE(xfer_subcmds,
-	CLI_CMD_ARG_USAGE(send, NULL, "stream a file to the PC over YMODEM <sd|fs> <path>",
-	                  "sd|fs <path>", cmd_xfer_send, 3, 0),
+	CLI_CMD_ARG_USAGE(send, NULL, "stream a file to the PC over YMODEM sd <path>",
+	                  "sd <path>", cmd_xfer_send, 3, 0),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(xfer, xfer_subcmds,

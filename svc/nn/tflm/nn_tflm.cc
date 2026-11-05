@@ -28,8 +28,8 @@
  *
  * [!] THERE IS NO BUILT-IN MODEL.  open() succeeds with NO MODEL: zero inputs, zero
  * outputs, the name "(none)".  A model arrives by load_region() + reload() -- out of
- * wio-lite-ai's NOR blob store, off f746g-disco's SD card (since its issue #159 Step
- * 4c) -- and release() (`nn model unload`) returns to that state.  Three things fall
+ * wio-lite-ai's NOR blob store and f746g-disco's QSPI one (issue #194; off its SD card
+ * from its issue #159 Step 4c until then) -- and release() (`nn model unload`) returns to that state.  Three things fall
  * out of it, all wanted:
  *
  *   - `nn info` works on a board that has never been given a model, and reports the

@@ -69,7 +69,8 @@ struct nn_backend_vt {
 	 * owhinata/stm32f746g-disco#89 P2) ------------------------------------
 	 *
 	 * Only a backend that INTERPRETS a model at run time can implement these.
-	 * Where the bytes come from (a NOR blob, a file on the SD card) is the
+	 * Where the bytes come from (a NOR or QSPI blob on every board since
+	 * issue #194; a file on f746g-disco's SD card before) is the
 	 * board adapter's business; the backend only owns the buffer.
 	 */
 

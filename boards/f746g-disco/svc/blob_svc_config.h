@@ -31,6 +31,7 @@
 #define BLOB_SVC_ERASE_MS_TYP 700u
 #define BLOB_SVC_ERASE_MS_MAX 3000u
 #define BLOB_SVC_CANCEL_UNIT  "64 KB sectors"
+#define BLOB_SVC_HEADER_UNIT  "4 KB subsector"    /* N25Q128A: its sectors are 64 KB */
 #define BLOB_SVC_SENDER       "`sb <file>` (lrzsz YMODEM batch; `sz` will NOT work)"
 #define BLOB_SVC_READ_MAX     1024u
 #define BLOB_SVC_HELP         "named assets on the QSPI NOR (models etc.)"

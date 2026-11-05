@@ -422,8 +422,7 @@ static int nn_life_prepare(struct nn_core_model_job *j)
 	/* Hold the blob flag from the name lookup to the payload read
 	 * (nn_life_blob). */
 	if (blob_busy_acquire() != BLOB_OK) {
-		nn_detail_set("blob busy (a `blob write` / `erase` or `qspi erase` "
-		              "/ `qspi test` is running)");
+		nn_detail_set("blob busy (" BLOB_BUSY_HOLDERS " is running)");
 		return NN_SVC_ERR_BUSY;
 	}
 	nn_life_blob = 1u;

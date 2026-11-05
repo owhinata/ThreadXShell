@@ -539,6 +539,24 @@ gcc $CFLAGS -Wno-int-to-pointer-cast \
     $LDFLAGS -o "$out/test_blob_store_grove"
 "$out/test_blob_store_grove"
 
+# issue #194 -- this board's blob store write side (src/blob_writer.c),
+# compiled unchanged against stand-ins for port/nor and the read side, as
+# wio-lite-ai's and f746g-disco's test_blob_writer.c.  It holds what the writer
+# decides itself: a reservation refused while the port is in use is BUSY and
+# one refused because it is FAULTED is FAULT (terminal), from both refusal
+# points and every state; the header erase maps the writer's FAULTED to FAULT
+# and a refusal before the wire, no transport and a part-way stop to IO, never
+# to FAULT; the span erase and the program hand the status on as it is; and
+# the bring-up lease goes back once whether the reservation is had or not.
+gcc $CFLAGS \
+    -DNOR_PART_FW_END=0x00200000u -DNOR_PART_BLOB_END=0x00FFE000u \
+    -DNOR_ERASE_GRAN=0x00001000u \
+    -I "$board/src" -I "$board/port/nor" -I "$board/port/sdk_seam" \
+    -I "$board/svc" -I "$svc" -I "$svc/blob" \
+    "$here/test_blob_writer.c" "$board/src/blob_writer.c" \
+    $LDFLAGS -o "$out/test_blob_writer_grove"
+"$out/test_blob_writer_grove"
+
 # The blob header codec and the transfer's decisions (svc/blob/blob_state.c)
 # are board-independent since issue #192 and tested by shell/test/test_blob_state.c.
 

@@ -73,6 +73,7 @@ int blob_slot_geometry(unsigned slot, uint32_t *base, uint32_t *payload_addr,
 {
 	const struct blob_slot *s = blob_map_slot(slot);
 
+	blob_stub.store_calls++;
 	if (s == NULL)
 		return BLOB_ERR_PARAM;
 	if (base)         *base = s->base;
@@ -104,6 +105,7 @@ static void fill(unsigned slot, struct blob_info *out)
 
 int blob_stat(unsigned slot, struct blob_info *out, enum blob_hdr_reject *why)
 {
+	blob_stub.store_calls++;
 	if (why)
 		*why = BLOB_REJECT_NONE;
 	if (slot >= STUB_SLOTS)
@@ -116,17 +118,29 @@ int blob_stat(unsigned slot, struct blob_info *out, enum blob_hdr_reject *why)
 	return BLOB_OK;
 }
 
+/* As a real store's read: a range past the slot's payload is PARAM, so a
+ * caller that does not cut the length gets a refusal, not bytes. */
 int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len)
 {
-	(void)slot;
+	const struct blob_slot *s = blob_map_slot(slot);
+	uint32_t cap;
+
+	blob_stub.store_calls++;
+	if (s == NULL || len == 0u)
+		return BLOB_ERR_PARAM;
+	cap = blob_map_payload_max(s, UNIT);
+	if (off >= cap || len > cap - off)
+		return BLOB_ERR_PARAM;
 	if (blob_stub.read_rc != BLOB_OK)
 		return blob_stub.read_rc;
 	memset(buf, (int)(off & 0xFFu), len);
+	blob_stub.read_bytes += len;
 	return BLOB_OK;
 }
 
 int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed)
 {
+	blob_stub.store_calls++;
 	if (slot >= STUB_SLOTS)
 		return BLOB_ERR_PARAM;
 	fill(slot, out);

@@ -27,6 +27,7 @@
 #define BLOB_SVC_ERASE_MS_TYP 150u
 #define BLOB_SVC_ERASE_MS_MAX 2000u
 #define BLOB_SVC_CANCEL_UNIT  "64 KB blocks"
+#define BLOB_SVC_HEADER_UNIT  "sector"            /* W25Q128JV: 4 KB sector */
 #define BLOB_SVC_SENDER       "`sb <file>` (lrzsz YMODEM batch; `sz` will NOT work)"
 #define BLOB_SVC_READ_MAX     1024u
 #define BLOB_SVC_HELP         "named assets on the external NOR (models etc.)"

@@ -38,6 +38,10 @@
  *   BLOB_SVC_ERASE_MS_TYP  a 64 KB erase, typical ms (an expectation only)
  *   BLOB_SVC_ERASE_MS_MAX  ... and at most, or 0 when not known
  *   BLOB_SVC_CANCEL_UNIT   what Ctrl+C stops an erase between
+ *   BLOB_SVC_HEADER_UNIT   what the part calls the erase unit a slot's header
+ *                          occupies, as in "(one sector)" (issue #194: a 4 KB
+ *                          unit is a sector on the NORs, a subsector on f746's
+ *                          QSPI part, whose sectors are 64 KB)
  *   BLOB_SVC_SENDER        how to start the sender on the PC
  *   BLOB_SVC_READ_MAX      the longest `blob read`
  *   BLOB_SVC_LIST_NOTE     the board's note under `blob list`
@@ -51,6 +55,9 @@
 
 #ifndef BLOB_SVC_HAS_RX_LEVEL
 #define BLOB_SVC_HAS_RX_LEVEL 0
+#endif
+#ifndef BLOB_SVC_HEADER_UNIT
+#error "svc/blob_svc_config.h must say what its part calls the header's erase unit (BLOB_SVC_HEADER_UNIT)"
 #endif
 
 #if BLOB_SVC_HAS_STORE && BLOB_SVC_HAS_RECEIVE
@@ -219,7 +226,7 @@ static int cmd_blob_info(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)s->base, (unsigned long)(s->base + s->size),
 	          (unsigned long)(s->size / 1024u));
 	cli_print(sh, "header   : " BLOB_SVC_ADDR_FMT " .. " BLOB_SVC_ADDR_FMT
-	              " (one sector)\r\n",
+	              " (one " BLOB_SVC_HEADER_UNIT ")\r\n",
 	          (unsigned long)s->base, (unsigned long)(s->base + unit));
 	cli_print(sh, "payload  : " BLOB_SVC_ADDR_FMT " .. " BLOB_SVC_ADDR_FMT
 	              " (%lu B)\r\n",
@@ -715,7 +722,7 @@ static int cmd_blob_erase(struct cli_instance *sh, int argc, char **argv)
 	 * this is fast and `blob list` stops showing the blob at once -- while the
 	 * bytes are still there for anyone who reads the flash directly. */
 	cli_print(sh, "erasing  : slot %u header at " BLOB_SVC_ADDR_FMT
-	              " (one sector)\r\n", slot, (unsigned long)base);
+	              " (one " BLOB_SVC_HEADER_UNIT ")\r\n", slot, (unsigned long)base);
 	rc = blob_svc_erase_header(token, slot);
 	blob_svc_unreserve(token);
 	if (rc != BLOB_OK)

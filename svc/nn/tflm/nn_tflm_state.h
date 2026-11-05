@@ -87,8 +87,9 @@ static_assert(std::is_aggregate<nn_tflm_state>::value,
 
 /** What the board tells the backend about itself (beyond placement and state). */
 struct nn_tflm_board_facts {
-	/* Prepended to every loaded model's display name: f746g-disco's "sd:" (its
-	 * models come from the SD card), "" on wio-lite-ai.  `(none)` is never prefixed. */
+	/* Prepended to every loaded model's display name: "" on both boards since
+	 * issue #194 (f746g-disco's was "sd:" while its models came from the SD
+	 * card).  `(none)` is never prefixed. */
 	const char *name_prefix;
 };
 

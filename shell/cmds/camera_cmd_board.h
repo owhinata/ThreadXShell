@@ -12,7 +12,8 @@
  * ownership gate.  A port adapter holds no shell instance and must not reach up
  * for either, so the board's cmds/cmd_camera_board.c defines these and the
  * shared command (shell/cmds/cmd_camera.c) calls them -- the same arrangement
- * as nn_board_read_file() for `nn model load --path`.
+ * as nn_board_read_file() for `nn model load --path` (which no board defines
+ * since issue #194; the branch goes in issue #196).
  *
  * [!] THE SHARED COMMAND INCLUDES THIS AND NOT A BOARD'S cmds/ HEADERS.  That
  * is why these two exist: a board's cmd_xfer.h and fs_devices.h stay its own.

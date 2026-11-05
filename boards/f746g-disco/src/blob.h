@@ -167,6 +167,16 @@ int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed);
 int blob_find(const char *name, unsigned *slot, struct blob_info *out,
               enum blob_lookup *why);
 
+/**
+ * Who can hold the busy flag, in the words every refusal names them with:
+ * cmds/cmd_blob_board.c (`blob`), cmds/cmd_qspi.c (`qspi erase` / `qspi
+ * test`) and port/nn/nn_svc_f746_model.c (`nn model load`).  One string, so a
+ * new holder is added to every refusal at once (issue #194).
+ */
+#define BLOB_BUSY_HOLDERS \
+	"a `blob write` / `blob erase`, a `qspi erase` / `qspi test` or an `nn " \
+	"model load --name`"
+
 /* ---- mutating side (all of it under blob_busy_acquire) -------------------- */
 
 /**

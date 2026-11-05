@@ -96,7 +96,7 @@ int nor_erase(uint32_t addr, uint32_t len)
 	return NOR_OK;
 }
 
-/* Not reached by blob.c (the write path programs through cmds/cmd_blob.c);
+/* Not reached by blob.c (the write path programs through src/blob_writer.c);
  * declared by nor_flash.h, so defined for completeness of the link. */
 int nor_write(uint32_t addr, const void *buf, uint32_t len)
 {

@@ -316,7 +316,8 @@ static void t_erase(void)
 	store(4u, "x", 10u, 1u);
 	run("blob erase 4\r");
 	expect("an erase erases the header under the reservation and says so",
-	       has("erasing  : slot 4 header at 0x480000 (one sector)\r\n") &&
+	       has("erasing  : slot 4 header at 0x480000 (one test header unit)"
+	           "\r\n") &&
 	       has("erased   : the header is gone") &&
 	       blob_stub.erase_headers == 1u && blob_stub.reserves == 1u &&
 	       blob_stub.unreserves == 1u);
@@ -388,10 +389,63 @@ static void t_read(void)
 	run("blob read 3 0 600\r");
 	expect("a read past BLOB_SVC_READ_MAX is refused",
 	       has("blob: length must be 1..512"));
+	/* [!] Slot 12's payload is 258,048 B (0x3f000).  From 258,040 a 64 B
+	 * read is cut to the 8 B that are there: the line at 0x3eff8 and
+	 * nothing after it.  The stub's read refuses a range past the payload
+	 * as a real store does, so a command that did not cut prints a refusal
+	 * instead -- and the bytes handed out are counted.  (Until #194's
+	 * review this looked for a "0003f000" line, which a hexdump starting
+	 * at 0x3eff8 never prints whether or not it was cut.) */
 	reset();
 	run("blob read 12 258040 64\r");
 	expect("a read is cut at the end of the payload",
-	       has("0003eff8") && !has("0003f000"));
+	       has("0003eff8") && !has("0003f008") && !has("blob: ") &&
+	       blob_stub.read_bytes == 8u);
+	reset();
+	run("blob read 12 258048 1\r");
+	expect("a read that starts at the end is refused, nothing read",
+	       has("no such slot (0..12), or a range outside the payload") &&
+	       blob_stub.read_bytes == 0u);
+}
+
+/* ---- slot numbers past the table ------------------------------------------ */
+
+/* [!] 4294967295 must not become -1 ("no slot given") in `blob write`, where
+ * a stored name with no slot means "reuse its slot" -- the slot that would
+ * then be erased.  Every subcommand that takes a slot refuses the count
+ * itself and 2^32-1 in the parse, before the store is asked anything and
+ * before the reservation. */
+static void t_slot_bounds(void)
+{
+	static const char *const lines[] = {
+		"blob write model 4294967295\r", "blob write model 13\r",
+		"blob erase 4294967295\r", "blob erase 13\r",
+		"blob verify 4294967295\r", "blob verify 13\r",
+		"blob info 4294967295\r", "blob info 13\r",
+		"blob read 4294967295\r", "blob read 13\r",
+	};
+	unsigned i;
+	char what[96];
+
+	for (i = 0u; i < sizeof lines / sizeof lines[0]; i++) {
+		reset();
+		store(3, "model", 3000u, 0x12345678u);
+		run(lines[i]);
+		snprintf(what, sizeof what, "refused in the parse: %.*s",
+		         (int)strlen(lines[i]) - 1, lines[i]);
+		expect(what, has("blob: no such slot (0..12)") &&
+		       blob_stub.store_calls == 0u && blob_stub.reserves == 0u &&
+		       blob_stub.erase_spans == 0u &&
+		       blob_stub.erase_headers == 0u &&
+		       blob_stub.state[3] == BLOB_VALID);
+	}
+	/* The last slot is still a slot, and its header is named in the
+	 * board's word for the unit (BLOB_SVC_HEADER_UNIT, issue #194). */
+	reset();
+	run("blob info 12\r");
+	expect("the last slot is taken", has("slot     : 12\r\n"));
+	expect("the header unit is the board's word",
+	       has("header   : 0x7c0000 .. 0x7c1000 (one test header unit)\r\n"));
 }
 
 #endif
@@ -407,6 +461,7 @@ int main(void)
 	t_write();
 	t_erase();
 	t_read();
+	t_slot_bounds();
 	t_rx_line();
 #else
 	printf("test_blob_cmd (%s):\n",

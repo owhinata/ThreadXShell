@@ -194,9 +194,8 @@ static int parse_subsector(struct cli_instance *sh, const char *s, uint32_t *add
 static int qspi_busy_gate(struct cli_instance *sh)
 {
 	if (blob_busy_acquire() != BLOB_OK) {
-		cli_error(sh, "qspi: busy -- a `blob write` / `blob erase` or "
-		              "another `qspi erase` / `qspi test` is running; try "
-		              "again\r\n");
+		cli_error(sh, "qspi: busy -- " BLOB_BUSY_HOLDERS " is running; "
+		              "try again\r\n");
 		return -1;
 	}
 	return 0;

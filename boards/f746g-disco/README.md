@@ -943,7 +943,18 @@ What is this board's:
   background, rather than describe flash that is being changed.  They only
   look at the flag, so two readers do not refuse each other.  `qspi erase` and
   `qspi test` take the flag for their whole run (`qspi: busy -- ...` when they
-  cannot); `qspi probe`, `qspi info` and `qspi read` do not look at it.
+  cannot); `qspi probe`, `qspi info` and `qspi read` do not look at it.  Every
+  refusal names the same holders -- `blob`'s, `qspi`'s and `nn model load`'s
+  BUSY -- from one string, `BLOB_BUSY_HOLDERS` in `src/blob.h`.
+- [!] **A read looks at the flag once, when it starts.**  A `blob verify`
+  that is already running is not stopped when another console then starts a
+  `qspi erase` or `qspi test`: it goes on reading flash that is being erased
+  or programmed and may report a false CRC mismatch.  A `blob list` looks
+  again at every row, so it stops part way with the busy line instead (or
+  shows a row read while the flag was still free).  Run either again once the
+  other command is done.  wio-lite-ai's reads never look at the flag
+  at all; there a read alongside a `blob write` or `blob erase` sees the same
+  thing.
 - **The erase is one 64 KB sector at a time** where a whole sector is left,
   4 KB subsectors elsewhere (`blob_erase_span()`; every slot is whole 64 KB
   sectors, so in practice all sectors), one erase per driver call, so the
@@ -951,7 +962,9 @@ What is this board's:
   sectors.  The announcement uses the datasheet's 64 KB figures
   (`svc/blob_svc_config.h`: 0.7 s typical, 3 s at most): about 3 / 6 / 12 s
   for a 256 KB / 512 KB / 1 MB slot, at most 12 / 24 / 48 s.  `blob erase
-  <slot>` erases the header subsector only.
+  <slot>` erases the header subsector only, and `blob info` / `blob erase`
+  call it that (`(one 4 KB subsector)`, `BLOB_SVC_HEADER_UNIT`; the shared
+  words said "one sector" until #194's review, which on this part is 64 KB).
 - **`blob write` is VCP only.**  From the telnet console it is refused before
   anything is touched (`ymodem: refused on the telnet console -- it would
   destroy this session. Run it from the VCP console.`; YMODEM over telnet is

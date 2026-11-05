@@ -35,6 +35,7 @@
 #define BLOB_SVC_ERASE_MS_TYP 1000u
 #define BLOB_SVC_ERASE_MS_MAX 2000u
 #define BLOB_SVC_CANCEL_UNIT  "test units"
+#define BLOB_SVC_HEADER_UNIT  "test header unit"
 #define BLOB_SVC_SENDER       "`test-send <file>`"
 #define BLOB_SVC_READ_MAX     512u
 #define BLOB_SVC_HELP         "test blob store"

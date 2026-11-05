@@ -61,8 +61,8 @@ extern "C" {
 struct plugin_claims {
 	struct plugin_view view;
 	/** The board's own words for where these bytes came from, formatted when
-	 *  the load read them: wio-lite-ai and grove-vision-ai-v2 "slot N, blob
-	 *  'name'", f746g-disco "<path>, N B, file crc32 X".  NUL-terminated. */
+	 *  the load read them: "slot N, blob 'name'" on all three boards (f746g-disco's
+	 *  was "<path>, N B, file crc32 X" until issue #194).  NUL-terminated. */
 	char from[PLUGIN_CLAIMS_FROM_MAX];
 };
 

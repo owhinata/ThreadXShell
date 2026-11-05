@@ -25,6 +25,7 @@
 #define BLOB_SVC_ERASE_MS_TYP 1280u
 #define BLOB_SVC_ERASE_MS_MAX 0u
 #define BLOB_SVC_CANCEL_UNIT  "sectors"
+#define BLOB_SVC_HEADER_UNIT  "sector"            /* 4 KB, the part's erase sector */
 #define BLOB_SVC_SENDER       "`sb -k <file>` (lrzsz YMODEM batch)"
 /* Same cap as `devmem dump`. */
 #define BLOB_SVC_READ_MAX     256u

@@ -17,6 +17,7 @@
 #include "cli.h"
 #include "cli_instance.h"      /* sh->tr: which console this is */
 #include "blob_cmd_board.h"
+#include "blob.h"             /* BLOB_BUSY_HOLDERS */
 #include "blob_err.h"
 #include "cli_backend_uart.h"  /* the VCP's RX ring high-water */
 #include "cmd_xfer.h"
@@ -47,9 +48,9 @@ int blob_board_say(struct cli_instance *sh, int rc)
 		cli_error(sh, "blob: QSPI driver down (`qspi info` says why)\r\n");
 		return 1;
 	case BLOB_ERR_BUSY:
-		/* The busy flag is held by exactly these. */
-		cli_error(sh, "blob: another QSPI operation is running (a `blob "
-		              "write` / `erase`, or `qspi erase` / `qspi test`)\r\n");
+		/* The busy flag is held by exactly these (src/blob.h). */
+		cli_error(sh, "blob: another QSPI operation is running ("
+		              BLOB_BUSY_HOLDERS ")\r\n");
 		return 1;
 	default:
 		break;

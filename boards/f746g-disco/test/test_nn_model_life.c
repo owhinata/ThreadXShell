@@ -282,6 +282,13 @@ int main(void)
 	load(NN_SPEC_NAME, "big");
 	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
 	assert(strcmp(res.detail, "slot 2 is 65 B, staging holds 64 B") == 0);
+	/* A VALID header with a length of 0 (the store's header decode makes
+	 * that INVALID on the board, so this is the adapter's own check): ARG,
+	 * the flag back, not one byte read. */
+	nn_blob_stub_put(2u, "zero", model_bytes, 0u);
+	load(NN_SPEC_NAME, "zero");
+	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
+	assert(strcmp(res.detail, "slot 2 is 0 B, staging holds 64 B") == 0);
 	/* [!] None of those read a payload byte. */
 	assert(nn_blob_stub.reads == reads);
 	/* The read itself fails, and the copy disagrees with the header: HW. */

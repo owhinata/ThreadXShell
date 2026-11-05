@@ -38,6 +38,8 @@ struct blob_stub {
 	unsigned level_clears;   /* blob_board_rx_level_clear() calls */
 	unsigned erases_at_clear;/* erase spans already run at the last clear */
 	unsigned level_reads;
+	unsigned store_calls;    /* blob_stat / _read / _verify / _slot_geometry */
+	uint32_t read_bytes;     /* payload bytes blob_read() handed out */
 };
 
 extern struct blob_stub blob_stub;

@@ -519,6 +519,26 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_blob_map"
 "$out/test_blob_map"
 
+# issue #194 -- this board's blob store read side (src/blob.c), compiled
+# unchanged against stand-ins for port/nor, with the memory-mapped window
+# mapped at NOR_XIP_BASE.  It holds the classification the shared results
+# (svc/blob/blob_err.h) must not erase: a lease refused while the part is in
+# use is BUSY, one refused because the port is FAULTED is FAULT (terminal), and
+# a read with no reservation or a dead token is BUSY and never performed.  The
+# interval is written out, as test_blob_map.c's LO / HI / UNIT are (the values
+# board.cmake passes the firmware); a table they did not fit would fail the
+# test's own blob_check_map() control.
+gcc $CFLAGS -Wno-int-to-pointer-cast \
+    -DNOR_PART_FW_END=0x00200000u -DNOR_PART_BLOB_END=0x00FFE000u \
+    -DNOR_ERASE_GRAN=0x00001000u \
+    -I "$board/src" -I "$board/port/nor" -I "$board/port/sdk_seam" \
+    -I "$svc" -I "$svc/blob" \
+    "$here/test_blob_store.c" "$board/src/blob.c" "$board/src/blob_slots.c" \
+    "$board/src/blob_stage.c" "$svc/blob/blob_map.c" \
+    "$svc/blob/blob_state.c" "$svc/crc32.c" \
+    $LDFLAGS -o "$out/test_blob_store_grove"
+"$out/test_blob_store_grove"
+
 # The blob header codec and the transfer's decisions (svc/blob/blob_state.c)
 # are board-independent since issue #192 and tested by shell/test/test_blob_state.c.
 

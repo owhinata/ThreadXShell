@@ -105,16 +105,11 @@ extern "C" {
 
 /* ---- returns ------------------------------------------------------------- */
 
-#define BLOB_OK            0
-#define BLOB_ERR_PARAM    -1   /* no such slot, or a range outside it          */
-#define BLOB_ERR_IO       -2   /* the NOR refused a read, program or erase     */
-#define BLOB_ERR_STATE    -3   /* the NOR device is down                       */
-#define BLOB_ERR_BUSY     -4   /* another blob-mutating operation is running   */
-#define BLOB_ERR_EMPTY    -5   /* the slot holds no header to check against    */
-#define BLOB_ERR_CRC      -6   /* read-back does not match the stored CRC32    */
-#define BLOB_ERR_MAP      -7   /* the slot table does not fit the interval     */
-#define BLOB_ERR_CANCEL   -8   /* an erase stopped because the operator asked  */
-#define BLOB_ERR_DUPLICATE -9  /* more than one VALID slot carries the name    */
+/* The shared results (svc/blob/blob_err.h, issue #194).  This board answers
+ * PARAM, IO (the NOR refused a read, program or erase), STATE (the NOR device
+ * is down), BUSY (another blob-mutating operation is running), EMPTY, CRC, MAP,
+ * CANCEL and DUPLICATE; never FAULT. */
+#include "blob_err.h"
 
 /* ---- the table, checked against the interval ------------------------------ */
 

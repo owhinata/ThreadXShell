@@ -329,6 +329,13 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
     $LDFLAGS -o "$out/test_blob_map_svc"
 "$out/test_blob_map_svc"
 
+# issue #194 -- the results every board's blob store answers
+# (svc/blob/blob_err.h), pinned by value and checked pairwise distinct.  A
+# renumbering would compile and pass every test that compares by name, while
+# the boards that print a result raw would start saying something else.
+gcc $CFLAGS -I "$svc/blob" "$here/test_blob_err.c" $LDFLAGS -o "$out/test_blob_err"
+"$out/test_blob_err"
+
 # issue #92 (#49 Step 2), shared since issue #192 -- the `blob write` coordinator
 # (svc/blob/blob_write.c).  A write holds the board writer's reservation and the
 # console claim at once and there are nine ways to leave; each has to give back

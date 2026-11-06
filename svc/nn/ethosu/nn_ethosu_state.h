@@ -36,6 +36,7 @@
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 
 #include "nn.h"
+#include "blob_state.h"      /* BLOB_NAME_MAX: the name field holds one whole (#201) */
 #include "nn_tflm_ops.h"
 #include "npu_cmdstream.h"   /* struct npu_cs_config */
 
@@ -58,9 +59,10 @@ struct nn_ethosu_model {
 };
 
 struct nn_ethosu_state {
-	/* The handle and the display name it points at. */
+	/* The handle and the display name it points at: the blob's name, the
+	 * longest one whole (issue #201: it held 63 characters). */
 	nn_ethosu_model tm;
-	char            model_name[64];
+	char            model_name[BLOB_NAME_MAX + 1u];
 
 	/* The flatbuffer the live interpreter is reading IN PLACE -- inside the
 	 * board's read window, kept there by the caller's lease (nn.h) -- or nullptr
@@ -88,9 +90,6 @@ static_assert(std::is_aggregate<nn_ethosu_state>::value,
 
 /** What the board tells the backend about itself. */
 struct nn_ethosu_board_facts {
-	/* Prepended to every loaded model's display name ("" for blob names).  `(none)`
-	 * is never prefixed. */
-	const char *name_prefix;
 	/* The memory-mapped read window a model must lie wholly inside: the board's
 	 * one statement of it (grove-vision-ai-v2: nor_flash.h's NOR_XIP_BASE and
 	 * NOR_SIZE).  The backend holds no address of its own. */

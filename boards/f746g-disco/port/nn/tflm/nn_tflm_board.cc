@@ -4,7 +4,7 @@
  */
 /**
  * @file    nn_tflm_board.cc
- * @brief   This board's tflm backend state and facts (issue #161).
+ * @brief   This board's tflm backend state (issue #161).
  *
  * svc/nn/tflm/nn_tflm.cc owns no storage; its state is the object below, bound at
  * link time (svc/nn/tflm/nn_tflm_state.h).  C++ because the state holds TFLM objects'
@@ -17,10 +17,5 @@
 extern "C" {
 
 nn_tflm_state nn_tflm_board_state;
-
-/* Models come out of the QSPI asset store by name (issue #194; off the SD
- * card as "sd:<path>" until then): `nn info` names one by its blob name, with
- * no prefix, as wio-lite-ai's does. */
-const struct nn_tflm_board_facts nn_tflm_board_facts = { "" };
 
 }  /* extern "C" */

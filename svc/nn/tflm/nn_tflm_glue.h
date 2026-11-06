@@ -25,7 +25,9 @@
  * the including file names BEFORE including this header:
  *
  *   #define NN_TFLM_GLUE_STATE  nn_tflm_board_state   (the backend's state object)
- *   #define NN_TFLM_GLUE_FACTS  nn_tflm_board_facts   (the board's facts)
+ *
+ * (Until issue #201 it named the board's facts too, NN_TFLM_GLUE_FACTS, for the
+ * model-name prefix; there is no prefix any more.)
  *
  * WHY MACROS AND NOT TEMPLATES OR PARAMETERS.  The first version took the state as a
  * template parameter.  It compiled to the same logic, but GCC's inliner budgets the
@@ -49,8 +51,9 @@
  *   resolver       pointer to the backend's op resolver type, nullptr until built
  *   resolver_buf   raw storage the resolver is placement-new'd into
  *
- * and the facts need `name_prefix`.  The op list is the including file's
- * NN_TFLM_OPS_ALL (nn_tflm_ops.h), which must be in scope before this header.
+ * model_name must hold BLOB_NAME_MAX characters and the terminator (issue #201;
+ * asserted below).  The op list is the including file's NN_TFLM_OPS_ALL
+ * (nn_tflm_ops.h), which must be in scope before this header.
  */
 #ifndef NN_TFLM_GLUE_H
 #define NN_TFLM_GLUE_H
@@ -68,8 +71,8 @@
 #ifndef NN_TFLM_OPS_ALL
 #error "nn_tflm_glue.h needs the op list: include nn_tflm_ops.h first"
 #endif
-#if !defined(NN_TFLM_GLUE_STATE) || !defined(NN_TFLM_GLUE_FACTS)
-#error "nn_tflm_glue.h needs NN_TFLM_GLUE_STATE and NN_TFLM_GLUE_FACTS defined first"
+#if !defined(NN_TFLM_GLUE_STATE)
+#error "nn_tflm_glue.h needs NN_TFLM_GLUE_STATE defined first"
 #endif
 
 /* The backend's op resolver type, read off its state object. */
@@ -110,9 +113,16 @@ void nn_tflm_fill_tensor(struct nn_tensor *nt, const TfLiteTensor *tt)
 	nt->zero_point = tt->params.zero_point;
 }
 
-/* Used by: tflm, ethosu.  Copy a display name into the backend-owned buffer: the
- * board's prefix, then @p name.  nullptr / "" means no model and reads "(none)",
- * never prefixed. */
+/* Used by: tflm, ethosu.  Copy a display name -- the blob's name, as it is -- into
+ * the backend-owned buffer.  nullptr / "" means no model and reads "(none)".
+ *
+ * [!] NOTHING IS CUT (issue #201).  @p name is a blob name, at most BLOB_NAME_MAX
+ * characters (nn.h's nn_model_reload()), and the assert holds the state type's
+ * field to that plus the terminator.  The bound in the loop stays as the memory
+ * bound for a caller that broke the rule; shell/test/test_nn_model_name.cc pins
+ * that the longest legal name comes back whole. */
+static_assert(sizeof NN_TFLM_GLUE_STATE.model_name >= BLOB_NAME_MAX + 1u,
+              "the name field cannot hold the longest blob name whole");
 void nn_tflm_set_model_name(const char *name)
 {
 	auto &s = NN_TFLM_GLUE_STATE;
@@ -120,10 +130,6 @@ void nn_tflm_set_model_name(const char *name)
 	int n = 0;
 
 	if (name && name[0]) {
-		const char *pre = NN_TFLM_GLUE_FACTS.name_prefix;
-
-		for (; pre && *pre && n < cap; pre++)
-			s.model_name[n++] = *pre;
 		for (; *name && n < cap; name++)
 			s.model_name[n++] = *name;
 	} else {

@@ -64,7 +64,6 @@
 
 /* The glue shared with the tflm backend works on the object named here. */
 #define NN_TFLM_GLUE_STATE  nn_ethosu_board_state
-#define NN_TFLM_GLUE_FACTS  nn_ethosu_board_facts
 #include "nn_tflm_glue.h"
 #include "nn_tflm_model_check.h" /* the I/O dims rule, shared with the host gate */
 

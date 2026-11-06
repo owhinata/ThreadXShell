@@ -367,6 +367,10 @@ int nn_model_staging_is_open(void);
  * Adopt the model now sitting in the staging buffer: @p len bytes at @p data,
  * called @p name for display.
  *
+ * @p name is the blob's name, at most BLOB_NAME_MAX characters: the backends'
+ * name fields hold that whole and show it as it is (issue #201), and every
+ * board passes the name of the blob it looked up.
+ *
  * @p data == NULL is refused (NN_ERR_ARG) and changes nothing; an unload is
  * nn_model_release().  Before the singleton exists the answer is NN_ERR_STATE;
  * while nn_scratch_claim() is held, NN_ERR_SCRATCH_HELD; on a backend that

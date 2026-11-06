@@ -15,8 +15,8 @@
  *
  * WHAT IS THE BOARD'S.  Three things, and only these: where the arena and the model
  * buffer live (nn_tflm_mem.h, defined in the board's nn_tflm_bufs.c), the state object
- * (nn_tflm_state.h, defined in the board's nn_tflm_board.cc together with its facts --
- * the display-name prefix), and compile definitions: the arena and buffer sizes, the op
+ * (nn_tflm_state.h, defined in the board's nn_tflm_board.cc; its facts, the
+ * display-name prefix, went in issue #201), and compile definitions: the arena and buffer sizes, the op
  * profile (nn_tflm_ops.h) and NN_TFLM_VERIFY.  Everything else -- the validation
  * order, the error codes, the one staging buffer and when it is handed out, the
  * reload's endings, the descriptor publication order -- is one policy here.  This
@@ -59,11 +59,10 @@
 #include "nn_tflm_model_check.h" /* the bounded verifier and the I/O dims rule, shared with the host gates */
 #include "nn_tflm_mem.h"     /* the board-placed arena, buffer and capacity */
 #include "nn_tflm_ops.h"     /* the op list, shared with verify_tflite */
-#include "nn_tflm_state.h"   /* the board-defined state and facts */
+#include "nn_tflm_state.h"   /* the board-defined state */
 
 /* The glue shared with the Ethos-U backend works on the object named here. */
 #define NN_TFLM_GLUE_STATE  nn_tflm_board_state
-#define NN_TFLM_GLUE_FACTS  nn_tflm_board_facts
 #include "nn_tflm_glue.h"    /* descriptors, name, resolver, interpreter (shared) */
 
 #include <new>

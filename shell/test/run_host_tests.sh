@@ -1045,7 +1045,7 @@ echo "  ok   NN_REFUSAL_NEG_CLAUSE refused at compile time, by the clause check"
 # hold taken once, every input filled and every run timed under it, given back
 # exactly once on every exit and never after a failed acquire.  A console
 # reaches only the common exits; a fake board records the order of all of them.
-gcc $CFLAGS -I "$svc" -I "$svc/nn" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/blob" \
     "$here/test_nn_bench.c" "$svc/nn/nn_bench.c" "$svc/fmt.c" \
     $LDFLAGS -o "$out/test_nn_bench"
 "$out/test_nn_bench"

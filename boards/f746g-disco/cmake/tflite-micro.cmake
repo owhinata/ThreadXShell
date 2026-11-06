@@ -175,7 +175,8 @@ target_include_directories(tflm PRIVATE
     "${TFLM_ROOT}/third_party/gemmlowp"              # "fixedpoint/..."
     "${TFLM_ROOT}/third_party/ruy"                   # "ruy/..."
     "${CMAKE_SOURCE_DIR}/svc/nn/tflm"         # the backend's own headers (#161)
-    "${CMAKE_SOURCE_DIR}/svc/nn")             # nn.h, nn_backend.h (shared since #161)
+    "${CMAKE_SOURCE_DIR}/svc/nn"              # nn.h, nn_backend.h (shared since #161)
+    "${CMAKE_SOURCE_DIR}/svc/blob")           # BLOB_NAME_MAX: the name field (#201)
 
 # TF_LITE_STATIC_MEMORY changes TFLM's context/tensor structs across the API boundary,
 # so it must be visible to every TU that includes TFLM headers -> PUBLIC.  Stripping

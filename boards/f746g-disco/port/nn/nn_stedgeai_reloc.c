@@ -46,6 +46,7 @@
  */
 #include "nn.h"
 #include "nn_backend.h"
+#include "blob_state.h"      /* BLOB_NAME_MAX (issue #201) */
 #include "nn_reloc_shape.h"   /* the shape half of reloc_map() (issue #176) */
 
 #include "stm32f7xx_hal.h"   /* SCB_CleanDCache_by_Addr / SCB_InvalidateICache / __DSB / __ISB */
@@ -102,7 +103,8 @@ struct reloc_model {
 	struct nn_tensor  out[NN_MAX_IO];
 	int               n_in, n_out;
 	uint32_t          acts_bytes;
-	char              name[40];
+	/* The blob's name whole (issue #201: 40 cut a name of 40 or more). */
+	char              name[BLOB_NAME_MAX + 1u];
 };
 static struct reloc_model g_reloc;
 

@@ -243,10 +243,11 @@ int nn_session_try_acquire(void)
 }
 void nn_session_release(void) { session_held = 0; }
 int nn_model_present(const struct nn_model *m) { return m->present; }
+static const char *model_name = "det";
 const char *nn_model_name(const struct nn_model *m)
 {
 	(void)m;
-	return "det";
+	return model_name;
 }
 uint32_t nn_activations_bytes(const struct nn_model *m)
 {
@@ -316,6 +317,27 @@ static void test_info(void)
 	CHECK(out.model[0] == '\0' && out.model_active == 0u &&
 	      out.avail_identity == NN_AVAIL_OK && out.source[0] == '\0',
 	      "info, open failed: zeroed, as before");
+
+	/* The longest name a backend can hand out -- the longest blob name -- is
+	 * copied whole (issue #201). */
+	{
+		char longest[BLOB_NAME_MAX + 1u];
+
+		memset(longest, 'a', BLOB_NAME_MAX);
+		longest[BLOB_NAME_MAX - 1u] = 'z';
+		longest[BLOB_NAME_MAX] = '\0';
+		model_name = longest;
+		open_rc = 0;
+		session_rc = 0;
+		seqs[0] = seqs[1] = 2u;
+		seq_reads = 0;
+		the_model.present = 1;
+		memset(&out, 0x5A, sizeof out);
+		nn_svc_common_info(&out, life_seq);
+		CHECK(out.model_active == 1u && strcmp(out.model, longest) == 0,
+		      "info, the longest name: copied whole");
+		model_name = "det";
+	}
 
 	/* the null backend says so */
 	bi.name = "null";

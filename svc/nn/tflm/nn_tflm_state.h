@@ -4,7 +4,7 @@
  */
 /**
  * @file    nn_tflm_state.h
- * @brief   The tflm backend's state, and the facts the board gives it (issue #161).
+ * @brief   The tflm backend's state, defined by the board (issue #161).
  *
  * svc/nn/tflm/nn_tflm.cc is the one TFLM backend of wio-lite-ai and f746g-disco, and
  * like every shared translation unit it owns no mutable storage
@@ -35,6 +35,7 @@
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 
 #include "nn.h"
+#include "blob_state.h"      /* BLOB_NAME_MAX: the name field holds one whole (#201) */
 #include "nn_tflm_ops.h"
 
 #include <cstdint>
@@ -57,9 +58,11 @@ struct nn_tflm_model {
 
 struct nn_tflm_state {
 	/* The handle and the display name it points at (backend-owned, so `nn info`
-	 * never prints through a pointer into a command's argv). */
+	 * never prints through a pointer into a command's argv).  The blob's name,
+	 * the longest one whole (issue #201: it held 63 characters and cut a
+	 * 64-character name). */
 	nn_tflm_model tm;
-	char          model_name[64];
+	char          model_name[BLOB_NAME_MAX + 1u];
 
 	/* The flatbuffer the live interpreter is reading, inside nn_tflm_model_buf, or
 	 * nullptr when no model is loaded (zero is the boot state).  While it is set the
@@ -85,19 +88,12 @@ static_assert(std::is_trivially_destructible<nn_tflm_state>::value,
 static_assert(std::is_aggregate<nn_tflm_state>::value,
               "the tflm state is plain storage, not an object with a constructor");
 
-/** What the board tells the backend about itself (beyond placement and state). */
-struct nn_tflm_board_facts {
-	/* Prepended to every loaded model's display name: "" on both boards since
-	 * issue #194 (f746g-disco's was "sd:" while its models came from the SD
-	 * card).  `(none)` is never prefixed. */
-	const char *name_prefix;
-};
-
 extern "C" {
-/** The board's one instance (boards/<board>/port/nn/tflm/nn_tflm_board.cc). */
+/** The board's one instance (boards/<board>/port/nn/tflm/nn_tflm_board.cc).
+ *  The board states nothing else: the facts it gave until issue #201 were the
+ *  model-name prefix alone ("sd:" on f746g-disco until #194, "" since), and
+ *  a model is named by its blob name as it is. */
 extern nn_tflm_state nn_tflm_board_state;
-/** The board's facts (same file). */
-extern const struct nn_tflm_board_facts nn_tflm_board_facts;
 }
 
 #endif /* NN_TFLM_STATE_H */

@@ -774,3 +774,29 @@ else
     python3 "$HOST_TEST_REPO/cmake/fixtures/run_model_io_gate_tests.py" \
         --build-dir "$io_build" --gate verify_vela_model --style vela
 fi
+
+# issue #201 -- the display name the Ethos-U backend keeps (svc/nn/tflm/nn_tflm_glue.h's
+# nn_tflm_set_model_name(), into svc/nn/ethosu/nn_ethosu_state.h's field): the
+# longest blob name comes back whole.  The field held 63 characters and cut the
+# 64th.  The
+# shared test (shell/test/test_nn_model_name.cc) needs TFLM's headers, so it is
+# built here against the SDK's tree (pin-fetched at configure).  No tree: a loud
+# SKIP.
+mn_tree="$sdk/library/inference/tflmtag2412_u55tag2411"
+if [ ! -f "$mn_tree/tensorflow/lite/micro/micro_interpreter.h" ]; then
+    echo "test_nn_model_name (ethosu): SKIPPED -- no SDK TFLM tree at" \
+         "$mn_tree (configure a grove-vision-ai-v2 build once to fetch it)" >&2
+else
+    g++ -std=c++17 -O1 -Wall -Wextra -Wno-unused-function \
+        -fno-exceptions -fno-rtti \
+        -isystem "$mn_tree" -isystem "$mn_tree/third_party/flatbuffers/include" \
+        -isystem "$mn_tree/third_party/gemmlowp" -isystem "$mn_tree/third_party/ruy" \
+        -isystem "$mn_tree/third_party/ethos_u_core_driver/include" \
+        -I "$board/port/nn/npu" -I "$svc/nn/ethosu" -I "$svc/nn/tflm" \
+        -I "$svc/nn" -I "$svc/blob" \
+        -DNN_TFLM_OPS_ETHOSU_PROFILE=1 -DTF_LITE_STATIC_MEMORY \
+        -DETHOS_U -DETHOSU55 -DETHOSU_ARCH=u55 -DTEST_ETHOSU \
+        "$HOST_TEST_SHELL_TEST/test_nn_model_name.cc" \
+        -o "$out/test_nn_model_name_ethosu"
+    "$out/test_nn_model_name_ethosu"
+fi

@@ -462,3 +462,25 @@ else
     python3 "$board/cmake/fixtures/run_verify_tflite_size_tests.py" \
         --build-dir "$io_build"
 fi
+
+# issue #201 -- the display name the tflm backend keeps (svc/nn/tflm/nn_tflm_glue.h's
+# nn_tflm_set_model_name(), into nn_tflm_state.h's field): the longest blob name
+# comes back whole.  The field held 63 characters and cut the 64th.  The shared test
+# (shell/test/test_nn_model_name.cc) needs TFLM's headers, so it is built here
+# against this board's generated tree: build/wio-lite-ai/tflm-tree, or
+# WIO_BUILD_DIR's.  No tree: a loud SKIP.
+mn_tree="${WIO_BUILD_DIR:-$HOST_TEST_REPO/build/wio-lite-ai}/tflm-tree"
+if [ ! -f "$mn_tree/tensorflow/lite/micro/micro_interpreter.h" ]; then
+    echo "test_nn_model_name (tflm): SKIPPED -- no generated TFLM tree at" \
+         "$mn_tree (configure build/wio-lite-ai, or set WIO_BUILD_DIR)" >&2
+else
+    g++ -std=c++17 -O1 -Wall -Wextra -Wno-unused-function \
+        -fno-exceptions -fno-rtti \
+        -isystem "$mn_tree" -isystem "$mn_tree/third_party/flatbuffers/include" \
+        -isystem "$mn_tree/third_party/gemmlowp" -isystem "$mn_tree/third_party/ruy" \
+        -I "$svc/nn/tflm" -I "$svc/nn" -I "$svc/blob" \
+        -DNN_TFLM_OPS_BLAZEFACE_PROFILE=1 -DTF_LITE_STATIC_MEMORY \
+        "$HOST_TEST_SHELL_TEST/test_nn_model_name.cc" \
+        -o "$out/test_nn_model_name_tflm"
+    "$out/test_nn_model_name_tflm"
+fi

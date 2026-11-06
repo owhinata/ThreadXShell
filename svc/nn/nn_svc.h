@@ -45,6 +45,7 @@
 #include "blazeface.h"       /* struct bf_det, struct bf_result */
 #include "nn_detail.h"       /* NN_SVC_DETAIL_MAX, NN_SVC_DETAIL_LIT (#122) */
 #include "nn_det_record.h"   /* struct nn_det_snapshot (issue #97) */
+#include "blob_state.h"      /* BLOB_NAME_MAX (issue #201) */
 #include "nn_stream_life.h" /* the shared stream lifecycle (issue #99)   */
 #include "tensor.h"          /* struct tensor_desc (issue #97) */
 
@@ -268,12 +269,13 @@ enum nn_avail {
  * on-board model verify" off at "no on-", which reads as a truncated sentence
  * rather than a shortened one -- and the half it removed was the caveat. */
 #define NN_SVC_VERSION_MAX 63
-/* [!] LONG ENOUGH FOR THE LONGEST NAME ANY BOARD CAN PRODUCE.  wio's asset
- * store allows 63 characters and grove-vision-ai-v2's 64 (this said 63 until
- * issue #122 and cut the last character off a legal Grove name); a field that
- * truncates would report two distinct legal models under one prefix -- a name
- * that is wrong rather than merely short.  Each board asserts its limit. */
-#define NN_SVC_MODEL_MAX   64
+/* [!] LONG ENOUGH FOR THE LONGEST NAME ANY BOARD CAN PRODUCE.  This said 63
+ * until issue #122 and cut the last character off a legal Grove name, and the
+ * backends' own field did the same until issue #201; a field that truncates
+ * would report two distinct legal models under one prefix -- a name that is
+ * wrong rather than merely short.  A model is named by its blob, so it is the
+ * blob's limit itself, not a number written again here. */
+#define NN_SVC_MODEL_MAX   BLOB_NAME_MAX
 #define NN_SVC_SOURCE_MAX  79
 
 struct nn_svc_info {

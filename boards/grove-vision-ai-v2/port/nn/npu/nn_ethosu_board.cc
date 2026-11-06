@@ -21,15 +21,15 @@ extern "C" {
 nn_ethosu_state nn_ethosu_board_state;
 
 /*
- * Model names are the blob names the operator typed (`nn model load <name>`), so
- * nothing is prefixed.  The window is the external NOR's XIP alias, the whole part:
+ * Model names are the blob names the operator typed (`nn model load <name>`),
+ * shown as they are.  The window is the external NOR's XIP alias, the whole part:
  * a model may lie anywhere in it the caller's lease covers, and the backend refuses
  * a range that leaves it.  The NPU configuration is npu_hw.h's, whose SHRAM size
  * npu_hw_init() has read back from the NPU before any model can be loaded
  * (issue #184).
  */
 const struct nn_ethosu_board_facts nn_ethosu_board_facts = {
-	"", NOR_XIP_BASE, NOR_SIZE, NPU_CS_CONFIG_INIT
+	NOR_XIP_BASE, NOR_SIZE, NPU_CS_CONFIG_INIT
 };
 
 }  /* extern "C" */

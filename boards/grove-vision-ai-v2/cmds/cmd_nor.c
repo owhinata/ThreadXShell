@@ -154,7 +154,7 @@ static int nor_cmd_enter(struct cli_instance *sh, uint32_t *token)
 static const char *lease_holder(uint32_t live)
 {
 	switch (live) {
-	case (1u << NOR_LEASE_NPU):    return "`nn` has a model open (nn close)";
+	case (1u << NOR_LEASE_NPU):    return "`nn` has a model open (nn model unload)";
 	case (1u << NOR_LEASE_SCAN):   return "a `nor scan` is running";
 	case (1u << NOR_LEASE_DEVMEM): return "a `devmem` read is in flight";
 	case (1u << NOR_LEASE_BLOB):   return "a `blob` read is in flight";

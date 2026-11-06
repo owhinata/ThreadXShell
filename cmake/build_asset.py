@@ -35,6 +35,7 @@ matching for a reason nobody can see.
 import argparse
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -308,6 +309,12 @@ def main():
                     % (args.name, len(blob), cap, args.stage_symbol,
                        args.stage_elf))
         else:
+            # A slot is a decimal number, refused here in a sentence: "" or
+            # "5x" used to die in int() with a traceback, and int() alone
+            # would read " 5" as slot 5.  The same shape add_asset() requires.
+            if not re.fullmatch(r"[0-9]+", args.slot):
+                die("--slot %r is not a slot number; nothing was published"
+                    % args.slot)
             table = json.load(open(args.slot_table))
             for sl in table["slots"]:
                 if sl["index"] == int(args.slot):

@@ -676,8 +676,12 @@ python3 "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
 # issue #159 -- an asset's destination is exactly one of a slot or a file, and
 # the receipt prints the board's own transfer / verify lines: build_asset.py
 # refuses none / both / half of either before packing, and asset_receipt.py
-# prints the slot boards' receipt byte for byte as before.  The staging-capacity
-# read-back needs the cross toolchain and runs from f746's host_tests.sh.
+# prints the slot boards' receipt byte for byte as before.  Since #195 it also
+# runs build_asset.py to the end with stand-in tools: a container that fits its
+# slot exactly is published, and a byte over, a slot the table lacks, a missing
+# --slot / --slot-table and a non-numeric slot publish nothing.  The
+# staging-capacity read-back needs the cross toolchain and runs from f746's
+# host_tests.sh.
 python3 "$repo/cmake/fixtures/run_asset_dest_tests.py"
 
 # issue #132 -- the pin is checked again by the FIRST CONSUMER of the fetched

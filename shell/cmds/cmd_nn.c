@@ -292,7 +292,7 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 		}
 	} else {
 #if NN_SVC_HAS_MODEL_LOAD
-		cli_warn(sh, "note    : nothing loaded -- `nn model load ...`\r\n");
+		cli_warn(sh, "note    : nothing loaded -- `nn model load <name>`\r\n");
 #else
 		cli_warn(sh, "note    : this build has no runtime model loader\r\n");
 #endif

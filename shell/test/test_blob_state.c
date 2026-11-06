@@ -169,6 +169,15 @@ static void t_dash_names(void)
 	      strcmp(blob_name_verdict_name(BLOB_NAME_DASH),
 	             blob_name_verdict_name(BLOB_NAME_CHAR)) != 0,
 	      "DASH reads as CHAR");
+
+	/* CHAR's sentence names the space too: a quoted word carries one this
+	 * far (`nn model load "a b"`), and a space is printable ASCII, so
+	 * "not printable ASCII" alone would be wrong for it. */
+	CHECK(strcmp(blob_name_verdict_name(BLOB_NAME_CHAR),
+	             "name has a space or a character that is not printable "
+	             "ASCII") == 0,
+	      "the CHAR sentence is \"%s\"",
+	      blob_name_verdict_name(BLOB_NAME_CHAR));
 }
 
 /*

@@ -191,8 +191,9 @@ const char *blob_name_verdict_name(enum blob_name_verdict v);
 /**
  * @brief  May @p name be stored, and how long is it?
  *
- * Printable ASCII with no space: a space could not survive the command line
- * anyway (the parser splits on it) and `blob list` prints names in a column.
+ * Printable ASCII with no space: `blob list` prints names in a column.  A
+ * quoted word can still carry a space this far, so BLOB_NAME_CHAR's sentence
+ * names the space as well as the bytes outside printable ASCII.
  * And not starting with '-' (issue #196): a word that starts with '-' is an
  * option on a command line, so a name like that could be stored but never
  * named back (`nn model load -x` is refused as "not a model name").  A '-'

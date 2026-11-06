@@ -67,7 +67,7 @@ const char *blob_name_verdict_name(enum blob_name_verdict v)
 	case BLOB_NAME_OK:    return "ok";
 	case BLOB_NAME_EMPTY: return "name is empty";
 	case BLOB_NAME_LONG:  return "name is too long";
-	case BLOB_NAME_CHAR:  return "name has a character that is not printable ASCII";
+	case BLOB_NAME_CHAR:  return "name has a space or a character that is not printable ASCII";
 	case BLOB_NAME_DASH:  return "name starts with '-'";
 	default:              break;
 	}
@@ -86,9 +86,9 @@ enum blob_name_verdict blob_name_check(const char *name, uint32_t *len_out)
 	while (name[n] != '\0') {
 		uint8_t c = (uint8_t)name[n];
 
-		/* 0x21..0x7E: printable and not a space.  A space could not
-		 * reach here through the command line anyway, and `blob list`
-		 * prints these in a column. */
+		/* 0x21..0x7E: printable and not a space.  A quoted word can
+		 * carry a space here (`nn model load "a b"`), so the answer
+		 * names it; `blob list` prints these in a column. */
 		if (c < 0x21u || c > 0x7Eu)
 			return BLOB_NAME_CHAR;
 		n++;

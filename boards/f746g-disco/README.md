@@ -505,7 +505,7 @@ ten `nn run` in a row):
 
 The backend can hold no model at all: `nn info` then prints `model : (none)`
 and, in place of the tensor lines, `note : nothing loaded -- `nn model load
-...``; `nn run`, `nn stream start` and `nn bench` are refused (`nn bench` with
+<name>``; `nn run`, `nn stream start` and `nn bench` are refused (`nn bench` with
 `no model is loaded`). On `tflm` that is the state after boot (Step 4c: there
 is no built-in model) and after `nn model unload`.
 

@@ -283,6 +283,14 @@ int main(void)
 	run_load(NN_SVC_OK, NN_MODEL_NEW, 0);
 	expect("a load that succeeds says loaded", has("nn: loaded\r\n"));
 
+	/* `nn info` with nothing open points at the one spelling there is
+	 * (issue #196): the same `<name>` as the usage, never `...`. */
+	run_line("nn info\r");
+	expect("`nn info` with nothing open names the load as `<name>`",
+	       has("model   : (none)\r\n") &&
+	       has("note    : nothing loaded -- `nn model load " SOURCES
+	           "`\r\n") && !has("..."));
+
 	if (failures != 0) {
 		printf("test_nn_cmd_usage: %d failure(s)\n", failures);
 		return 1;

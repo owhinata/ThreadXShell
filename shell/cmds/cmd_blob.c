@@ -560,8 +560,9 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 
 	nv = blob_name_check(argv[1], NULL);
 	if (nv != BLOB_NAME_OK) {
-		cli_error(sh, "blob: %s (printable ASCII, no space, at most %u "
-		              "characters)\r\n", blob_name_verdict_name(nv),
+		cli_error(sh, "blob: %s (printable ASCII, no space, not starting "
+		              "with '-', at most %u characters)\r\n",
+		          blob_name_verdict_name(nv),
 		          (unsigned)BLOB_NAME_MAX);
 		return 1;
 	}

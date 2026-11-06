@@ -68,6 +68,7 @@ const char *blob_name_verdict_name(enum blob_name_verdict v)
 	case BLOB_NAME_EMPTY: return "name is empty";
 	case BLOB_NAME_LONG:  return "name is too long";
 	case BLOB_NAME_CHAR:  return "name has a character that is not printable ASCII";
+	case BLOB_NAME_DASH:  return "name starts with '-'";
 	default:              break;
 	}
 	return "?";
@@ -79,6 +80,9 @@ enum blob_name_verdict blob_name_check(const char *name, uint32_t *len_out)
 
 	if (name == NULL || name[0] == '\0')
 		return BLOB_NAME_EMPTY;
+	/* The first byte, before the loop: see blob_state.h for the order. */
+	if (name[0] == '-')
+		return BLOB_NAME_DASH;
 	while (name[n] != '\0') {
 		uint8_t c = (uint8_t)name[n];
 

@@ -356,6 +356,61 @@ static void t_write(void)
 	           "what is where)") && blob_stub.erase_spans == 0u);
 }
 
+/*
+ * [!] A NAME THAT STARTS WITH '-' (issue #196): refused by the name rule
+ * before anything is taken -- no reservation, no store call, no erase, no
+ * receive -- with the new reason and the rule in brackets.  And a `-x` that
+ * is already stored (written before the rule) is still listed, still guards
+ * its slot against another name, and goes with `blob erase <slot>`.
+ */
+static void t_dash_name(void)
+{
+	static const char *const bad[] = {
+		"blob write -x 3", "blob write - 3", "blob write --name 3",
+	};
+	char line[32];
+	unsigned i;
+
+	for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+		reset();
+		store(3u, "keep", 100u, 0x11111111u);
+		snprintf(line, sizeof line, "%s\r", bad[i]);
+		run(line);
+		expect(bad[i], has("blob: name starts with '-' (printable ASCII, "
+		                   "no space, not starting with '-', at most 64 "
+		                   "characters)\r\n") &&
+		       blob_stub.reserves == 0u && blob_stub.store_calls == 0u &&
+		       blob_stub.erase_spans == 0u &&
+		       blob_stub.erase_headers == 0u &&
+		       blob_stub.receives == 0u &&
+		       strcmp(blob_stub.name[3], "keep") == 0);
+	}
+
+	/* A '-' that is not the first character is an ordinary name. */
+	reset();
+	run("blob write a-b 12\r");
+	expect("`a-b` is stored", has("stored   : 'a-b' in slot 12"));
+	reset();
+	run("blob write x- 12\r");
+	expect("`x-` is stored", has("stored   : 'x-' in slot 12"));
+
+	/* What is already stored is read as before. */
+	reset();
+	store(3u, "-x", 3000u, 0x12345678u);
+	run("blob list\r");
+	expect("a stored `-x` is listed as valid",
+	       has("   3  0x400000    512K  valid           3000  12345678  "
+	           "-x\r\n"));
+	run("blob write other 3\r");
+	expect("and it still guards its slot",
+	       has("that slot holds something else") &&
+	       blob_stub.erase_spans == 0u);
+	run("blob erase 3\r");
+	expect("and `blob erase <slot>` removes it",
+	       has("erased   : the header is gone") &&
+	       blob_stub.erase_headers == 1u);
+}
+
 /* ---- erase ----------------------------------------------------------------- */
 
 static void t_erase(void)
@@ -507,6 +562,7 @@ int main(void)
 	t_list();
 	t_columns();
 	t_write();
+	t_dash_name();
 	t_erase();
 	t_read();
 	t_slot_bounds();

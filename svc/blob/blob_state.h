@@ -182,6 +182,7 @@ enum blob_name_verdict {
 	BLOB_NAME_EMPTY,   /**< NULL or zero length         */
 	BLOB_NAME_LONG,    /**< longer than BLOB_NAME_MAX   */
 	BLOB_NAME_CHAR,    /**< a byte outside 0x21..0x7E   */
+	BLOB_NAME_DASH,    /**< the first byte is '-'       */
 };
 
 /** Short name for a name verdict (the console prints it back at the operator). */
@@ -192,6 +193,25 @@ const char *blob_name_verdict_name(enum blob_name_verdict v);
  *
  * Printable ASCII with no space: a space could not survive the command line
  * anyway (the parser splits on it) and `blob list` prints names in a column.
+ * And not starting with '-' (issue #196): a word that starts with '-' is an
+ * option on a command line, so a name like that could be stored but never
+ * named back (`nn model load -x` is refused as "not a model name").  A '-'
+ * anywhere else is fine (`a-b`, `x-`).
+ *
+ * [!] THE FIRST BYTE THAT BREAKS A RULE DECIDES, read from the front: empty
+ * first, then a leading '-', then each byte's range and the running length.
+ * So `-` alone, `-` followed by a non-ASCII byte and a 65-byte name that
+ * starts with `-` all answer BLOB_NAME_DASH -- the operator's first mistake is
+ * the first character, and fixing it is what the answer should say.  A byte
+ * outside the range before the 65th still answers CHAR, a valid 65th byte
+ * LONG, as before.
+ *
+ * [!] THE READER IS WIDER THAN THIS, ON PURPOSE.  The header decoder keeps its
+ * own byte-range check and does not call this function, so a `-x` blob stored
+ * before the rule existed still decodes as VALID, is listed, is found by name,
+ * and is removed with `blob erase <slot>`.  Calling this from the decoder
+ * would turn such a slot into unreadable bytes on a reflash alone.
+ *
  * @p len_out receives the length on BLOB_NAME_OK; it is not touched otherwise.
  */
 enum blob_name_verdict blob_name_check(const char *name, uint32_t *len_out);

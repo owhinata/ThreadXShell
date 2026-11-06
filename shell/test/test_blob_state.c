@@ -122,6 +122,101 @@ static void t_names(void)
 	      "a NULL length pointer was refused");
 }
 
+/*
+ * [!] A LEADING '-' (issue #196): its own verdict, never folded into CHAR.
+ * The first byte that breaks a rule decides, so a name that is also empty
+ * of anything else, non-ASCII after the dash, or too long still says DASH.
+ */
+static void t_dash_names(void)
+{
+	char long_dash[BLOB_NAME_MAX + 2u];
+	uint32_t n;
+
+	CHECK(blob_name_check("-x", &n) == BLOB_NAME_DASH, "`-x` was not DASH");
+	CHECK(blob_name_check("-", &n) == BLOB_NAME_DASH, "`-` was not DASH");
+	CHECK(blob_name_check("--name", &n) == BLOB_NAME_DASH,
+	      "`--name` was not DASH");
+	CHECK(blob_name_check("-\xc3\xa9", &n) == BLOB_NAME_DASH,
+	      "a dash then a non-ASCII byte was not DASH");
+	memset(long_dash, 'x', sizeof long_dash);
+	long_dash[0] = '-';
+	long_dash[BLOB_NAME_MAX + 1u] = '\0';           /* 65 bytes */
+	CHECK(blob_name_check(long_dash, &n) == BLOB_NAME_DASH,
+	      "a 65-byte name starting with a dash was not DASH");
+	/* The other orders keep their answers. */
+	CHECK(blob_name_check("\xc3-", &n) == BLOB_NAME_CHAR,
+	      "a non-ASCII byte before a dash was not CHAR");
+	CHECK(blob_name_check(" -x", &n) == BLOB_NAME_CHAR,
+	      "a space before a dash was not CHAR");
+
+	n = 0u;
+	CHECK(blob_name_check("a-b", &n) == BLOB_NAME_OK && n == 3u,
+	      "`a-b` was refused");
+	CHECK(blob_name_check("x-", &n) == BLOB_NAME_OK && n == 2u,
+	      "`x-` was refused");
+	CHECK(blob_name_check("a--b", &n) == BLOB_NAME_OK && n == 4u,
+	      "`a--b` was refused");
+	n = 0xDEADu;
+	CHECK(blob_name_check("-x", &n) == BLOB_NAME_DASH && n == 0xDEADu,
+	      "a refused dash name still reported a length");
+
+	/* Its own sentence, the one every board copies. */
+	CHECK(strcmp(blob_name_verdict_name(BLOB_NAME_DASH),
+	             "name starts with '-'") == 0,
+	      "the DASH sentence is \"%s\"",
+	      blob_name_verdict_name(BLOB_NAME_DASH));
+	CHECK(BLOB_NAME_DASH != BLOB_NAME_CHAR &&
+	      strcmp(blob_name_verdict_name(BLOB_NAME_DASH),
+	             blob_name_verdict_name(BLOB_NAME_CHAR)) != 0,
+	      "DASH reads as CHAR");
+}
+
+/*
+ * [!] THE WRITER REFUSES A LEADING '-', THE READER DOES NOT (issue #196).  A
+ * `-x` header cannot be built, but one already in flash decodes VALID and is
+ * found by name -- a reflash alone must not turn a stored blob into bytes
+ * nobody can read or name.
+ */
+static void t_dash_stored(void)
+{
+	struct blob_info got;
+	struct blob_slot_view v[3];
+	enum blob_hdr_reject why = BLOB_REJECT_NONE;
+	unsigned found = 0xEEu;
+	uint32_t crc;
+
+	hdr_erase();
+	CHECK(put_body(BASE, CAP, "-x", 16u, 0u) == BLOB_REJECT_NAME,
+	      "a `-x` header was built");
+
+	/* The same header as a writer before the rule laid it down: build `ax`,
+	 * turn the first byte into '-', recompute the body CRC. */
+	hdr_erase();
+	CHECK(put_body(BASE, CAP, "ax", 16u, 0xCAFEu) == BLOB_REJECT_NONE,
+	      "the `ax` header would not encode");
+	put_magic();
+	BODY[BLOB_BODY_OFF_NAME] = '-';
+	crc = crc32_update(0u, BODY, BLOB_BODY_OFF_BODYCRC);
+	BODY[BLOB_BODY_OFF_BODYCRC + 0u] = (uint8_t)(crc & 0xFFu);
+	BODY[BLOB_BODY_OFF_BODYCRC + 1u] = (uint8_t)((crc >> 8) & 0xFFu);
+	BODY[BLOB_BODY_OFF_BODYCRC + 2u] = (uint8_t)((crc >> 16) & 0xFFu);
+	BODY[BLOB_BODY_OFF_BODYCRC + 3u] = (uint8_t)((crc >> 24) & 0xFFu);
+	memset(&got, 0, sizeof got);
+	CHECK(decode(&why, &got) == BLOB_VALID && strcmp(got.name, "-x") == 0 &&
+	      got.length == 16u,
+	      "a stored `-x` header decoded as %s", blob_hdr_reject_name(why));
+
+	/* Found by name the way every board builds its views: VALID and the
+	 * decoded name equal to the one asked for. */
+	memset(v, 0, sizeof v);
+	v[0].state = BLOB_EMPTY;
+	v[1].state = BLOB_VALID;
+	v[1].name_match = (uint8_t)(strcmp(got.name, "-x") == 0);
+	v[2].state = BLOB_EMPTY;
+	CHECK(blob_resolve_name(v, 3u, &found) == BLOB_LOOKUP_FOUND &&
+	      found == 1u, "a stored `-x` was not found by name");
+}
+
 /* ---- the codec ----------------------------------------------------------- */
 
 static void t_roundtrip(void)
@@ -380,9 +475,10 @@ static void t_body_rejections(void)
 	      "an over-long stored name decoded as %s",
 	      blob_hdr_reject_name(why));
 
-	/* A stored name with a byte the name rules refuse.  The rules are one
-	 * set: what blob_name_check() will not accept from an operator is what
-	 * the decoder will not accept from flash. */
+	/* A stored name with a byte outside the range.  The decoder's rule is
+	 * WIDER than the writer's (issue #196): it refuses the bytes
+	 * blob_name_check() refuses, but not a leading '-' -- see
+	 * t_dash_names(). */
 	hdr_erase();
 	(void)put_body(BASE, CAP, "abc", 16u, 0u);
 	put_magic();
@@ -836,6 +932,8 @@ static void t_resolve(void)
 int main(void)
 {
 	t_names();
+	t_dash_names();
+	t_dash_stored();
 	t_roundtrip();
 	t_empty_and_foreign();
 	t_magic_page();

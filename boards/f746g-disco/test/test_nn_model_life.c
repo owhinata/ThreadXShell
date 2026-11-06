@@ -250,6 +250,17 @@ int main(void)
 	assert(strstr(res.detail, "is not a blob name") != NULL);
 	assert(nn_blob_stub.finds == 1u);   /* the first load's only */
 
+	/* [!] A NAME THAT STARTS WITH '-' (issue #196): the same ARG and the
+	 * shared sentence, nothing acquired -- even with a `-x` blob stored
+	 * (written before the rule): the writer's rule decides what may be
+	 * NAMED, and the store is not asked. */
+	nn_blob_stub_put(2u, "-x", model_bytes, 32u);
+	load(NN_SPEC_NAME, "-x");
+	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
+	assert(strcmp(res.detail, "'-x' is not a blob name (name starts with "
+	                          "'-')") == 0);
+	assert(nn_blob_stub.finds == 1u && stub.reloads == 0);
+
 	/* [!] THE STORE'S ANSWERS, each its own status and words, each over a
 	 * model and each leaving it (PREVIOUS), the flag back every time. */
 	reads = nn_blob_stub.reads;

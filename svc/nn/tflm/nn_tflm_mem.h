@@ -77,9 +77,9 @@ extern uint8_t nn_tflm_model_buf[NN_TFLM_MODEL_MAX];
  * limit, and stage_capacity() answers it while a model is still open (issue #191:
  * a board checks a length against it before the open model goes down), both
  * through a volatile read so the limit is THIS object and not a constant the
- * compiler folded beside it; f746g-disco's asset build reads the same object's bytes
- * out of the shipped shell.elf (cmake/build_asset.py --stage-symbol) to refuse a
- * container that would not fit.  The board defines it as NN_TFLM_MODEL_MAX.
+ * compiler folded beside it; the post-link cmake/check_blob_staging.py reads the
+ * same object's bytes out of the shipped shell.elf to refuse a slot larger than
+ * it (issue #194).  The board defines it as NN_TFLM_MODEL_MAX.
  */
 extern const uint32_t nn_tflm_stage_cap;
 

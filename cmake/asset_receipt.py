@@ -24,13 +24,13 @@ are known to be the right ones (wio names its model load there).
 
 [!] AND SO ARE THE TRANSFER AND THE COMPARISON (issue #159).  This file used to
 print "in picocom: C-a C-s" and "`blob list` must show crc32" for every board;
-f746 has neither -- its file goes to the card through a PC card reader, and the
-CRC to compare is the one its load prints.  So each arrives as a label and its
-lines (--transfer-label/--transfer, --verify-label/--verify, templates over
-{name}, {slot}, {file} and {crc}).  Grove and wio pass the text this printed
-before, so their receipts are byte-identical.
+f746 then had neither.  So each arrives as a label and its lines
+(--transfer-label/--transfer, --verify-label/--verify, templates over {name},
+{slot} and {crc}).  Grove and wio pass the text this printed before, so their
+receipts are byte-identical.
 
-The destination is exactly one: a slot (the positional argument) or --file.
+The destination is the slot (the positional argument, required).  The file
+destination's --file was removed in issue #195; argparse refuses it by name.
 """
 import argparse
 import json
@@ -39,13 +39,11 @@ import zlib
 
 ap = argparse.ArgumentParser()
 ap.add_argument("receipt")
-ap.add_argument("slot", nargs="?", default="")
+ap.add_argument("slot")
 ap.add_argument("--step", action="append", default=[], required=True,
                 help="a board command, as a template over {name} and {slot}")
 ap.add_argument("--then", action="append", default=[],
                 help="a board command for after the CRC check, same template")
-ap.add_argument("--file", default="",
-                help="the file name on the board's card (a file destination)")
 ap.add_argument("--transfer-label", required=True)
 ap.add_argument("--transfer", action="append", default=[], required=True,
                 help="how the file reaches the board, same template")
@@ -54,9 +52,8 @@ ap.add_argument("--verify", action="append", default=[], required=True,
                 help="how the stored bytes are compared with {crc}")
 args = ap.parse_args()
 receipt, slot = args.receipt, args.slot
-if bool(slot) == bool(args.file):
-    sys.exit("asset_receipt: exactly one destination -- a slot or --file -- "
-             "is required")
+if not slot.isascii() or not slot.isdigit():
+    sys.exit("asset_receipt: the slot must be a slot number, got %r" % slot)
 r = json.load(open(receipt))
 
 # [!] RECOMPUTED FROM THE FILE, NOT TRUSTED FROM THE RECEIPT.  The receipt and
@@ -70,9 +67,8 @@ if "%08X" % _actual != r["crc32"]:
     sys.exit("asset_receipt: %s does not match its receipt (file %08X, receipt "
              "%s).  Rebuild the asset -- do not send this file."
              % (r["path"], _actual, r["crc32"]))
-dest_txt = ("slot %s" % slot) if slot else ("file %s" % args.file)
-fill = dict(name=r["name"], slot=slot or "<slot>", file=args.file or "<file>",
-            crc=r["crc32"])
+dest_txt = "slot %s" % slot
+fill = dict(name=r["name"], slot=slot, crc=r["crc32"])
 
 
 def block(label, lines):

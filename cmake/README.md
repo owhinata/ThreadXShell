@@ -372,32 +372,38 @@ configure says so; `FILE` is a path, not a hash pin, and is guarded by whatever
 pins the tree it lives in (Grove's cifar10 is inside the pinned Himax SDK).
 `fixtures/run_pinned_input_tests.py` covers both checkers.
 
-# Asset destinations: a slot or a file, exactly one (#159)
+# Asset destination: a store slot, required (#159, #195)
 
-`add_asset()` takes exactly one destination. A store slot -- `SLOT` with
-`SLOT_TABLE` -- is what every board uses since #194 (Grove and wio before it,
-f746 from then on), and its fit check against the slot table before
-publication is unchanged. A file the operator copies to the board's card --
-`FILE_NAME` with `STAGE_SYMBOL` -- was f746's (from #159 Step 4b to #194):
-`build_asset.py` reads the staging capacity the shipped firmware holds in that
-`const uint32_t`, out of the ELF `veneer_cost_gate()` registered, and refuses a
-container larger than it before publishing. None, both, or half of either is
-refused at configure (`add_asset()`) and again in `build_asset.py`, which used
-to skip the fit check on a call that named no slot.  [!] No board passes the
-file destination any more, but the route is still in the tools
-(`add_asset.cmake`, `build_asset.py --stage-symbol` / `--file`,
-`asset_receipt.py --file`, `run_with_pinned_input.py`) and their tests still
-run it; removing it is issue #195.
+Every asset goes to a store slot: `add_asset()` requires `SLOT` with
+`SLOT_TABLE`, and `build_asset.py` requires `--slot` with `--slot-table` and
+checks the packed container against that slot's `payload_max` before anything
+is published, on every call (the check has no "if there is a destination"
+branch). None, half, an empty value, a slot that is not a number, or a slot
+table that is missing or unreadable is refused in a sentence and publishes
+nothing. Together with the post-link `check_blob_staging.py` (every slot fits
+the staging buffer, below), a published container also fits the buffer the
+board loads it into.
+
+#159 had added a second destination, a file copied to f746's card and checked
+against the staging capacity read out of the firmware ELF. f746 moved to a slot
+in #194, and #195 removed that route from `add_asset.cmake`, `build_asset.py`
+and `asset_receipt.py`. Its words are refused by name rather than forgotten:
+`add_asset()` still parses `FILE_NAME` / `STAGE_SYMBOL` only to refuse them
+(an unknown word after a multi-value keyword such as `VERIFY_ARGS` would be
+taken as one of its values and configure would pass), and argparse refuses
+`--stage-elf` / `--stage-symbol` / `--file`. (`run_with_pinned_input.py` was
+never part of that route: it re-checks a pinned model's SHA256 in front of a
+board's ingest, above.)
 
 The receipt's transfer and verify lines are the board's too
 (`RECEIPT_TRANSFER` / `RECEIPT_VERIFY`: a label and its lines, templates over
-`{name}`, `{slot}`, `{file}` and `{crc}`). Grove and wio pass the picocom and
+`{name}`, `{slot}` and `{crc}`). Grove and wio pass the picocom and
 `blob list` text the receipt always printed, so their receipts are
 byte-identical; f746 passes wio's text since #194. `fixtures/run_add_plugin_arg_tests.py` covers the configure
-refusals; `fixtures/run_asset_dest_tests.py` covers `build_asset.py`'s, the
-receipt (including the slot boards' text byte for byte) and, with the cross
-toolchain, the capacity read-back's refusals (missing, writable, zero, not a
-`uint32_t`).
+refusals; `fixtures/run_asset_dest_tests.py` covers `build_asset.py`'s (run to
+the end with stand-in tools, so the fit check itself and "nothing published on
+a refusal" are tested) and the receipt (including the slot boards' text byte
+for byte).
 
 # Blob slots against the model staging buffer (`check_blob_staging.py`, #193)
 

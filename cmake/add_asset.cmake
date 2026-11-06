@@ -36,16 +36,10 @@
 #                                override, a FILE, or an ingest's output (the
 #                                ingest's first step checked the pin)
 #      PLUGIN  <name>            a plugin this board built with add_plugin()
-#      -- EXACTLY ONE destination (issue #159):
-#      SLOT <n> SLOT_TABLE <path>   a store slot (Grove, wio): fit-checked
-#                                   against the slot table, printed on the
-#                                   receipt
-#      FILE_NAME <name> STAGE_SYMBOL <symbol>
-#                                   a file the operator copies to the board's
-#                                   card (f746): fit-checked against the
-#                                   staging capacity the shipped firmware holds
-#                                   in <symbol> (a const uint32_t), read back
-#                                   out of the ELF veneer_cost_gate() registered
+#      SLOT <n> SLOT_TABLE <path>   REQUIRED, both: the store slot the
+#                                   asset goes to, fit-checked against the
+#                                   slot table before publication and printed
+#                                   on the receipt
 #      PACKER LAYOUT CONTAINER_VERIFIER <path>
 #      MODEL_VERIFIER <path>     REQUIRED, but may be empty: a board with no
 #                                host C++ compiler passes "", and build_asset.py
@@ -60,13 +54,15 @@
 #                                            with the receipt's CRC ({crc})
 #  )
 #
-#  [!] THE DESTINATION IS EXACTLY ONE OF TWO, AND NEITHER IS OPTIONAL (issue
-#  #159).  Until then SLOT and SLOT_TABLE were simply required, which a board
-#  with no store slots could only satisfy by inventing one.  A slot board keeps
-#  both, and its fit check before publication is unchanged; a file board names
-#  the file and where the firmware's staging capacity is, and the same
-#  "refuse before the device finds out" holds against that capacity.  None,
-#  both, or half of either is refused at configure.
+#  [!] THE DESTINATION IS A SLOT, AND IT IS NOT OPTIONAL (issues #159, #195).
+#  #159 added a second destination, a file on f746's card fit-checked against
+#  the firmware's staging capacity; f746 moved to a slot in #194 and #195
+#  removed the file route.  SLOT and SLOT_TABLE are required -- none, half, an
+#  empty value or a SLOT that is not a number is refused at configure -- so no
+#  asset can be declared whose fit nothing checks.  The removed FILE_NAME and
+#  STAGE_SYMBOL are still PARSED, only to be refused: as unknown words they
+#  would be swallowed as values of a multi-value keyword written before them
+#  (VERIFY_ARGS, RECEIPT_*), and configure would pass.
 #
 #  [!] THE TRANSFER AND THE VERIFY LINES ARE THE BOARD'S (issue #159).  The
 #  receipt used to print picocom and `blob list` on every board; on a board
@@ -84,11 +80,9 @@
 #  and vela on Grove, nothing on wio) is the board's own.
 #
 #  [!] THE GATES RUN AT BUILD TIME, NOT AT SEND TIME, AND NEITHER TARGET IS IN
-#  ALL.  The send is whatever path is typed (picocom's `sb -k`, or a copy to a
-#  card): the receipt's CRC, compared afterwards with the CRC the board reports
-#  for the bytes it stored (`blob list` on a slot board; on f746 the CRC the
-#  load prints over the whole file it read), is the only "built bytes = stored
-#  bytes" check.  And a tree with no access to the model host must still build
+#  ALL.  The send is whatever path is typed (picocom's `sb -k`): the receipt's
+#  CRC, compared afterwards with the CRC the board reports for the bytes it
+#  stored (`blob list`), is the only "built bytes = stored bytes" check.  And a tree with no access to the model host must still build
 #  the firmware (issue #94's lesson), so neither the fetch nor the asset is a
 #  dependency of anything in ALL.
 # ============================================================================
@@ -185,7 +179,20 @@ function(add_asset _name)
         message(FATAL_ERROR
             "add_asset(${_name}): unrecognised: ${A_UNPARSED_ARGUMENTS}")
     endif()
-    foreach(_req MODEL PLUGIN PACKER LAYOUT CONTAINER_VERIFIER
+    # [!] THE REMOVED FILE DESTINATION IS REFUSED, WITH OR WITHOUT A VALUE
+    # (issue #195) -- first, so no later message can hide it; see the header.
+    foreach(_gone FILE_NAME STAGE_SYMBOL)
+        if(DEFINED A_${_gone} OR "${_gone}" IN_LIST A_KEYWORDS_MISSING_VALUES)
+            message(FATAL_ERROR
+                "add_asset(${_name}): ${_gone} was the file destination, "
+                "removed in issue #195 -- every asset goes to a store slot "
+                "(SLOT with SLOT_TABLE)")
+        endif()
+    endforeach()
+    # [!] SLOT AND SLOT_TABLE ARE REQUIRED LIKE EVERY OTHER INPUT (issues #159,
+    # #195): no branch here or in build_asset.py runs the fit check only "when
+    # there is a destination".
+    foreach(_req MODEL PLUGIN SLOT SLOT_TABLE PACKER LAYOUT CONTAINER_VERIFIER
                  BUILD_ID TARGET_ID LINK_ADDR CAPACITY RECEIPT_STEPS
                  RECEIPT_TRANSFER RECEIPT_VERIFY)
         if(NOT DEFINED A_${_req} OR "${A_${_req}}" STREQUAL "")
@@ -202,54 +209,6 @@ function(add_asset _name)
                 "least one line, got '${A_RECEIPT_${_r}}'")
         endif()
     endforeach()
-    # [!] EXACTLY ONE DESTINATION (issue #159) -- see the header.
-    set(_has_slot FALSE)
-    set(_has_file FALSE)
-    if(DEFINED A_SLOT OR DEFINED A_SLOT_TABLE)
-        set(_has_slot TRUE)
-    endif()
-    if(DEFINED A_FILE_NAME OR DEFINED A_STAGE_SYMBOL)
-        set(_has_file TRUE)
-    endif()
-    if(_has_slot AND _has_file)
-        message(FATAL_ERROR
-            "add_asset(${_name}): both a slot destination (SLOT/SLOT_TABLE) "
-            "and a file destination (FILE_NAME/STAGE_SYMBOL) -- an asset has "
-            "exactly one")
-    endif()
-    if(NOT _has_slot AND NOT _has_file)
-        message(FATAL_ERROR
-            "add_asset(${_name}): no destination -- SLOT with SLOT_TABLE (a "
-            "store slot) or FILE_NAME with STAGE_SYMBOL (a file on the board's "
-            "card) is required")
-    endif()
-    if(_has_slot)
-        foreach(_req SLOT SLOT_TABLE)
-            if(NOT DEFINED A_${_req} OR "${A_${_req}}" STREQUAL "")
-                message(FATAL_ERROR
-                    "add_asset(${_name}): a slot destination needs ${_req} "
-                    "(SLOT and SLOT_TABLE go together)")
-            endif()
-        endforeach()
-    else()
-        foreach(_req FILE_NAME STAGE_SYMBOL)
-            if(NOT DEFINED A_${_req} OR "${A_${_req}}" STREQUAL "")
-                message(FATAL_ERROR
-                    "add_asset(${_name}): a file destination needs ${_req} "
-                    "(FILE_NAME and STAGE_SYMBOL go together)")
-            endif()
-        endforeach()
-        if(NOT A_FILE_NAME MATCHES "^[A-Za-z0-9][A-Za-z0-9._-]*$")
-            message(FATAL_ERROR
-                "add_asset(${_name}): FILE_NAME must be a plain file name, got "
-                "'${A_FILE_NAME}'")
-        endif()
-        if(NOT A_STAGE_SYMBOL MATCHES "^[A-Za-z_][A-Za-z0-9_]*$")
-            message(FATAL_ERROR
-                "add_asset(${_name}): STAGE_SYMBOL must be a C identifier, got "
-                "'${A_STAGE_SYMBOL}'")
-        endif()
-    endif()
     # [!] MODEL_VERIFIER MUST BE PRESENT, EVEN WHEN IT IS EMPTY.  Empty is a
     # board saying "no host C++ compiler, so no model gate", which build_asset.py
     # turns into a refusal at build time.  Absent would be a board that forgot
@@ -279,7 +238,7 @@ function(add_asset _name)
             "MODEL_SHA256 must be its pin (asset_model_source()'s "
             "<var>_SHA256), got '${A_MODEL_SHA256}'")
     endif()
-    if(_has_slot AND NOT A_SLOT MATCHES "^[0-9]+$")
+    if(NOT A_SLOT MATCHES "^[0-9]+$")
         message(FATAL_ERROR
             "add_asset(${_name}): SLOT must be a slot number, got '${A_SLOT}'")
     endif()
@@ -309,22 +268,6 @@ function(add_asset _name)
         list(APPEND _policy --policy-stack "${_l}")
     endforeach()
 
-    # Where the packed size is checked, before publication.
-    if(_has_slot)
-        set(_dest_args --slot "${A_SLOT}" --slot-table "${A_SLOT_TABLE}")
-        set(_dest_deps "${A_SLOT_TABLE}")
-        set(_receipt_dest "${A_SLOT}")
-    else()
-        # [!] THE CAPACITY IS READ BACK FROM THE SHIPPED FIRMWARE, the one
-        # veneer_cost_gate() registered -- not a number the board restates
-        # here, which could agree with nothing the device holds.
-        get_property(_fw GLOBAL PROPERTY VENEER_GATE_FIRMWARE)
-        set(_dest_args --stage-elf "$<TARGET_FILE:${_fw}>"
-                       --stage-symbol "${A_STAGE_SYMBOL}")
-        set(_dest_deps "$<TARGET_FILE:${_fw}>")
-        set(_receipt_dest --file "${A_FILE_NAME}")
-    endif()
-
     set(_nnc "${CMAKE_BINARY_DIR}/asset/${_name}.nnc")
     add_custom_command(
         OUTPUT "${_nnc}"
@@ -346,15 +289,15 @@ function(add_asset _name)
                 --capacity "${A_CAPACITY}"
                 ${_policy}
                 --veneer-cost "${_veneer_cost}"
-                # The declaration names a destination, and the packed size is
-                # known here, so the fit is checked before the device would
-                # find out (a slot board's `blob write` erases the slot first).
-                ${_dest_args}
+                # The declaration names the slot, and the packed size is known
+                # here, so the fit is checked before the device would find out
+                # (`blob write` erases the slot first).
+                --slot "${A_SLOT}" --slot-table "${A_SLOT_TABLE}"
                 --out "${_nnc}"
         DEPENDS "${A_MODEL}" "${_plugin_dir}/plugin.elf"
                 "${_plugin_dir}/plugin.stacks.json"
                 "${A_PACKER}" "${A_LAYOUT}"
-                "${A_CONTAINER_VERIFIER}" ${_dest_deps}
+                "${A_CONTAINER_VERIFIER}" "${A_SLOT_TABLE}"
                 "${_ADD_ASSET_DIR}/build_asset.py"
                 ${A_MODEL_VERIFIER}
                 # [!] No container is packed before the firmware passes its
@@ -386,7 +329,7 @@ function(add_asset _name)
     endforeach()
     add_custom_target(asset-${_name}
         COMMAND "${Python3_EXECUTABLE}" "${_ADD_ASSET_DIR}/asset_receipt.py"
-                "${_nnc}.json" ${_receipt_dest} ${_receipt}
+                "${_nnc}.json" "${A_SLOT}" ${_receipt}
         DEPENDS "${_nnc}"
         VERBATIM)
 endfunction()

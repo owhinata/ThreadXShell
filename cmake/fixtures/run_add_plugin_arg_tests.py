@@ -202,38 +202,37 @@ ASSET_CASES = [
     ("asset_no_model_sha256", "MODEL_SHA256", {},
      "MODEL_SHA256 is required"),
     ("asset_no_plugin", "PLUGIN", {}, "PLUGIN is required"),
-    # Issue #159: a destination is exactly one of a slot or a file, each
-    # whole.  Half a slot, no destination, both, and malformed ones refuse.
-    ("asset_no_slot", "SLOT", {},
-     "a slot destination needs SLOT (SLOT and SLOT_TABLE go together)"),
+    # Issues #159, #195: the destination is a slot, and SLOT and SLOT_TABLE
+    # are both required -- absent, half, empty or malformed refuse.
+    ("asset_no_slot", "SLOT", {}, "SLOT is required"),
+    ("asset_empty_slot", None, {"SLOT": '""'}, "SLOT is required"),
     ("asset_no_packer", "PACKER", {}, "PACKER is required"),
     ("asset_no_layout", "LAYOUT", {}, "LAYOUT is required"),
     ("asset_no_container_verifier", "CONTAINER_VERIFIER", {},
      "CONTAINER_VERIFIER is required"),
-    ("asset_no_slot_table", "SLOT_TABLE", {},
-     "a slot destination needs SLOT_TABLE"),
+    ("asset_no_slot_table", "SLOT_TABLE", {}, "SLOT_TABLE is required"),
+    ("asset_empty_slot_table", None, {"SLOT_TABLE": '""'},
+     "SLOT_TABLE is required"),
     ("asset_no_destination", None, {"SLOT": None, "SLOT_TABLE": None},
-     "no destination -- SLOT with SLOT_TABLE"),
-    ("asset_both_destinations", None,
-     {"FILE_NAME": "blazeface.nnc", "STAGE_SYMBOL": "nn_stage_capacity"},
-     "both a slot destination (SLOT/SLOT_TABLE) and a file destination"),
-    ("asset_file_control", None,
-     {"SLOT": None, "SLOT_TABLE": None, "FILE_NAME": "blazeface.nnc",
-      "STAGE_SYMBOL": "nn_stage_capacity"}, None),
-    ("asset_file_no_symbol", None,
-     {"SLOT": None, "SLOT_TABLE": None, "FILE_NAME": "blazeface.nnc"},
-     "a file destination needs STAGE_SYMBOL"),
-    ("asset_file_no_name", None,
-     {"SLOT": None, "SLOT_TABLE": None, "STAGE_SYMBOL": "nn_stage_capacity"},
-     "a file destination needs FILE_NAME"),
-    ("asset_file_bad_name", None,
-     {"SLOT": None, "SLOT_TABLE": None, "FILE_NAME": "dir/x.nnc",
-      "STAGE_SYMBOL": "nn_stage_capacity"},
-     "FILE_NAME must be a plain file name, got 'dir/x.nnc'"),
-    ("asset_file_bad_symbol", None,
-     {"SLOT": None, "SLOT_TABLE": None, "FILE_NAME": "x.nnc",
-      "STAGE_SYMBOL": "9cap"},
-     "STAGE_SYMBOL must be a C identifier, got '9cap'"),
+     "SLOT is required"),
+    # Issue #195: the removed file destination is refused by name in every
+    # form -- first in the call, with no value, and after a multi-value
+    # keyword (VERIFY_ARGS), where an unknown word would be absorbed as one of
+    # its values and configure would pass.  Beside a whole slot each time.
+    ("asset_file_name_first", None, {"^FILE_NAME": "blazeface.nnc"},
+     "FILE_NAME was the file destination, removed in issue #195"),
+    ("asset_file_name_no_value", None, {"FILE_NAME": ""},
+     "FILE_NAME was the file destination, removed in issue #195"),
+    ("asset_file_name_after_list", None,
+     {"VERIFY_ARGS": "--blazeface", "FILE_NAME": "blazeface.nnc"},
+     "FILE_NAME was the file destination, removed in issue #195"),
+    ("asset_stage_symbol_first", None, {"^STAGE_SYMBOL": "nn_stage_capacity"},
+     "STAGE_SYMBOL was the file destination, removed in issue #195"),
+    ("asset_stage_symbol_no_value", None, {"STAGE_SYMBOL": ""},
+     "STAGE_SYMBOL was the file destination, removed in issue #195"),
+    ("asset_stage_symbol_after_list", None,
+     {"VERIFY_ARGS": "--blazeface", "STAGE_SYMBOL": "nn_stage_capacity"},
+     "STAGE_SYMBOL was the file destination, removed in issue #195"),
     ("asset_no_transfer", "RECEIPT_TRANSFER", {},
      "RECEIPT_TRANSFER is required"),
     ("asset_no_verify", "RECEIPT_VERIFY", {}, "RECEIPT_VERIFY is required"),
@@ -247,6 +246,18 @@ ASSET_CASES = [
     ("asset_unknown_plugin", None, {"PLUGIN": "blazeface"},
      "no add_plugin(blazeface) on this board"),
     ("asset_bad_slot", None, {"SLOT": "five"}, "SLOT must be a slot number"),
+    # Digits are not enough: the whole value must be digits (issue #195).  The
+    # quoted forms reach add_asset() as one argument, space included.
+    ("asset_slot_letters", None, {"SLOT": "5x"},
+     "SLOT must be a slot number, got '5x'"),
+    ("asset_slot_space", None, {"SLOT": '" 5"'},
+     "SLOT must be a slot number, got ' 5'"),
+    ("asset_slot_trailing_space", None, {"SLOT": '"5 "'},
+     "SLOT must be a slot number, got '5 '"),
+    ("asset_slot_negative", None, {"SLOT": "-1"},
+     "SLOT must be a slot number, got '-1'"),
+    ("asset_slot_newline", None, {"SLOT": '"5\\n"'},
+     "SLOT must be a slot number, got '5"),
     # A policy of the asset's own is not an argument.  Placed FIRST: after a
     # multi-value keyword (RECEIPT_STEPS) cmake_parse_arguments() would absorb
     # it into that list as receipt text -- measured -- where it can reach no
@@ -645,13 +656,9 @@ def main():
             text = build_text(work) if expect is None and rc == 0 else ""
         if expect is None and rc == 0:
             sha = a["MODEL_SHA256"].strip('"')
-            # The destination reaches the pack (its fit check) and the
-            # receipt: a slot as --slot/--slot-table and the positional slot,
-            # a file as --stage-elf/--stage-symbol and --file (issue #159).
-            dest = ((r"--stage-elf\s+\S*fw", r"--stage-symbol\s+"
-                     r"nn_stage_capacity\b", r"--file\s+blazeface\.nnc\b")
-                    if "FILE_NAME" in a else
-                    (r"--slot\s+5\b", r"--slot-table\s+\S*slots\.json"))
+            # The slot reaches the pack (its fit check) as --slot and
+            # --slot-table (issues #159, #195).
+            dest = (r"--slot\s+5\b", r"--slot-table\s+\S*slots\.json")
             need = [w for w in (POLICY_LINE, r"--veneer-cost\s+256\b",
                                 r"plugin/cifar10/plugin\.elf",
                                 r"asset_receipt\.py",

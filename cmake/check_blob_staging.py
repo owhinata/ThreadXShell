@@ -23,8 +23,7 @@ the image by -Wl,--require-defined in board.cmake: LTO folds the count into
 code, and without a reader --gc-sections drops both); the capacity is the const
 `nn_tflm_stage_cap` the backend hands out (svc/nn/tflm/nn_tflm_mem.h), and the
 buffer behind it is `nn_tflm_model_buf`, which must be at least that long.  The
-words are read from the image's loaded bytes, like cmake/build_asset.py's
-stage_capacity() and check_policy_probe.py.
+words are read from the image's loaded bytes, like check_policy_probe.py.
 
 THE BOARD PASSES ITS OWN FACTS, AND ONLY THOSE (issue #194).
   --header-bytes      the header unit at the top of every slot (the board's

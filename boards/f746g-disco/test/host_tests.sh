@@ -165,21 +165,6 @@ gcc $CFLAGS "$here/test_sbrk.c" "$out/retarget_host.o" \
     $LDFLAGS -o "$out/test_sbrk"
 "$out/test_sbrk"
 
-# issue #159 -- the file destination's fit check reads the staging capacity
-# back out of the shipped firmware (cmake/build_asset.py stage_capacity()).  No
-# board sends an asset as a file since issue #194 (this one sends to a slot);
-# the shared route and its tests stay until it is removed (issue #195).  Its
-# refusals need a real ARM ELF, so this runs with the repository-pinned cross
-# toolchain and SKIPS -- loudly -- without it.  (The toolchain-free cases of the
-# same script run from shell/test/run_host_tests.sh.)
-gate_cc=$(ls -d "$HOST_TEST_REPO"/tools/arm-gnu-toolchain-*/bin/arm-none-eabi-gcc 2>/dev/null | tail -1)
-if [ -n "$gate_cc" ] && [ -x "$gate_cc" ]; then
-    python3 "$HOST_TEST_REPO/cmake/fixtures/run_asset_dest_tests.py" --cc "$gate_cc"
-else
-    echo "run_asset_dest_tests --cc: SKIPPED -- no arm-none-eabi toolchain under" \
-         "$HOST_TEST_REPO/tools/ (configure an f746 build once to fetch it)" >&2
-fi
-
 # issue #194 -- the QSPI driver's two decisions after a receive and after a
 # failed HAL call (port/qspi/qspi_idle.h): whether the CCR may be rewritten to
 # put the functional mode back to indirect write (only for a form with a data
@@ -237,6 +222,7 @@ gcc $CFLAGS -I "$here/blob_shim" \
 # lists with the backends this board offers (stedgeai and stedgeai_reloc are
 # not applicable, as null is); the synthetic images need the pinned toolchain
 # and SKIP loudly without it.
+gate_cc=$(ls -d "$HOST_TEST_REPO"/tools/arm-gnu-toolchain-*/bin/arm-none-eabi-gcc 2>/dev/null | tail -1)
 if [ -n "$gate_cc" ] && [ -x "$gate_cc" ]; then
     python3 "$HOST_TEST_REPO/cmake/fixtures/run_blob_staging_tests.py" \
         --board-dir "$board" --include port/qspi --cc "$gate_cc"

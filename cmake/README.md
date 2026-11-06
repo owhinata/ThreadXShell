@@ -241,6 +241,12 @@ link that writes fewer partitions than the last. `shared_analysis` /
 `thumb_stack_analysis.py` alone re-runs both gates and nothing re-runs without
 one, and a refusal added to that module alone fails both gates for that
 reason, leaves no stamp and stops flash and every asset.
+Every edit a case expects ninja to notice is followed by re-touching the file
+with the current time until it is strictly newer than everything in the build
+directory: ninja treats an equal mtime as up to date, file times advance once
+per clock tick (1 ms here), and an edit made in the same tick as the last stamp
+was once missed (`script_change`, #204). The time is never set ahead, so the
+"nothing re-runs" cases still hold.
 It also covers the c the firmware compiles in: `cost_wiring` changes DECLARED and
 reads the value back from a policy TU in a `$<TARGET_OBJECTS:>` library and from
 an asset's command line, and `cost_override` adds `-DPLUGIN_VENEER_BASE_COST=1u`

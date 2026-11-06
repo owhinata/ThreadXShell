@@ -164,6 +164,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -812,6 +813,37 @@ def expect(cond, why, out=""):
         raise Fail(why + ("\n" + out[-2000:] if out else ""))
 
 
+def make_edit_visible(p, path):
+    """Make an edit of `path` visible to ninja before the next build.
+
+    ninja reruns an edge only when an input is NEWER than its output, and an
+    equal mtime is "up to date".  File times here come from a clock that ticks
+    once per jiffy (1 ms on the host this was found on), so an edit made within
+    the same tick as the last thing ninja wrote -- the stamp, a few ms earlier --
+    can carry the same time, and the next `ninja` then says "no work to do"
+    (issue #204: script_change failed that way once).  So after the edit the
+    file is re-touched with the CURRENT time until it is strictly newer than
+    everything in the build directory.  Never a time in the future: a script
+    dated ahead of the stamp its rerun writes would stay dirty, and the "a
+    second build does nothing" cases would fail instead.
+    """
+    newest = 0
+    for root, _, files in os.walk(p.bld):
+        for f in files:
+            try:
+                newest = max(newest,
+                             os.stat(os.path.join(root, f)).st_mtime_ns)
+            except OSError:
+                pass
+    deadline = time.monotonic() + 5
+    while os.stat(path).st_mtime_ns <= newest:
+        if time.monotonic() > deadline:
+            raise Fail("make_edit_visible: %s is still not newer than "
+                       "the build directory after 5 s" % path)
+        time.sleep(0.002)
+        os.utime(path)
+
+
 def ran_check(out):
     return "check_veneer_base_cost: " in out
 
@@ -863,6 +895,7 @@ def main_tree(p, results):
                    "check_plugin_image.py"):
         with open(os.path.join(p.src, "cmake", script), "a") as fh:
             fh.write("\n# touched by the build test\n")
+        make_edit_visible(p, os.path.join(p.src, "cmake", script))
         rc, out = p.ninja()
         expect(rc == 0 and ran_check(out),
                "script_change: editing %s did not rerun the check" % script,
@@ -874,6 +907,7 @@ def main_tree(p, results):
 
     with open(os.path.join(p.src, "root.c"), "a") as fh:
         fh.write("\nint image_change_marker(void) { return 3; }\n")
+    make_edit_visible(p, os.path.join(p.src, "root.c"))
     rc, out = p.ninja()
     expect(rc == 0 and ran_check(out)
            and os.path.getmtime(p.elf) != elf_mtime,
@@ -928,6 +962,7 @@ def main_tree(p, results):
     # shipped; what was wrong is that the stamp went on asserting a pass.
     with open(os.path.join(p.src, "root.c"), "a") as fh:
         fh.write("\nint relink_marker(void) { return 4; }\n")
+    make_edit_visible(p, os.path.join(p.src, "root.c"))
     before = os.path.getmtime(p.elf)
     rc, out = p.ninja("shell")
     expect(rc == 0 and os.path.getmtime(p.elf) != before,
@@ -1000,6 +1035,7 @@ def shared_tree(p, results):
 
     with open(mod, "a") as fh:
         fh.write("\n# touched by the build test\n")
+    make_edit_visible(p, mod)
     rc, out = p.ninja()
     expect(rc == 0 and ran_check(out) and PLUGIN_GATE in out
            and os.path.exists(p.stamp),
@@ -1020,6 +1056,7 @@ def shared_tree(p, results):
         p.rm(f)
     with open(mod, "w") as fh:
         fh.write(pristine + REFUSAL)
+    make_edit_visible(p, mod)
     # -k 0: the two gates are independent edges, and ninja would otherwise
     # stop at whichever failed first -- this case is about BOTH.
     rc, out = p.ninja("-k", "0")
@@ -1047,6 +1084,7 @@ def shared_tree(p, results):
 
     with open(mod, "w") as fh:
         fh.write(pristine)
+    make_edit_visible(p, mod)
     rc, out = p.ninja("asset-plugin", "flash")
     expect(rc == 0 and os.path.exists(p.stamp)
            and os.path.exists(p.path("plugin.nnc"))

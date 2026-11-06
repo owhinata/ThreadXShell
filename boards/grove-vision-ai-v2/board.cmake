@@ -2173,29 +2173,32 @@ if(HOST_CC)
     # ENFORCES (issue #195).  asset/tools/slot_table.c is the one wio-lite-ai and
     # f746g-disco build.  The interval and the erase unit are port/sdk_seam/
     # nor_seam.h's NOR_WRITABLE_LO / _HI / NOR_ERASE_UNIT -- what src/blob.c's
-    # blob_check_map() reads through nor_seam_limits -- over the SAME three
-    # variables shell_objs gets them from (NOR_PART_FW_END / _BLOB_END /
-    # NOR_ERASE_GRAN above), so no second declaration of the measured geometry
-    # exists here: until #195 the erase unit was a run-time argument and the
-    # table was not checked at all.  A table the store would refuse stops the
+    # blob_check_map() reads through nor_seam_limits -- over the three
+    # definitions READ BACK FROM shell_objs's own COMPILE_DEFINITIONS
+    # (NOR_PART_FW_END / _BLOB_END / NOR_ERASE_GRAN above), not written out a
+    # second time here, so the tool cannot be built against a different
+    # interval or unit than the firmware is.  If the filter finds none of them
+    # the argument disappears and nor_seam.h's #error stops the tool; if it
+    # finds some, the same #error names the missing one.  Until #195 the erase
+    # unit was a run-time argument and the table was not checked at all.  A table the store would refuse stops the
     # build (container-tools is in ALL).  [!] slot_table.c is the LAST source:
     # gcc writes the depfile of the last input only, and its closure holds
     # nor_seam.h and blob_map.h.
+    set(_grove_nor_defs "$<FILTER:$<TARGET_PROPERTY:shell_objs,COMPILE_DEFINITIONS>,INCLUDE,^NOR_(PART_FW_END|PART_BLOB_END|ERASE_GRAN)=>")
     add_custom_command(
         OUTPUT "${GROVE_SLOT_TABLE_JSON}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
         COMMAND "${HOST_CC}" -std=c11 -O1 -Wall -Wextra -Werror
                 -MD -MF "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
                 -MT "${GROVE_SLOT_TABLE_JSON}"
-                -DNOR_PART_FW_END=${GROVE_FW_RESERVED}
-                -DNOR_PART_BLOB_END=${GROVE_SLOT_HDR_ADDR}
-                -DNOR_ERASE_GRAN=${GROVE_ERASE_GRAN}
+                "$<$<BOOL:${_grove_nor_defs}>:-D$<JOIN:${_grove_nor_defs},;-D>>"
                 -I "${BOARD_DIR}/src" -I "${BOARD_DIR}/port/sdk_seam"
                 -I "${BOARD_DIR}/port/nor"
                 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/blob"
                 "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
                 "${BOARD_DIR}/src/blob_slots.c"
-                -include nor_seam.h -DSLOT_TABLE_LO=NOR_WRITABLE_LO
+                -include "${BOARD_DIR}/port/sdk_seam/nor_seam.h"
+                -DSLOT_TABLE_LO=NOR_WRITABLE_LO
                 -DSLOT_TABLE_HI=NOR_WRITABLE_HI
                 -DSLOT_TABLE_UNIT=NOR_ERASE_UNIT
                 "${CMAKE_SOURCE_DIR}/asset/tools/slot_table.c"
@@ -2207,7 +2210,7 @@ if(HOST_CC)
                 "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
                 "${BOARD_DIR}/src/blob_slots.c"
         COMMENT "host cc -> slot_table.json (payload capacity per blob slot)"
-        VERBATIM)
+        VERBATIM COMMAND_EXPAND_LISTS)
 
     add_custom_command(
         OUTPUT "${GROVE_CONTAINER_VERIFIER}"

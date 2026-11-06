@@ -252,10 +252,31 @@ def main():
         try:
             with open(args.slot_table) as fh:
                 table = json.load(fh)
-            slots = table["slots"]
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (OSError, ValueError) as exc:
             die("cannot read the slot table %s (%s); nothing was published"
                 % (args.slot_table, exc))
+        # [!] EVERY ROW IS CHECKED, NOT ONLY THE DECLARED ONE (issue #195).  A
+        # comparison against NaN or Infinity is never "too large", `true`
+        # equals slot 1, and with two rows of one index the first would win:
+        # each of those published an unchecked container.  So the table must
+        # be a non-empty list of rows whose index and payload_max are whole
+        # numbers (not bool, not float), at least 0, with no index twice.
+        slots = table.get("slots") if isinstance(table, dict) else None
+        if not isinstance(slots, list) or not slots:
+            die("the slot table %s has no list of slots; nothing was "
+                "published" % args.slot_table)
+        seen = set()
+        for row in slots:
+            if not (isinstance(row, dict) and all(
+                    type(row.get(k)) is int and row[k] >= 0
+                    for k in ("index", "payload_max"))):
+                die("the slot table %s has a row that is not whole numbers "
+                    "for index and payload_max: %r; nothing was published"
+                    % (args.slot_table, row))
+            if row["index"] in seen:
+                die("the slot table %s names slot %d twice; nothing was "
+                    "published" % (args.slot_table, row["index"]))
+            seen.add(row["index"])
         for sl in slots:
             if sl["index"] == int(args.slot):
                 if len(blob) > sl["payload_max"]:

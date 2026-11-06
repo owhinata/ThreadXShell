@@ -347,6 +347,30 @@ def table_call(table):
     return "plugin_stack_table(\n%s)\n" % tcall
 
 
+def edge_inputs(work, output):
+    """The explicit inputs of the build.ninja edge that produces @output (a
+    path relative to the build directory), or None when there is no such edge.
+    [!] INPUTS, NOT TEXT: a path that only appears on the edge's command line
+    is not a dependency, and ninja would not rebuild when it changes (#195)."""
+    with open(os.path.join(work, "b", "build.ninja")) as fh:
+        for line in fh:
+            if not line.startswith("build "):
+                continue
+            outs, sep, rest = line.rstrip("\n").partition(": ")
+            if not sep or output not in outs.split()[1:]:
+                continue
+            words = rest.split()
+            if not words or words[0] != "CUSTOM_COMMAND":
+                continue
+            inputs = []
+            for w in words[1:]:
+                if w in ("|", "||"):
+                    break
+                inputs.append(w)
+            return inputs
+    return None
+
+
 def configure(work, args, gate=GATE, plugin=True, twice=False, table=TABLE,
               tail="", generator="Ninja"):
     src = os.path.join(work, "src")
@@ -673,7 +697,25 @@ def main():
             rc, out = configure(work, dict(FULL),
                                 tail=inc + "add_asset(fix\n%s)\n" % acall)
             text = build_text(work) if expect is None and rc == 0 else ""
+            inputs = (edge_inputs(work, "asset/fix.nnc")
+                      if expect is None and rc == 0 else None)
         if expect is None and rc == 0:
+            # [!] The container is rebuilt when what it was checked against
+            # changes: the slot table, the packing and checking tools and the
+            # model are INPUTS of the edge that makes it (issue #195).
+            want_in = ["slots.json", "pack.py", "layout.json",
+                       "verify_container", "m.tflite",
+                       os.path.join(CMAKE_DIR, "build_asset.py")]
+            if a.get("MODEL_VERIFIER", '""') != '""':
+                want_in.append("verify_model")
+            lacking = [w for w in want_in if inputs is None or not any(
+                t == w or t.endswith("/" + w) for t in inputs)]
+            if lacking:
+                print("  FAIL %-22s configures, but the container's edge does "
+                      "not take %s as inputs (inputs: %s)"
+                      % (name, lacking, inputs))
+                bad += 1
+                continue
             sha = a["MODEL_SHA256"].strip('"')
             # The slot reaches the pack (its fit check) as --slot and
             # --slot-table (issues #159, #195).

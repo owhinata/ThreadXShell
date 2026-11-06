@@ -191,6 +191,41 @@ def fit_cases(work):
     refused("fit_slot_table_not_json", FIT_CAP,
             ["--slot", "%d" % FIT_SLOT, "--slot-table", model],
             "cannot read the slot table")
+    # [!] The table's rows are checked, all of them, before the fit (issue
+    # #195).  Each table below would let a 5,000 B container through a check
+    # that only looked up the declared row; the last breaks a row that is NOT
+    # the declared one.  NaN / Infinity are what Python's json accepts.
+    big = 5 * FIT_CAP
+    for tname, text, use_slot, want in (
+            ("fit_table_nan", '{"slots": [{"index": 5, "payload_max": NaN}]}',
+             "5", "is not whole numbers"),
+            ("fit_table_infinity",
+             '{"slots": [{"index": 5, "payload_max": Infinity}]}', "5",
+             "is not whole numbers"),
+            ("fit_table_index_twice",
+             '{"slots": [{"index": 5, "payload_max": 100000}, '
+             '{"index": 5, "payload_max": 1000}]}', "5", "names slot 5 twice"),
+            ("fit_table_index_bool",
+             '{"slots": [{"index": true, "payload_max": 100000}]}', "1",
+             "is not whole numbers"),
+            ("fit_table_no_payload_key", '{"slots": [{"index": 5}]}', "5",
+             "is not whole numbers"),
+            ("fit_table_payload_string",
+             '{"slots": [{"index": 5, "payload_max": "100000"}]}', "5",
+             "is not whole numbers"),
+            ("fit_table_payload_negative",
+             '{"slots": [{"index": 5, "payload_max": -1}]}', "5",
+             "is not whole numbers"),
+            ("fit_table_slots_not_list", '{"slots": {"5": 100000}}', "5",
+             "has no list of slots"),
+            ("fit_table_slots_empty", '{"slots": []}', "5",
+             "has no list of slots"),
+            ("fit_table_other_row_broken",
+             '{"slots": [{"index": 0, "payload_max": NaN}, '
+             '{"index": 5, "payload_max": 100000}]}', "5",
+             "is not whole numbers")):
+        path = put(tname + ".json", text)
+        refused(tname, big, ["--slot", use_slot, "--slot-table", path], want)
     for opt in ("--stage-elf", "--stage-symbol"):
         refused("fit" + opt.replace("-", "_")[1:] + "_gone", FIT_CAP,
                 slot + [opt, plugin], "unrecognized arguments: " + opt)
@@ -244,7 +279,9 @@ RECEIPT_GONE = ["--file", "--step", "--then", "--transfer-label", "--transfer",
 
 def receipt_cases(work):
     def fixture(name, body):
-        nnc = os.path.join(work, name + ".nnc")
+        # [!] The file is NOT named after the asset, so a receipt that took
+        # its name from the path instead of the JSON's "name" shows (#195).
+        nnc = os.path.join(work, "built-" + name + ".bin")
         with open(nnc, "wb") as fh:
             fh.write(body)
         crc = "%08X" % (zlib.crc32(body) & 0xFFFFFFFF)
@@ -292,7 +329,7 @@ def receipt_cases(work):
         rc, out, err = run(nnc + ".json", ["12"])
         judge(name, rc != 0 and want in err and "Traceback" not in err and
               "on the board:" not in out, out + err)
-    rec = os.path.join(work, "blazeface.nnc.json")
+    rec = os.path.join(work, "built-blazeface.bin.json")
     rc, out, err = run(rec, [])
     judge("receipt_no_slot", rc != 0 and out == "" and
           "the following arguments are required: slot" in err, out + err)

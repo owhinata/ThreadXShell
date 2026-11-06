@@ -379,8 +379,11 @@ Every asset goes to a store slot: `add_asset()` requires `SLOT` with
 checks the packed container against that slot's `payload_max` before anything
 is published, on every call (the check has no "if there is a destination"
 branch). None, half, an empty value, a slot that is not a number, or a slot
-table that is missing or unreadable is refused in a sentence and publishes
-nothing. Together with the post-link `check_blob_staging.py` (every slot fits
+table that is missing, not JSON, or not a non-empty list of rows whose `index`
+and `payload_max` are whole numbers of at least 0 with no index twice (every
+row is checked, not only the declared one: NaN, `true` or a second row of the
+same index would otherwise slip past the comparison) is refused in a sentence
+and publishes nothing. Together with the post-link `check_blob_staging.py` (every slot fits
 the staging buffer, below), a published container also fits the buffer the
 board loads it into. The table is each board's `plugin/slot_table.json`, written
 by the one shared tool `asset/tools/slot_table.c` (#195): it is compiled with the

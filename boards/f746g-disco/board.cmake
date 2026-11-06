@@ -981,7 +981,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
                     -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/blob"
                     "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
                     "${BOARD_DIR}/src/blob_slots.c"
-                    -include blob.h -DSLOT_TABLE_LO=BLOB_REGION_BASE
+                    -include "${BOARD_DIR}/src/blob.h"
+                    -DSLOT_TABLE_LO=BLOB_REGION_BASE
                     -DSLOT_TABLE_HI=BLOB_REGION_END
                     -DSLOT_TABLE_UNIT=BLOB_ERASE_UNIT
                     "${CMAKE_SOURCE_DIR}/asset/tools/slot_table.c"
@@ -1088,9 +1089,10 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # never committed.
     #
     # [!] THE SLOT IS A DECLARATION THE BOARD CANNOT CHECK, as on wio-lite-ai:
-    # the build refuses a container too large for it; nothing refuses the WRONG
-    # slot -- the receipt's `blob erase` retires whatever is there.  Read `blob
-    # list` first.  Slot 12 is the last 256 KB slot (src/blob_slots.c, 258,048 B
+    # the build refuses a container too large for it, but it never sees the
+    # slot number typed on the board.  There `blob write` rewrites a slot that
+    # holds the same name and refuses, before any erase, one holding another
+    # blob or a name already stored elsewhere.  Read `blob list` first.  Slot 12 is the last 256 KB slot (src/blob_slots.c, 258,048 B
     # of payload), wio-lite-ai's choice for the same container.
     f746_add_asset(blazeface
         PLUGIN  blazeface  SLOT 12

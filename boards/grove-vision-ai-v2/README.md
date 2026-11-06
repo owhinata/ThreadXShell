@@ -6271,11 +6271,17 @@ gives `OCCUPIED` before anything is erased; a slot already holding
 it refuses the same NAME in two slots.  Either refusal is cleared by a
 deliberate `blob erase <slot>` after reading `blob list`.
 
-[!] **And the slot number is not checked anywhere on the host.**  `blob write`
-picks the slot on the DEVICE and **erases the whole slot before the YMODEM size
-header arrives**, so an oversized container is discovered with the old contents
-already gone.  The build prints the intended slot on the receipt; it verifies
-nothing about it.
+[!] **The build checks the declared slot; nothing checks the one you type.**
+`blob write` picks the slot on the DEVICE and **erases the whole slot before
+the YMODEM size header arrives**, so an oversized container would be discovered
+with the old contents already gone.  So the build refuses first: it checks the
+packed container against the payload capacity of the slot `board.cmake`
+declares (the slot it prints on the receipt), read from `plugin/slot_table.json`
+-- which the shared `asset/tools/slot_table.c` writes from this board's
+`src/blob_slots.c` and, since issue #195, only after checking that table against
+the interval the firmware enforces.  What the build cannot see is the slot
+number typed on the board: type a different one and only the device's own
+refusals apply.
 
 ### What the chain does, and why in that order
 
@@ -6465,8 +6471,8 @@ amount of firmware generalisation could do, because the names come with the
 model and nowhere else.
 
 ```
-blob erase 1                      # the slot has to be empty; see below
-blob write cls 1                  # then C-a C-s in picocom
+blob write cls 1                  # then C-a C-s in picocom (refused if
+                                  # slot 1 holds another blob; see below)
 nn model load --name cls
 nn run
 ```
@@ -7566,7 +7572,7 @@ grove_add_asset(cifar10  PROFILE cls  PLUGIN cifar10  SLOT 1  FILE ...)
 
 ```
 cmake --build build/grove-vision-ai-v2 --target asset-cifar10
-# then: blob erase 1 ; blob write cifar10 1 ; C-a C-s ; paste the printed path
+# then: blob write cifar10 1 ; C-a C-s ; paste the printed path
 ```
 
 Until issue #107 there were two namespaces -- the plugin directories
@@ -7592,9 +7598,12 @@ which is at least a sentence naming the mistake instead of a wrong answer.
 `--plugin` exists to override the pairing when that is what you actually mean.
 
 **[!] `blob write` refuses a duplicate name.**  Replacing `cls` in the slot it
-already occupies is `blob erase 1` then `blob write cls 1`; a write to a
-different slot while the old one is still VALID is refused with `DUPLICATE`,
-because one name in two slots is not a state this store will hold.
+already occupies is just `blob write cls 1` -- the same name is erased and
+rewritten in place; a write to a different slot while the old one is still
+VALID is refused with `DUPLICATE`, before anything is erased, because one name
+in two slots is not a state this store will hold.  A slot holding a blob under
+another name is refused with `OCCUPIED`; either is cleared only by a deliberate
+`blob erase <slot>`.
 
 ### Two ways to be looking at the wrong bytes
 

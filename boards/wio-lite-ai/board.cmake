@@ -1759,9 +1759,9 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # `--target asset-<name>` produces build/<board>/asset/<name>.nnc: a container
     # that has already been through every gate, published only after passing
     # (cmake/build_asset.py).  The fetch, the pack-verify-publish chain and the
-    # receipt are shared with Grove; the INGEST is this board's -- float32 I/O as
-    # the zoo ships it (the shared decoder reads float32), no strip and no vela
-    # (there is no NPU here), and the model gate is this board's own
+    # receipt are shared by every board; the INGEST is this board's -- float32
+    # I/O as the zoo ships it (the shared decoder reads float32), no strip and
+    # no vela (there is no NPU here), and the model gate is this board's own
     # verify_tflite, which checks the model against the operators THIS firmware
     # registers.
     #
@@ -1778,10 +1778,11 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     #     SLOT   <n>       checked for capacity, printed on the receipt
     #     FILE <path> | URL <git> COMMIT <sha> PATH_IN <p> SHA256 <hash>)
     #
-    # The rule itself is shared with Grove (cmake/add_asset.cmake, issue #126):
-    # it takes the stack policy, the veneer cost and the plugin's image from
-    # their own registrations, so what is passed below is only this board's --
-    # its tools, its reservation and target word, and the receipt's commands.
+    # The rule itself is shared by every board (cmake/add_asset.cmake, issue
+    # #126): it takes the stack policy, the veneer cost and the plugin's image
+    # from their own registrations, so what is passed below is only this
+    # board's -- its tools, its reservation and target word, and its slot (the
+    # receipt's text is shared since issue #195).
     if(HOST_CXX)
         set(WIO_MODEL_VERIFIER "${CMAKE_BINARY_DIR}/verify_tflite")
     else()

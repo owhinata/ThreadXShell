@@ -1633,11 +1633,12 @@ endif()
 # [!] THE INGEST HALF IS GROVE'S; THE REST IS SHARED (issue #108).  Ethos-U owns
 # the ingest: verify_vela_model links the shared svc/nn/ethosu/npu_payload.c
 # and THIS port's npu_arena.c, and tflite_strip_boundary exists because this
-# port registers one operator and offloads everything else.  Wio has no NPU, so
-# its ingest is a different pipeline.  What both boards run is the fetch
-# (cmake/fetch_model.cmake), the pack-verify-publish chain (cmake/build_asset.py)
-# and the receipt (cmake/asset_receipt.py) -- each of which takes this board's
-# facts as arguments below and holds none of its own.
+# port registers one operator and offloads everything else.  wio-lite-ai and
+# f746g-disco have no NPU, so their ingest is a different pipeline.  What every
+# board runs is the fetch (cmake/fetch_model.cmake), the pack-verify-publish
+# chain (cmake/build_asset.py) and the receipt (cmake/asset_receipt.py) -- each
+# of which takes this board's facts as arguments below and holds none of its
+# own.
 #
 # [!] AND NEITHER TARGET IS IN ALL.  The detection model cannot be committed
 # (model-zoo licensed) and is fetched on demand, so a tree with no access to the
@@ -1646,8 +1647,9 @@ endif()
 #
 # [!] THE BUILD CHECKS THE FIT, THE DEVICE ONLY REFUSES IT.  SLOT is printed on
 # the receipt, and cmake/build_asset.py refuses to publish a container larger
-# than that slot's payload (from slot_table.json, which this board emits from
-# its own headers).  The device refuses an oversized payload too, on the YMODEM
+# than that slot's payload (from slot_table.json, which the shared
+# asset/tools/slot_table.c writes from this board's table and the interval the
+# firmware enforces, after checking the table against it -- issue #195).  The device refuses an oversized payload too, on the YMODEM
 # size header -- but blob_write_run() erases the WHOLE SLOT before that header
 # arrives, so a file that reaches it some other way costs the previous blob and
 # one endurance event before the refusal.  The build cannot check that the slot
@@ -1656,16 +1658,16 @@ endif()
 # grove_add_asset(<name>
 #     PROFILE cls|det        which model checks run; never guessed from a name
 #     PLUGIN  <name>         a plugin built by add_plugin() below
-#     SLOT    <n>            printed on the receipt
+#     SLOT    <n>            checked for capacity, printed on the receipt
 #     FILE <path> | URL <git> COMMIT <sha> PATH_IN <p> SHA256 <hash>
 #     [STRIP] [VELA]         the ingest steps this model needs
 # )
 #
-# The fetch, the pack-verify-publish chain and the receipt are shared with wio
-# (cmake/add_asset.cmake, issue #126) and take the stack policy, the veneer cost
-# and the plugin's image from their own registrations.  What stays here is this
-# board's: the profile, the ingest (strip + vela), its tools and the receipt's
-# commands.
+# The fetch, the pack-verify-publish chain and the receipt are shared by every
+# board (cmake/add_asset.cmake, issue #126) and take the stack policy, the
+# veneer cost and the plugin's image from their own registrations.  What stays
+# here is this board's: the profile, the ingest (strip + vela), its tools and
+# its slot (the receipt's text is shared since issue #195).
 include("${CMAKE_SOURCE_DIR}/cmake/add_asset.cmake")
 
 # [!] THE PIN'S FIRST CONSUMER CHECKS IT (issue #132), inside its own

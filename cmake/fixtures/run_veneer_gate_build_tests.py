@@ -678,14 +678,14 @@ plugin_stack_table(
 # between it and an unchecked firmware.
 add_custom_target(asset-bare
     COMMAND ${DELIVER} "${CMAKE_BINARY_DIR}/bare.nnc" VERBATIM)
-# An asset whose pack rule names the gate, as grove/wio_add_asset() do.
+# An asset whose pack rule names the gate, as cmake/add_asset.cmake does.
 get_property(_gate GLOBAL PROPERTY VENEER_GATE_TARGET)
 add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/packed.nnc"
     COMMAND ${DELIVER} "${CMAKE_BINARY_DIR}/packed.nnc"
     DEPENDS ${_gate} VERBATIM)
 add_custom_target(asset-packed DEPENDS "${CMAKE_BINARY_DIR}/packed.nnc")
-# The c an asset hands the host container verifier, as grove/wio_add_asset()
-# take it (issue #111).
+# The c an asset hands the host container verifier, as cmake/add_asset.cmake
+# takes it (issue #111).
 veneer_cost_gate_declared(_cost)
 add_custom_target(asset-cost
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/record.py"
@@ -717,7 +717,7 @@ if(FIX_PLUGIN)
         SLOTS   entry shapes_ok decode draw report
         SBUF_WRITE_MAX 64)
     add_custom_target(plugin ALL DEPENDS ${FIX_PLUGIN_ELFS})
-    # The plugin's container, as grove/wio_add_asset() wire one: it waits for
+    # The plugin's container, as cmake/add_asset.cmake wires one: it waits for
     # the plugin's image AND the firmware's check.
     add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/plugin.nnc"
         COMMAND ${DELIVER} "${CMAKE_BINARY_DIR}/plugin.nnc"

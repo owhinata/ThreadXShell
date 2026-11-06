@@ -1036,7 +1036,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # before, plan #159 D4/D5): its fit is checked against the slot's payload
     # capacity in the slot table JSON (asset/tools/slot_table.c, the table the
     # firmware links), and the closing check is the receipt's CRC against what
-    # `blob list` shows for the slot -- wio-lite-ai's.
+    # `blob list` shows for the slot -- the same receipt every board prints.
     #
     # [!] THE GATES RUN AT BUILD TIME, NOT AT SEND TIME: nothing checks that the
     # file sent is the file built -- `blob list`'s CRC is the only "built bytes

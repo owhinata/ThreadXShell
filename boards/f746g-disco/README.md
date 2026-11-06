@@ -1486,7 +1486,7 @@ from `src/blob_slots.c` with the shared lookups, `asset/tools/slot_table.c`), an
 wio-lite-ai (provisional; the slot is one argument in `board.cmake`).  Until
 #194 the destination was a FILE checked against `nn_tflm_stage_cap`, and the
 receipt said to copy it to the card and compare with the CRC the load
-printed.  The CRC moves with the build id (the HEAD the tree was configured
+printed (that route was removed from the shared tools in #195).  The CRC moves with the build id (the HEAD the tree was configured
 at), so compare with the receipt of the build that produced the file you
 sent.  The `cifar10` plugin
 is built and gated too, but no asset carries it: no CIFAR-10 model this

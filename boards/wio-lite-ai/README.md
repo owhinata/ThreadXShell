@@ -1490,18 +1490,26 @@ with the M7 blazeface plugin, runs the device's validator over the packed file,
 and publishes only then.  It prints a receipt:
 
 ```
-  on the board:  blob erase 12   (the slot must be empty first)
-                 blob write blazeface 12   (erases the slot, then waits for the file)
+  on the board:  blob write blazeface 12   (erases the slot, then waits for the file)
+                 refused if slot 12 holds another name, or blazeface is
+                 already in another slot: `blob list` shows which, and
+                 `blob erase <that slot>` clears it on purpose
   in picocom:    C-a C-s, then the path above
   afterwards:    `blob list` must show crc32 <CRC> -- ...
   then:          nn model load --name blazeface
 ```
 
+The text is the same on every board (`cmake/asset_receipt.py`, issue #195);
+only the name, the slot and the CRC differ.
+
 **Slot 12 (the last 256 KB slot) is only the declaration in `board.cmake`.**
-The build refuses a container too large for it; nothing refuses the *wrong*
-slot -- the receipt's `blob erase` retires whatever is there, and `blob write`
-erases the whole slot before the transfer.  Read `blob list` first.  (Until
-issue #193 the receipt said `blob write 5` and `nn model load --slot 5`.)
+The build refuses a container too large for it.  On the board, `blob write
+blazeface 12` rewrites slot 12 when it is empty or already holds `blazeface`
+(it erases the whole slot before the transfer), and refuses -- before any
+erase -- a slot 12 holding another blob, or a `blazeface` stored in another
+slot; clearing that is a deliberate `blob erase`.  (Until issue #195 the
+receipt began with `blob erase 12`, which removed that protection every time;
+until issue #193 it said `blob write 5` and `nn model load --slot 5`.)
 
 [!] **The `.nnc` under `build/` is the last one PACKED, not the last one SENT.**
 What the board holds is established by `blob list`'s crc32 against the receipt

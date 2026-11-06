@@ -12,44 +12,33 @@ be compared against the file that was sent.  This is the operator's only
 end-to-end "built bytes = stored bytes" check, so it is printed every time
 alongside the path to paste.
 
-[!] THE COMMANDS TYPED ON THE BOARD ARE THE BOARD'S, AND ARRIVE AS --step.  The
-two boards spell the store differently -- Grove names a blob and a slot, wio
-only a slot -- and a receipt that printed one board's syntax on the other would
-send an operator to a command that does not exist, at the one moment they are
-following it to the letter.  Each --step is a template over {name} and {slot};
-the first is printed as "on the board", the rest under it in order.  What is
-NOT a board's -- the CRC and the instruction to compare it -- stays here.
-A --then is printed after the CRC comparison, for what to type once the bytes
-are known to be the right ones (wio names its model load there).
+[!] THE COMMANDS ARE THE SHARED `blob` COMMAND'S, SO THEY LIVE HERE (issue
+#195).  Until then each board passed its own lines (--step, --then, --transfer,
+--verify), from when each board's store spoke differently; since #194 all three
+run shell/cmds/cmd_blob.c, and the three copies had drifted (Grove lacked the
+`then:` line and the note on `blob write`).  So the text below is the one
+receipt, and a board passes only its slot -- the same value add_asset() gave
+the fit check.  The removed options are left to argparse, which refuses each
+by name: what is left takes exactly two positional values and nothing that
+could absorb a stray word.
 
-[!] AND SO ARE THE TRANSFER AND THE COMPARISON (issue #159).  This file used to
-print "in picocom: C-a C-s" and "`blob list` must show crc32" for every board;
-f746 then had neither.  So each arrives as a label and its lines
-(--transfer-label/--transfer, --verify-label/--verify, templates over {name},
-{slot} and {crc}).  Grove and wio pass the text this printed before, so their
-receipts are byte-identical.
-
-The destination is the slot (the positional argument, required).  The file
-destination's --file was removed in issue #195; argparse refuses it by name.
+[!] AND IT FOLLOWS THE COMMAND, NOT THE OTHER WAY ROUND.  `blob write <name>
+<slot>` erases the slot and receives into it when the slot is empty or holds
+this same name (it is rewritten); it refuses, before any erase, a slot that
+holds another blob, and a name already stored in another slot, and tells the
+operator to `blob erase` on purpose.  The receipt used to start with `blob
+erase <slot>`, which cleared exactly that protection every time it was
+followed to the letter.
 """
 import argparse
 import json
+import os
 import sys
 import zlib
 
 ap = argparse.ArgumentParser()
 ap.add_argument("receipt")
 ap.add_argument("slot")
-ap.add_argument("--step", action="append", default=[], required=True,
-                help="a board command, as a template over {name} and {slot}")
-ap.add_argument("--then", action="append", default=[],
-                help="a board command for after the CRC check, same template")
-ap.add_argument("--transfer-label", required=True)
-ap.add_argument("--transfer", action="append", default=[], required=True,
-                help="how the file reaches the board, same template")
-ap.add_argument("--verify-label", required=True)
-ap.add_argument("--verify", action="append", default=[], required=True,
-                help="how the stored bytes are compared with {crc}")
 args = ap.parse_args()
 receipt, slot = args.receipt, args.slot
 if not slot.isascii() or not slot.isdigit():
@@ -62,28 +51,31 @@ r = json.load(open(receipt))
 # describes neither the file nor what the board stored is worse than none, since
 # the whole point is that an operator acts on this number.  Recomputing costs
 # milliseconds and makes the pairing unfalsifiable.
+if not os.path.isfile(r["path"]):
+    sys.exit("asset_receipt: %s is missing.  Rebuild the asset." % r["path"])
 _actual = zlib.crc32(open(r["path"], "rb").read()) & 0xFFFFFFFF
 if "%08X" % _actual != r["crc32"]:
     sys.exit("asset_receipt: %s does not match its receipt (file %08X, receipt "
              "%s).  Rebuild the asset -- do not send this file."
              % (r["path"], _actual, r["crc32"]))
-dest_txt = "slot %s" % slot
-fill = dict(name=r["name"], slot=slot, crc=r["crc32"])
+name, crc = r["name"], r["crc32"]
 
+# The one receipt.  The lines are fixed text with the name, slot and CRC put
+# in, so a longer name or a two-digit slot only lengthens a line; the label
+# column (two spaces, then 15 wide) never moves.
+RECEIPT = """
+  asset {name:<12} {path}
+  {dest:<18} {bytes} B   crc32 {crc}
 
-def block(label, lines):
-    # The label column is 15 wide after two spaces, as the receipt always was.
-    for i, line in enumerate(lines):
-        print("%s%s" % ("  %-15s" % label if i == 0 else " " * 17,
-                        line.format(**fill)))
-
-
-print("")
-print("  asset %-12s %s" % (r["name"], r["path"]))
-print("  %-18s %d B   crc32 %s" % (dest_txt, r["bytes"], r["crc32"]))
-print("")
-block("on the board:", args.step)
-block(args.transfer_label, args.transfer)
-block(args.verify_label, args.verify)
-block("then:", args.then)
-print("")
+  on the board:  blob write {name} {slot}   (erases the slot, then waits for the file)
+                 refused if slot {slot} holds another name, or {name} is
+                 already in another slot: `blob list` shows which, and
+                 `blob erase <that slot>` clears it on purpose
+  in picocom:    C-a C-s, then the path above
+  afterwards:    `blob list` must show crc32 {crc} -- that is how you know
+                 the bytes that were built are the bytes that were stored.
+  then:          nn model load --name {name}
+"""
+sys.stdout.write(RECEIPT.format(name=name, path=r["path"], slot=slot,
+                                dest="slot %s" % slot, bytes=r["bytes"],
+                                crc=crc) + "\n")

@@ -395,15 +395,22 @@ taken as one of its values and configure would pass), and argparse refuses
 never part of that route: it re-checks a pinned model's SHA256 in front of a
 board's ingest, above.)
 
-The receipt's transfer and verify lines are the board's too
-(`RECEIPT_TRANSFER` / `RECEIPT_VERIFY`: a label and its lines, templates over
-`{name}`, `{slot}` and `{crc}`). Grove and wio pass the picocom and
-`blob list` text the receipt always printed, so their receipts are
-byte-identical; f746 passes wio's text since #194. `fixtures/run_add_plugin_arg_tests.py` covers the configure
+The receipt is one text for every board, in `asset_receipt.py` (#195): every
+board runs the shared `blob` command since #194, so the commands it prints
+are the same, and only the name, the slot (the one `add_asset()` gave the fit
+check) and the CRC differ. It starts with `blob write <name> <slot>`, which
+erases the slot and receives into it when the slot is empty or holds that
+name, and says when the command refuses before any erase (another blob in
+the slot, or the name already in another slot), then the picocom transfer,
+the `blob list` CRC comparison and `nn model load --name <name>`. Until #195
+each board passed its own lines (`RECEIPT_STEPS` / `_THEN` / `_TRANSFER` /
+`_VERIFY`), the copies had drifted, and all three began with `blob erase
+<slot>`, which removed the store's refusal every time; those four words are
+now refused at configure like `FILE_NAME`. `fixtures/run_add_plugin_arg_tests.py` covers the configure
 refusals; `fixtures/run_asset_dest_tests.py` covers `build_asset.py`'s (run to
 the end with stand-in tools, so the fit check itself and "nothing published on
-a refusal" are tested) and the receipt (including the slot boards' text byte
-for byte).
+a refusal" are tested) and the receipt (its whole text byte for byte, for a
+one-digit and a two-digit slot).
 
 # Blob slots against the model staging buffer (`check_blob_staging.py`, #193)
 

@@ -5,16 +5,17 @@
 
 An asset goes to a store slot, named by --slot with the board's --slot-table
 (the file destination #159 added was removed in #195), and the receipt prints
-the board's own transfer and verify lines.  add_asset()'s configure-time
+one text for every board, the shared `blob` command's (#195).  add_asset()'s configure-time
 refusals are in run_add_plugin_arg_tests.py; this covers the two scripts
 behind it:
 
   - cmake/build_asset.py refuses a missing --slot or --slot-table, and the
     removed --stage-elf / --stage-symbol, BEFORE anything is packed (it used
     to skip the fit check on a call with neither -- a fail-open);
-  - cmake/asset_receipt.py prints, for the text Grove and wio passed in #159,
-    EXACTLY the receipt it printed then (byte for byte), and refuses a
-    missing or non-numeric slot and the removed --file;
+  - cmake/asset_receipt.py prints EXACTLY the receipt below (byte for byte),
+    for a one-digit and a two-digit slot, and refuses a missing or
+    non-numeric slot and every removed option (--file, --step, --then,
+    --transfer-label, --transfer, --verify-label, --verify);
   - build_asset.py, run to the end with stand-ins for the packer and the two
     verifiers, publishes a container that fits its slot exactly and refuses
     one a byte over, a slot the table does not hold, a missing --slot or
@@ -200,64 +201,114 @@ def fit_cases(work):
 
 
 # --- asset_receipt.py --------------------------------------------------------
-# What the receipt printed before #159 for wio's blazeface (the text is wio's
-# and Grove's; only the path, size and CRC are this fixture's).
-SLOT_WANT = """
+# [!] THE RECEIPT, WRITTEN OUT IN FULL (issue #195) -- not built from the same
+# template the script uses, so a changed word, a lost line or a slot other than
+# the one passed shows here.  Two cases: Grove's cifar10 in slot 1 and the
+# blazeface wio and f746 send to slot 12; only path, size and CRC are the
+# fixture's.  The refusal lines follow shell/cmds/cmd_blob.c: another blob in
+# the slot, or the same name in another slot, is refused before any erase.
+RECEIPT_WANT = {
+    ("blazeface", "12"): """
   asset blazeface    {path}
-  slot 5             {n} B   crc32 {crc}
+  slot 12            {n} B   crc32 {crc}
 
-  on the board:  blob write 5   (erases the slot, then waits for the file)
+  on the board:  blob write blazeface 12   (erases the slot, then waits for the file)
+                 refused if slot 12 holds another name, or blazeface is
+                 already in another slot: `blob list` shows which, and
+                 `blob erase <that slot>` clears it on purpose
   in picocom:    C-a C-s, then the path above
   afterwards:    `blob list` must show crc32 {crc} -- that is how you know
                  the bytes that were built are the bytes that were stored.
-  then:          nn model load --slot 5
+  then:          nn model load --name blazeface
 
-"""
-SLOT_ARGS = ["--step", "blob write {slot}   (erases the slot, then waits for the file)",
-             "--then", "nn model load --slot {slot}",
-             "--transfer-label", "in picocom:",
-             "--transfer", "C-a C-s, then the path above",
-             "--verify-label", "afterwards:",
-             "--verify", "`blob list` must show crc32 {crc} -- that is how you know",
-             "--verify", "the bytes that were built are the bytes that were stored."]
+""",
+    ("cifar10", "1"): """
+  asset cifar10      {path}
+  slot 1             {n} B   crc32 {crc}
+
+  on the board:  blob write cifar10 1   (erases the slot, then waits for the file)
+                 refused if slot 1 holds another name, or cifar10 is
+                 already in another slot: `blob list` shows which, and
+                 `blob erase <that slot>` clears it on purpose
+  in picocom:    C-a C-s, then the path above
+  afterwards:    `blob list` must show crc32 {crc} -- that is how you know
+                 the bytes that were built are the bytes that were stored.
+  then:          nn model load --name cifar10
+
+""",
+}
+# Each removed option, with a value, beside a whole call.
+RECEIPT_GONE = ["--file", "--step", "--then", "--transfer-label", "--transfer",
+                "--verify-label", "--verify"]
 
 
 def receipt_cases(work):
-    nnc = os.path.join(work, "blazeface.nnc")
-    with open(nnc, "wb") as fh:
-        fh.write(b"fixture container bytes")
-    data = open(nnc, "rb").read()
-    crc = "%08X" % (zlib.crc32(data) & 0xFFFFFFFF)
-    rec = nnc + ".json"
-    with open(rec, "w") as fh:
-        json.dump({"name": "blazeface", "bytes": len(data), "crc32": crc,
-                   "path": nnc}, fh)
+    def fixture(name, body):
+        nnc = os.path.join(work, name + ".nnc")
+        with open(nnc, "wb") as fh:
+            fh.write(body)
+        crc = "%08X" % (zlib.crc32(body) & 0xFFFFFFFF)
+        with open(nnc + ".json", "w") as fh:
+            json.dump({"name": name, "bytes": len(body), "crc32": crc,
+                       "path": nnc}, fh)
+        return nnc, crc
 
-    def run(args):
+    def run(rec, args):
         r = subprocess.run([sys.executable, RECEIPT, rec] + args,
                            capture_output=True, text=True)
         return r.returncode, r.stdout, r.stderr
 
-    rc, out, err = run(["5"] + SLOT_ARGS)
-    want = SLOT_WANT.format(path=nnc, n=len(data), crc=crc)
-    judge("receipt_slot_unchanged", rc == 0 and out == want,
-          "got:\n%s\nwant:\n%s%s" % (out, want, err))
-    rc, out, err = run(SLOT_ARGS)
+    for (name, slot), text in sorted(RECEIPT_WANT.items()):
+        body = ("fixture container bytes for %s" % name).encode()
+        nnc, crc = fixture(name, body)
+        rc, out, err = run(nnc + ".json", [slot])
+        want = text.format(path=nnc, n=len(body), crc=crc)
+        judge("receipt_%s_slot_%s" % (name, slot), rc == 0 and out == want,
+              "got:\n%s\nwant:\n%s%s" % (out, want, err))
+    # [!] THE CRC IS RECOMPUTED FROM THE FILE (issue #195): a receipt whose
+    # crc32 is not the file's, a file changed after its receipt, and a receipt
+    # pointing at no file are refused in a sentence, with no instruction
+    # printed -- the CRC is the operator's only "built = stored" check.
+    for name, how in (("receipt_crc_mismatch", "json"),
+                      ("receipt_file_changed", "file"),
+                      ("receipt_file_missing", "gone")):
+        nnc, crc = fixture(name, b"fixture container bytes for " +
+                           name.encode())
+        if how == "json":
+            bad_crc = ("0" if crc[0] != "0" else "1") + crc[1:]
+            with open(nnc + ".json", "w") as fh:
+                json.dump({"name": name, "bytes": os.path.getsize(nnc),
+                           "crc32": bad_crc, "path": nnc}, fh)
+            want = "does not match its receipt"
+        elif how == "file":
+            data = bytearray(open(nnc, "rb").read())
+            data[0] ^= 0x01
+            with open(nnc, "wb") as fh:
+                fh.write(data)
+            want = "does not match its receipt"
+        else:
+            os.unlink(nnc)
+            want = "%s is missing" % nnc
+        rc, out, err = run(nnc + ".json", ["12"])
+        judge(name, rc != 0 and want in err and "Traceback" not in err and
+              "on the board:" not in out, out + err)
+    rec = os.path.join(work, "blazeface.nnc.json")
+    rc, out, err = run(rec, [])
     judge("receipt_no_slot", rc != 0 and out == "" and
           "the following arguments are required: slot" in err, out + err)
     for name, bad_slot in (("receipt_slot_empty", ""),
                            ("receipt_slot_letters", "5x")):
-        rc, out, err = run([bad_slot] + SLOT_ARGS)
+        rc, out, err = run(rec, [bad_slot])
         judge(name, rc != 0 and out == "" and
               ("the slot must be a slot number, got %r" % bad_slot) in err,
               out + err)
-    # Issue #195: the file destination's --file is gone, refused by name.
-    rc, out, err = run(["5", "--file", "blazeface.nnc"] + SLOT_ARGS)
-    judge("receipt_file_gone", rc != 0 and out == "" and
-          "unrecognized arguments: --file blazeface.nnc" in err, out + err)
-    rc, out, err = run(["5", "--step", "s", "--verify-label", "a",
-                        "--verify", "v"])
-    judge("receipt_no_transfer", rc != 0 and "--transfer" in err, err)
+    # Issue #195: the file destination's --file and the board's own receipt
+    # lines are gone, each refused by name.
+    for opt in RECEIPT_GONE:
+        rc, out, err = run(rec, ["12", opt, "x"])
+        judge("receipt%s_gone" % opt.replace("-", "_")[1:], rc != 0 and
+              out == "" and ("unrecognized arguments: %s x" % opt) in err,
+              out + err)
 
 
 def main():

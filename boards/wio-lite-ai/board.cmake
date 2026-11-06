@@ -1803,11 +1803,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         # No ingest: float32 I/O as the zoo ships it, no strip, no vela.
         asset_model_source(${_name}
             OVERRIDE_VAR WIO_ASSET_${_name}_FILE OUT_VAR _src ${_pin})
-        # The receipt's commands are THIS board's: since issue #193 `blob
-        # write` takes the name and the slot, refuses a slot that holds a blob
-        # under another name (hence the erase first), and erases the slot
-        # itself before it receives.  The load names the blob, as the store
-        # keys on it.
+        # The receipt's commands are the shared `blob` command's, printed by
+        # cmake/asset_receipt.py for every board (issue #195): no RECEIPT_* here.
         add_asset(${_name}
             # No ingest, so the packer is the pin's first consumer and
             # re-checks it on the bytes it packs (issue #132).
@@ -1820,16 +1817,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
             BUILD_ID "${WIO_PLUGIN_BUILD_ID}"
             TARGET_ID "${WIO_PLUGIN_TARGET_ID}"
             LINK_ADDR "${WIO_PLUGIN_BASE}"
-            CAPACITY "${WIO_PLUGIN_MAX}"
-            RECEIPT_STEPS "blob erase {slot}   (the slot must be empty first)"
-                          "blob write {name} {slot}   (erases the slot, then waits for the file)"
-            RECEIPT_THEN  "nn model load --name {name}"
-            # How the file gets there and how the stored bytes are compared
-            # with the receipt's CRC -- this board's, since issue #159.
-            RECEIPT_TRANSFER "in picocom:" "C-a C-s, then the path above"
-            RECEIPT_VERIFY   "afterwards:"
-                "`blob list` must show crc32 {crc} -- that is how you know"
-                "the bytes that were built are the bytes that were stored.")
+            CAPACITY "${WIO_PLUGIN_MAX}")
     endfunction()
 
     # The file #107 pins for Grove -- the same commit and the same SHA-256, from

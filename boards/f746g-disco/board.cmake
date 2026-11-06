@@ -1063,11 +1063,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         # No ingest: the model as the zoo ships it (tflm with CMSIS-NN reads it).
         asset_model_source(${_name}
             OVERRIDE_VAR F746_ASSET_${_name}_FILE OUT_VAR _src ${_pin})
-        # The receipt's commands are THIS board's since issue #194, and the
-        # same as wio-lite-ai's: `blob write` takes the name and the slot,
-        # refuses a slot that holds a blob under another name (hence the
-        # erase first), and erases the slot itself before it receives.  The
-        # load names the blob, as the store keys on it.
+        # The receipt's commands are the shared `blob` command's, printed by
+        # cmake/asset_receipt.py for every board (issue #195): no RECEIPT_* here.
         add_asset(${_name}
             MODEL "${_src}"  MODEL_SHA256 "${_src_SHA256}"
             PLUGIN ${A_PLUGIN}  SLOT ${A_SLOT}
@@ -1078,14 +1075,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
             BUILD_ID "${F746_PLUGIN_BUILD_ID}"
             TARGET_ID "${F746_PLUGIN_TARGET_ID}"
             LINK_ADDR "${F746_PLUGIN_BASE}"
-            CAPACITY "${F746_PLUGIN_MAX}"
-            RECEIPT_STEPS "blob erase {slot}   (the slot must be empty first)"
-                          "blob write {name} {slot}   (erases the slot, then waits for the file)"
-            RECEIPT_THEN  "nn model load --name {name}"
-            RECEIPT_TRANSFER "in picocom:" "C-a C-s, then the path above"
-            RECEIPT_VERIFY   "afterwards:"
-                "`blob list` must show crc32 {crc} -- that is how you know"
-                "the bytes that were built are the bytes that were stored.")
+            CAPACITY "${F746_PLUGIN_MAX}")
     endfunction()
 
     # The file wio-lite-ai and Grove pin -- the same commit and SHA-256, from the

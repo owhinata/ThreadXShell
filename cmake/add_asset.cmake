@@ -48,10 +48,6 @@
 #                                configures
 #      [VERIFY_ARGS <arg ...>]   the board's model checks (Grove: --blazeface)
 #      BUILD_ID TARGET_ID LINK_ADDR CAPACITY <value>
-#      RECEIPT_STEPS <text ...>  [RECEIPT_THEN <text ...>]
-#      RECEIPT_TRANSFER <label> <text ...>   how the file reaches the board
-#      RECEIPT_VERIFY   <label> <text ...>   how its stored bytes are compared
-#                                            with the receipt's CRC ({crc})
 #  )
 #
 #  [!] THE DESTINATION IS A SLOT, AND IT IS NOT OPTIONAL (issues #159, #195).
@@ -62,21 +58,23 @@
 #  asset can be declared whose fit nothing checks.  The removed FILE_NAME and
 #  STAGE_SYMBOL are still PARSED, only to be refused: as unknown words they
 #  would be swallowed as values of a multi-value keyword written before them
-#  (VERIFY_ARGS, RECEIPT_*), and configure would pass.
+#  (VERIFY_ARGS), and configure would pass.
 #
-#  [!] THE TRANSFER AND THE VERIFY LINES ARE THE BOARD'S (issue #159).  The
-#  receipt used to print picocom and `blob list` on every board; on a board
-#  that has neither, the one sentence an operator follows to the letter would
-#  send them to a command that does not exist.  Grove and wio pass the text the
-#  receipt always printed, so their receipts are byte-identical.
+#  [!] THE RECEIPT'S TEXT IS NOT A BOARD'S (issue #195).  Until #195 each
+#  board passed the commands its receipt printed (RECEIPT_STEPS / _THEN /
+#  _TRANSFER / _VERIFY), because each board's store spoke differently.  Since
+#  #194 all three run the one shared `blob` command, and three copies of its
+#  instructions had already drifted apart (Grove lacked two lines), so the text
+#  lives in cmake/asset_receipt.py and this passes it only the receipt JSON and
+#  the slot.  The four words are refused like FILE_NAME, for the same reason.
 #
 #  [!] WHAT IS NOT AN ARGUMENT IS THE POINT.  The stack policy is the board's
 #  plugin_stack_table(), the veneer cost is veneer_cost_gate()'s DECLARED, and
 #  the plugin's image and bounds are where add_plugin() put them -- each looked
 #  up from the registration it belongs to, so an asset cannot be packed against
 #  numbers the firmware does not hold.  What a board passes is what only the
-#  board knows: its tools, its target word and reservation, its model checks,
-#  and the commands its receipt prints.  The ingest between the two calls (strip
+#  board knows: its tools, its target word and reservation, its model checks
+#  and its slot.  The ingest between the two calls (strip
 #  and vela on Grove, nothing on wio) is the board's own.
 #
 #  [!] THE GATES RUN AT BUILD TIME, NOT AT SEND TIME, AND NEITHER TARGET IS IN
@@ -189,24 +187,22 @@ function(add_asset _name)
                 "(SLOT with SLOT_TABLE)")
         endif()
     endforeach()
+    # [!] AND SO IS A RECEIPT TEXT OF THE BOARD'S OWN (issue #195).
+    foreach(_gone RECEIPT_STEPS RECEIPT_THEN RECEIPT_TRANSFER RECEIPT_VERIFY)
+        if(DEFINED A_${_gone} OR "${_gone}" IN_LIST A_KEYWORDS_MISSING_VALUES)
+            message(FATAL_ERROR
+                "add_asset(${_name}): ${_gone} is not an argument since issue "
+                "#195 -- the receipt's text is cmake/asset_receipt.py's, the "
+                "same for every board")
+        endif()
+    endforeach()
     # [!] SLOT AND SLOT_TABLE ARE REQUIRED LIKE EVERY OTHER INPUT (issues #159,
     # #195): no branch here or in build_asset.py runs the fit check only "when
     # there is a destination".
     foreach(_req MODEL PLUGIN SLOT SLOT_TABLE PACKER LAYOUT CONTAINER_VERIFIER
-                 BUILD_ID TARGET_ID LINK_ADDR CAPACITY RECEIPT_STEPS
-                 RECEIPT_TRANSFER RECEIPT_VERIFY)
+                 BUILD_ID TARGET_ID LINK_ADDR CAPACITY)
         if(NOT DEFINED A_${_req} OR "${A_${_req}}" STREQUAL "")
             message(FATAL_ERROR "add_asset(${_name}): ${_req} is required")
-        endif()
-    endforeach()
-    # A label and at least one line each: a label alone would print a heading
-    # with nothing under it, where the operator expects an instruction.
-    foreach(_r TRANSFER VERIFY)
-        list(LENGTH A_RECEIPT_${_r} _n)
-        if(_n LESS 2)
-            message(FATAL_ERROR
-                "add_asset(${_name}): RECEIPT_${_r} takes a label and at "
-                "least one line, got '${A_RECEIPT_${_r}}'")
         endif()
     endforeach()
     # [!] MODEL_VERIFIER MUST BE PRESENT, EVEN WHEN IT IS EMPTY.  Empty is a
@@ -309,27 +305,11 @@ function(add_asset _name)
 
     # [!] THE RECEIPT PRINTS FROM A PHONY, not from the command above -- that
     # one does not rerun once its output is current, so the number an operator
-    # needs would appear exactly once and never again.  The commands it prints
-    # are the board's own: how a slot is written differs per board.
-    set(_receipt "")
-    foreach(_s IN LISTS A_RECEIPT_STEPS)
-        list(APPEND _receipt --step "${_s}")
-    endforeach()
-    foreach(_s IN LISTS A_RECEIPT_THEN)
-        list(APPEND _receipt --then "${_s}")
-    endforeach()
-    foreach(_r TRANSFER VERIFY)
-        string(TOLOWER "${_r}" _opt)
-        list(GET A_RECEIPT_${_r} 0 _label)
-        list(SUBLIST A_RECEIPT_${_r} 1 -1 _lines)
-        list(APPEND _receipt "--${_opt}-label" "${_label}")
-        foreach(_s IN LISTS _lines)
-            list(APPEND _receipt "--${_opt}" "${_s}")
-        endforeach()
-    endforeach()
+    # needs would appear exactly once and never again.  It is given the slot
+    # the fit check above was given -- the same variable -- and nothing else.
     add_custom_target(asset-${_name}
         COMMAND "${Python3_EXECUTABLE}" "${_ADD_ASSET_DIR}/asset_receipt.py"
-                "${_nnc}.json" "${A_SLOT}" ${_receipt}
+                "${_nnc}.json" "${A_SLOT}"
         DEPENDS "${_nnc}"
         VERBATIM)
 endfunction()

@@ -674,10 +674,10 @@ python3 "$repo/cmake/fixtures/run_storage_gate_tests.py" \
 python3 "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
 
 # issues #159, #195 -- an asset's destination is a slot, both halves required,
-# and the receipt prints the board's own transfer / verify lines: build_asset.py
-# refuses a missing --slot / --slot-table and the removed file options before
-# packing, and asset_receipt.py prints the slot boards' receipt byte for byte
-# as before.  It also runs build_asset.py to the end with stand-in tools: a
+# and the receipt is one text for every board: build_asset.py refuses a
+# missing --slot / --slot-table and the removed file options before packing,
+# and asset_receipt.py prints that text byte for byte for a one- and a
+# two-digit slot and refuses the removed per-board options.  It also runs build_asset.py to the end with stand-in tools: a
 # container that fits its slot exactly is published, and a byte over, a slot
 # the table lacks, an unreadable slot table and a non-numeric slot publish
 # nothing.

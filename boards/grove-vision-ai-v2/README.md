@@ -6227,7 +6227,20 @@ which ends by printing what you need:
 ```
   asset blazeface    /home/.../build/grove-vision-ai-v2/asset/blazeface.nnc
   slot 9             168928 B   crc32 C9AEEFA8
+
+  on the board:  blob write blazeface 9   (erases the slot, then waits for the file)
+                 refused if slot 9 holds another name, or blazeface is
+                 already in another slot: `blob list` shows which, and
+                 `blob erase <that slot>` clears it on purpose
+  in picocom:    C-a C-s, then the path above
+  afterwards:    `blob list` must show crc32 C9AEEFA8 -- that is how you know
+                 the bytes that were built are the bytes that were stored.
+  then:          nn model load --name blazeface
 ```
+
+(The text is the same on every board since issue #195, `cmake/asset_receipt.py`;
+until then this board's receipt began with `blob erase 9` and had no `then:`
+line.)
 
 Then, with picocom started the one way it is ever started:
 
@@ -6236,8 +6249,7 @@ picocom -b 921600 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0
 ```
 
 ```
-# on the board -- the slot must be EMPTY first; see below
-blob erase 9
+# on the board -- refused if slot 9 holds another blob; see below
 blob write blazeface 9
 
 # in picocom: C-a C-s, then paste the path from the receipt
@@ -6252,10 +6264,12 @@ What a device holds is established by `blob list`'s crc32 against the receipt of
 a transfer you actually made -- never by reading the build tree, which a rebuild
 moves without touching the board.
 
-[!] **`blob write` will not overwrite an occupied slot**, whatever the name.  A
-slot holding a VALID blob under *any* other name gives `OCCUPIED`, not a fresh
-write -- so the `blob erase` above is required, not tidiness.  (The duplicate
-rule is a different one: it refuses the same NAME in two slots.)
+[!] **`blob write` will not overwrite a slot holding another blob.**  A slot
+holding a blob under another name -- or bytes this firmware cannot read --
+gives `OCCUPIED` before anything is erased; a slot already holding
+`blazeface` is erased and rewritten.  The duplicate rule is a different one:
+it refuses the same NAME in two slots.  Either refusal is cleared by a
+deliberate `blob erase <slot>` after reading `blob list`.
 
 [!] **And the slot number is not checked anywhere on the host.**  `blob write`
 picks the slot on the DEVICE and **erases the whole slot before the YMODEM size

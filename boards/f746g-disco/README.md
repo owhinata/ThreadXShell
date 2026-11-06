@@ -45,9 +45,11 @@ cmake --build build/f746g-disco --target asset-blazeface   # fetches the pinned 
 ```
 
 ```
-blob erase 12                    # the slot must be empty first
 blob write blazeface 12          # then, in picocom: C-a C-s and
                                  # build/f746g-disco/asset/blazeface.nnc
+                                 # (refused, before any erase, if slot 12
+                                 # holds another blob or blazeface is in
+                                 # another slot: see `blob list`)
 blob list                        # slot 12's crc32 must be the receipt's
 nn model load --name blazeface
 ```
@@ -1467,16 +1469,18 @@ built-in model) with this board's blazeface plugin -- through every gate, and pr
   asset blazeface    .../build/f746-tflm/asset/blazeface.nnc
   slot 12            194232 B   crc32 <CRC>
 
-  on the board:  blob erase 12   (the slot must be empty first)
-                 blob write blazeface 12   (erases the slot, then waits for the file)
+  on the board:  blob write blazeface 12   (erases the slot, then waits for the file)
+                 refused if slot 12 holds another name, or blazeface is
+                 already in another slot: `blob list` shows which, and
+                 `blob erase <that slot>` clears it on purpose
   in picocom:    C-a C-s, then the path above
   afterwards:    `blob list` must show crc32 <CRC> -- that is how you know
                  the bytes that were built are the bytes that were stored.
   then:          nn model load --name blazeface
 ```
 
-The destination is a SLOT (`cmake/add_asset.cmake`, issue #194), the same
-receipt as wio-lite-ai's: its fit is checked against that slot's payload in
+The destination is a SLOT (`cmake/add_asset.cmake`, issue #194), and the
+receipt is the one every board prints (`cmake/asset_receipt.py`, issue #195): its fit is checked against that slot's payload in
 the table the firmware links (`plugin/slot_table.json`, compiled on the host
 from `src/blob_slots.c` with the shared lookups, `scripts/slot_table.c`), and `blazeface` goes to slot 12, the last 256 KB slot, as on
 wio-lite-ai (provisional; the slot is one argument in `board.cmake`).  Until

@@ -1748,9 +1748,8 @@ function(grove_add_asset _name)
         set(_src "${_velaed}")
     endif()
 
-    # The commands the receipt prints are this board's: a Grove blob has a
-    # NAME as well as a slot, and `blob write` will not overwrite a VALID blob
-    # of another name.
+    # The receipt's commands are the shared `blob` command's, printed by
+    # cmake/asset_receipt.py for every board (issue #195): no RECEIPT_* here.
     add_asset(${_name}
         MODEL "${_src}"  MODEL_SHA256 "${_src_SHA256}"
         PLUGIN ${A_PLUGIN}  SLOT ${A_SLOT}
@@ -1762,15 +1761,7 @@ function(grove_add_asset _name)
         BUILD_ID "${GROVE_PLUGIN_BUILD_ID}"
         TARGET_ID "${GROVE_PLUGIN_TARGET_ID}"
         LINK_ADDR "${GROVE_PLUGIN_BASE}"
-        CAPACITY "${GROVE_PLUGIN_MAX}"
-        RECEIPT_STEPS "blob erase {slot}   (the slot must be empty first)"
-                      "blob write {name} {slot}"
-        # How the file gets there and how the stored bytes are compared
-        # with the receipt's CRC -- this board's, since issue #159.
-        RECEIPT_TRANSFER "in picocom:" "C-a C-s, then the path above"
-        RECEIPT_VERIFY   "afterwards:"
-            "`blob list` must show crc32 {crc} -- that is how you know"
-            "the bytes that were built are the bytes that were stored.")
+        CAPACITY "${GROVE_PLUGIN_MAX}")
 endfunction()
 
 # --- The layout check, and the one flashing target left (issues #44, #45, #94)-

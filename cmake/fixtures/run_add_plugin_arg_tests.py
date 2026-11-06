@@ -93,10 +93,6 @@ ASSET = {
     "TARGET_ID": "0x1201",
     "LINK_ADDR": "0x24048000",
     "CAPACITY": "32768",
-    "RECEIPT_STEPS": '"blob write {slot}"',
-    # Issue #159: the board's transfer and verify lines, a label and a line.
-    "RECEIPT_TRANSFER": '"in picocom:" "C-a C-s, then the path above"',
-    "RECEIPT_VERIFY": '"afterwards:" "`blob list` must show crc32 {crc}"',
 }
 
 # A complete gate registration, as a board makes it.  Its DECLARED matches
@@ -233,16 +229,40 @@ ASSET_CASES = [
     ("asset_stage_symbol_after_list", None,
      {"VERIFY_ARGS": "--blazeface", "STAGE_SYMBOL": "nn_stage_capacity"},
      "STAGE_SYMBOL was the file destination, removed in issue #195"),
-    ("asset_no_transfer", "RECEIPT_TRANSFER", {},
-     "RECEIPT_TRANSFER is required"),
-    ("asset_no_verify", "RECEIPT_VERIFY", {}, "RECEIPT_VERIFY is required"),
-    ("asset_transfer_label_only", None, {"RECEIPT_TRANSFER": '"in picocom:"'},
-     "RECEIPT_TRANSFER takes a label and at least one line"),
+    # Issue #195: the receipt's text is asset_receipt.py's, the same for every
+    # board, so a board's own RECEIPT_* is refused in the same three forms.
+    ("asset_receipt_steps_first", None, {"^RECEIPT_STEPS": '"blob write {name} {slot}"'},
+     "RECEIPT_STEPS is not an argument since issue #195"),
+    ("asset_receipt_steps_no_value", None, {"RECEIPT_STEPS": ""},
+     "RECEIPT_STEPS is not an argument since issue #195"),
+    ("asset_receipt_steps_after_list", None,
+     {"VERIFY_ARGS": "--blazeface", "RECEIPT_STEPS": '"blob write {name} {slot}"'},
+     "RECEIPT_STEPS is not an argument since issue #195"),
+    ("asset_receipt_then_first", None, {"^RECEIPT_THEN": '"nn model load --name {name}"'},
+     "RECEIPT_THEN is not an argument since issue #195"),
+    ("asset_receipt_then_no_value", None, {"RECEIPT_THEN": ""},
+     "RECEIPT_THEN is not an argument since issue #195"),
+    ("asset_receipt_then_after_list", None,
+     {"VERIFY_ARGS": "--blazeface", "RECEIPT_THEN": '"nn model load --name {name}"'},
+     "RECEIPT_THEN is not an argument since issue #195"),
+    ("asset_receipt_transfer_first", None, {"^RECEIPT_TRANSFER": '"in picocom:" "C-a C-s"'},
+     "RECEIPT_TRANSFER is not an argument since issue #195"),
+    ("asset_receipt_transfer_no_value", None, {"RECEIPT_TRANSFER": ""},
+     "RECEIPT_TRANSFER is not an argument since issue #195"),
+    ("asset_receipt_transfer_after_list", None,
+     {"VERIFY_ARGS": "--blazeface", "RECEIPT_TRANSFER": '"in picocom:" "C-a C-s"'},
+     "RECEIPT_TRANSFER is not an argument since issue #195"),
+    ("asset_receipt_verify_first", None, {"^RECEIPT_VERIFY": '"afterwards:" "crc32 {crc}"'},
+     "RECEIPT_VERIFY is not an argument since issue #195"),
+    ("asset_receipt_verify_no_value", None, {"RECEIPT_VERIFY": ""},
+     "RECEIPT_VERIFY is not an argument since issue #195"),
+    ("asset_receipt_verify_after_list", None,
+     {"VERIFY_ARGS": "--blazeface", "RECEIPT_VERIFY": '"afterwards:" "crc32 {crc}"'},
+     "RECEIPT_VERIFY is not an argument since issue #195"),
     ("asset_no_build_id", "BUILD_ID", {}, "BUILD_ID is required"),
     ("asset_no_target_id", "TARGET_ID", {}, "TARGET_ID is required"),
     ("asset_no_link_addr", "LINK_ADDR", {}, "LINK_ADDR is required"),
     ("asset_no_capacity", "CAPACITY", {}, "CAPACITY is required"),
-    ("asset_no_receipt", "RECEIPT_STEPS", {}, "RECEIPT_STEPS is required"),
     ("asset_unknown_plugin", None, {"PLUGIN": "blazeface"},
      "no add_plugin(blazeface) on this board"),
     ("asset_bad_slot", None, {"SLOT": "five"}, "SLOT must be a slot number"),
@@ -259,9 +279,8 @@ ASSET_CASES = [
     ("asset_slot_newline", None, {"SLOT": '"5\\n"'},
      "SLOT must be a slot number, got '5"),
     # A policy of the asset's own is not an argument.  Placed FIRST: after a
-    # multi-value keyword (RECEIPT_STEPS) cmake_parse_arguments() would absorb
-    # it into that list as receipt text -- measured -- where it can reach no
-    # command line but the receipt's.
+    # multi-value keyword (VERIFY_ARGS) cmake_parse_arguments() would absorb
+    # it into that list as a model-gate argument.
     ("asset_policy_refused", None, {"^POLICY_STACK": "draw=4096"},
      "unrecognised: POLICY_STACK"),
 ]
@@ -661,9 +680,10 @@ def main():
             dest = (r"--slot\s+5\b", r"--slot-table\s+\S*slots\.json")
             need = [w for w in (POLICY_LINE, r"--veneer-cost\s+256\b",
                                 r"plugin/cifar10/plugin\.elf",
-                                r"asset_receipt\.py",
-                                r"--transfer-label\s+\"?in picocom:",
-                                r"--verify-label\s+\"?afterwards:",
+                                # The receipt gets the JSON and the slot,
+                                # and nothing after it (issue #195).
+                                r"asset_receipt\.py\"?\s+\"?\S*asset/"
+                                r"fix\.nnc\.json\"?\s+\"?5\"?[ \t]*(\r?\n|&&|$)",
                                 r"--model-sha256=%s(\s|$)" % sha) + dest
                     if not re.search(w, text)]
             if need:

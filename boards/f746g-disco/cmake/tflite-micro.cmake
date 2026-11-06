@@ -262,7 +262,7 @@ target_link_libraries(tflm PUBLIC stdc++_nano supc++_nano m)
 find_program(HOST_CXX NAMES c++ g++ clang++)
 if(HOST_CXX)
     # [!] THE SLOT LIMIT IS THE SHIPPED TABLE'S (issue #194), compiled in as C --
-    # src/blob_slots.c with svc/blob/blob_map.c's lookups, as scripts/slot_table.c
+    # src/blob_slots.c with svc/blob/blob_map.c's lookups, as asset/tools/slot_table.c
     # does -- and the staging limit is the variable the firmware is built with
     # (nn_tflm_mem.h's NN_TFLM_MODEL_MAX).  No number is restated in the tool.
     set(_vt_dir "${CMAKE_BINARY_DIR}/verify_tflite.d")

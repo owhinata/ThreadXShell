@@ -374,7 +374,7 @@ if(HOST_CXX)
     # agree on the op set by construction (never empty, see NN_TFLM_OPS_DEFINE).
     set(_vt_ops_def "-D${NN_TFLM_OPS_DEFINE}")
     # [!] THE SLOT LIMIT IS THE SHIPPED TABLE'S (issue #193), compiled in as C --
-    # src/blob_slots.c with svc/blob/blob_map.c's lookups, as scripts/slot_table.c
+    # src/blob_slots.c with svc/blob/blob_map.c's lookups, as asset/tools/slot_table.c
     # does -- and the staging limit is the variable the firmware is built with
     # (nn_tflm_mem.h's NN_TFLM_MODEL_MAX).  No number is restated in the tool.
     set(_vt_dir "${CMAKE_BINARY_DIR}/verify_tflite.d")

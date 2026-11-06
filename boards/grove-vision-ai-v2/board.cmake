@@ -2167,21 +2167,42 @@ if(HOST_CC)
         COMMENT "host cc -> abi_layout.json (the packer's view of the ABI)"
         VERBATIM)
 
+    # [!] THE SHARED TOOL, CHECKING THE TABLE AGAINST THE INTERVAL THE FIRMWARE
+    # ENFORCES (issue #195).  asset/tools/slot_table.c is the one wio-lite-ai and
+    # f746g-disco build.  The interval and the erase unit are port/sdk_seam/
+    # nor_seam.h's NOR_WRITABLE_LO / _HI / NOR_ERASE_UNIT -- what src/blob.c's
+    # blob_check_map() reads through nor_seam_limits -- over the SAME three
+    # variables shell_objs gets them from (NOR_PART_FW_END / _BLOB_END /
+    # NOR_ERASE_GRAN above), so no second declaration of the measured geometry
+    # exists here: until #195 the erase unit was a run-time argument and the
+    # table was not checked at all.  A table the store would refuse stops the
+    # build (container-tools is in ALL).  [!] slot_table.c is the LAST source:
+    # gcc writes the depfile of the last input only, and its closure holds
+    # nor_seam.h and blob_map.h.
     add_custom_command(
         OUTPUT "${GROVE_SLOT_TABLE_JSON}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
-        COMMAND "${HOST_CC}" -std=c11 -O1 -w
-                -I "${BOARD_DIR}/src" -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
-                "${BOARD_DIR}/scripts/slot_table.c"
-                "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c" "${BOARD_DIR}/src/blob_slots.c"
-                -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
-        COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table" "${GROVE_ERASE_GRAN}"
-                > "${GROVE_SLOT_TABLE_JSON}"
-        # The shared lookups AND this board's table, and the header both are
-        # compiled against: a change to any of them changes the numbers.
-        DEPENDS "${BOARD_DIR}/scripts/slot_table.c"
+        COMMAND "${HOST_CC}" -std=c11 -O1 -Wall -Wextra -Werror
+                -MD -MF "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
+                -MT "${GROVE_SLOT_TABLE_JSON}"
+                -DNOR_PART_FW_END=${GROVE_FW_RESERVED}
+                -DNOR_PART_BLOB_END=${GROVE_SLOT_HDR_ADDR}
+                -DNOR_ERASE_GRAN=${GROVE_ERASE_GRAN}
+                -I "${BOARD_DIR}/src" -I "${BOARD_DIR}/port/sdk_seam"
+                -I "${BOARD_DIR}/port/nor"
+                -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/blob"
                 "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
-                "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.h"
+                "${BOARD_DIR}/src/blob_slots.c"
+                -include nor_seam.h -DSLOT_TABLE_LO=NOR_WRITABLE_LO
+                -DSLOT_TABLE_HI=NOR_WRITABLE_HI
+                -DSLOT_TABLE_UNIT=NOR_ERASE_UNIT
+                "${CMAKE_SOURCE_DIR}/asset/tools/slot_table.c"
+                -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
+        COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table"
+                "${GROVE_SLOT_TABLE_JSON}"
+        DEPFILE "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
+        DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/slot_table.c"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
                 "${BOARD_DIR}/src/blob_slots.c"
         COMMENT "host cc -> slot_table.json (payload capacity per blob slot)"
         VERBATIM)

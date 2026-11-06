@@ -683,6 +683,13 @@ python3 "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
 # nothing.
 python3 "$repo/cmake/fixtures/run_asset_dest_tests.py"
 
+# issue #195 -- the one slot-table tool every board's asset build runs
+# (asset/tools/slot_table.c): each board's shipped table passes and comes out
+# as JSON; a slot outside the interval, overlapping or not whole erase units
+# is refused and leaves no JSON (an earlier one is removed); and the interval
+# checked is the board's own.  Host cc only.
+python3 "$repo/cmake/fixtures/run_slot_table_tests.py"
+
 # issue #132 -- the pin is checked again by the FIRST CONSUMER of the fetched
 # model, inside its own command (ninja reruns only the consumer when the file
 # changes after its fetch): the packer's --model-sha256 on the bytes it packs,

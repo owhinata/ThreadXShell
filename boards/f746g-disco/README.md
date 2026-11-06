@@ -1482,7 +1482,7 @@ built-in model) with this board's blazeface plugin -- through every gate, and pr
 The destination is a SLOT (`cmake/add_asset.cmake`, issue #194), and the
 receipt is the one every board prints (`cmake/asset_receipt.py`, issue #195): its fit is checked against that slot's payload in
 the table the firmware links (`plugin/slot_table.json`, compiled on the host
-from `src/blob_slots.c` with the shared lookups, `scripts/slot_table.c`), and `blazeface` goes to slot 12, the last 256 KB slot, as on
+from `src/blob_slots.c` with the shared lookups, `asset/tools/slot_table.c`), and `blazeface` goes to slot 12, the last 256 KB slot, as on
 wio-lite-ai (provisional; the slot is one argument in `board.cmake`).  Until
 #194 the destination was a FILE checked against `nn_tflm_stage_cap`, and the
 receipt said to copy it to the card and compare with the CRC the load

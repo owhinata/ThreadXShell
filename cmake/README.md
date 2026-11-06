@@ -382,7 +382,12 @@ branch). None, half, an empty value, a slot that is not a number, or a slot
 table that is missing or unreadable is refused in a sentence and publishes
 nothing. Together with the post-link `check_blob_staging.py` (every slot fits
 the staging buffer, below), a published container also fits the buffer the
-board loads it into.
+board loads it into. The table is each board's `plugin/slot_table.json`, written
+by the one shared tool `asset/tools/slot_table.c` (#195): it is compiled with the
+board's `src/blob_slots.c`, the shared `svc/blob/blob_map.c` lookups and the
+interval and erase unit of the header the firmware's store reads them from
+(forced in with `-include`, so no number is restated), refuses a table the
+store would refuse, and writes no JSON then.
 
 #159 had added a second destination, a file copied to f746's card and checked
 against the staging capacity read out of the firmware ELF. f746 moved to a slot

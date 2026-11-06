@@ -1685,12 +1685,13 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
             VERBATIM)
 
         # [!] THE TABLE IS THE ONE THE FIRMWARE LINKS, RUN THROUGH THE SAME
-        # LOOKUPS (issue #193): the tool compiles this board's src/blob_slots.c
-        # with svc/blob/blob_map.c, as grove-vision-ai-v2's does, and takes the
-        # interval and the erase unit from src/blob.h -- whose closure reaches
-        # nor_flash.h -- so the compiler's own depfile lists every header it
-        # opened and a stale table cannot survive a change the firmware itself
-        # recompiles for.  [!] slot_table.c is the LAST source on the line:
+        # LOOKUPS (issue #193): the shared tool asset/tools/slot_table.c
+        # (issue #195) compiles this board's src/blob_slots.c with
+        # svc/blob/blob_map.c and takes the interval and the erase unit from
+        # src/blob.h -- whose closure reaches nor_flash.h -- so the compiler's
+        # own depfile lists every header it opened and a stale table cannot
+        # survive a change the firmware itself recompiles for.  [!] slot_table.c
+        # is the LAST source on the line:
         # with several inputs gcc writes the depfile of the last one only, and
         # that is the one whose closure has the interval in it (the other two
         # are DEPENDS, and their one header is in that closure).  It refuses
@@ -1705,12 +1706,15 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
                     -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
                     "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
                     "${BOARD_DIR}/src/blob_slots.c"
-                    "${BOARD_DIR}/scripts/slot_table.c"
+                    -include blob.h -DSLOT_TABLE_LO=BLOB_REGION_BASE
+                    -DSLOT_TABLE_HI=BLOB_REGION_END
+                    -DSLOT_TABLE_UNIT=BLOB_ERASE_UNIT
+                    "${CMAKE_SOURCE_DIR}/asset/tools/slot_table.c"
                     -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
             COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table"
-                    > "${WIO_SLOT_TABLE_JSON}"
+                    "${WIO_SLOT_TABLE_JSON}"
             DEPFILE "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
-            DEPENDS "${BOARD_DIR}/scripts/slot_table.c"
+            DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/slot_table.c"
                     "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
                     "${BOARD_DIR}/src/blob_slots.c"
             COMMENT "host cc -> slot_table.json (payload capacity per blob slot)"

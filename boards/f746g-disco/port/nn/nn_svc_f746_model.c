@@ -268,9 +268,8 @@ static const struct nn_core_model_backend nn_life_backend = {
 /* ---- the board ------------------------------------------------------------ */
 
 /* Every tag but a name, refused before anything is acquired -- in
- * wio-lite-ai's words.  `--path` is one of them since issue #194: the model
- * is a blob in the QSPI store, no longer a file on the SD card.  `builtin`
- * since issue #159 Step 4c. */
+ * wio-lite-ai's words.  The model is a blob in the QSPI store (issue #194);
+ * the shared grammar has had no slot, path or built-in tag since issue #196. */
 static void nn_life_spec_refused(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
@@ -280,13 +279,8 @@ static void nn_life_spec_refused(struct nn_core_model_job *j)
 		return;
 	nn_detail_set("this board loads a model from a QSPI asset by name "
 	              "(--name); it has no %s",
-	              spec->tag == NN_SPEC_SLOT ? "load by slot number "
-	                                          "(`blob list` names them)"
-	              : spec->tag == NN_SPEC_PATH ? "filesystem load (send the "
-	                                            "file with `blob write`)"
-	              : spec->tag == NN_SPEC_ADDR ? "raw model window"
-	              : spec->tag == NN_SPEC_BUILTIN ? "built-in model"
-	                                             : "such source");
+	              spec->tag == NN_SPEC_ADDR ? "raw model window"
+	                                        : "such source");
 }
 
 /* The name's own rules, before anything is acquired: a name the store could
@@ -718,17 +712,11 @@ void nn_svc_info(struct nn_svc_info *out)
 
 /* Point the model at @p spec -- over an open model too.  The order and its
  * endings: svc/nn/nn_core_model.h. */
-void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
-                       void *ctx, struct nn_op_result *res,
+void nn_svc_model_load(const struct nn_spec *spec, struct nn_op_result *res,
                        enum nn_model_state *state)
 {
 	struct nn_f746_job f;
 	struct nn_core_model_job j;
-
-	/* The model is read out of the QSPI asset store here; no filesystem
-	 * reader is needed or taken (issue #194). */
-	(void)read;
-	(void)ctx;
 
 	nn_detail_clear();
 	memset(&f, 0, sizeof f);

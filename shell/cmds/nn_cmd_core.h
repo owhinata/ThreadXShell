@@ -75,14 +75,16 @@ char *nn_shape_str(const struct tensor_desc *t, char *buf, size_t cap);
  * @p argv is the list AFTER the `load` word, @p argc its length.  The grammar is
  * closed and decidable without knowing the board:
  *
- *   --name <name> | --slot <index> | --path <path> | builtin | --addr <a> <len>
+ *   --name <name> | --addr <a> <len>
  *
- * [!] A BARE STRING IS NOT ACCEPTED, and that is the point.  The same word means
- * a blob name on one board, a filesystem path on another, and nothing at all on
- * a third -- so a parser that took one would have to guess per board, which is
- * board knowledge in shell/ by a quieter route.  Making the caller say which
- * namespace they mean is what lets a board refuse one it does not have instead
- * of half-implementing it.
+ * Any other first word -- `--slot`, `--path` and `builtin` included, which no
+ * board takes any more (issue #196) -- is "not a tag this grammar has".
+ *
+ * [!] A BARE STRING IS NOT ACCEPTED, and that is the point.  A parser that took
+ * one would have to guess per board what it names, which is board knowledge in
+ * shell/ by a quieter route.  Making the caller say which namespace they mean
+ * is what lets a board refuse one it does not have instead of half-implementing
+ * it.
  *
  * [!] THE RAW FORM'S LENGTH IS MANDATORY.  It is the bound handed to the
  * FlatBuffer verifier before anything walks the payload; "the rest of the

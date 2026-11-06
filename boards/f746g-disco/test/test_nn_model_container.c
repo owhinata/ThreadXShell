@@ -362,7 +362,7 @@ static void load(const char *name)
 	memset(&res, 0, sizeof res);
 	spec.tag  = NN_SPEC_NAME;
 	strncpy(spec.name, name, NN_SPEC_NAME_MAX);
-	nn_svc_model_load(&spec, NULL, NULL, &res, &state);
+	nn_svc_model_load(&spec, &res, &state);
 	assert(test_tx_masked == 0);
 	assert(!nn_blob_stub.held && nn_blob_stub.acquires == nn_blob_stub.releases);
 }
@@ -469,7 +469,7 @@ int main(void)
 		memset(&res, 0, sizeof res);
 		spec.tag = NN_SPEC_NAME;
 		strcpy(spec.name, "fixture");
-		nn_svc_model_load(&spec, NULL, NULL, &res, &state);
+		nn_svc_model_load(&spec, &res, &state);
 		assert(res.status == NN_SVC_ERR_HW && state == NN_MODEL_EMPTY);
 		assert(strstr(res.detail, "CRC32 mismatch") != NULL);
 		assert(!stub.has && !pl_active);

@@ -880,11 +880,7 @@ static void nn_life_spec_refused(struct nn_core_model_job *j)
 	if (spec == NULL)
 		return;
 	nn_detail_set("this board loads a model by name or by --addr; it has "
-	              "no %s",
-	              spec->tag == NN_SPEC_SLOT    ? "slot index"
-	              : spec->tag == NN_SPEC_PATH  ? "filesystem"
-	              : spec->tag == NN_SPEC_BUILTIN ? "built-in model"
-	                                             : "such source");
+	              "no such source");
 }
 
 static int nn_life_check_spec(struct nn_core_model_job *j)
@@ -1075,17 +1071,11 @@ static const struct nn_core_model_board nn_life_board = {
 
 /* Point the model lifecycle at @p spec -- over an open model too (issue #122).
  * The order and its endings: svc/nn/nn_core_model.h. */
-void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
-                       void *ctx, struct nn_op_result *res,
+void nn_svc_model_load(const struct nn_spec *spec, struct nn_op_result *res,
                        enum nn_model_state *state)
 {
 	struct nn_grove_job g;
 	struct nn_core_model_job j;
-
-	/* This board's models come from the asset store or a raw window; it never
-	   reads a file, so the reader is not used. */
-	(void)read;
-	(void)ctx;
 
 	nn_detail_clear();
 	memset(&g, 0, sizeof g);

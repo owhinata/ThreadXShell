@@ -152,15 +152,6 @@ static void test_spec_accepts(void)
 	assert(parse(&s, 2, "--name", "cls", NULL) == NN_SVC_OK);
 	assert(s.tag == NN_SPEC_NAME && strcmp(s.name, "cls") == 0);
 
-	assert(parse(&s, 2, "--slot", "9", NULL) == NN_SVC_OK);
-	assert(s.tag == NN_SPEC_SLOT && s.slot == 9u);
-
-	assert(parse(&s, 2, "--path", "/model.tflite", NULL) == NN_SVC_OK);
-	assert(s.tag == NN_SPEC_PATH && strcmp(s.path, "/model.tflite") == 0);
-
-	assert(parse(&s, 1, "builtin", NULL, NULL) == NN_SVC_OK);
-	assert(s.tag == NN_SPEC_BUILTIN);
-
 	assert(parse(&s, 3, "--addr", "0x3AE81000", "164512") == NN_SVC_OK);
 	assert(s.tag == NN_SPEC_ADDR && s.addr == 0x3AE81000u && s.len == 164512u);
 
@@ -192,6 +183,23 @@ static void test_spec_refuses(void)
 	assert(parse(&s, 1, "/model.tflite", NULL, NULL) == NN_SVC_ERR_SPEC);
 	assert(parse(&s, 1, "9", NULL, NULL) == NN_SVC_ERR_SPEC);
 
+	/* [!] THE TAGS NO BOARD TOOK ARE GONE FROM THE GRAMMAR (issue #196).  Each
+	 * is "not a tag this grammar has" whatever follows it -- the operand a
+	 * removed branch used to parse included, and a malformed one too, so an
+	 * old branch left behind cannot answer OK or ERR_ARG here. */
+	assert(parse(&s, 2, "--slot", "5", NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 1, "--slot", NULL, NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 2, "--slot", "nine", NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 2, "--path", "x", NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 2, "--path", "", NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 1, "builtin", NULL, NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 2, "builtin", "extra", NULL) == NN_SVC_ERR_SPEC);
+	/* Only the exact word is a tag: a word that merely starts like one is
+	 * not, so a prefix comparison cannot hide behind the cases above. */
+	assert(parse(&s, 2, "--names", "cls", NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 2, "--nam", "cls", NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 3, "--addrx", "0x3AE81000", "16") == NN_SVC_ERR_SPEC);
+
 	/* Nothing at all is a malformed invocation, not an unknown namespace. */
 	assert(parse(&s, 0, NULL, NULL, NULL) == NN_SVC_ERR_ARG);
 
@@ -199,10 +207,7 @@ static void test_spec_refuses(void)
 	   different answer from ERR_SPEC, because it points somewhere else. */
 	assert(parse(&s, 1, "--name", NULL, NULL) == NN_SVC_ERR_ARG);
 	assert(parse(&s, 2, "--name", "", NULL) == NN_SVC_ERR_ARG);
-	assert(parse(&s, 1, "--slot", NULL, NULL) == NN_SVC_ERR_ARG);
-	assert(parse(&s, 2, "--slot", "nine", NULL) == NN_SVC_ERR_ARG);
-	assert(parse(&s, 2, "--path", "", NULL) == NN_SVC_ERR_ARG);
-	assert(parse(&s, 2, "builtin", "extra", NULL) == NN_SVC_ERR_ARG);
+	assert(parse(&s, 3, "--name", "a", "b") == NN_SVC_ERR_ARG);
 
 	/* [!] THE RAW FORM WITHOUT ITS LENGTH IS REFUSED.  The length is the
 	 * bound the FlatBuffer verifier is given; "the rest of the window" is not

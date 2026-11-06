@@ -8,7 +8,7 @@
  * WHY THROUGH THE DISPATCHER.  The usage line is assembled in two places: the
  * dispatcher prints "usage: <command path> " and the command supplies what
  * follows.  Each half looks right on its own, and the line was wrong on every
- * board -- "usage: nn model load load <--slot <n>>" -- because the `model` parent
+ * board -- "usage: nn model load load <--name <name>>" -- because the `model` parent
  * and the `load` leaf shared one argument string while their paths differ by a
  * word.  Only the joined line shows that, so this drives the joined line: the
  * dummy backend in, the capture log out, with stub nn_svc_* adapters behind it.
@@ -34,33 +34,15 @@
 
 /* The source list each shape must print -- written out, not rebuilt from the
  * macros, so a wrong expansion cannot agree with itself. */
-#if defined(NN_SVC_HAS_MODEL_SLOT) && NN_SVC_HAS_MODEL_SLOT
-/* No board declares this since issue #193 (wio-lite-ai loads by name now); the
- * shared command still spells the tag, so the shape is still walked. */
-#define SHAPE    "slot (no board)"
-#define SOURCES  "<--slot <n>>"
-#define A_SOURCE "--slot 5"
-#elif defined(NN_SVC_HAS_MODEL_NAME) && NN_SVC_HAS_MODEL_NAME && \
+#if defined(NN_SVC_HAS_MODEL_NAME) && NN_SVC_HAS_MODEL_NAME && \
       defined(NN_SVC_HAS_MODEL_ADDR) && NN_SVC_HAS_MODEL_ADDR
 #define SHAPE    "name + addr (grove-vision-ai-v2)"
 #define SOURCES  "<--name <name> | --addr <addr> <len>>"
 #define A_SOURCE "--name person"
 #elif defined(NN_SVC_HAS_MODEL_NAME) && NN_SVC_HAS_MODEL_NAME
-#define SHAPE    "name (wio-lite-ai)"
+#define SHAPE    "name (wio-lite-ai, f746g-disco)"
 #define SOURCES  "<--name <name>>"
 #define A_SOURCE "--name person"
-#elif defined(NN_SVC_HAS_MODEL_PATH) && NN_SVC_HAS_MODEL_PATH && \
-      defined(NN_SVC_HAS_MODEL_BUILTIN) && NN_SVC_HAS_MODEL_BUILTIN
-/* No board declares this since issue #159 Step 4c (f746g-disco dropped its
- * built-in model); the shared command still spells the word, so the shape is
- * still walked. */
-#define SHAPE    "path + builtin (no board)"
-#define SOURCES  "<--path <p> | builtin>"
-#define A_SOURCE "builtin"
-#elif defined(NN_SVC_HAS_MODEL_PATH) && NN_SVC_HAS_MODEL_PATH
-#define SHAPE    "path (f746g-disco)"
-#define SOURCES  "<--path <p>>"
-#define A_SOURCE "--path /m.tflite"
 #else
 #error "build this test with a board's NN_SVC_HAS_MODEL_* set"
 #endif
@@ -81,11 +63,10 @@ void nn_svc_info(struct nn_svc_info *out)
 	out->model_active = info_model_active;
 }
 void nn_svc_info_extra(nn_svc_write_fn write, void *ctx) { (void)write; (void)ctx; }
-void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
-                       void *ctx, struct nn_op_result *res,
+void nn_svc_model_load(const struct nn_spec *spec, struct nn_op_result *res,
                        enum nn_model_state *state)
 {
-	(void)spec; (void)read; (void)ctx;
+	(void)spec;
 	load_calls++;
 	res->status = load_status;
 	res->claim = (uint8_t)NN_CLAIM_NONE;
@@ -107,14 +88,6 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *d, int m
 int  nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out) { *out = *in; return NN_SVC_OK; }
 int  nn_svc_thresh_get(unsigned *milli) { *milli = NN_SVC_THRESH_NONE; return NN_SVC_OK; }
 int  nn_svc_thresh_set(unsigned milli) { (void)milli; return NN_SVC_ERR_STATE; }
-#if defined(NN_SVC_HAS_MODEL_PATH) && NN_SVC_HAS_MODEL_PATH
-int nn_board_read_file(void *ctx, const char *path, void *buf, uint32_t cap,
-                       uint32_t *len)
-{
-	(void)ctx; (void)path; (void)buf; (void)cap; (void)len;
-	return -1;
-}
-#endif
 
 /* ---- harness (the same shape as test_integration.c) --------------------- */
 
@@ -211,6 +184,28 @@ int main(void)
 	       has("'bogus' is not a model source") && load_calls == 0);
 	expect("and the parser's usage line agrees with the dispatcher's",
 	       has("usage: nn model load " SOURCES "\r\n") && !has("load load"));
+
+	/* [!] THE TAGS NO BOARD TOOK ARE THE GRAMMAR'S REFUSAL NOW (issue #196),
+	 * on every board shape: the same sentence a bare word gets, the usage,
+	 * and the adapter never called -- so no board's own words for them are
+	 * needed, and none is left to drift.  The usage must not offer them. */
+	{
+		static const struct { const char *line, *word; } gone[] = {
+			{ "nn model load --slot 5\r",  "'--slot' is not a model source" },
+			{ "nn model load --path x\r",  "'--path' is not a model source" },
+			{ "nn model load builtin\r",   "'builtin' is not a model source" },
+		};
+		unsigned i;
+
+		for (i = 0; i < sizeof gone / sizeof gone[0]; i++) {
+			run_line(gone[i].line);
+			expect(gone[i].word, has(gone[i].word) && load_calls == 0 &&
+			       has("usage: nn model load " SOURCES "\r\n"));
+		}
+		run_line("nn model load\r");
+		expect("the usage offers no removed source",
+		       !has("--slot") && !has("--path") && !has("builtin"));
+	}
 
 	/*
 	 * [!] THE PARENT'S .usage IS NOT PRINTED, and this pins that rather than

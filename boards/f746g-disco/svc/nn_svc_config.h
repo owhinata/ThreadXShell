@@ -28,11 +28,11 @@
  *  card, `--path`, which is gone). */
 #define NN_SVC_HAS_MODEL_NAME  1
 #endif
-/* No NN_SVC_HAS_MODEL_BUILTIN: since issue #159 Step 4c no build of this board
- * carries a model it could adopt by name -- tflm loads from the asset store
- * only, like stedgeai_reloc -- so `nn model load builtin` is refused and the usage
- * does not list it.  (null / stedgeai still open their own stub / generated
- * model without a load; that is has_builtin in nn_backend.h, not a source.) */
+/* No built-in source: since issue #159 Step 4c no build of this board carries
+ * a model it could adopt by name -- tflm loads from the asset store only, like
+ * stedgeai_reloc -- and since issue #196 the shared grammar has no `builtin`
+ * word at all.  (null / stedgeai still open their own stub / generated model
+ * without a load; that is has_builtin in nn_backend.h, not a source.) */
 
 /** One-shot capture and infer.  The camera is on the DCMI header. */
 #define NN_SVC_HAS_CAMERA      1

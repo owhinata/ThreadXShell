@@ -23,10 +23,11 @@
  *     all three lines (the stub's reload asks it), and a held session with no
  *     load in flight -- a stream -- still gets the copy;
  *   - nothing is called inside the board's critical section;
- *   - the board is empty from boot and `builtin` is not a source it takes
- *     (issue #159 Step 4c): SPEC, worded, nothing touched;
+ *   - the board is empty from boot, and the one tag it does not take
+ *     (`--addr`) is SPEC, worded, nothing touched -- from empty and over a
+ *     model (the grammar has had no slot, path or built-in tag since #196);
  *   - since issue #194 the model is a blob, read by name out of the QSPI asset
- *     store (a stand-in, nn_blob_stub.c): `--path` is refused as SPEC; a bad
+ *     store (a stand-in, nn_blob_stub.c); a bad
  *     name, a name in no slot, a name in two, unreadable headers, a busy store,
  *     a blob longer than the staging buffer, a payload read that fails and a
  *     copy whose CRC disagrees with the header each refuse with their own
@@ -171,13 +172,10 @@ static void load(uint8_t tag, const char *what)
 	memset(&spec, 0, sizeof spec);
 	memset(&res, 0, sizeof res);
 	spec.tag  = tag;
-	if (tag == NN_SPEC_PATH)
-		spec.path = what;
-	else
-		strncpy(spec.name, what ? what : "", NN_SPEC_NAME_MAX);
+	strncpy(spec.name, what ? what : "", NN_SPEC_NAME_MAX);
 	state = (enum nn_model_state)99;
 	acq = nn_blob_stub.acquires;
-	nn_svc_model_load(&spec, NULL, NULL, &res, &state);
+	nn_svc_model_load(&spec, &res, &state);
 	assert(test_tx_masked == 0);
 	assert(res.claim == NN_CLAIM_NONE);
 	/* [!] The blob flag: taken at most once, and never left held. */
@@ -223,19 +221,13 @@ int main(void)
 	/* Boot: nothing in the image, so the first `nn info` finds no model. */
 	info_is(0, "(none)", NN_AVAIL_OK);
 
-	/* [!] `builtin` IS NOT A SOURCE HERE ANY MORE (issue #159 Step 4c): the
-	 * shared SPEC refusal, worded, refused before anything is acquired. */
-	load(NN_SPEC_BUILTIN, NULL);
+	/* A tag this board does not take, from empty: the shared SPEC refusal,
+	 * worded, refused before anything is acquired. */
+	load(NN_SPEC_ADDR, NULL);
 	assert(res.status == NN_SVC_ERR_SPEC && state == NN_MODEL_EMPTY);
-	assert(strstr(res.detail, "built-in model") != NULL);
+	assert(strstr(res.detail, "it has no raw model window") != NULL);
 	assert(stub.reloads == 0 && invalidations == 0 && !stub.has);
-
-	/* [!] `--path` is not a source here any more (issue #194). */
-	load(NN_SPEC_PATH, "a.tflite");
-	assert(res.status == NN_SVC_ERR_SPEC && state == NN_MODEL_EMPTY);
-	assert(strstr(res.detail, "it has no filesystem load (send the file "
-	                          "with `blob write`)") != NULL);
-	assert(stub.reloads == 0 && nn_blob_stub.acquires == 0u);
+	assert(nn_blob_stub.acquires == 0u);
 
 	/* The first model comes from the store, by name. */
 	load(NN_SPEC_NAME, "a");
@@ -244,11 +236,12 @@ int main(void)
 	stub.reloads  = 0;
 	invalidations = 0;
 
-	/* A spec this board does not take: SPEC, worded, nothing touched. */
-	load(NN_SPEC_SLOT, NULL);
+	/* A spec this board does not take, over a model: SPEC, worded, nothing
+	 * touched, the model kept. */
+	load(NN_SPEC_ADDR, NULL);
 	assert(res.status == NN_SVC_ERR_SPEC && state == NN_MODEL_PREVIOUS);
-	assert(strstr(res.detail, "load by slot number") != NULL);
-	assert(stub.reloads == 0);
+	assert(strstr(res.detail, "it has no raw model window") != NULL);
+	assert(stub.reloads == 0 && stub.has);
 
 	/* A name the store could never have stored: ARG, nothing acquired. */
 	load(NN_SPEC_NAME, "has space");

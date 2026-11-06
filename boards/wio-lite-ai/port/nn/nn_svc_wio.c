@@ -464,12 +464,8 @@ static void nn_life_spec_refused(struct nn_core_model_job *j)
 		return;
 	nn_detail_set("this board loads a model from a NOR asset by name "
 	              "(--name); it has no %s",
-	              spec->tag == NN_SPEC_SLOT ? "load by slot number "
-	                                          "(`blob list` names them)"
-	              : spec->tag == NN_SPEC_PATH ? "filesystem"
-	              : spec->tag == NN_SPEC_ADDR ? "raw model window"
-	              : spec->tag == NN_SPEC_BUILTIN ? "built-in model"
-	                                             : "such source");
+	              spec->tag == NN_SPEC_ADDR ? "raw model window"
+	                                        : "such source");
 }
 
 /* The name's own rules, before anything is acquired: a name the store could
@@ -888,17 +884,11 @@ static const struct nn_core_model_board nn_life_board = {
 
 /* Point the model at @p spec -- over an open model too (issue #122).  The order
  * and its endings: svc/nn/nn_core_model.h. */
-void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
-                       void *ctx, struct nn_op_result *res,
+void nn_svc_model_load(const struct nn_spec *spec, struct nn_op_result *res,
                        enum nn_model_state *state)
 {
 	struct nn_wio_job w;
 	struct nn_core_model_job j;
-
-	/* This board reads its model out of the NOR asset store itself; it never
-	   needs a filesystem reader. */
-	(void)read;
-	(void)ctx;
 
 	nn_detail_clear();
 	memset(&w, 0, sizeof w);

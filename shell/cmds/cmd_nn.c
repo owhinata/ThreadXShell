@@ -71,30 +71,13 @@
 #ifndef NN_SVC_HAS_STREAM_TEST
 #define NN_SVC_HAS_STREAM_TEST 0
 #endif
-#ifndef NN_SVC_HAS_MODEL_PATH
-#define NN_SVC_HAS_MODEL_PATH  0
-#endif
 /* Which model sources `nn model load` takes -- one macro per tag of the
- * grammar, beside NN_SVC_HAS_MODEL_PATH above (issue #122 P9). */
+ * grammar (issue #122 P9). */
 #ifndef NN_SVC_HAS_MODEL_NAME
 #define NN_SVC_HAS_MODEL_NAME    0
 #endif
-#ifndef NN_SVC_HAS_MODEL_SLOT
-#define NN_SVC_HAS_MODEL_SLOT    0
-#endif
-#ifndef NN_SVC_HAS_MODEL_BUILTIN
-#define NN_SVC_HAS_MODEL_BUILTIN 0
-#endif
 #ifndef NN_SVC_HAS_MODEL_ADDR
 #define NN_SVC_HAS_MODEL_ADDR    0
-#endif
-
-#if NN_SVC_HAS_MODEL_PATH
-/** The board's own whole-file read, for the `--path` source.  It lives in the
- *  board's cmds/ because the filesystem helper it uses takes a shell instance;
- *  passing it DOWN is what keeps the port from reaching up for it. */
-int nn_board_read_file(void *ctx, const char *path, void *buf, uint32_t cap,
-                       uint32_t *len);
 #endif
 
 /* Longest shape string worth carrying: four dimensions of up to ten digits, the
@@ -341,11 +324,11 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 #if NN_SVC_HAS_MODEL_LOAD
 /*
  * [!] THE SOURCES LISTED ARE THIS BOARD'S (issue #122 P9).  The usage used to
- * list all five tags on every board, while `help` is otherwise an inventory of
- * the board it runs on -- so an operator reading it was offered `--path` on a
- * board with no filesystem and learned otherwise only from the refusal.  The
- * PARSER still takes all five: a tag this board lacks is refused by the board
- * in its own words, and a bare word by the grammar, which is the point of it.
+ * list every tag on every board, while `help` is otherwise an inventory of
+ * the board it runs on -- so an operator reading it was offered a source the
+ * board did not have and learned otherwise only from the refusal.  The PARSER
+ * still takes both tags (`--name`, `--addr`): a tag this board lacks is refused
+ * by the board in its own words, and any other word by the grammar.
  *
  * Each alternative carries the separator in front of it exactly when an
  * earlier one is present, so the list reads "a | b" with no stray bar.
@@ -355,39 +338,8 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 #else
 #define NN_SRC_NAME_ ""
 #endif
-#define NN_SRC_ANY1_ (NN_SVC_HAS_MODEL_NAME)
-#if NN_SVC_HAS_MODEL_SLOT
-#if NN_SRC_ANY1_
-#define NN_SRC_SLOT_ " | --slot <n>"
-#else
-#define NN_SRC_SLOT_ "--slot <n>"
-#endif
-#else
-#define NN_SRC_SLOT_ ""
-#endif
-#define NN_SRC_ANY2_ (NN_SRC_ANY1_ || NN_SVC_HAS_MODEL_SLOT)
-#if NN_SVC_HAS_MODEL_PATH
-#if NN_SRC_ANY2_
-#define NN_SRC_PATH_ " | --path <p>"
-#else
-#define NN_SRC_PATH_ "--path <p>"
-#endif
-#else
-#define NN_SRC_PATH_ ""
-#endif
-#define NN_SRC_ANY3_ (NN_SRC_ANY2_ || NN_SVC_HAS_MODEL_PATH)
-#if NN_SVC_HAS_MODEL_BUILTIN
-#if NN_SRC_ANY3_
-#define NN_SRC_BUILTIN_ " | builtin"
-#else
-#define NN_SRC_BUILTIN_ "builtin"
-#endif
-#else
-#define NN_SRC_BUILTIN_ ""
-#endif
-#define NN_SRC_ANY4_ (NN_SRC_ANY3_ || NN_SVC_HAS_MODEL_BUILTIN)
 #if NN_SVC_HAS_MODEL_ADDR
-#if NN_SRC_ANY4_
+#if NN_SVC_HAS_MODEL_NAME
 #define NN_SRC_ADDR_ " | --addr <addr> <len>"
 #else
 #define NN_SRC_ADDR_ "--addr <addr> <len>"
@@ -395,11 +347,10 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 #else
 #define NN_SRC_ADDR_ ""
 #endif
-#if !(NN_SRC_ANY4_ || NN_SVC_HAS_MODEL_ADDR)
+#if !(NN_SVC_HAS_MODEL_NAME || NN_SVC_HAS_MODEL_ADDR)
 #error "NN_SVC_HAS_MODEL_LOAD with no model source: say which tags this board takes"
 #endif
-#define NN_MODEL_SOURCES_ \
-	NN_SRC_NAME_ NN_SRC_SLOT_ NN_SRC_PATH_ NN_SRC_BUILTIN_ NN_SRC_ADDR_
+#define NN_MODEL_SOURCES_ NN_SRC_NAME_ NN_SRC_ADDR_
 
 /* [!] THREE SPELLINGS, BECAUSE THERE ARE THREE CONSUMERS.  A .usage field
  * carries the ARGUMENT SPELLING only, and the dispatcher prints "usage: <command
@@ -449,11 +400,7 @@ static int cmd_nn_model_load(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	memset(&res, 0, sizeof res);
-#if NN_SVC_HAS_MODEL_PATH
-	nn_svc_model_load(&spec, nn_board_read_file, sh, &res, &state);
-#else
-	nn_svc_model_load(&spec, NULL, NULL, &res, &state);
-#endif
+	nn_svc_model_load(&spec, &res, &state);
 
 	/*
 	 * [!] THE RESULTING MODEL STATE IS ITS OWN ANSWER.  A refusal before the

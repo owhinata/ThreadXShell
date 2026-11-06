@@ -196,13 +196,12 @@ struct nn_op_result {
 /**
  * How a model is named.
  *
- * [!] TAGGED, NOT A BARE STRING.  The same word means different things on
- * different boards -- a blob name on Grove, a filesystem path on f746, and
- * nothing at all on wio, which has no lookup by name -- so a shared parser given
- * one string would have to guess per board, which is board knowledge in shell/
- * by another route.  Spelling the tag makes the grammar decidable where it is
+ * [!] TAGGED, NOT A BARE STRING.  A shared parser given one string would
+ * have to guess per board what it names, which is board knowledge in shell/ by
+ * another route.  Spelling the tag makes the grammar decidable where it is
  * parsed, and lets a board refuse a namespace it does not have instead of
- * pretending to implement it.
+ * pretending to implement it.  The slot, path and built-in tags are gone (issue
+ * #196): no board took them after issues #193 and #194.
  *
  * [!] THE RAW FORM CARRIES A LENGTH AND THAT IS NOT CEREMONY.  It is the bound
  * the FlatBuffer verifier is given before anything walks the payload; "whatever
@@ -211,9 +210,6 @@ struct nn_op_result {
 enum nn_spec_tag {
 	NN_SPEC_NONE = 0,
 	NN_SPEC_NAME,     /**< `--name <name>`  -- an asset store entry       */
-	NN_SPEC_SLOT,     /**< `--slot <index>` -- an asset store index       */
-	NN_SPEC_PATH,     /**< `--path <path>`  -- a filesystem path          */
-	NN_SPEC_BUILTIN,  /**< `builtin`        -- the model built into the image */
 	NN_SPEC_ADDR,     /**< `--addr <addr> <len>` -- raw, always with a length */
 };
 
@@ -233,8 +229,6 @@ enum nn_spec_tag {
 struct nn_spec {
 	uint8_t  tag;                          /**< enum nn_spec_tag          */
 	char     name[NN_SPEC_NAME_MAX + 1];   /**< NN_SPEC_NAME              */
-	uint32_t slot;                         /**< NN_SPEC_SLOT              */
-	const char *path;                      /**< NN_SPEC_PATH -- argv, not copied */
 	uint32_t addr;                         /**< NN_SPEC_ADDR              */
 	uint32_t len;                          /**< NN_SPEC_ADDR -- required  */
 };
@@ -465,21 +459,6 @@ struct nn_report_capture {
  *  reported rather than hidden, so this is a comfort, not a contract. */
 #define NN_REPORT_CAPTURE_MAX 512u
 
-/**
- * Read a whole file into a buffer.
- *
- * A board whose model source is a filesystem path needs one of these, and the
- * filesystem helper that has it takes a shell instance and prints its own
- * errors -- so it cannot be called from a port.  The same shape as the cancel
- * hook solves it: the board's own SHELL-layer file implements the read, the
- * shared command passes it down, and the port sees only a function pointer.
- * Nothing in a port ever names anything above it.
- *
- * @return 0 with @p len set, non-zero on failure (a message has been printed)
- */
-typedef int (*nn_svc_read_fn)(void *ctx, const char *path, void *buf,
-                              uint32_t cap, uint32_t *len);
-
 /** Convenience for a board: true when @p fn says stop.  NULL never stops. */
 static inline int nn_svc_cancelled(nn_svc_cancel_fn fn, void *ctx)
 {
@@ -509,8 +488,7 @@ void nn_svc_info(struct nn_svc_info *out);
  *               except that it is not written when the status is
  *               NN_SVC_ERR_BUSY (issue #138; svc/nn/nn_core_model.h)
  */
-void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
-                       void *ctx, struct nn_op_result *res,
+void nn_svc_model_load(const struct nn_spec *spec, struct nn_op_result *res,
                        enum nn_model_state *state);
 
 /** Release the model-specific persistent resources, in model -> NPU -> lease

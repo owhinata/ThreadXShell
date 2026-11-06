@@ -397,7 +397,7 @@ int main(void)
 {
 	/* ---- refusals before the claim: nothing acquired, nothing changed ---- */
 	reset(1);
-	load("tag this board does not take", NN_SPEC_PATH, NN_SVC_ERR_SPEC,
+	load("tag this board does not take", NN_SPEC_NONE, NN_SVC_ERR_SPEC,
 	     NN_MODEL_PREVIOUS, "spec_refused");
 	reset(0);
 	load("tag out of range", 40, NN_SVC_ERR_SPEC, NN_MODEL_EMPTY,

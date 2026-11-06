@@ -142,33 +142,11 @@ int nn_spec_parse(int argc, char *const argv[], struct nn_spec *out)
 	if (argc < 1)
 		return NN_SVC_ERR_ARG;
 
-	if (strcmp(argv[0], "builtin") == 0) {
-		if (argc != 1)
-			return NN_SVC_ERR_ARG;
-		out->tag = (uint8_t)NN_SPEC_BUILTIN;
-		return NN_SVC_OK;
-	}
-
 	if (strcmp(argv[0], "--name") == 0) {
 		if (argc != 2)
 			return NN_SVC_ERR_ARG;
 		out->tag = (uint8_t)NN_SPEC_NAME;
 		return nn_spec_set_name(out, argv[1]);
-	}
-
-	if (strcmp(argv[0], "--slot") == 0) {
-		if (argc != 2 || cli_parse_u32(argv[1], &out->slot) != 0)
-			return NN_SVC_ERR_ARG;
-		out->tag = (uint8_t)NN_SPEC_SLOT;
-		return NN_SVC_OK;
-	}
-
-	if (strcmp(argv[0], "--path") == 0) {
-		if (argc != 2 || argv[1][0] == '\0')
-			return NN_SVC_ERR_ARG;
-		out->tag = (uint8_t)NN_SPEC_PATH;
-		out->path = argv[1];    /* argv outlives the command; not copied */
-		return NN_SVC_OK;
 	}
 
 	if (strcmp(argv[0], "--addr") == 0) {

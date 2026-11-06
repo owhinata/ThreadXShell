@@ -849,11 +849,8 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
 # Neither half is wrong on its own, so only the joined line can be tested.  The
 # adapters are stubs (nothing is loaded); nn_cfg/ stands in for a board's
 # nn_svc_config.h with the loader on, and -D picks the sources.
-for shape in "-DNN_SVC_HAS_MODEL_SLOT=1" \
-             "-DNN_SVC_HAS_MODEL_NAME=1" \
-             "-DNN_SVC_HAS_MODEL_NAME=1 -DNN_SVC_HAS_MODEL_ADDR=1" \
-             "-DNN_SVC_HAS_MODEL_PATH=1" \
-             "-DNN_SVC_HAS_MODEL_PATH=1 -DNN_SVC_HAS_MODEL_BUILTIN=1"; do
+for shape in "-DNN_SVC_HAS_MODEL_NAME=1" \
+             "-DNN_SVC_HAS_MODEL_NAME=1 -DNN_SVC_HAS_MODEL_ADDR=1"; do
     # -Wno-unused-function: the stub config has no camera or bench, so the
     # cancel shim they share is unused here and nowhere on a real board.
     # shellcheck disable=SC2086  # $shape is deliberately word-split

@@ -21,9 +21,9 @@
  * in/out); `nn model load --name <blob>` installs a model (a blob longer than a
  * 448 KB slot is refused by the adapter before it is read, issue #194 D4);
  * `nn model unload` (release())
- * empties it again.  `nn model load builtin` is refused (not a source this
- * board takes) -- it used to unload, which is not what the word says (issue
- * #131 P16).
+ * empties it again.  `nn model load builtin` is refused (by the shared grammar
+ * since issue #196) -- it used to unload, which is not what the word says
+ * (issue #131 P16).
  *
  * Memory (all in .sdram.ai / .sdram.ai.model, FMC bank3):
  *   - g_model_slot[2]  (.sdram.ai.model, bank3 UPPER half -> bsp.c MPU region2 makes
@@ -503,7 +503,8 @@ static int reloc_bk_load_region(void **buf, uint32_t *cap)
 
 /* Rebuild the model from a loaded .bin (transactional).  @p data==NULL asks for
  * a built-in model, which this backend does not have: refused, nothing changes
- * (the adapter refuses `builtin` before it gets here; unload is release()).
+ * (nothing reaches it with NULL -- `builtin` is not in the grammar since issue
+ * #196; unload is release()).
  * *impl_out is ALWAYS &g_reloc (non-NULL): "no model" is the internal hdl==NULL state
  * (open stays true; model_name "(none)"; run() fails until a model loads). */
 static int reloc_bk_reload(const void *data, uint32_t len, const char *name, void **impl_out)

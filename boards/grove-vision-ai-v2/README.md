@@ -4360,6 +4360,16 @@ cannot be brought back and was never ours.
 
 #### Writing one: `blob write <name> [slot]`
 
+> [!] **Known defect (issue #203): write right after a reset.**  On this
+> board a `blob write` issued after `nn` has run in the same boot -- `nn model
+> load`, a stream, then `nn model unload` -- failed at its first 64 KB program
+> in two attempts out of two: the read-back did not match (`blob: a program did
+> not take`, `first bad at ...: read ff` in `dmesg`) and the NOR port went to
+> its terminal fault, so `reboot` is needed.  The same write issued straight
+> after a reset succeeded, and the other blobs were intact (`blob verify`).
+> The write transaction is unchanged since issue #92; the cause is not known.
+> Until #203 is settled: `reboot`, then `blob write`, then `nn model load`.
+
 ```
 blob write <name> [slot]    receive a file over YMODEM into a slot
 blob verify <slot>          re-read the payload and check its stored crc32

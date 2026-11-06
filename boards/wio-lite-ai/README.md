@@ -659,7 +659,7 @@ them:
 |---|---|---|
 | `psram.h` | `port/nn/nn_camera.c`, `port/nn/nn_svc_wio.c` | An OCTOSPI1 user place (`psram_acquire_shared()` / `psram_release_shared()`): the stream and `nn bench` read PSRAM, so a command that retunes the bus must be kept out (users do not exclude each other). |
 | `cam_preview.h` | `port/nn/nn_svc_wio.c` | `CAM_PREVIEW_STACK_BYTES`, the preview thread's stack: the ceiling the plugin draw allowance is asserted below. (The plugin-draw counters moved to `port/nn/nn_panel.h` in issue #140.) |
-| `blob.h` | `port/nn/nn_svc_wio.c` | The NOR asset store: `nn model load --name` resolves the name and reads the blob under the store's busy guard. |
+| `blob.h` | `port/nn/nn_svc_wio.c` | The NOR asset store: `nn model load <name>` resolves the name and reads the blob under the store's busy guard. |
 
 ### The camera input: one contract with f746g-disco (issue #162)
 
@@ -777,7 +777,7 @@ same table since #194.
 The `blob` subcommands and their rules are the shared command's, described
 once in [svc/README.md](../../svc/README.md#the-blob-command-is-shared-issue-194)
 (`blob list | info | read | free | write <name> [slot] | verify | erase`, and
-`nn model load --name <name>`).  What is this board's:
+`nn model load <name>`).  What is this board's:
 
 - **The erase is one 64 KB block at a time** (`nor_erase()` per block), so the
   NOR mutex is given back between blocks and `kv` gets a turn, and Ctrl+C
@@ -976,7 +976,8 @@ on grove-vision-ai-v2 and f746g-disco): `infers` counts the results a reader
 can use, so it and `errors` never count the same frame. Until #138 this board
 counted it in both, because the inference ran.
 
-`nn model load --name <name>` (issue #193; `--slot <n>` before it) resolves the
+`nn model load <name>` (issue #193; `--slot <n>` before it, `--name <name>`
+until issue #196) resolves the
 name to the one slot holding a VALID blob under it, reads the blob into the
 PSRAM staging buffer and CRC-checks that copy exactly as before, then:
 
@@ -1015,7 +1016,7 @@ buffer is where the open model lives, a load runs in this order:
 
 Every failure in step 3 ends with **no model** (`nothing is loaded now`), and
 the operator loads the previous model again by its name (`nn model load
---name <name>`).  While steps 2 and 3 run, `nn info` on the other console says the
+<name>`).  While steps 2 and 3 run, `nn info` on the other console says the
 model is busy, and `nn thresh` waits for the lease and then answers busy.
 
 The capacity the backend reports is 1,048,576 B, and the largest blob slot's
@@ -1496,7 +1497,7 @@ and publishes only then.  It prints a receipt:
                  `blob erase <that slot>` clears it on purpose
   in picocom:    C-a C-s, then the path above
   afterwards:    `blob list` must show crc32 <CRC> -- ...
-  then:          nn model load --name blazeface
+  then:          nn model load blazeface
 ```
 
 The text is the same on every board (`cmake/asset_receipt.py`, issue #195);
@@ -1592,6 +1593,8 @@ headroom between them and the thread's stack larger, which is the thing being
 checked.
 
 ### The stack budget, and what is still owed to it (issue #110)
+
+> The records in this section quote commands as they were typed then: `nn model load --slot <n>` (until issue #193) and `--name <name>` (until #196) are now `nn model load <name>`.
 
 There are **two quantities**, and Step 3a only had one of them:
 

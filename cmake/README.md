@@ -410,7 +410,7 @@ check) and the CRC differ. It starts with `blob write <name> <slot>`, which
 erases the slot and receives into it when the slot is empty or holds that
 name, and says when the command refuses before any erase (another blob in
 the slot, or the name already in another slot), then the picocom transfer,
-the `blob list` CRC comparison and `nn model load --name <name>`. Until #195
+the `blob list` CRC comparison and `nn model load <name>`. Until #195
 each board passed its own lines (`RECEIPT_STEPS` / `_THEN` / `_TRANSFER` /
 `_VERIFY`), the copies had drifted, and all three began with `blob erase
 <slot>`, which removed the store's refusal every time; those four words are

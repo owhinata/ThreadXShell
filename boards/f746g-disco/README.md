@@ -51,7 +51,7 @@ blob write blazeface 12          # then, in picocom: C-a C-s and
                                  # holds another blob or blazeface is in
                                  # another slot: see `blob list`)
 blob list                        # slot 12's crc32 must be the receipt's
-nn model load --name blazeface
+nn model load blazeface
 ```
 
 The CRC32 `blob list` shows is the one the store computed over the bytes it
@@ -291,8 +291,8 @@ knowing:
 `tflm` runs tflite-micro with CMSIS-NN kernels.  [!] **It carries no model**
 (issue #159 Step 4c): a model -- a bare `.tflite`, or a plugin container that
 brings the decoder for it -- is sent into the QSPI asset store with `blob
-write` and loaded with `nn model load --name` (issue #194; a file on the
-microSD card and `--path` before).  The pinned BlazeFace front 128 int8 that wio-lite-ai and
+write` and loaded with `nn model load <name>` (issue #194; a file on the
+microSD card and `--path` before, `--name <name>` until issue #196).  The pinned BlazeFace front 128 int8 that wio-lite-ai and
 grove-vision-ai-v2 ship (ST model zoo, `STMicroelectronics/stm32ai-modelzoo`,
 commit `1423c78953a830903485135febe1dd98ff31aed8`,
 `face_detection/facedetect_front/.../blazeface_front_128_int8.tflite`, SHA256
@@ -335,7 +335,7 @@ issue #163, see svc/README.md):
 | File | Thread or context | Hardware reason |
 |---|---|---|
 | `port/nn/nn_svc_f746.c` | console | The thin adapter over the `nn.h` API (`svc/nn/nn.h`, implemented by `svc/nn/nn.c`, shared with wio-lite-ai); it adds no state. `nn thresh` is `svc/nn/nn_svc_common`'s and the refusals' words are `svc/nn/nn_refusal`'s (issue #174); this file passes its lease and its teardown clause. |
-| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | `nn info`'s model section is `svc/nn/nn_svc_common`'s (issue #174), given this file's counter read. The steps of the shared load order on this board: the blob named by `--name`, found and read under the store's busy flag (issue #194), with its length checked before the read and its CRC after; the model staging buffer in SDRAM (on `tflm` asked for only after the open model went down, issue #191); on `tflm`, the plugin policy, the container split and the open container's claims (issue #159; the claims' store and their `nn info` lines are `svc/plugin/plugin_claims`, read under this file's critical section). |
+| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | `nn info`'s model section is `svc/nn/nn_svc_common`'s (issue #174), given this file's counter read. The steps of the shared load order on this board: the blob named by `nn model load <name>`, found and read under the store's busy flag (issue #194), with its length checked before the read and its CRC after; the model staging buffer in SDRAM (on `tflm` asked for only after the open model went down, issue #191); on `tflm`, the plugin policy, the container split and the open container's claims (issue #159; the claims' store and their `nn info` lines are `svc/plugin/plugin_claims`, read under this file's critical section). |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) and the camera sink's open / close of the nn step | Binds the shared frame path to this board's camera as the nn step of the one camera sink, and holds nn's place among the camera's holders (issue #142); owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
 | `port/nn/nn_producer.c` | camera producer (the nn step of the camera sink's `consume()`) | Prepares a frame straight into the model's input tensor (nearest-neighbour resize + RGB565 expansion on the CPU, each value through the shared conversion `svc/nn/nn_input_contract.h`) and hands it over; it does not put the frame -- the sink does, last. |
 | `port/camera/cam_sink.c` | camera producer (`consume()`), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one RGB565 subscriber of the base capture, running the GUIX display step and then the nn step, with `camera_frame_put()` last. Each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
@@ -509,17 +509,16 @@ and, in place of the tensor lines, `note : nothing loaded -- `nn model load
 `no model is loaded`). On `tflm` that is the state after boot (Step 4c: there
 is no built-in model) and after `nn model unload`.
 
-- `nn model load builtin` is refused before anything is acquired: `this board
-  loads a model from a QSPI asset by name (--name); it has no built-in model`
-  (SPEC). The usage lists `--name` only.
-- [!] **There is no SD load any more** (issue #194).  `nn model load --path
-  <p>` is refused the same way (`... it has no filesystem load (send the file
-  with `blob write`)`), `--slot <n>` too (`... no load by slot number (`blob
-  list` names them)`), and a bare word by the shared grammar (`nn: '<word>' is
-  not a model source.  Say which kind it is ...`).  A model that used to sit on
-  the card is sent again into a slot -- see [Moving models off the SD
+- The model is named by one word, the blob name (issue #196, the same on all
+  three boards; svc/README.md).  An option word -- `--name x`, `--path <p>`,
+  `--slot <n>`, `-foo` -- is refused by the shared grammar before the board is
+  asked (`nn: '<word>' is not a model name -- write the name alone (a name
+  never starts with '-')` and the usage); `builtin` is an ordinary name, looked
+  up like any other.
+- [!] **There is no SD load any more** (issue #194).  A model that used to sit
+  on the card is sent again into a slot -- see [Moving models off the SD
   card](#moving-models-off-the-sd-card).
-- **`nn model load --name <name>`** (`port/nn/nn_svc_f746_model.c`) refuses a
+- **`nn model load <name>`** (`port/nn/nn_svc_f746_model.c`) refuses a
   name the store could never have stored before it takes anything (`'<name>' is
   not a blob name (...)`), then holds the store's busy flag from the name
   lookup to the end of the payload read, so no `blob write` / `blob erase` /
@@ -957,7 +956,7 @@ never hand bank 3 to a DMA has not been checked.
 Models and containers live on the on-board 16 MB QSPI NOR (N25Q128A) in named
 slots, the same store wio-lite-ai has on its external NOR: the same slot table,
 the same header format and the same `blob` command, so `blob write` and `nn
-model load --name` mean the same thing on both.  Until issue #194 the QSPI NOR
+model load <name>` mean the same thing on both.  Until issue #194 the QSPI NOR
 was a LevelX + FileX volume (the `fs` command) and models were files on the
 microSD card; both are gone (see [Moving models off the SD
 card](#moving-models-off-the-sd-card)).
@@ -1009,7 +1008,7 @@ once in [svc/README.md](../../svc/README.md#the-blob-command-is-shared-issue-194
 blob list | info <slot> | read <slot> [off] [len] | free
 blob write <name> [slot]     erase the slot, receive a file over YMODEM, verify
 blob verify <slot> | erase <slot>
-nn model load --name <name>  load the blob stored under <name>
+nn model load <name>         load the blob stored under <name>
 ```
 
 What is this board's:
@@ -1018,7 +1017,7 @@ What is this board's:
   wio-lite-ai's: `blob list`, `blob info`, `blob read`, `blob verify` and
   `blob free` answer `blob: another QSPI operation is running (...)` while a
   `blob write` / `blob erase`, a `qspi erase` / `qspi test` or an `nn model
-  load --name` (lookup to end of read) runs on another console or in the
+  load <name>` (lookup to end of read) runs on another console or in the
   background, rather than describe flash that is being changed.  They only
   look at the flag, so two readers do not refuse each other.  `qspi erase` and
   `qspi test` take the flag for their whole run (`qspi: busy -- ...` when they
@@ -1169,6 +1168,8 @@ and the registers after it.  A recovered failure leaves the driver usable;
 
 ### QSPI operations failing after `nn model load` (issue #194)
 
+> This record quotes `nn model load --name <name>` as it was typed then; since issue #196 it is `nn model load <name>`.
+
 **Symptom** (on the #194 firmware up to `22aa173`): a few seconds after an
 `nn model load --name` -- on one boot only after an `nn run` -- every `blob`
 and `qspi` operation failed until reboot, and `qspi info` said `QUADSPI
@@ -1222,12 +1223,14 @@ not the file's.
 
 ### Measured
 
+> The rows quote `nn model load --name` as it was typed then; since issue #196 it is `nn model load <name>`.
+
 | | before #194 (`c4ebdd6`) | after (`dce051d`) |
 |---|---|---|
 | `shell.bin` (`tflm`) | 621,492 B | 629,436 B (+7,944 B: the store, the shared command, YMODEM receive; the LevelX + FileX volume -8,408 B) |
 | `shell.bin` (`null`) | 417,164 B | 424,404 B |
 | internal SRAM `.data` + `.bss` (`tflm`) | 110,768 B | 101,624 B (-9,144 B: the volume's buffers out, the 4 KB RX ring and the 1 KB staging buffer in) |
-| `nn model load --name` deepest stack | | about 2.0 KB of the 4 KB console stack (from the `.su` files; the QSPI read side) |
+| `nn model load <name>` deepest stack | | about 2.0 KB of the 4 KB console stack (from the `.su` files; the QSPI read side) |
 
 A 1 MB payload is read for a load in sixteen 64 KB pieces (`BLOB_READ_CHUNK`),
 about 250 ms at the 4 KB/ms `qspi test` measured, each piece far below the
@@ -1278,7 +1281,7 @@ M4/FPv4 firmware image and watches it refused under `0x1101`.
 Since issue #194 a container reaches the board the way it reaches
 wio-lite-ai: sent into a slot of the [QSPI asset
 store](#the-qspi-asset-store-blob-issue-194) with `blob write`, and loaded
-with `nn model load --name <name>`.  (Until then it was a file the operator
+with `nn model load <name>`.  (Until then it was a file the operator
 copied to the microSD card and loaded with `nn model load --path`, and the
 reader, `cmds/cmd_nn_board.c` with `svc/nn/nn_container.c`, printed the CRC of
 the bytes it read; both are gone.)
@@ -1476,7 +1479,7 @@ built-in model) with this board's blazeface plugin -- through every gate, and pr
   in picocom:    C-a C-s, then the path above
   afterwards:    `blob list` must show crc32 <CRC> -- that is how you know
                  the bytes that were built are the bytes that were stored.
-  then:          nn model load --name blazeface
+  then:          nn model load blazeface
 ```
 
 The destination is a SLOT (`cmake/add_asset.cmake`, issue #194), and the

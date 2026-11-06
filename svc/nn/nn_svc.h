@@ -611,8 +611,8 @@ void nn_svc_bench(uint32_t iters, struct nn_bench_stats *out,
  * the two operations that a waiter performs afterwards carry it.
  */
 
-/** How a stream is started.  Tagged for the same reason a model source is: the
- *  bare word would mean different things on different boards. */
+/** How a stream is started.  An option spelled out (`--test`), because a bare
+ *  word would mean different things on different boards. */
 struct nn_stream_spec {
 	/** Feed a test pattern instead of the sensor.  Refused with
 	 *  NN_SVC_ERR_SPEC where the board has no such thing.  A frame count is

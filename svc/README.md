@@ -89,7 +89,7 @@ counts and stack depths, is the board README's:
 | Subcommand | Meaning | Capability | What differs by board |
 |---|---|---|---|
 | `nn info` | The backend (`nn_backend()`'s name and version), the model and where it came from, the arena reserved and used, the input and output tensors, then the board's plugin lines; answered in full while a stream runs, busy while a load is in flight. | always | f746g-disco: `sdram test` holding `.sdram.ai` answers busy.  grove-vision-ai-v2: also busy while a `nn run` or `nn bench` holds its gate; the `source` line says the NPU runs secure and privileged. |
-| `nn model load --name / --slot / --path / --addr` | Point the model at bytes from the board's one store and swap it in as one transaction (the plugin after the backend succeeds; the order is `nn/nn_core_model`). | `MODEL_LOAD` and the tag's | grove-vision-ai-v2: a NOR blob by name, or a raw window with its length, read in place through the XIP window.  wio-lite-ai: a NOR blob by name (since issue #193) copied to PSRAM, the CRC checked on the copy.  f746g-disco: a QSPI blob by name (since issue #194; a microSD file before) copied to SDRAM, the CRC checked on the copy; `stedgeai_reloc` refuses a blob past its 448 KB slot.  On every board the closing check of a delivered asset is `blob list`'s crc32 against the receipt. |
+| `nn model load <name>` | Point the model at the blob stored under `<name>` and swap it in as one transaction (the plugin after the backend succeeds; the order is `nn/nn_core_model`). | `MODEL_LOAD` | grove-vision-ai-v2: a NOR blob by name, read in place through the XIP window.  wio-lite-ai: a NOR blob by name (since issue #193) copied to PSRAM, the CRC checked on the copy.  f746g-disco: a QSPI blob by name (since issue #194; a microSD file before) copied to SDRAM, the CRC checked on the copy; `stedgeai_reloc` refuses a blob past its 448 KB slot.  On every board the closing check of a delivered asset is `blob list`'s crc32 against the receipt. |
 | `nn model unload` | Unload the plugin and the model; nothing is loaded afterwards. | `MODEL_LOAD` | grove-vision-ai-v2: also powers the NPU down and gives back the NOR lease. |
 | `nn bench [n]` | One hold: fill every input with `0x5A`, n timed runs, min / avg / max (`nn/nn_bench`). | `BENCH` | grove-vision-ai-v2: the 1 ms ThreadX tick and no `@MHz` (the DWT stops in WFI); the other two count DWT cycles. |
 | `nn run` | One frame through the same producer and worker as a stream; ends one of five ways (`nn/nn_run_wait`) and prints its own result. | `CAMERA` | grove-vision-ai-v2: int8 input only (the Ethos-U55 fills a byte per element), and the first frames after a camera bring-up are skipped.  wio-lite-ai: the input must tile onto the 60-row DCMI bands; PSRAM must be up and OCTOSPI1 not held by a retuner.  f746g-disco: the camera must stream RGB565; `sdram test` holding `.sdram.ai` answers busy. |
@@ -110,19 +110,34 @@ counters (`nn/nn_decode_count`, the same rule on every board since issue #164).
 | Capability | grove-vision-ai-v2 | wio-lite-ai | f746g-disco |
 |---|---|---|---|
 | `NN_SVC_HAS_MODEL_LOAD` | yes | `tflm` with the KV store | `tflm` or `stedgeai_reloc` |
-| `NN_SVC_HAS_MODEL_NAME` | yes | as `MODEL_LOAD` (since issue #193) | as `MODEL_LOAD` (since issue #194) |
-| `NN_SVC_HAS_MODEL_ADDR` | yes | -- | -- |
-| `NN_SVC_HAS_MODEL_SLOT` / `_PATH` | -- | -- (`--slot` until #193) | -- (`--path` until #194) |
 | `NN_SVC_HAS_CAMERA`, `_BENCH`, `_STREAM` | yes | yes | yes |
 | `NN_SVC_HAS_NORM` | -- | yes | yes |
 | `NN_SVC_HAS_STREAM_TEST` | -- | yes | -- |
 
 The declarations are `boards/<board>/svc/nn_svc_config.h`; a capability that is
-0 leaves its subcommand or tag unregistered.  `NN_SVC_HAS_MODEL_BUILTIN` (`nn
-model load builtin`) is declared by no board, and since issue #194 neither are
-`_SLOT` and `_PATH`: the parser still takes every tag, and a board refuses one
-it has no source for in its own words (`shell/cmds/cmd_nn.c` keeps its `--path`
-reader branch until issue #196).
+0 leaves its subcommand unregistered.
+
+**The model is named by one word, the blob name (issue #196).**  All three
+boards look it up with the same `blob/blob_state` name rules, so the word means
+the same thing everywhere -- which is what the tagged forms (`--name`,
+`--slot`, `--path`, `builtin`, Grove's `--addr <addr> <len>`) existed to
+guarantee while the boards' stores differed, and why none of them comes back.
+`builtin` or `9` is an ordinary name now.  A word that starts with `-` is not
+a name, and the rule lives in two places on purpose:
+
+- the parser (`shell/cmds/nn_cmd_core.c`) refuses a first word that starts
+  with `-` as "not a model name -- write the name alone", whatever follows, so
+  an old `--name x` or `--addr 0x... 16` is told what to type instead of being
+  read as two words.  It does not call `blob_name_check()` -- a build with no
+  store still links the parser -- and `shell/test/test_nn_cmd_core.c` checks
+  that the two agree over one list;
+- `blob_name_check()` refuses it as `name starts with '-'`, so `blob write`
+  never stores a name that could not be typed back.
+
+The reader is wider than the writer: the header decoder keeps its own byte
+check, so a `-x` blob stored before the rule still lists as `valid`, guards its
+slot, and goes with `blob erase <slot>`.  It cannot be loaded by name (the
+board's pre-check uses `blob_name_check()`).
 
 The lifecycle's refusals of `nn run`, `nn stream start` and `nn stream stop`
 (a stream already running, a `nn run` holding the camera, a start or stop in
@@ -811,12 +826,13 @@ blob free                    the slots `blob write` accepts with no `blob erase`
 blob write <name> [slot]     erase the slot, receive a file over YMODEM, verify
 blob verify <slot>           re-read the payload against its stored crc32
 blob erase <slot>            retire a blob: erase its header sector only
-nn model load --name <name>  load the blob stored under <name>
+nn model load <name>         load the blob stored under <name>
 ```
 
 - **The name is the one typed, not the sender's filename** (which only goes to
-  `dmesg`).  Printable ASCII with no space, at most 64 characters; anything
-  else is refused before anything is touched.
+  `dmesg`).  Printable ASCII with no space, not starting with `-` (issue
+  #196), at most 64 characters; anything else is refused before anything is
+  touched.
 - **A name already stored goes back to its own slot** (`blob write <name>`
   needs no slot then).  Naming a different slot for it is refused (`that name
   is in another slot`), and a new name has to say which slot.

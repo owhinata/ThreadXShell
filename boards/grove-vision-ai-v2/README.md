@@ -2321,9 +2321,8 @@ boxes on the LIVE preview (`nn stream`) since issue #48.  The console stays
 usable while any of them runs.
 
 ```
-nn model load --name <n>  # QSPI XIP on, NPU out of reset, the blob of that name
-                          #   parsed in place
-nn model load --addr <a> <len>   # ... or a raw address and a length
+nn model load <n>         # QSPI XIP on, NPU out of reset, the blob of that name
+                          #   parsed in place (the only form since issue #196)
 nn info                   # backend, model, arena use, tensors, plugin
 nn run                    # one frame -> whatever the LOADED MODEL produces:
                           #   top-5 classes, or face boxes.  See below.
@@ -2426,13 +2425,13 @@ malformed flatbuffer, where this board used to say "model flatbuffer is malforme
 A model with more than 8 outputs or a tensor of rank > 4 is now refused at load
 instead of loading and being refused by `nn stream`.
 
-**`--addr` is refused by the backend, after the bring-up.**  The adapter no longer
-checks a raw address and length itself (that copy of the window check went to make
-room in ITCM).  `nn model load --addr 0x10 16` therefore brings the NPU up and takes
-the NOR lease, is refused by the backend (`model address outside the flash window
-(0x00000010, 16 B)`, status -76 where the adapter's own check answered -70), and
-gives both back; address 0 is a NULL pointer and reads `bad argument`.  The status
-is printed only -- a load's refusal leaves no claim to recover either way.
+**The raw `--addr` form is gone (issue #196).**  From issue #169 the backend, not
+the adapter, refused a bad raw address and length, after the bring-up (that copy of
+the window check went to make room in ITCM).  Since #196 `nn model load --addr ...`
+is an option word, refused by the shared grammar before the NPU comes up or the NOR
+lease is taken; the window, length and alignment checks themselves are unchanged and
+apply to every blob.  To look at a payload, `blob read <slot> [off] [len]`; to open
+bytes as a model, write them into a slot with `blob write`.
 
 **Measured (2026-10-31, after the change).**
 
@@ -2626,7 +2625,7 @@ loaded section of `shell.elf` is byte-identical to the first step's.
 
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 
-`nn model load --name cls` asks the asset store for the blob called `cls` and parses what it
+`nn model load cls` asks the asset store for the blob called `cls` and parses what it
 finds.  It used to mean an address `board.cmake` compiled in, which made
 changing a model a host-build errand -- and for the detector, which cannot be
 committed, an errand that started by reproducing a pipeline.  Now:
@@ -2637,7 +2636,7 @@ nn model load cls
 nn run
 ```
 
-**The order inside `nn model load --name <name>` is the design**, and every step of it is
+**The order inside `nn model load <name>` is the design**, and every step of it is
 load-bearing.  Since issue #131 the order itself is `svc/nn/nn_core_model.c`, shared by every
 board and walked step by step by `shell/test/test_nn_core_model.c`; what this board supplies
 are the steps' contents (`port/nn/nn_svc_grove.c`: the claim, the bring-up, the lookup, the
@@ -2689,7 +2688,6 @@ shares since issue #131, walked by `shell/test/test_nn_swap.c`):
 | name, CRC, container (nothing touched) | failed | `previous` | kept | kept | kept |
 | the backend refused the new model, the previous one rebuilt from the same bytes | failed | `previous` | kept (never touched) | kept | kept |
 | the backend refused it and the previous one too | failed | `empty` | unloaded | down | gone |
-| `--addr` outside the window or under the length floor (issue #169: refused by the backend, after the bring-up) | failed | `previous`, or `empty` with nothing loaded | kept / none | kept; or brought up and taken down again | kept / gone |
 | the new model's plugin refused (`entry()` or earlier) | **failed** | **`new`** | unloaded | kept, for the new model | gone |
 | opened, plugin started or none carried | ok | `new` | the new one, or none | kept | gone |
 
@@ -2724,8 +2722,8 @@ plugin  : <name> (build <id>, crc <digest>), running
 ```
 
 `running` is the loader's own state; `validated, not loaded` is a container whose
-plugin was refused.  A raw `--addr` window is always a bare model on this board,
-so it never has claims (`(none)`).  The reservation (its size and address) is
+plugin was refused.  A bare model (a blob that is not a container) never has
+claims (`(none)`).  The reservation (its size and address) is
 printed only on the two `(none ...)` lines: while a plugin is there its `image`
 line names its link address instead.  The `where` and `code ... data ... bss`
 lines this board printed until #174 are folded into the `image` line and the
@@ -2754,9 +2752,9 @@ forms (`blob_stat_leased`, `blob_verify_leased`) take the CALLER'S token and
 check it is live, so the sequence is safe by construction rather than by
 accident of what else happened to be holding the part.
 
-The raw form is `nn model load --addr <addr> <len>` -- a flag, so that a name can
-never be read as a hex number or the other way round.  It is how you look at a
-model somebody put somewhere the store does not carve.
+There is no raw form any more: `nn model load --addr <addr> <len>` went in
+issue #196, and a model is opened from a slot only.  To look at bytes, `blob read <slot>`;
+to open them as a model, write them into a slot.
 
 ### [!] The backend takes a length, and verifies the flatbuffer (#93)
 
@@ -2772,7 +2770,7 @@ neighbouring slot, the rest of the store, or the bootloader's own block at the
 top of the part.
 
 That was survivable while a model was something the host build had verified and
-written to a fixed address.  It is not survivable now: `nn model load --name <name>` parses a
+written to a fixed address.  It is not survivable now: `nn model load <name>` parses a
 payload an operator sent, and **the blob CRC is computed over the stream that
 ARRIVED**, so a file that was already broken on the PC verifies perfectly and
 lands intact.  So the order is
@@ -2783,9 +2781,9 @@ range -> length -> "TFL3" identifier -> flatbuffer verifier -> payload scan
 ```
 
 and the length is what makes the verifier a bounds check at all -- and, since
-issue #179, what bounds the payload scan's work.  The raw form
-takes one for the same reason: "the rest of the window" would satisfy the
-arithmetic and check nothing.  The length also has a FLOOR -- the identifier is
+issue #179, what bounds the payload scan's work.  The raw `--addr` form
+(gone since issue #196) took one for the same reason: "the rest of the window"
+would satisfy the arithmetic and check nothing.  The length also has a FLOOR -- the identifier is
 read at offset 4, so a shorter declared length would have the identifier check
 reading outside the bounds it declared.
 
@@ -2859,11 +2857,10 @@ things it is not:
 - **It does not say the model is a sane Vela output.**  One subgraph, every
   operator on Ethos-U, an arena that fits: `verify_vela_model` on the host.  The
   two are not alternatives to each other.
-- **The raw `--addr` form is bounded by the WINDOW, not by a slot.**  It skips
-  the store on purpose -- no lookup, no header, no CRC -- so a length starting in
-  one slot may reach into the next if those bytes happen to verify.  It cannot
-  reach past the end of the 16 MB alias.  Slot isolation is what opening by name
-  is for.
+- **Until issue #196 the raw `--addr` form was bounded by the WINDOW, not by a
+  slot**: it skipped the store -- no lookup, no header, no CRC -- so a length
+  starting in one slot could reach into the next.  It is gone; every load is now a
+  slot's payload, by name.
 
 ### [!] The host gate did not go away, and it runs the board's check
 
@@ -2915,7 +2912,7 @@ what, rather than "the gates ran at build time":
 | **model-section** damage that still satisfies the backend | **nothing** -- only the plugin section has a digest | -- |
 | a **stale** artifact from another build | **nothing refuses it** | -- |
 | content that was never gated: a model that never passed `verify_vela_model`, or a container pairing the wrong model with the wrong plugin | **nothing** | -- |
-| stored under the wrong **name** | not enforced, but observable -- `nn model load --name` refuses a key that is not there, and `blob list` shows slot and key | at load |
+| stored under the wrong **name** | not enforced, but observable -- `nn model load <name>` refuses a key that is not there, and `blob list` shows slot and key | at load |
 
 **The device checks structure and ABI target, never identity, freshness, or that
 the right model met the right plugin.**
@@ -2973,7 +2970,7 @@ There used to be two more flashing targets, `--target flash-model-cls` and
 `--target flash-model-det`, writing MobileNet at `0xB7B000` and BlazeFace at
 `0xD20000`.  Both are deleted.  A model is an asset in the store now: it goes
 over the console with `blob write`, through the verified send path above, and
-`nn model load --name <name>` reads it out of a slot.
+`nn model load <name>` reads it out of a slot.
 
 [!] **Step 4 was split in two because of the ORDER.** Deleting the reservations
 grows the writable interval to `0xFFE000`, which puts the old model region
@@ -2984,8 +2981,9 @@ moved the map, in that order, and 4b did not start until both models had been
 written to the store, verified there and opened by name on hardware.
 
 [!] **Nothing erased the old copies.**  MobileNet's bytes are still at
-`0xB7B000` and BlazeFace's at `0xD20000`, and stay readable by address -- `nn
-open --addr 0x3AB7B000 1704672` -- until something writes there.  They now fall
+`0xB7B000` and BlazeFace's at `0xD20000` until something writes there (until
+issue #196 they could also be opened by address, `nn model load --addr
+0x3AB7B000 1704672`; that form is gone).  They now fall
 across several slots of the re-carved table, which do not all report the same
 state; see the `nor scan` section.
 
@@ -3069,12 +3067,12 @@ that fallback silently boots the **previous build**.  One erase block is
 reserved, so that both copies are inside it.
 
 [!] **No model address is compiled into anything any more** (#93, #94).
-`nn model load --name <name>` takes the address from the blob header it verified, and since
+`nn model load <name>` takes the address from the blob header it verified, and since
 #94 there is no `GROVE_MODEL_*_ADDR` for a flashing target to read either -- a
 layout value that can still be set and is read by nothing reads as part of the
 map, so board.cmake `unset(... CACHE)`s them the way it does `GROVE_FW_RESERVED`.
-The old fixed addresses are still reachable by typing them, until something
-writes there: `nn model load --addr 0x3AB7B000 1704672`.
+Until issue #196 the old fixed addresses could still be opened by typing them
+(`nn model load --addr 0x3AB7B000 1704672`); that raw form is gone.
 
 ### The firmware reservation is the bootloader's own arithmetic
 
@@ -3166,7 +3164,7 @@ slots (`port/nor/nor_state.h`):
 | `NOR_LEASE_BLOB` | one `blob` read: one row of a listing, one `info`, one `read` (issue #92) |
 
 The slots are separate holders, not a mutex: two readers of different slots are
-out at the same time quite happily.  `nn model load --name cls` followed by `blob list`
+out at the same time quite happily.  `nn model load cls` followed by `blob list`
 works, and was checked on the board -- a model stays open through a listing,
 because both are reading the same window and neither is writing it.
 
@@ -3871,6 +3869,8 @@ inference. Only a cancel supports it.
 
 ### What is actually on this board's flash
 
+> This record quotes `nn model load --addr ...` as it was typed then; the raw form is gone since issue #196.
+
 Measured with `nor scan`, which reads **every byte**:
 
 ```
@@ -3997,8 +3997,9 @@ write was also the first this port has made to flash nothing had ever touched.
 while `cls` was still valid in slot 0 is refused with `DUPLICATE`:
 `blob_choose_target()` will not add to a state where one name is in two slots.
 `blob erase 0` retires the name first.  It erases only the header sector, so
-between the two commands the payload is still readable by address
-(`nn model load --addr 0x3A201000 1704672`) if the transfer needs retrying.
+between the two commands the payload bytes are still on the flash, but nothing
+opens them as a model any more (the raw `nn model load --addr` went in
+issue #196): if the transfer needs retrying, send the file again.
 
 ### [!] The fitted NOR is a Zbit ZB25LQ128C, not the schematic's Winbond
 
@@ -4159,12 +4160,13 @@ transfer prints) are described once in
 [svc/README.md](../../svc/README.md#the-blob-command-is-shared-issue-194).  It
 moved to wio-lite-ai's wording where the two differed: `help` reads `named
 assets on the external NOR (models etc.)`; a refused name gives the rule
-(`printable ASCII, no space, at most 64 characters`); `blob info` says
+(`printable ASCII, no space, at most 64 characters`; since issue #196 also
+`not starting with '-'`); `blob info` says
 `(one sector)` and points at `blob verify N` / `blob erase N`; a busy read
 says `blob: busy -- <holder>` in `nor`'s words; `blob free`'s last line reads
 `uncarved : N B of 0x00200000 .. 0x00ffe000 named by no slot`.  The store's
 result numbers became the shared `svc/blob/blob_err.h` ones (busy -4, table
--7, faulted -10 where they were -2, -3 and -4), which `nn model load --name`'s
+-7, faulted -10 where they were -2, -3 and -4), which `nn model load <name>`'s
 `could not be verified (N)` prints.
 
 Note that even the read side is not free of writes: the first lease on a cold
@@ -4914,7 +4916,7 @@ Issue #45.  ST model zoo's BlazeFace Front 128x128 -- a MediaPipe-derived SSD
 face detector -- on the NPU, decoded to boxes on the CPU.
 
 ```
-nn model load --name det
+nn model load det
 nn run                 # the detector is loaded, so this reports boxes
 nn thresh 500          # more sensitive; 1..999, milli-probability
 ```
@@ -5226,7 +5228,7 @@ Issue #48, and issue #99 for the grammar.  The camera on the panel with the
 detections drawn on it:
 
 ```
-nn model load --name det
+nn model load det
 nn stream start             # returns immediately; the panel keeps updating
 nn stream stats             # while it runs
 nn stream stop
@@ -6199,7 +6201,7 @@ brings the panel up too.
 There is no room for an unexpected vendor-enabled line.  The wrap is
 fail-closed, so the symptom would be the camera refusing to come up during
 `nn stream` (or `nn run`) rather than silent mis-accounting -- but it is worth running
-`thread` once after the first `nn model load --name det`, when IRQ 133 is also present, to
+`thread` once after the first `nn model load det`, when IRQ 133 is also present, to
 see the cpu% column still reported as trustworthy.
 
 ## Model containers (issue #101)
@@ -6235,7 +6237,7 @@ which ends by printing what you need:
   in picocom:    C-a C-s, then the path above
   afterwards:    `blob list` must show crc32 C9AEEFA8 -- that is how you know
                  the bytes that were built are the bytes that were stored.
-  then:          nn model load --name blazeface
+  then:          nn model load blazeface
 ```
 
 (The text is the same on every board since issue #195, `cmake/asset_receipt.py`;
@@ -6473,7 +6475,7 @@ model and nowhere else.
 ```
 blob write cls 1                  # then C-a C-s in picocom (refused if
                                   # slot 1 holds another blob; see below)
-nn model load --name cls
+nn model load cls
 nn run
 ```
 
@@ -7116,11 +7118,11 @@ each slot, waiting for each background job to finish (`jobs` empty) before the
 next line:
 
 ```
-nn model load --name <det>      # entry, on the console
+nn model load <det>             # entry, on the console
 nn info                         # param_get
 nn thresh 500                   # param_set (and param_get)
 nn run                          # decode and report
-nn model load --name <det> &    # the same four, on a background job
+nn model load <det> &           # the same four, on a background job
 nn info &
 nn thresh 500 &
 nn run &
@@ -7298,7 +7300,7 @@ indistinguishable from a broken one -- and the classifier could only be read one
 frame at a time through `nn run`.
 
 ```
-nn model load --name cls
+nn model load cls
 nn stream start
 ```
 

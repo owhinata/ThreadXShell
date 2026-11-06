@@ -1940,8 +1940,13 @@ telnet -- each with its own line editor, history and RX/TX drop counters.
 `console` prints those counters, one line per console; what counts as a console
 is in the root
 [README](../../README.md#a-board-can-run-more-than-one-console).  `wio-net>`'s
-`rx_drop` stays 0 by construction -- only a ring-buffered backend can overflow,
-and the TCP one has no ring -- while `tx_drop` applies to both.  The boot-time
+`rx_drop` stays 0, but input can still be lost there: the telnet backend has a
+512 B receive ring (holding 511, `src/net_shell.c`), the NetX receive callback
+empties the socket into it at once so the TCP window never holds input back,
+and a byte that finds the ring full is discarded.  Those bytes are counted,
+just not in `console`: they are the `rx-drops` figure of `net shell status`
+(cumulative since boot, also in its `dmesg` line).  `tx_drop` applies to
+both.  The boot-time
 KV shell (`src/kv_boot.c`) is an instance too, but it is never started as a
 console -- its output goes to `dmesg` -- so it is not listed.
 

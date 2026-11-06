@@ -46,10 +46,12 @@ the app/shell layers and is treated as immutable.
 A shell instance owns its transport, line editor, history and drop counters, and
 a board may start several at once -- so "the console" is not a single thing. The
 shared `console` command prints one line per running interactive console: its
-prompt as the label, then `rx_drop` (bytes a backend discarded because the RX
-ring was full) and `tx_drop` (output bytes dropped after a TX no-progress
+prompt as the label, then `rx_drop` (bytes a serial backend discarded because
+its RX ring was full) and `tx_drop` (output bytes dropped after a TX no-progress
 deadline). Both are cumulative since boot and neither can be cleared -- a counter
-a reader can zero stops being evidence.
+a reader can zero stops being evidence. A telnet console's `rx_drop` stays 0
+even when its own receive ring overflows: those backends do not count into this
+column, and the board READMEs say where, if anywhere, the loss is counted.
 
 What it lists is every instance that `cli_start()` started and that is still in
 the thread->instance registry. A background job's worker is an instance too but

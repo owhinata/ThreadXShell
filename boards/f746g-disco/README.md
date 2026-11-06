@@ -1640,8 +1640,13 @@ net>                  0          0
 ```
 
 The `net>` row appears whether or not a telnet client is attached.  Its `rx_drop`
-stays 0 by construction -- only a ring-buffered backend can overflow, and the TCP
-one has no ring -- while `tx_drop` applies to both, because the no-progress
+stays 0, but that is not evidence that no input was lost: the telnet backend
+does have a receive ring (512 B, holding 511, in `port/netxduo/nx_shell.c`).
+The NetX receive callback pulls every segment out of the socket at once, so
+the TCP window never holds input back; when the console thread is not reading
+and the ring fills, the rest of the bytes are discarded and nothing counts
+them -- not `rx_drop` (only the VCP backend increments it), not the `telnet:`
+line of `net info`.  `tx_drop` applies to both, because the no-progress
 deadline that drops output lives in the shared output path.  What counts as a
 console, and what the two columns mean, is in the root
 [README](../../README.md#a-board-can-run-more-than-one-console).

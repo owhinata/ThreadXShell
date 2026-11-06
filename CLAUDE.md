@@ -59,7 +59,7 @@ src cmds svc cmake test README。wio のみ boot も）。
 - **capability マクロは「性質」で「ボード名」ではない**。バックエンド依存は `CONFIG_NN_BACKEND` に従う。
 - **status と claim disposition は別フィールドで `retryable` と `terminal` を畳まない**（**判断できない
   ボードは `terminal` に fail-closed**）。disposition は**呼び出し側の解放権限**である。
-- **モデル指定はタグ付きで裸の文字列は拒否する**（同じ語がボードごとに別物）。`--addr` の長さは必須。
+- **モデル指定はタグ付きで裸の文字列は拒否する**（同じ語がボードごとに別物）。
 - **port のアダプタは `struct cli_instance` を取らない**（印字・待ち・キャンセルは `boards/*/cmds/`）。
 - **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（`preview` は復活させない）。`start` は非ブロッキングで、待ちは `--frames <n>` が 1 実装で持つ。
 - **[!] stream には世代があり、`stop` は遷移を claim するのと同じクリティカルセクション内で照合する**。

@@ -200,17 +200,14 @@ struct nn_op_result {
  * have to guess per board what it names, which is board knowledge in shell/ by
  * another route.  Spelling the tag makes the grammar decidable where it is
  * parsed, and lets a board refuse a namespace it does not have instead of
- * pretending to implement it.  The slot, path and built-in tags are gone (issue
- * #196): no board took them after issues #193 and #194.
- *
- * [!] THE RAW FORM CARRIES A LENGTH AND THAT IS NOT CEREMONY.  It is the bound
- * the FlatBuffer verifier is given before anything walks the payload; "whatever
- * is left in the window" is not a bound, and this repo forbids it.
+ * pretending to implement it.  The slot, path, built-in and raw-window tags
+ * are gone (issue #196): no board took the first three after issues #193 and
+ * #194, and the raw window was Grove's alone.  A model's length now always
+ * comes from the store that holds it.
  */
 enum nn_spec_tag {
 	NN_SPEC_NONE = 0,
 	NN_SPEC_NAME,     /**< `--name <name>`  -- an asset store entry       */
-	NN_SPEC_ADDR,     /**< `--addr <addr> <len>` -- raw, always with a length */
 };
 
 /** Longest model name the shared parser will carry.  A board with a shorter
@@ -229,8 +226,6 @@ enum nn_spec_tag {
 struct nn_spec {
 	uint8_t  tag;                          /**< enum nn_spec_tag          */
 	char     name[NN_SPEC_NAME_MAX + 1];   /**< NN_SPEC_NAME              */
-	uint32_t addr;                         /**< NN_SPEC_ADDR              */
-	uint32_t len;                          /**< NN_SPEC_ADDR -- required  */
 };
 
 /* ---- what `nn info` prints ----------------------------------------------- */

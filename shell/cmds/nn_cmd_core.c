@@ -10,8 +10,6 @@
 
 #include <string.h>
 
-#include "cli.h"   /* cli_parse_u32 -- this firmware's own number parser */
-
 /* The scaled-integer form every fractional value in this firmware is printed
    with.  Six fraction digits, so the divisor is a million. */
 #define NN_FRAC_DIGITS 1000000.0f
@@ -147,18 +145,6 @@ int nn_spec_parse(int argc, char *const argv[], struct nn_spec *out)
 			return NN_SVC_ERR_ARG;
 		out->tag = (uint8_t)NN_SPEC_NAME;
 		return nn_spec_set_name(out, argv[1]);
-	}
-
-	if (strcmp(argv[0], "--addr") == 0) {
-		/* [!] Both operands, always.  The length is the verifier's bound. */
-		if (argc != 3 ||
-		    cli_parse_u32(argv[1], &out->addr) != 0 ||
-		    cli_parse_u32(argv[2], &out->len) != 0)
-			return NN_SVC_ERR_ARG;
-		if (out->len == 0u)
-			return NN_SVC_ERR_ARG;
-		out->tag = (uint8_t)NN_SPEC_ADDR;
-		return NN_SVC_OK;
 	}
 
 	/* Not a tag this grammar has -- distinct from a malformed operand, because

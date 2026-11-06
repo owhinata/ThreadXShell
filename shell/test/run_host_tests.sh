@@ -756,11 +756,8 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
 #   on a third, so a parser that accepted one would have to guess per board --
 #   board knowledge back inside shell/ by a quieter route.  The refusal is the
 #   assertion someone deletes to make the command friendlier.
-#
-# Links cli_parse.c for cli_parse_u32(): the grammar uses this firmware's own
-# number parser rather than growing a second one.
 gcc $CFLAGS -I "$inc" -I "$here/../cmds" -I "$core" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
-    "$here/test_nn_cmd_core.c" "$here/../cmds/nn_cmd_core.c" "$core/cli_parse.c" \
+    "$here/test_nn_cmd_core.c" "$here/../cmds/nn_cmd_core.c" \
     $LDFLAGS -o "$out/test_nn_cmd_core"
 "$out/test_nn_cmd_core"
 
@@ -849,8 +846,7 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
 # Neither half is wrong on its own, so only the joined line can be tested.  The
 # adapters are stubs (nothing is loaded); nn_cfg/ stands in for a board's
 # nn_svc_config.h with the loader on, and -D picks the sources.
-for shape in "-DNN_SVC_HAS_MODEL_NAME=1" \
-             "-DNN_SVC_HAS_MODEL_NAME=1 -DNN_SVC_HAS_MODEL_ADDR=1"; do
+for shape in "-DNN_SVC_HAS_MODEL_NAME=1"; do
     # -Wno-unused-function: the stub config has no camera or bench, so the
     # cancel shim they share is unused here and nowhere on a real board.
     # shellcheck disable=SC2086  # $shape is deliberately word-split

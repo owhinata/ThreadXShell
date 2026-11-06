@@ -13,13 +13,12 @@
 #ifndef NN_SVC_CONFIG_H
 #define NN_SVC_CONFIG_H
 
-/** A model is opened from the asset store by name, or from a raw address with a
- *  length.  Always available: this board has no compile-time model at all. */
+/** A model is opened from the asset store by name (the raw window went in
+ *  issue #196).  Always available: this board has no compile-time model at
+ *  all. */
 #define NN_SVC_HAS_MODEL_LOAD  1
-/** ...by name, which is how the asset store is addressed here... */
+/** ...by name, which is how the asset store is addressed here. */
 #define NN_SVC_HAS_MODEL_NAME  1
-/** ...or by a raw window, always with its length. */
-#define NN_SVC_HAS_MODEL_ADDR  1
 
 /** One-shot capture and infer.  The camera and the NPU are both here. */
 #define NN_SVC_HAS_CAMERA      1

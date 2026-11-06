@@ -23,9 +23,10 @@
  *     all three lines (the stub's reload asks it), and a held session with no
  *     load in flight -- a stream -- still gets the copy;
  *   - nothing is called inside the board's critical section;
- *   - the board is empty from boot, and the one tag it does not take
- *     (`--addr`) is SPEC, worded, nothing touched -- from empty and over a
- *     model (the grammar has had no slot, path or built-in tag since #196);
+ *   - the board is empty from boot, and a tag outside the board's set is
+ *     SPEC, worded, nothing touched -- from empty and over a model.  The
+ *     grammar names no such tag since issue #196 (a name is the only one), so
+ *     the out-of-set tag here is NN_SPEC_NONE, straight to the adapter;
  *   - since issue #194 the model is a blob, read by name out of the QSPI asset
  *     store (a stand-in, nn_blob_stub.c); a bad
  *     name, a name in no slot, a name in two, unreadable headers, a busy store,
@@ -223,9 +224,9 @@ int main(void)
 
 	/* A tag this board does not take, from empty: the shared SPEC refusal,
 	 * worded, refused before anything is acquired. */
-	load(NN_SPEC_ADDR, NULL);
+	load(NN_SPEC_NONE, NULL);
 	assert(res.status == NN_SVC_ERR_SPEC && state == NN_MODEL_EMPTY);
-	assert(strstr(res.detail, "it has no raw model window") != NULL);
+	assert(strstr(res.detail, "it has no such source") != NULL);
 	assert(stub.reloads == 0 && invalidations == 0 && !stub.has);
 	assert(nn_blob_stub.acquires == 0u);
 
@@ -238,9 +239,9 @@ int main(void)
 
 	/* A spec this board does not take, over a model: SPEC, worded, nothing
 	 * touched, the model kept. */
-	load(NN_SPEC_ADDR, NULL);
+	load(NN_SPEC_NONE, NULL);
 	assert(res.status == NN_SVC_ERR_SPEC && state == NN_MODEL_PREVIOUS);
-	assert(strstr(res.detail, "it has no raw model window") != NULL);
+	assert(strstr(res.detail, "it has no such source") != NULL);
 	assert(stub.reloads == 0 && stub.has);
 
 	/* A name the store could never have stored: ARG, nothing acquired. */

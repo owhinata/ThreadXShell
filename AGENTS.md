@@ -71,7 +71,7 @@
 - **status と claim disposition は別フィールドで 4 値を畳まない**（`none` / `caller` / `retryable` /
   `terminal`）。**混同は実害**で**判断できないボードは `terminal` に fail-closed**。disposition は
   保持者ではなく**呼び出し側の解放権限**である。
-- **モデル指定はタグ付きで裸の文字列は拒否**（同じ語がボードごとに別物を指す）。**`--addr` の長さは必須。**
+- **モデル指定はタグ付きで裸の文字列は拒否**（同じ語がボードごとに別物を指す）。
 - **port のアダプタは `struct cli_instance` を取らない**（印字・待ち・キャンセルは `boards/*/cmds/` から関数ポインタで下へ渡す）。
 - **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（`preview` は復活させない）。`start` は非ブロッキングで、待ちは共有コマンドの `--frames <n>` が 1 実装で持つ。
 - **[!] stream には世代がある。** 待ち手は `start` の generation を持ち、`stop` は**遷移を claim するのと

@@ -152,9 +152,6 @@ static void test_spec_accepts(void)
 	assert(parse(&s, 2, "--name", "cls", NULL) == NN_SVC_OK);
 	assert(s.tag == NN_SPEC_NAME && strcmp(s.name, "cls") == 0);
 
-	assert(parse(&s, 3, "--addr", "0x3AE81000", "164512") == NN_SVC_OK);
-	assert(s.tag == NN_SPEC_ADDR && s.addr == 0x3AE81000u && s.len == 164512u);
-
 	/* [!] THE LONGEST NAME A BOARD CAN STORE IS CARRIED WHOLE (issue #122
 	 * P10).  grove-vision-ai-v2's asset store takes 64 characters and this
 	 * limit was 31, so a legal name was refused here as a malformed operand
@@ -194,11 +191,18 @@ static void test_spec_refuses(void)
 	assert(parse(&s, 2, "--path", "", NULL) == NN_SVC_ERR_SPEC);
 	assert(parse(&s, 1, "builtin", NULL, NULL) == NN_SVC_ERR_SPEC);
 	assert(parse(&s, 2, "builtin", "extra", NULL) == NN_SVC_ERR_SPEC);
+	/* The raw window, too (Grove's alone until issue #196): well-formed, short
+	 * of its length, with a zero or a non-number length -- all SPEC, never
+	 * OK and never the ERR_ARG its old branch gave a malformed operand. */
+	assert(parse(&s, 3, "--addr", "0x3AE81000", "164512") == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 3, "--addr", "0x1", "16") == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 2, "--addr", "0x3AE81000", NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 3, "--addr", "0x3AE81000", "0") == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 3, "--addr", "0x3AE81000", "no") == NN_SVC_ERR_SPEC);
 	/* Only the exact word is a tag: a word that merely starts like one is
 	 * not, so a prefix comparison cannot hide behind the cases above. */
 	assert(parse(&s, 2, "--names", "cls", NULL) == NN_SVC_ERR_SPEC);
 	assert(parse(&s, 2, "--nam", "cls", NULL) == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 3, "--addrx", "0x3AE81000", "16") == NN_SVC_ERR_SPEC);
 
 	/* Nothing at all is a malformed invocation, not an unknown namespace. */
 	assert(parse(&s, 0, NULL, NULL, NULL) == NN_SVC_ERR_ARG);
@@ -208,14 +212,6 @@ static void test_spec_refuses(void)
 	assert(parse(&s, 1, "--name", NULL, NULL) == NN_SVC_ERR_ARG);
 	assert(parse(&s, 2, "--name", "", NULL) == NN_SVC_ERR_ARG);
 	assert(parse(&s, 3, "--name", "a", "b") == NN_SVC_ERR_ARG);
-
-	/* [!] THE RAW FORM WITHOUT ITS LENGTH IS REFUSED.  The length is the
-	 * bound the FlatBuffer verifier is given; "the rest of the window" is not
-	 * a bound and this repo forbids it.  Refusing here rather than leaving a
-	 * board to discover it keeps every board's answer the same. */
-	assert(parse(&s, 2, "--addr", "0x3AE81000", NULL) == NN_SVC_ERR_ARG);
-	assert(parse(&s, 3, "--addr", "0x3AE81000", "0") == NN_SVC_ERR_ARG);
-	assert(parse(&s, 3, "--addr", "0x3AE81000", "no") == NN_SVC_ERR_ARG);
 
 	/* A name too long to hold is refused, never truncated: a truncated name
 	   can still match a DIFFERENT entry, which is worse than not matching. */

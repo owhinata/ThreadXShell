@@ -185,7 +185,7 @@ static const struct nn_core_model_backend backend = {
 
 static const struct nn_core_model_board board = {
 	.cs_enter = cs_enter, .cs_exit = cs_exit, .backend = &backend,
-	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME) | NN_CORE_MODEL_TAG(NN_SPEC_ADDR),
+	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
 	.spec_refused = b_refused, .check_spec = b_check, .admit = b_admit,
 	.claim_take = b_claim, .claim_give = b_unclaim, .prepare = b_prepare,
 	.fetch = b_fetch, .lease_take = b_lease, .lease_give = b_unlease,
@@ -198,7 +198,7 @@ static const struct nn_core_model_board board = {
  * ever be called and the geometry's plugin copy is never touched. */
 static const struct nn_core_model_board board_nolease = {
 	.cs_enter = cs_enter, .cs_exit = cs_exit, .backend = &backend,
-	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME) | NN_CORE_MODEL_TAG(NN_SPEC_ADDR),
+	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
 	.spec_refused = b_refused, .check_spec = b_check, .admit = b_admit,
 	.claim_take = b_claim, .claim_give = b_unclaim, .prepare = b_prepare,
 	.fetch = b_fetch, .lease_take = NULL, .lease_give = NULL,
@@ -219,7 +219,7 @@ static const struct nn_core_model_backend backend_staged = {
 
 static const struct nn_core_model_board board_staged = {
 	.cs_enter = cs_enter, .cs_exit = cs_exit, .backend = &backend_staged,
-	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME) | NN_CORE_MODEL_TAG(NN_SPEC_ADDR),
+	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
 	.spec_refused = b_refused, .check_spec = b_check, .admit = b_admit,
 	.claim_take = b_claim, .claim_give = b_unclaim, .prepare = b_prepare,
 	.fetch = b_fetch, .lease_take = b_lease, .lease_give = b_unlease,
@@ -230,7 +230,7 @@ static const struct nn_core_model_board board_staged = {
 
 static const struct nn_core_model_board board_staged_nolease = {
 	.cs_enter = cs_enter, .cs_exit = cs_exit, .backend = &backend_staged,
-	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME) | NN_CORE_MODEL_TAG(NN_SPEC_ADDR),
+	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
 	.spec_refused = b_refused, .check_spec = b_check, .admit = b_admit,
 	.claim_take = b_claim, .claim_give = b_unclaim, .prepare = b_prepare,
 	.fetch = b_fetch, .lease_take = NULL, .lease_give = NULL,
@@ -500,7 +500,7 @@ int main(void)
 	     "check admit claim prepare(open) fetch lease ODD swap pstart inval "
 	     "commit geom(L) EVEN unlease unclaim");
 	reset(0);
-	load("opened from empty", NN_SPEC_ADDR, NN_SVC_OK, NN_MODEL_NEW,
+	load("opened from empty", N, NN_SVC_OK, NN_MODEL_NEW,
 	     "check admit claim prepare fetch lease ODD swap pstart inval commit "
 	     "geom(L) EVEN unlease unclaim");
 	reset(1); bare = 1;

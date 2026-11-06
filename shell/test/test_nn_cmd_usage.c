@@ -34,13 +34,8 @@
 
 /* The source list each shape must print -- written out, not rebuilt from the
  * macros, so a wrong expansion cannot agree with itself. */
-#if defined(NN_SVC_HAS_MODEL_NAME) && NN_SVC_HAS_MODEL_NAME && \
-      defined(NN_SVC_HAS_MODEL_ADDR) && NN_SVC_HAS_MODEL_ADDR
-#define SHAPE    "name + addr (grove-vision-ai-v2)"
-#define SOURCES  "<--name <name> | --addr <addr> <len>>"
-#define A_SOURCE "--name person"
-#elif defined(NN_SVC_HAS_MODEL_NAME) && NN_SVC_HAS_MODEL_NAME
-#define SHAPE    "name (wio-lite-ai, f746g-disco)"
+#if defined(NN_SVC_HAS_MODEL_NAME) && NN_SVC_HAS_MODEL_NAME
+#define SHAPE    "name (all three boards)"
 #define SOURCES  "<--name <name>>"
 #define A_SOURCE "--name person"
 #else
@@ -194,6 +189,8 @@ int main(void)
 			{ "nn model load --slot 5\r",  "'--slot' is not a model source" },
 			{ "nn model load --path x\r",  "'--path' is not a model source" },
 			{ "nn model load builtin\r",   "'builtin' is not a model source" },
+			{ "nn model load --addr 0x3A201000 16\r",
+			  "'--addr' is not a model source" },
 		};
 		unsigned i;
 
@@ -204,7 +201,8 @@ int main(void)
 		}
 		run_line("nn model load\r");
 		expect("the usage offers no removed source",
-		       !has("--slot") && !has("--path") && !has("builtin"));
+		       !has("--slot") && !has("--path") && !has("builtin") &&
+		       !has("--addr"));
 	}
 
 	/*

@@ -76,9 +76,6 @@
 #ifndef NN_SVC_HAS_MODEL_NAME
 #define NN_SVC_HAS_MODEL_NAME    0
 #endif
-#ifndef NN_SVC_HAS_MODEL_ADDR
-#define NN_SVC_HAS_MODEL_ADDR    0
-#endif
 
 /* Longest shape string worth carrying: four dimensions of up to ten digits, the
    separators, and the terminator. */
@@ -326,31 +323,13 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
  * [!] THE SOURCES LISTED ARE THIS BOARD'S (issue #122 P9).  The usage used to
  * list every tag on every board, while `help` is otherwise an inventory of
  * the board it runs on -- so an operator reading it was offered a source the
- * board did not have and learned otherwise only from the refusal.  The PARSER
- * still takes both tags (`--name`, `--addr`): a tag this board lacks is refused
- * by the board in its own words, and any other word by the grammar.
- *
- * Each alternative carries the separator in front of it exactly when an
- * earlier one is present, so the list reads "a | b" with no stray bar.
+ * board did not have and learned otherwise only from the refusal.  One tag is
+ * left (`--name`, issue #196); any other word is refused by the grammar.
  */
-#if NN_SVC_HAS_MODEL_NAME
-#define NN_SRC_NAME_ "--name <name>"
-#else
-#define NN_SRC_NAME_ ""
-#endif
-#if NN_SVC_HAS_MODEL_ADDR
-#if NN_SVC_HAS_MODEL_NAME
-#define NN_SRC_ADDR_ " | --addr <addr> <len>"
-#else
-#define NN_SRC_ADDR_ "--addr <addr> <len>"
-#endif
-#else
-#define NN_SRC_ADDR_ ""
-#endif
-#if !(NN_SVC_HAS_MODEL_NAME || NN_SVC_HAS_MODEL_ADDR)
+#if !NN_SVC_HAS_MODEL_NAME
 #error "NN_SVC_HAS_MODEL_LOAD with no model source: say which tags this board takes"
 #endif
-#define NN_MODEL_SOURCES_ NN_SRC_NAME_ NN_SRC_ADDR_
+#define NN_MODEL_SOURCES_ "--name <name>"
 
 /* [!] THREE SPELLINGS, BECAUSE THERE ARE THREE CONSUMERS.  A .usage field
  * carries the ARGUMENT SPELLING only, and the dispatcher prints "usage: <command

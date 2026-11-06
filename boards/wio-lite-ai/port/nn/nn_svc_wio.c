@@ -463,9 +463,7 @@ static void nn_life_spec_refused(struct nn_core_model_job *j)
 	if (spec == NULL)
 		return;
 	nn_detail_set("this board loads a model from a NOR asset by name "
-	              "(--name); it has no %s",
-	              spec->tag == NN_SPEC_ADDR ? "raw model window"
-	                                        : "such source");
+	              "(--name); it has no such source");
 }
 
 /* The name's own rules, before anything is acquired: a name the store could

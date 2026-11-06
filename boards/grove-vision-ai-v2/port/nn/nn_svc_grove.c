@@ -89,7 +89,6 @@ _Static_assert(NN_SPEC_NAME_MAX >= BLOB_NAME_MAX,
                "nn model load --name cannot carry this board's longest blob name");
 _Static_assert(NN_SVC_MODEL_MAX >= BLOB_NAME_MAX,
                "nn info would truncate this board's longest blob name");
-static int      nn_model_slot;      /**< -1 for the raw form                  */
 
 /** The geometry the last capture used.  Kept because a box has to be mapped
  *  back through the SAME transform the overlay draws with, or the console and
@@ -330,7 +329,7 @@ void nn_svc_info(struct nn_svc_info *out)
 	uint32_t used_snap;
 	char     from_snap[BLOB_NAME_MAX + 1];
 	/* The model's display name is the backend's one copy (svc/nn/nn.h's
-	 * nn_model_name(): the blob name, or "(raw)" for --addr; issue #169).
+	 * nn_model_name(): the blob name; issue #169).
 	 * Taken before any critical section: the first call may open the
 	 * singleton. */
 	struct nn_model *m = nn_mh();
@@ -626,9 +625,9 @@ const struct plugin_bindings plugin_board_bindings = {
  * [!] PLAIN DATA, AND NOTHING HERE IS EVER CALLED.  struct plugin_view carries
  * integer offsets, not function pointers.
  */
-/* "slot 4294967295, blob '" + the longest name + "'" must survive whole.  Only
- * a blob can be a container here: a raw `--addr` window is always a bare model
- * (nn_life_fetch()), so it never has claims and no "from" is written for it. */
+/* "slot 4294967295, blob '" + the longest name + "'" must survive whole.  Every
+ * model here is a blob (the raw window went in issue #196); a bare one has no
+ * claims and no "from" is written for it. */
 _Static_assert(23u + BLOB_NAME_MAX + 1u < PLUGIN_CLAIMS_FROM_MAX,
                "a container's slot and blob name would be cut on `nn info`");
 
@@ -660,7 +659,7 @@ struct nn_resolved {
 	uint32_t addr, len;   /**< the MODEL: what nn_model_reload() is given    */
 	uint32_t src;         /**< the container's first byte, or 0 for a bare
 	                       *   model -- where the plugin image is read from  */
-	int      slot;        /**< -1 for the raw form                           */
+	int      slot;        /**< the blob's slot; -1 until one is resolved    */
 };
 
 /*
@@ -795,7 +794,7 @@ static struct nn_core_model nn_model_life;
  *  adapter's until commit(). */
 struct nn_grove_job {
 	struct nn_resolved r;
-	const char        *name;   /**< NULL for the raw form */
+	const char        *name;   /**< the blob name, from the spec */
 };
 
 static int nn_life_has_model(void)
@@ -843,8 +842,8 @@ static int nn_life_swap(struct nn_core_model_job *j, int *model_after)
 	/* Open the singleton first (the first load does); if it could not be,
 	 * nn_model_reload() refuses with NN_ERR_STATE itself and changes nothing. */
 	(void)nn_mh();
-	rc = nn_model_reload((const void *)(uintptr_t)r->addr, r->len,
-	                     (g->name != NULL) ? g->name : "(raw)", &after);
+	rc = nn_model_reload((const void *)(uintptr_t)r->addr, r->len, g->name,
+	                     &after);
 	if (rc == 0) {
 		*model_after = 1;
 		return NN_SVC_OK;
@@ -879,8 +878,8 @@ static void nn_life_spec_refused(struct nn_core_model_job *j)
 
 	if (spec == NULL)
 		return;
-	nn_detail_set("this board loads a model by name or by --addr; it has "
-	              "no such source");
+	nn_detail_set("this board loads a model by name; it has no such "
+	              "source");
 }
 
 static int nn_life_check_spec(struct nn_core_model_job *j)
@@ -889,22 +888,16 @@ static int nn_life_check_spec(struct nn_core_model_job *j)
 	const struct nn_spec *spec = j->spec;
 	struct nn_grove_job *g = j->board;
 
-	if (spec->tag == NN_SPEC_NAME) {
-		if (blob_name_check(spec->name, NULL) != BLOB_NAME_OK) {
-			nn_detail_set("'%s' is not a blob name (%s)", spec->name,
-			              blob_name_verdict_name(
-			                      blob_name_check(spec->name, NULL)));
-			return NN_SVC_ERR_ARG;
-		}
-		g->name = spec->name;
-		return NN_SVC_OK;
+	/* A name is the only tag this board takes (.tags), so the shared order
+	 * brings nothing else here.  The window, length and alignment of what the
+	 * name resolves to stay the backend's to refuse (issue #169). */
+	if (blob_name_check(spec->name, NULL) != BLOB_NAME_OK) {
+		nn_detail_set("'%s' is not a blob name (%s)", spec->name,
+		              blob_name_verdict_name(
+		                      blob_name_check(spec->name, NULL)));
+		return NN_SVC_ERR_ARG;
 	}
-	/* [!] THE RANGE AND THE LENGTH ARE THE BACKEND'S TO REFUSE (issue #169): its
-	 * window -> length checks are the one statement of them, and a second copy
-	 * here could only disagree.  The refusal reaches the operator as the
-	 * backend's code with the address and length beside it (nn_life_swap()). */
-	g->r.addr = spec->addr;
-	g->r.len  = spec->len;
+	g->name = spec->name;
 	return NN_SVC_OK;
 }
 
@@ -937,8 +930,7 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 {
 	struct nn_grove_job *g = j->board;
 
-	if (g->name != NULL &&
-	    nn_resolve_blob(j->res, npu_hw_flash_lease(), g->name, &g->r) != 0)
+	if (nn_resolve_blob(j->res, npu_hw_flash_lease(), g->name, &g->r) != 0)
 		return NN_SVC_ERR_ARG;
 	j->bare = (g->r.src == 0u);
 	return NN_SVC_OK;
@@ -1016,7 +1008,6 @@ static void nn_life_invalidate(void)
 static void nn_life_forget(void)
 {
 	nn_open_done  = 0u;
-	nn_model_slot = -1;
 	nn_claims_set(NULL);
 }
 
@@ -1029,7 +1020,6 @@ static void nn_life_commit(struct nn_core_model_job *j)
 	const struct nn_grove_job *g = j->board;
 
 	nn_open_done  = 1u;
-	nn_model_slot = g->r.slot;
 	nn_claims_set((g->r.src != 0u) ? &nn_claims_next : NULL);
 	/* The name is not copied here: the backend took it with the model
 	 * (nn_life_swap()), and nn_model_name() is its one copy. */
@@ -1049,8 +1039,7 @@ static const struct nn_core_model_board nn_life_board = {
 	.cs_enter      = nn_core_cs_enter,
 	.cs_exit       = nn_core_cs_exit,
 	.backend       = &nn_life_backend,
-	.tags          = NN_CORE_MODEL_TAG(NN_SPEC_NAME) |
-	                 NN_CORE_MODEL_TAG(NN_SPEC_ADDR),
+	.tags          = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
 	.spec_refused  = nn_life_spec_refused,
 	.check_spec    = nn_life_check_spec,
 	.admit         = NULL,   /* a stream holds the gate: the claim refuses */

@@ -418,6 +418,16 @@ current objects, and fails the suite if either step fails. Without a tree (or
 without the pinned toolchain) it prints a `run_fixture_tests: SKIPPED` line to
 stderr and the rest of the suite still runs.
 
+Since issue #204 `shell/test/run_host_tests.sh` also checks that the fixtures
+actually ran. It looks for the same tree and the pinned toolchain itself (not
+at the board's SKIPPED line), and when both are there it requires exactly one
+`run_fixture_tests: OK (N fixtures)` line in this board's output, with N equal
+to the count it declares (`grove_fixture_count`, 25). A call removed from
+`test/host_tests.sh`, or a fixture removed from the runner, now fails the suite
+instead of passing quietly. Adding a fixture fails it too until the declared
+count is changed in the same commit: equality, not a floor, so a forgotten
+update cannot hide a later removal.
+
 `seam_probe` is a build target, not an artifact -- nothing flashes it.  It
 exists because M-G3a does not link the camera archives, so every wrapper is
 garbage-collected out of `shell` and the claim would otherwise go unchecked

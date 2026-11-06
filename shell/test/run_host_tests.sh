@@ -44,6 +44,13 @@ trap 'rm -rf "$out"' EXIT
 boards=""
 if [ $# -gt 0 ]; then
     for b in "$@"; do
+        # A tab-completed "grove-vision-ai-v2/" names the same board.  Without
+        # this the name still passed the directory test below but matched no
+        # per-board rule further down (issue #204).
+        b=${b%/}
+        case "$b" in
+            ""|*/*) echo "run_host_tests: '$b' is not a board name" >&2; exit 1 ;;
+        esac
         if [ ! -d "$repo/boards/$b" ]; then
             echo "run_host_tests: no such board '$b'; available:" >&2
             ls "$repo/boards" >&2
@@ -1134,11 +1141,66 @@ export HOST_TEST_SVC="$svc"
 export HOST_TEST_BACKEND="$backend"
 export HOST_TEST_SHELL_TEST="$here"
 
+# issue #204 -- a board's negative tests run inside that board's host_tests.sh,
+# and a call that is deleted (or turned into `:`) there prints nothing and fails
+# nothing: the suite still ends in "host tests passed".  For Grove's linker-gate
+# fixtures (boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py, the
+# only place the output-vocabulary gate's negative tests run) this runner, not
+# the board script, decides whether they must have run, and then requires the
+# fixture runner's own last line "run_fixture_tests: OK (N fixtures)" exactly
+# once with N equal to the count declared here.
+#
+# "Must have run" is decided HERE from the same two facts the board script
+# looks at -- a configured tree (GROVE_BUILD_DIR, or build/grove-vision-ai-v2)
+# and the pinned toolchain under tools/ -- and not from the board's SKIPPED
+# line, so a board script that skipped when it should not have is caught too.
+# Without either, nothing is required and the run is as before.
+#
+# The count is the number of fixtures the runner has (main a32a712): F1-F3
+# for check_timer_seam.py (3), P0-P5 for check_placement_budget.py (6), V0-V4
+# for check_output_vocabulary.py (5) and Q0-Q10 for check_nor_seam.py (11) --
+# 25.  [!] It is compared for equality, not as a floor: with a floor, a fixture
+# added without raising it would let a later one be dropped unnoticed.  So
+# adding or removing a fixture fails here until this number is changed in the
+# same commit, which is the point -- the change shows up in the diff.
+grove_fixture_count=25
+grove_fixtures_expected() {
+    _gb="${GROVE_BUILD_DIR:-$repo/build/grove-vision-ai-v2}"
+    _gcc=$(ls -d "$repo"/tools/arm-gnu-toolchain-*/bin/arm-none-eabi-gcc \
+               2>/dev/null | tail -1)
+    [ -f "$_gb/build.ninja" ] && [ -n "$_gcc" ] && [ -x "$_gcc" ]
+}
+grove_fixtures_check() {  # <board log>
+    _hits=$(grep -c '^run_fixture_tests: OK (' "$1" || true)
+    _n=$(sed -n 's/^run_fixture_tests: OK (\([0-9][0-9]*\) fixtures)$/\1/p' "$1")
+    if [ "$_hits" -ne 1 ] || [ -z "$_n" ] || [ "$_n" -ne "$grove_fixture_count" ]; then
+        echo "run_host_tests: grove-vision-ai-v2 has a configured build tree" \
+             "(${GROVE_BUILD_DIR:-$repo/build/grove-vision-ai-v2}) and the" \
+             "pinned toolchain, so its board tests must end the linker-gate" \
+             "fixtures with one 'run_fixture_tests: OK (N fixtures)' line," \
+             "N = $grove_fixture_count (grove_fixture_count in this" \
+             "script; change it with the fixture list); found $_hits such" \
+             "line(s), N='${_n:-none}'" >&2
+        exit 1
+    fi
+    echo "--- board tests: grove-vision-ai-v2 ran $_n linker-gate fixtures" \
+         "(declared $grove_fixture_count)"
+}
+
 for b in $boards; do
     script="$repo/boards/$b/test/host_tests.sh"
     if [ -f "$script" ]; then
         echo "--- board tests: $b"
-        sh "$script"
+        # stdout is kept to be read back; the exit code travels in a file
+        # because a pipeline's status is tee's, not the board script's.
+        log="$out/board_tests_$b.log"
+        { brc=0; sh "$script" || brc=$?; echo "$brc" > "$log.rc"; } \
+            | tee "$log"
+        brc=$(cat "$log.rc")
+        [ "$brc" -eq 0 ] || exit "$brc"
+        if [ "$b" = grove-vision-ai-v2 ] && grove_fixtures_expected; then
+            grove_fixtures_check "$log"
+        fi
     else
         echo "--- board tests: $b (none)"
     fi

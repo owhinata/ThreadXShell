@@ -66,7 +66,7 @@ gcc $CFLAGS \
 # against a 16 MB array standing in for the NOR (nor_flash.h's calls are defined
 # by the test, which counts and can fail them) and a shim of the three PRIMASK
 # intrinsics it takes from the HAL (blob_shim/).  The slot erase `blob write`
-# runs, the header-only erase, the name lookup of `nn model load --name`, the
+# runs, the header-only erase, the name lookup of `nn model load <name>`, the
 # reads' range checks and the busy flag -- the cases a console cannot stage
 # without spending flash cycles.
 gcc $CFLAGS -I "$here/blob_shim" \

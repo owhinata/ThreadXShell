@@ -254,7 +254,7 @@ RECEIPT_WANT = {
   in picocom:    C-a C-s, then the path above
   afterwards:    `blob list` must show crc32 {crc} -- that is how you know
                  the bytes that were built are the bytes that were stored.
-  then:          nn model load --name blazeface
+  then:          nn model load blazeface
 
 """,
     ("cifar10", "1"): """
@@ -268,7 +268,7 @@ RECEIPT_WANT = {
   in picocom:    C-a C-s, then the path above
   afterwards:    `blob list` must show crc32 {crc} -- that is how you know
                  the bytes that were built are the bytes that were stored.
-  then:          nn model load --name cifar10
+  then:          nn model load cifar10
 
 """,
 }

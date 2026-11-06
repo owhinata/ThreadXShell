@@ -18,7 +18,7 @@
  * nn vtable load_region()/reload() path and cmd_nn's `nn model load`.
  *
  * Loaded only: there is NO built-in model.  open() returns an empty handle (0
- * in/out); `nn model load --name <blob>` installs a model (a blob longer than a
+ * in/out); `nn model load <blob>` installs a model (a blob longer than a
  * 448 KB slot is refused by the adapter before it is read, issue #194 D4);
  * `nn model unload` (release())
  * empties it again.  `nn model load builtin` is refused (by the shared grammar

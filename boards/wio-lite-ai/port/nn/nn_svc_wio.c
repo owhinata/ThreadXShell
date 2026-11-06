@@ -242,9 +242,10 @@ static enum plugin_claims_seen nn_claims_snapshot(struct plugin_claims *out,
  * a truncated one can read as a different, equally legal, name. */
 _Static_assert(NN_SVC_MODEL_MAX >= BLOB_NAME_MAX,
                "nn info would truncate this board's longest asset name");
-/* ...and the parser's copy (`--name`), which is what the lookup compares. */
+/* ...and the parser's copy (`nn model load <name>`), which is what the lookup
+ * compares. */
 _Static_assert(NN_SPEC_NAME_MAX >= BLOB_NAME_MAX,
-               "nn model load --name cannot carry this board's longest blob name");
+               "nn model load <name> cannot carry this board's longest blob name");
 
 /*
  * This board's stop codes, and nothing else (issue #99).
@@ -453,18 +454,6 @@ static const struct nn_core_model_backend nn_life_backend = {
 	.used      = NULL,     /* `nn info` asks the open model */
 	.staging_is_open = nn_model_staging_is_open,
 };
-
-/* Every tag but a name, refused before anything is acquired. */
-static void nn_life_spec_refused(struct nn_core_model_job *j)
-{
-	struct nn_op_result *res = j->res;
-	const struct nn_spec *spec = j->spec;
-
-	if (spec == NULL)
-		return;
-	nn_detail_set("this board loads a model from a NOR asset by name "
-	              "(--name); it has no such source");
-}
 
 /* The name's own rules, before anything is acquired: a name the store could
  * never have stored is not looked for (the same rules `blob write` applied). */
@@ -854,8 +843,6 @@ static const struct nn_core_model_board nn_life_board = {
 	.cs_enter      = nn_core_cs_enter,
 	.cs_exit       = nn_core_cs_exit,
 	.backend       = &nn_life_backend,
-	.tags          = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
-	.spec_refused  = nn_life_spec_refused,
 	.check_spec    = nn_life_check_spec,
 	.admit         = nn_life_admit,
 	.claim_take    = nn_life_claim_take,
@@ -1439,7 +1426,7 @@ static const char *nn_nncam_strerror(int rc)
 	case NNCAM_ERR_MODEL:
 		return NN_SVC_DETAIL_LIT(
 			"no model loaded, or it has no usable input "
-			"tensor (`blob list`, then `nn model load --name <name>`)");
+			"tensor (`blob list`, then `nn model load <name>`)");
 	case NNCAM_ERR_SESSION:
 		return NN_SVC_DETAIL_LIT(
 			"the NN session is busy (`nn bench` or "

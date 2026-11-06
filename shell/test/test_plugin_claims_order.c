@@ -195,7 +195,6 @@ static void b_commit(struct nn_core_model_job *j)
 
 static const struct nn_core_model_board board = {
 	.cs_enter = cs_enter, .cs_exit = cs_exit, .backend = &backend,
-	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
 	.claim_take = b_claim, .claim_give = b_unclaim,
 	.fetch = b_fetch, .lease_take = b_lease, .lease_give = b_unlease,
 	.plugin_start = b_pstart, .plugin_unload = b_punload,
@@ -222,7 +221,6 @@ static void load(const char *what, int id, int container)
 
 	phase = what;
 	memset(&spec, 0, sizeof spec);
-	spec.tag = NN_SPEC_NAME;
 	snprintf(spec.name, sizeof spec.name, "m");
 	memset(&t, 0, sizeof t);
 	t.m.id = id;

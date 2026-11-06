@@ -11,7 +11,7 @@
  * that arrives from the PC over YMODEM.  Until issue #194 this board read its
  * models from files on the microSD and the QSPI NOR was a FileX-on-LevelX
  * volume; the store is the same shape as wio-lite-ai's (src/blob.h there), so
- * `blob write` and `nn model load --name` mean the same thing on both.
+ * `blob write` and `nn model load <name>` mean the same thing on both.
  *
  *   0x000000 .. 0x100000   reserved (1 MB, no slot; `qspi erase/test` reach it)
  *   0x100000 .. 0x800000   THIS: 13 slots in three sizes (src/blob_slots.c)
@@ -37,7 +37,7 @@
  * each other, with the busy flag below: two consoles (the VCP and telnet), a
  * background job, `qspi erase` / `qspi test` (cmds/cmd_qspi.c takes the flag
  * too), `blob write` / `blob erase` (src/blob_writer.c's reservation), and
- * `nn model load --name` (port/nn/nn_svc_f746_model.c, from the name lookup
+ * `nn model load <name>` (port/nn/nn_svc_f746_model.c, from the name lookup
  * to the end of the payload read).  The flag is taken by the CALLER for the
  * span only it knows.
  *
@@ -175,7 +175,7 @@ int blob_find(const char *name, unsigned *slot, struct blob_info *out,
  */
 #define BLOB_BUSY_HOLDERS \
 	"a `blob write` / `blob erase`, a `qspi erase` / `qspi test` or an `nn " \
-	"model load --name`"
+	"model load <name>`"
 
 /* ---- mutating side (all of it under blob_busy_acquire) -------------------- */
 

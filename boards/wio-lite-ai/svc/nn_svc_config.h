@@ -21,11 +21,6 @@
  */
 #if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_KV
 #define NN_SVC_HAS_MODEL_LOAD  1
-/** The one source `nn model load` lists here: a NOR asset by the name it was
- *  stored under (`blob write <name>`, issue #193).  A slot number is not
- *  offered: the index is a display ordinal of the table, and the name is what
- *  the store keys on. */
-#define NN_SVC_HAS_MODEL_NAME  1
 #endif
 
 /** One-shot capture and infer, from the camera's band stream. */

@@ -71,7 +71,7 @@
 - **status と claim disposition は別フィールドで 4 値を畳まない**（`none` / `caller` / `retryable` /
   `terminal`）。**混同は実害**で**判断できないボードは `terminal` に fail-closed**。disposition は
   保持者ではなく**呼び出し側の解放権限**である。
-- **モデル指定はタグ付きで裸の文字列は拒否**（同じ語がボードごとに別物を指す）。
+- **モデルは blob の名前 1 語で指し、別の指定（`--name` / `--addr` など）を戻さない**（3 ボードとも同じ `svc/blob` の名前の規則で引くので語の意味がボードで変わらない）。**`-` で始まる語は名前ではない**（`nn model load` は「名前だけ書く」で拒否、`blob write` も作らない。#196）。
 - **port のアダプタは `struct cli_instance` を取らない**（印字・待ち・キャンセルは `boards/*/cmds/` から関数ポインタで下へ渡す）。
 - **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（`preview` は復活させない）。`start` は非ブロッキングで、待ちは共有コマンドの `--frames <n>` が 1 実装で持つ。
 - **[!] stream には世代がある。** 待ち手は `start` の generation を持ち、`stop` は**遷移を claim するのと
@@ -248,7 +248,7 @@ board README が正。
   整列 → identifier → verifier → 走査 → walk → command stream の照合**（#184: DMA / 演算の届く範囲は base pointer のテンソルの内側・data 付きへ書かない・内部宛ては SHRAM 末尾 2 KB だけ、SHRAM は `npu_hw.h` の 1 箇所で init が読み戻す）。**長さには下限も要り生アドレス形にも必須**、**limits と load の walk は全ボード共通の `nn_tflm_model_check.h`（walk は長さを要素より先に見て 次元の値は大きさの上限と op 規則の比較でだけ読む、#178。量子化の長さ（scale ≤ 4096・zp は無し/1/同長・per-channel の qd は rank 内（rank 0/1 は < 6）・op 参照の総和 ≤ 65536）も、#180。buffer index は範囲内・offline plan は件数語を全 subgraph のテンソル総数と照合し offset は -1 か 0 以上、#181。全テンソルの型は大きさのある型・data 付き定数は shape の積 x 要素サイズと buffer 長の等号・書かれるテンソル（op 出力・subgraph 0 の I/O）に data 不可、#183。登録 op は定数を自分の形の内側で読む: conv / dw / FC の filter・bias の数と型、索引テンソル、broadcast / concat の形。規則は op 表から、#185。出力の枠: 負の次元なし・各テンソルの大きさは int32 内・和は 2^30 以下・offline offset は 2^30 未満、単項の要素数・PAD / TRANSPOSE / MEAN の形・conv / dw / pool の H・W の式、#188）、
   I/O 規則は `nn_ethosu_io.h` の 1 箇所でホストゲートと共有**）。**ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ
   最後 / 対象は**入力テンソル 0** / `is_variable()` は拒否 / payload の総和 <= モデル長を歩く前に課金・入力 1..n の -1 拒否、#179。入力 2..n に data 不可、#183）。
-- **[!] `nn model load --name` はリースを切らさない**（`npu_hw_init()` 先 → 走査 → CRC → `nn_model_reload()` → plugin、**残らない失敗は必ず backend の release の後に `npu_hw_deinit()`**）。
+- **[!] `nn model load <name>` はリースを切らさない**（`npu_hw_init()` 先 → 走査 → CRC → `nn_model_reload()` → plugin、**残らない失敗は必ず backend の release の後に `npu_hw_deinit()`**）。
   候補は **VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホスト側の `verify_vela_model` を外さない**（**書込みの後**に走る。**C++ 不在は fail-closed**）。
 - **[!] gate の外から plugin に入るコンソール呼び出し（`nn thresh` / `nn dets`）は数に入ってから lease を取り、load/unload はその数が 0 でなければ BUSY**（数の判定は claim と同じクリティカルセクション、`nn_param_calls.c`。数は待たず、lease は有界に待つ）。
 - **[!] アリーナのキャッシュ保守は「範囲ごと」にしない。** 潰すのは **`ethosu_invalidate_dcache()`

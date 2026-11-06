@@ -80,7 +80,7 @@ extern "C" {
 #define NN_SVC_OK              0
 #define NN_SVC_ERR_ARG      (-70)  /**< a null pointer or an out-of-range count  */
 #define NN_SVC_ERR_NOSUP    (-71)  /**< this board does not implement it at all  */
-#define NN_SVC_ERR_SPEC     (-72)  /**< the spec tag is not one this board takes */
+#define NN_SVC_ERR_SPEC     (-72)  /**< an option word the grammar lacks     */
 #define NN_SVC_ERR_STATE    (-73)  /**< no model is active, or one already is    */
 #define NN_SVC_ERR_BUSY     (-74)  /**< a transient claim is held elsewhere      */
 #define NN_SVC_ERR_CANCEL   (-75)  /**< the operator interrupted it              */
@@ -193,23 +193,6 @@ struct nn_op_result {
 
 /* ---- pointing a load at something ---------------------------------------- */
 
-/**
- * How a model is named.
- *
- * [!] TAGGED, NOT A BARE STRING.  A shared parser given one string would
- * have to guess per board what it names, which is board knowledge in shell/ by
- * another route.  Spelling the tag makes the grammar decidable where it is
- * parsed, and lets a board refuse a namespace it does not have instead of
- * pretending to implement it.  The slot, path, built-in and raw-window tags
- * are gone (issue #196): no board took the first three after issues #193 and
- * #194, and the raw window was Grove's alone.  A model's length now always
- * comes from the store that holds it.
- */
-enum nn_spec_tag {
-	NN_SPEC_NONE = 0,
-	NN_SPEC_NAME,     /**< `--name <name>`  -- an asset store entry       */
-};
-
 /** Longest model name the shared parser will carry.  A board with a shorter
  *  limit of its own refuses the overlong ones it cannot hold; this is only the
  *  bound on what shell/ is willing to copy.
@@ -220,12 +203,18 @@ enum nn_spec_tag {
  *  Each board asserts its own limit against this one. */
 #define NN_SPEC_NAME_MAX 64
 
-/** Where a load is pointed.  Filled by the shared parser before ANY acquisition
- *  or hardware access, so that an unsupported tag is refused while nothing is
- *  held (status NN_SVC_ERR_SPEC, claim NN_CLAIM_NONE). */
+/**
+ * Where a load is pointed: a blob name, one word (issue #196).
+ *
+ * [!] ONE MEANING ON EVERY BOARD.  All three look the word up with the same
+ * svc/blob name rules, so it is not board knowledge in shell/ any more -- which
+ * is what the tagged forms (`--name` / `--slot` / `--path` / `builtin` /
+ * `--addr`) existed to avoid, and why none of them comes back.  A word that
+ * starts with '-' is not a name; the shared parser refuses it (NN_SVC_ERR_SPEC)
+ * before ANY acquisition or hardware access, and no board sees it.
+ */
 struct nn_spec {
-	uint8_t  tag;                          /**< enum nn_spec_tag          */
-	char     name[NN_SPEC_NAME_MAX + 1];   /**< NN_SPEC_NAME              */
+	char     name[NN_SPEC_NAME_MAX + 1];   /**< NUL-terminated, never cut */
 };
 
 /* ---- what `nn info` prints ----------------------------------------------- */

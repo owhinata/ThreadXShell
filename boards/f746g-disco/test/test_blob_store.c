@@ -17,7 +17,7 @@
  *      subsectors only where a range does not cover a whole sector), and what
  *      it reports when the operator cancels or an erase fails part way;
  *   2. blob_erase_header(), which must touch the header subsector only;
- *   3. blob_find(), the lookup `nn model load --name` resolves with;
+ *   3. blob_find(), the lookup `nn model load <name>` resolves with;
  *   4. the range checks of blob_stat(), blob_read() and blob_verify(), and that
  *      blob_read() never asks the driver for more than BLOB_READ_CHUNK at once;
  *   5. the busy flag, taken and given back with interrupts masked.

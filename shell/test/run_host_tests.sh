@@ -751,13 +751,14 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
 #   quantisation scale >= 1, which output tensors routinely have, and plausible
 #   enough either way that nobody noticed by reading it;
 #
-#   the model-source grammar, whose whole point is that a BARE string is refused.
-#   The same word means a blob name on one board, a path on another and nothing
-#   on a third, so a parser that accepted one would have to guess per board --
-#   board knowledge back inside shell/ by a quieter route.  The refusal is the
-#   assertion someone deletes to make the command friendlier.
+#   the model-name grammar (issue #196): one word, the blob name, on every board;
+#   a first word that starts with '-' is an option and is refused, whatever
+#   follows (every old tagged form lands there); a name is never cut.  Linked
+#   with svc/blob/blob_state.c so the parser's '-' rule is compared with the
+#   store's, which the parser does not call.
 gcc $CFLAGS -I "$inc" -I "$here/../cmds" -I "$core" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
     "$here/test_nn_cmd_core.c" "$here/../cmds/nn_cmd_core.c" \
+    "$svc/blob/blob_state.c" "$svc/crc32.c" \
     $LDFLAGS -o "$out/test_nn_cmd_core"
 "$out/test_nn_cmd_core"
 
@@ -839,28 +840,25 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
 "$out/test_nn_detail_tables"
 
 # issue #122 -- what `nn model load` prints on a wrong invocation, through the REAL
-# dispatcher and the REAL shell/cmds/cmd_nn.c, once per source set a board
-# declares.  The line is joined from two halves -- the dispatcher's command path
-# and the command's argument spelling -- and it read "usage: nn model load load
-# <...>" on every board because the parent and the leaf shared one spelling.
-# Neither half is wrong on its own, so only the joined line can be tested.  The
-# adapters are stubs (nothing is loaded); nn_cfg/ stands in for a board's
-# nn_svc_config.h with the loader on, and -D picks the sources.
-for shape in "-DNN_SVC_HAS_MODEL_NAME=1"; do
-    # -Wno-unused-function: the stub config has no camera or bench, so the
-    # cancel shim they share is unused here and nowhere on a real board.
-    # shellcheck disable=SC2086  # $shape is deliberately word-split
-    gcc $CFLAGS -Wno-unused-function -DCLI_USE_COLOR=0 $shape \
-        $glue_inc -I "$here/shim" -I "$here/nn_cfg" -I "$inc" -I "$core" \
-        -I "$here/../cmds" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
-        "$here/test_nn_cmd_usage.c" "$here/../cmds/cmd_nn.c" \
-        "$here/../cmds/nn_cmd_core.c" \
-        "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
-        "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
-        $glue \
-        $LDFLAGS -o "$out/test_nn_cmd_usage"
-    "$out/test_nn_cmd_usage"
-done
+# dispatcher and the REAL shell/cmds/cmd_nn.c.  The line is joined from two
+# halves -- the dispatcher's command path and the command's argument spelling --
+# and it read "usage: nn model load load <...>" on every board because the parent
+# and the leaf shared one spelling.  Neither half is wrong on its own, so only the
+# joined line can be tested.  The adapters are stubs (nothing is loaded); nn_cfg/
+# stands in for a board's nn_svc_config.h with the loader on.  One shape since
+# issue #196: every board names the model the same way.
+# -Wno-unused-function: the stub config has no camera or bench, so the cancel
+# shim they share is unused here and nowhere on a real board.
+gcc $CFLAGS -Wno-unused-function -DCLI_USE_COLOR=0 \
+    $glue_inc -I "$here/shim" -I "$here/nn_cfg" -I "$inc" -I "$core" \
+    -I "$here/../cmds" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
+    "$here/test_nn_cmd_usage.c" "$here/../cmds/cmd_nn.c" \
+    "$here/../cmds/nn_cmd_core.c" \
+    "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
+    "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
+    $glue \
+    $LDFLAGS -o "$out/test_nn_cmd_usage"
+"$out/test_nn_cmd_usage"
 
 # issue #142 review / #143 -- which stream a stop waits for (svc/camera/cam_gen.h).  A
 # `camera stream stop &` (wio) or a `camera off` (f746, wio) below a console that

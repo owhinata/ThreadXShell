@@ -135,21 +135,22 @@ int nn_spec_parse(int argc, char *const argv[], struct nn_spec *out)
 		return NN_SVC_ERR_ARG;
 
 	memset(out, 0, sizeof(*out));
-	out->tag = (uint8_t)NN_SPEC_NONE;
 
-	if (argc < 1)
+	if (argc < 1 || argv[0] == NULL)
 		return NN_SVC_ERR_ARG;
 
-	if (strcmp(argv[0], "--name") == 0) {
-		if (argc != 2)
-			return NN_SVC_ERR_ARG;
-		out->tag = (uint8_t)NN_SPEC_NAME;
-		return nn_spec_set_name(out, argv[1]);
-	}
-
-	/* Not a tag this grammar has -- distinct from a malformed operand, because
-	   the two send a reader to different places. */
-	return NN_SVC_ERR_SPEC;
+	/* [!] THE FIRST WORD FIRST, WHATEVER FOLLOWS IT.  A word that starts with
+	 * '-' is an option, and this grammar has none -- so `--name x`, `--addr
+	 * a len` and `-foo` all get the same answer, and it is ERR_SPEC rather
+	 * than the ERR_ARG a word count would give: the reader is sent to "write
+	 * the name alone", not to the usage.  The rule is the parser's own and it
+	 * does not call blob_name_check(): a build with no blob store still links
+	 * this file.  shell/test/test_nn_cmd_core.c checks the two agree. */
+	if (argv[0][0] == '-')
+		return NN_SVC_ERR_SPEC;
+	if (argc != 1)
+		return NN_SVC_ERR_ARG;
+	return nn_spec_set_name(out, argv[0]);
 }
 
 const char *nn_claim_name(uint8_t claim)

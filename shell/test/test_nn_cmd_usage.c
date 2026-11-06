@@ -8,7 +8,7 @@
  * WHY THROUGH THE DISPATCHER.  The usage line is assembled in two places: the
  * dispatcher prints "usage: <command path> " and the command supplies what
  * follows.  Each half looks right on its own, and the line was wrong on every
- * board -- "usage: nn model load load <--name <name>>" -- because the `model` parent
+ * board -- "usage: nn model load load <...>" -- because the `model` parent
  * and the `load` leaf shared one argument string while their paths differ by a
  * word.  Only the joined line shows that, so this drives the joined line: the
  * dummy backend in, the capture log out, with stub nn_svc_* adapters behind it.
@@ -16,8 +16,9 @@
  * Also (issue #131 P19): which model-state line a refused load prints, the
  * BUSY refusal printing none -- the same printer, so the same harness.
  *
- * Built once per source set a board declares (run_host_tests.sh passes the
- * NN_SVC_HAS_MODEL_* macros), so the list each board prints is pinned too.
+ * And (issue #196) what the one grammar answers: a bare word reaches the
+ * adapter as the name, an option word gets the "write the name alone"
+ * sentence, a wrong count the usage -- the same on every board.
  */
 #include <assert.h>
 #include <stddef.h>
@@ -32,15 +33,17 @@
 #include "nn_svc.h"
 #include "nn_svc_config.h"
 
-/* The source list each shape must print -- written out, not rebuilt from the
- * macros, so a wrong expansion cannot agree with itself. */
-#if defined(NN_SVC_HAS_MODEL_NAME) && NN_SVC_HAS_MODEL_NAME
-#define SHAPE    "name (all three boards)"
-#define SOURCES  "<--name <name>>"
-#define A_SOURCE "--name person"
-#else
-#error "build this test with a board's NN_SVC_HAS_MODEL_* set"
-#endif
+/* What the usage must print -- written out, not rebuilt from the macro, so a
+ * wrong expansion cannot agree with itself.  One form on every board since
+ * issue #196. */
+#define SHAPE    "a bare name (all three boards)"
+#define SOURCES  "<name>"
+#define A_SOURCE "person"
+
+/* The sentence an option word gets, around the word that was typed. */
+#define DASH_LINE(w) \
+	"nn: '" w "' is not a model name -- write the name alone (a name never " \
+	"starts with '-')\r\n"
 
 /* ---- stub adapters: nothing below is reached by a wrong invocation ------- */
 
@@ -51,6 +54,8 @@ static int load_calls;
 static int load_status;
 static enum nn_model_state load_state;
 static uint8_t info_model_active;
+/* The name the adapter was handed, as the parser copied it. */
+static char load_name[NN_SPEC_NAME_MAX + 1];
 
 void nn_svc_info(struct nn_svc_info *out)
 {
@@ -61,8 +66,8 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx) { (void)write; (void)ct
 void nn_svc_model_load(const struct nn_spec *spec, struct nn_op_result *res,
                        enum nn_model_state *state)
 {
-	(void)spec;
 	load_calls++;
+	strncpy(load_name, spec->name, sizeof load_name - 1u);
 	res->status = load_status;
 	res->claim = (uint8_t)NN_CLAIM_NONE;
 	*state = load_state;
@@ -103,6 +108,7 @@ static void reset(void)
 	cli_test_set_tx_wait_hook(NULL, NULL);
 	cli_test_set_sleep_hook(NULL, NULL);
 	load_calls = 0;
+	memset(load_name, 0, sizeof load_name);
 	load_status = NN_SVC_ERR_SPEC;
 	load_state = NN_MODEL_EMPTY;
 	info_model_active = 0;
@@ -168,41 +174,55 @@ int main(void)
 	expect("never \"load load\"", !has("load load"));
 	expect("the adapter was not called", load_calls == 0);
 
-	/* The leaf, too many words: the same line. */
-	run_line("nn model load a b c d e\r");
-	expect("`nn model load` with too many words gets the same usage",
-	       has("usage: nn model load " SOURCES "\r\n") && !has("load load"));
+	/* The leaf, one word more than the dispatcher takes: its line. */
+	run_line("nn model load --addr 0x1 16 x y\r");
+	expect("five words after `load` are the dispatcher's",
+	       has("load: invalid number of arguments") &&
+	       has("usage: nn model load " SOURCES "\r\n") &&
+	       !has("is not a model name") && load_calls == 0);
 
-	/* The parser's own line, after a bare word: the same sources. */
+	/* A bare word is a name: it reaches the adapter, copied whole. */
 	run_line("nn model load bogus\r");
-	expect("a bare word is refused by the grammar, before the adapter",
-	       has("'bogus' is not a model source") && load_calls == 0);
-	expect("and the parser's usage line agrees with the dispatcher's",
-	       has("usage: nn model load " SOURCES "\r\n") && !has("load load"));
+	expect("a bare word reaches the adapter as the name",
+	       load_calls == 1 && strcmp(load_name, "bogus") == 0 &&
+	       !has("usage:"));
 
-	/* [!] THE TAGS NO BOARD TOOK ARE THE GRAMMAR'S REFUSAL NOW (issue #196),
-	 * on every board shape: the same sentence a bare word gets, the usage,
-	 * and the adapter never called -- so no board's own words for them are
-	 * needed, and none is left to drift.  The usage must not offer them. */
+	/* Two words that are not options: the usage, nothing called. */
+	run_line("nn model load a b\r");
+	expect("`a b` gets the usage alone and calls nothing",
+	       has("usage: nn model load " SOURCES "\r\n") &&
+	       !has("is not a model name") && !has("invalid number") &&
+	       load_calls == 0);
+
+	/* [!] AN OPTION WORD IS THE GRAMMAR'S REFUSAL (issue #196): the old
+	 * tagged forms, the most words the dispatcher lets through (`--addr 0x1
+	 * 16 x`), and any other option -- the sentence quoting the word typed,
+	 * the usage, no state line, and the adapter never called. */
 	{
-		static const struct { const char *line, *word; } gone[] = {
-			{ "nn model load --slot 5\r",  "'--slot' is not a model source" },
-			{ "nn model load --path x\r",  "'--path' is not a model source" },
-			{ "nn model load builtin\r",   "'builtin' is not a model source" },
-			{ "nn model load --addr 0x3A201000 16\r",
-			  "'--addr' is not a model source" },
+		static const struct { const char *line, *want; } opt[] = {
+			{ "nn model load --name x\r",          DASH_LINE("--name") },
+			{ "nn model load --addr 0x1 16 x\r",   DASH_LINE("--addr") },
+			{ "nn model load --slot 5\r",          DASH_LINE("--slot") },
+			{ "nn model load --path x\r",          DASH_LINE("--path") },
+			{ "nn model load -foo\r",              DASH_LINE("-foo") },
+			{ "nn model load -\r",                 DASH_LINE("-") },
 		};
 		unsigned i;
 
-		for (i = 0; i < sizeof gone / sizeof gone[0]; i++) {
-			run_line(gone[i].line);
-			expect(gone[i].word, has(gone[i].word) && load_calls == 0 &&
-			       has("usage: nn model load " SOURCES "\r\n"));
+		for (i = 0; i < sizeof opt / sizeof opt[0]; i++) {
+			char what[64];
+
+			run_line(opt[i].line);
+			snprintf(what, sizeof what, "%.*s gets the option sentence",
+			         (int)(strlen(opt[i].line) - 1u), opt[i].line);
+			expect(what, has(opt[i].want) && load_calls == 0 &&
+			       has("usage: nn model load " SOURCES "\r\n") &&
+			       !has_state_line());
 		}
 		run_line("nn model load\r");
-		expect("the usage offers no removed source",
-		       !has("--slot") && !has("--path") && !has("builtin") &&
-		       !has("--addr"));
+		expect("the usage offers no option",
+		       !has("--name") && !has("--slot") && !has("--path") &&
+		       !has("builtin") && !has("--addr"));
 	}
 
 	/*

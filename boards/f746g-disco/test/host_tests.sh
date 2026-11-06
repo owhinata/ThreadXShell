@@ -122,7 +122,7 @@ gcc $CFLAGS -I "$here/nn_shim" -I "$here" -I "$board/src" -I "$board/port/qspi" 
     $LDFLAGS -o "$out/test_nn_model_life"
 "$out/test_nn_model_life"
 
-# issue #159 (#78 Step 4a) -- `nn model load --name <container>` (a file on the
+# issue #159 (#78 Step 4a) -- `nn model load <container>` (a file on the
 # SD card until issue #194) on the tflm
 # build: the same adapter compiled WITH CONFIG_NN_BACKEND_TFLM and this board's
 # policy macros (the values board.cmake gives a tflm build), over the real

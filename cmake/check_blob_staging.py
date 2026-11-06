@@ -4,7 +4,7 @@
 
 WHY THIS EXISTS
 ---------------
-`nn model load --name` copies a blob's whole payload out of the NOR into the
+`nn model load <name>` copies a blob's whole payload out of the NOR into the
 tflm backend's one staging buffer before anything parses it, and refuses a blob
 longer than the buffer.  So a slot whose payload area is larger than the buffer
 is space the store will happily fill -- `blob write` takes the file -- with a

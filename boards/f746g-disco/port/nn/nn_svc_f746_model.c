@@ -267,20 +267,6 @@ static const struct nn_core_model_backend nn_life_backend = {
 
 /* ---- the board ------------------------------------------------------------ */
 
-/* Every tag but a name, refused before anything is acquired -- in
- * wio-lite-ai's words.  The model is a blob in the QSPI store (issue #194);
- * the shared grammar has had no slot, path or built-in tag since issue #196. */
-static void nn_life_spec_refused(struct nn_core_model_job *j)
-{
-	struct nn_op_result *res = j->res;
-	const struct nn_spec *spec = j->spec;
-
-	if (spec == NULL)
-		return;
-	nn_detail_set("this board loads a model from a QSPI asset by name "
-	              "(--name); it has no such source");
-}
-
 /* The name's own rules, before anything is acquired: a name the store could
  * never have stored is not looked for (the rules `blob write` applied). */
 static int nn_life_check_spec(struct nn_core_model_job *j)
@@ -656,8 +642,6 @@ static const struct nn_core_model_board nn_life_board = {
 	.cs_enter      = nn_life_cs_enter,
 	.cs_exit       = nn_life_cs_exit,
 	.backend       = &nn_life_backend,
-	.tags          = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
-	.spec_refused  = nn_life_spec_refused,
 	.check_spec    = nn_life_check_spec,
 	.admit         = nn_life_admit,
 	.claim_take    = nn_life_claim_take,

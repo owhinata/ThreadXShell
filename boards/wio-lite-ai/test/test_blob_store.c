@@ -15,7 +15,7 @@
  *      nothing either side, one block per nor_erase() call, and what it reports
  *      when the operator cancels or a block fails part way;
  *   2. blob_erase_header(), which must touch the header sector only;
- *   3. blob_find(), the lookup `nn model load --name` resolves with: one VALID
+ *   3. blob_find(), the lookup `nn model load <name>` resolves with: one VALID
  *      match, none, two (its own answer, not "none"), a slot that cannot be
  *      read (a failure, not "none"), and names in INCOMPLETE or INVALID slots,
  *      which never match;

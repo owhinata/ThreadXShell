@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test for `nn model load --name <container>` on this board's tflm build
+ * Host test for `nn model load <container>` on this board's tflm build
  * (issue #159 = #78 Step 4a; from the QSPI asset store since issue #194):
  * port/nn/nn_svc_f746_model.c compiled WITH CONFIG_NN_BACKEND_TFLM and this
  * board's policy macros, over the real svc/plugin/plugin_load.c, svc/crc32.c,
@@ -360,7 +360,6 @@ static void load(const char *name)
 	nn_blob_stub_put(0u, name, file, file_len);
 	memset(&spec, 0, sizeof spec);
 	memset(&res, 0, sizeof res);
-	spec.tag  = NN_SPEC_NAME;
 	strncpy(spec.name, name, NN_SPEC_NAME_MAX);
 	nn_svc_model_load(&spec, &res, &state);
 	assert(test_tx_masked == 0);
@@ -467,7 +466,6 @@ int main(void)
 		nn_blob_stub.info[0].crc32 ^= 1u;
 		memset(&spec, 0, sizeof spec);
 		memset(&res, 0, sizeof res);
-		spec.tag = NN_SPEC_NAME;
 		strcpy(spec.name, "fixture");
 		nn_svc_model_load(&spec, &res, &state);
 		assert(res.status == NN_SVC_ERR_HW && state == NN_MODEL_EMPTY);

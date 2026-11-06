@@ -19,7 +19,7 @@ extern "C" {
 
 nn_tflm_state nn_tflm_board_state;
 
-/* Model names are the blob names the operator typed (`nn model load --name`):
+/* Model names are the blob names the operator typed (`nn model load <name>`):
  * printed as they are. */
 const struct nn_tflm_board_facts nn_tflm_board_facts = { "" };
 

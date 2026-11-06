@@ -74,7 +74,7 @@ RECEIPT = """
   in picocom:    C-a C-s, then the path above
   afterwards:    `blob list` must show crc32 {crc} -- that is how you know
                  the bytes that were built are the bytes that were stored.
-  then:          nn model load --name {name}
+  then:          nn model load {name}
 """
 sys.stdout.write(RECEIPT.format(name=name, path=r["path"], slot=slot,
                                 dest="slot %s" % slot, bytes=r["bytes"],

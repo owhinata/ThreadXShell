@@ -105,7 +105,6 @@ static int  b_has(void)
 		unclaimed_has++;
 	return model_open;
 }
-static void b_refused(struct nn_core_model_job *j) { (void)j; put("spec_refused"); }
 static int  b_check(struct nn_core_model_job *j)   { (void)j; put("check"); return r_check; }
 static int  b_admit(struct nn_core_model_job *j)   { (void)j; put("admit"); return r_admit; }
 /* The claim words its own refusal (issue #138): what it writes must be what
@@ -185,8 +184,7 @@ static const struct nn_core_model_backend backend = {
 
 static const struct nn_core_model_board board = {
 	.cs_enter = cs_enter, .cs_exit = cs_exit, .backend = &backend,
-	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
-	.spec_refused = b_refused, .check_spec = b_check, .admit = b_admit,
+	.check_spec = b_check, .admit = b_admit,
 	.claim_take = b_claim, .claim_give = b_unclaim, .prepare = b_prepare,
 	.fetch = b_fetch, .lease_take = b_lease, .lease_give = b_unlease,
 	.plugin_start = b_pstart, .plugin_unload = b_punload,
@@ -198,8 +196,7 @@ static const struct nn_core_model_board board = {
  * ever be called and the geometry's plugin copy is never touched. */
 static const struct nn_core_model_board board_nolease = {
 	.cs_enter = cs_enter, .cs_exit = cs_exit, .backend = &backend,
-	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
-	.spec_refused = b_refused, .check_spec = b_check, .admit = b_admit,
+	.check_spec = b_check, .admit = b_admit,
 	.claim_take = b_claim, .claim_give = b_unclaim, .prepare = b_prepare,
 	.fetch = b_fetch, .lease_take = NULL, .lease_give = NULL,
 	.plugin_start = b_pstart, .plugin_unload = b_punload,
@@ -219,8 +216,7 @@ static const struct nn_core_model_backend backend_staged = {
 
 static const struct nn_core_model_board board_staged = {
 	.cs_enter = cs_enter, .cs_exit = cs_exit, .backend = &backend_staged,
-	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
-	.spec_refused = b_refused, .check_spec = b_check, .admit = b_admit,
+	.check_spec = b_check, .admit = b_admit,
 	.claim_take = b_claim, .claim_give = b_unclaim, .prepare = b_prepare,
 	.fetch = b_fetch, .lease_take = b_lease, .lease_give = b_unlease,
 	.plugin_start = b_pstart, .plugin_unload = b_punload,
@@ -230,8 +226,7 @@ static const struct nn_core_model_board board_staged = {
 
 static const struct nn_core_model_board board_staged_nolease = {
 	.cs_enter = cs_enter, .cs_exit = cs_exit, .backend = &backend_staged,
-	.tags = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
-	.spec_refused = b_refused, .check_spec = b_check, .admit = b_admit,
+	.check_spec = b_check, .admit = b_admit,
 	.claim_take = b_claim, .claim_give = b_unclaim, .prepare = b_prepare,
 	.fetch = b_fetch, .lease_take = NULL, .lease_give = NULL,
 	.plugin_start = b_pstart, .plugin_unload = b_punload,
@@ -324,7 +319,8 @@ static void rules(const char *what, int status, uint32_t seq0)
 	                                : count_word("unlease") == count_word("ODD"));
 }
 
-static void load(const char *what, int tag, int want_status,
+/* @p with_spec: 1 points the load at a name, 0 at NULL (a caller's mistake). */
+static void load(const char *what, int with_spec, int want_status,
                  enum nn_model_state want_state, const char *want_trace)
 {
 	struct nn_spec spec;
@@ -335,9 +331,9 @@ static void load(const char *what, int tag, int want_status,
 
 	memset(&spec, 0, sizeof spec);
 	memset(&res, 0, sizeof res);
-	spec.tag = (enum nn_spec_tag)tag;
+	strcpy(spec.name, "m");
 	res.claim = 0xEEu;
-	j.spec = &spec;
+	j.spec = with_spec ? &spec : NULL;
 	j.res = &res;
 	j.board = NULL;
 	nn_core_model_load(&life, cur, &j, &st);
@@ -391,17 +387,19 @@ static void unload(const char *what, int want_status, const char *want_trace)
 	rules(what, res.status, seq0);
 }
 
-#define N NN_SPEC_NAME
+#define N 1
 
 int main(void)
 {
 	/* ---- refusals before the claim: nothing acquired, nothing changed ---- */
+	/* [!] NO SPEC IS ERR_ARG, BEFORE ANY HOOK (issue #196): a spec is a
+	 * name, and what is not one never got past the grammar -- so a NULL is
+	 * the caller's mistake, not a source this board lacks, and nothing is
+	 * asked of the board, not even its own check. */
 	reset(1);
-	load("tag this board does not take", NN_SPEC_NONE, NN_SVC_ERR_SPEC,
-	     NN_MODEL_PREVIOUS, "spec_refused");
+	load("no spec, open", 0, NN_SVC_ERR_ARG, NN_MODEL_PREVIOUS, "");
 	reset(0);
-	load("tag out of range", 40, NN_SVC_ERR_SPEC, NN_MODEL_EMPTY,
-	     "spec_refused");
+	load("no spec, empty", 0, NN_SVC_ERR_ARG, NN_MODEL_EMPTY, "");
 	reset(1); r_check = NN_SVC_ERR_ARG;
 	load("argument refused", N, NN_SVC_ERR_ARG, NN_MODEL_PREVIOUS, "check");
 	reset(1); r_admit = NN_SVC_ERR_STATE;

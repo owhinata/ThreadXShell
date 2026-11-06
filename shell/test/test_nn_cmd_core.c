@@ -15,15 +15,14 @@
  *      routinely have -- and it survived because a quantisation scale looks
  *      plausible either way.  Case A pins the values that distinguish them.
  *
- *   B. THE ARGUMENT GRAMMAR.  A parser that accepts a bare string would have to
- *      guess which namespace it meant, differently per board.  Case C asserts
- *      the bare string is REFUSED, which is the property that keeps board
- *      knowledge out of shell/ -- and it is the assertion someone deletes when
- *      they "helpfully" make the command friendlier.
+ *   B. THE ARGUMENT GRAMMAR (issue #196).  One word, the blob name, the same on
+ *      every board.  Case C pins that no word is special (`builtin`, `9`);
+ *      case D that an option word -- every old tagged form -- is refused, and
+ *      that a name is never cut; D2 that the parser's '-' rule is the store's.
  *
- *   C. THE TWO REFUSALS ARE DIFFERENT.  A tag this grammar does not have at all
- *      and a tag with a malformed operand send a reader to different places, so
- *      they must not collapse into one code.
+ *   C. THE TWO REFUSALS ARE DIFFERENT.  An option word and a wrong word count
+ *      send a reader to different places ("write the name alone" / the usage),
+ *      so they must not collapse into one code.
  *
  *   D. WHAT `nn stream stats` SAYS ON ITS `last` LINE (issue #105).  Nothing in
  *      this project gates what a command PRINTS -- the board README says so in
@@ -42,6 +41,7 @@
 #include <string.h>
 
 #include "nn_cmd_core.h"
+#include "blob_state.h"   /* blob_name_check(): the store's '-' rule */
 
 static int last_failures;
 
@@ -137,20 +137,31 @@ static void test_shape(void)
 static int parse(struct nn_spec *out, int argc, const char *a0, const char *a1,
                  const char *a2)
 {
-	char *argv[3];
+	char *argv[4];
 
 	argv[0] = (char *)a0;
 	argv[1] = (char *)a1;
 	argv[2] = (char *)a2;
+	argv[3] = (char *)"fourth";
 	return nn_spec_parse(argc, argv, out);
 }
 
 static void test_spec_accepts(void)
 {
 	struct nn_spec s;
+	static const char *const names[] = {
+		/* [!] NO WORD IS SPECIAL (issue #196).  `builtin` and `9` used to
+		 * be a tag and a slot number; now they are names the board looks
+		 * up like any other.  A '-' that is not first is ordinary. */
+		"cls", "builtin", "9", "a-b", "x-", "a--b", "/model.tflite",
+	};
+	unsigned i;
 
-	assert(parse(&s, 2, "--name", "cls", NULL) == NN_SVC_OK);
-	assert(s.tag == NN_SPEC_NAME && strcmp(s.name, "cls") == 0);
+	for (i = 0; i < sizeof names / sizeof names[0]; i++) {
+		memset(&s, 0xA5, sizeof s);
+		assert(parse(&s, 1, names[i], NULL, NULL) == NN_SVC_OK);
+		assert(strcmp(s.name, names[i]) == 0);
+	}
 
 	/* [!] THE LONGEST NAME A BOARD CAN STORE IS CARRIED WHOLE (issue #122
 	 * P10).  grove-vision-ai-v2's asset store takes 64 characters and this
@@ -162,68 +173,82 @@ static void test_spec_accepts(void)
 
 		memset(name64, 'b', 64u);
 		name64[64] = '\0';
-		assert(parse(&s, 2, "--name", name64, NULL) == NN_SVC_OK);
-		assert(s.tag == NN_SPEC_NAME && strcmp(s.name, name64) == 0);
+		name64[63] = 'e';   /* the last byte is copied, not dropped */
+		assert(parse(&s, 1, name64, NULL, NULL) == NN_SVC_OK);
+		assert(strcmp(s.name, name64) == 0 && strlen(s.name) == 64u);
 	}
 
-	printf("  C. every source form parses                               ok\n");
+	printf("  C. a bare name parses, whatever the word                  ok\n");
 }
 
 static void test_spec_refuses(void)
 {
 	struct nn_spec s;
 
-	/* [!] THE ONE THAT MATTERS.  A bare word is not a spec: it would mean a
-	 * blob name on Grove, a path on f746 and nothing on wio.  Accepting it
-	 * here is how board knowledge gets back into shell/. */
-	assert(parse(&s, 1, "cls", NULL, NULL) == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 1, "/model.tflite", NULL, NULL) == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 1, "9", NULL, NULL) == NN_SVC_ERR_SPEC);
-
-	/* [!] THE TAGS NO BOARD TOOK ARE GONE FROM THE GRAMMAR (issue #196).  Each
-	 * is "not a tag this grammar has" whatever follows it -- the operand a
-	 * removed branch used to parse included, and a malformed one too, so an
-	 * old branch left behind cannot answer OK or ERR_ARG here. */
-	assert(parse(&s, 2, "--slot", "5", NULL) == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 1, "--slot", NULL, NULL) == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 2, "--slot", "nine", NULL) == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 2, "--path", "x", NULL) == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 2, "--path", "", NULL) == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 1, "builtin", NULL, NULL) == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 2, "builtin", "extra", NULL) == NN_SVC_ERR_SPEC);
-	/* The raw window, too (Grove's alone until issue #196): well-formed, short
-	 * of its length, with a zero or a non-number length -- all SPEC, never
-	 * OK and never the ERR_ARG its old branch gave a malformed operand. */
-	assert(parse(&s, 3, "--addr", "0x3AE81000", "164512") == NN_SVC_ERR_SPEC);
+	/* [!] A FIRST WORD THAT STARTS WITH '-' IS ERR_SPEC, HOWEVER MANY WORDS
+	 * FOLLOW (issue #196).  The old tagged forms land here -- `--name x` is
+	 * not a way to spell a name any more -- and so does any other option. */
+	assert(parse(&s, 2, "--name", "blazeface", NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 1, "--name", NULL, NULL) == NN_SVC_ERR_SPEC);
 	assert(parse(&s, 3, "--addr", "0x1", "16") == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 2, "--addr", "0x3AE81000", NULL) == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 3, "--addr", "0x3AE81000", "0") == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 3, "--addr", "0x3AE81000", "no") == NN_SVC_ERR_SPEC);
-	/* Only the exact word is a tag: a word that merely starts like one is
-	 * not, so a prefix comparison cannot hide behind the cases above. */
-	assert(parse(&s, 2, "--names", "cls", NULL) == NN_SVC_ERR_SPEC);
-	assert(parse(&s, 2, "--nam", "cls", NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 4, "--addr", "0x1", "16") == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 2, "--slot", "5", NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 2, "--path", "x", NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 1, "-foo", NULL, NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 1, "-", NULL, NULL) == NN_SVC_ERR_SPEC);
+	assert(parse(&s, 2, "-", "x", NULL) == NN_SVC_ERR_SPEC);
 
-	/* Nothing at all is a malformed invocation, not an unknown namespace. */
+	/* Nothing at all, or more than one word that is not an option: ERR_ARG
+	 * -- a different answer, because it sends the reader to the usage. */
 	assert(parse(&s, 0, NULL, NULL, NULL) == NN_SVC_ERR_ARG);
-
-	/* A known tag with a missing or unusable operand is ERR_ARG -- a
-	   different answer from ERR_SPEC, because it points somewhere else. */
-	assert(parse(&s, 1, "--name", NULL, NULL) == NN_SVC_ERR_ARG);
-	assert(parse(&s, 2, "--name", "", NULL) == NN_SVC_ERR_ARG);
-	assert(parse(&s, 3, "--name", "a", "b") == NN_SVC_ERR_ARG);
+	assert(parse(&s, 2, "a", "b", NULL) == NN_SVC_ERR_ARG);
+	assert(parse(&s, 2, "a", "-b", NULL) == NN_SVC_ERR_ARG);
+	assert(parse(&s, 3, "a", "b", "c") == NN_SVC_ERR_ARG);
+	assert(parse(&s, 1, "", NULL, NULL) == NN_SVC_ERR_ARG);
 
 	/* A name too long to hold is refused, never truncated: a truncated name
 	   can still match a DIFFERENT entry, which is worse than not matching. */
 	{
-		char longname[NN_SPEC_NAME_MAX + 8];
+		char name65[64 + 2];
 
-		memset(longname, 'a', sizeof longname - 1u);
-		longname[sizeof longname - 1u] = '\0';
-		assert(parse(&s, 2, "--name", longname, NULL) == NN_SVC_ERR_ARG);
+		memset(name65, 'a', sizeof name65 - 1u);
+		name65[sizeof name65 - 1u] = '\0';      /* 65 characters */
+		assert(parse(&s, 1, name65, NULL, NULL) == NN_SVC_ERR_ARG);
+		assert(s.name[0] == '\0');               /* nothing copied */
+		name65[0] = '-';                         /* the dash comes first */
+		assert(parse(&s, 1, name65, NULL, NULL) == NN_SVC_ERR_SPEC);
 	}
 
-	printf("  D. refusals stay distinct (bare word, operand, length)    ok\n");
+	printf("  D. refusals stay distinct (option, word count, length)    ok\n");
+}
+
+/*
+ * [!] THE PARSER AND THE STORE AGREE ON '-' (issue #196).  The parser keeps
+ * its own rule (it may not depend on the blob store), so the two are compared
+ * here over one list: the parser says ERR_SPEC exactly when blob_name_check()
+ * says BLOB_NAME_DASH.
+ */
+static void test_spec_agrees_with_store(void)
+{
+	static const char *const words[] = {
+		"-x", "-", "--name", "--addr", "-\xc3\xa9", "a", "a-b", "x-",
+		"a--b", "builtin", "9", "_x", "+x", "~x", "\xc3\xa9-",
+	};
+	struct nn_spec s;
+	unsigned i;
+
+	for (i = 0; i < sizeof words / sizeof words[0]; i++) {
+		int spec = parse(&s, 1, words[i], NULL, NULL) == NN_SVC_ERR_SPEC;
+		int dash = blob_name_check(words[i], NULL) == BLOB_NAME_DASH;
+
+		if (spec != dash) {
+			printf("  FAIL '%s': parser %s, store %s\n", words[i],
+			       spec ? "ERR_SPEC" : "not ERR_SPEC",
+			       dash ? "DASH" : "not DASH");
+			assert(0);
+		}
+	}
+	printf("  D2. the parser's '-' rule is the store's                  ok\n");
 }
 
 /* ---- E: the names a command prints --------------------------------------- */
@@ -368,6 +393,7 @@ int main(void)
 	test_shape();
 	test_spec_accepts();
 	test_spec_refuses();
+	test_spec_agrees_with_store();
 	test_names();
 	test_last_line();
 	if (last_failures != 0) {

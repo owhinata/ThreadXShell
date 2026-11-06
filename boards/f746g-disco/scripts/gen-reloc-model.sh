@@ -9,7 +9,7 @@
 # model-zoo licensed; see .gitignore).  Send the produced .bin into a 512 KB
 # slot (it must be at most 448 KB), then on the board:
 #   blob write <name> <slot>   (picocom C-a C-s, the .bin)
-#   nn model load --name <name>
+#   nn model load <name>
 # (Until issue #194 it was copied to the microSD card root and loaded by path.)
 #
 # `stedgeai generate --relocatable` invokes arm-none-eabi-gcc to compile the PIC
@@ -64,4 +64,4 @@ echo
 echo "OK: $(ls -l "${BIN}" | awk '{print $5, $9}')"
 echo "Send it into a 512 KB slot (at most 448 KB), then on the board:"
 echo "  blob write <name> <slot>   (picocom C-a C-s, this .bin)"
-echo "  nn model load --name <name>"
+echo "  nn model load <name>"

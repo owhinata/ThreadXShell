@@ -84,9 +84,10 @@ static uint8_t  nn_owner;           /**< enum nn_owner -- WHO holds it        */
 static uint8_t  nn_open_done;       /**< a model is active                    */
 
 /* [!] A legal name must survive both copies it takes through the shared
- * command: the parser's (`--name`) and `nn info`'s (issue #122 P10). */
+ * command: the parser's (`nn model load <name>`) and `nn info`'s (issue
+ * #122 P10). */
 _Static_assert(NN_SPEC_NAME_MAX >= BLOB_NAME_MAX,
-               "nn model load --name cannot carry this board's longest blob name");
+               "nn model load <name> cannot carry this board's longest blob name");
 _Static_assert(NN_SVC_MODEL_MAX >= BLOB_NAME_MAX,
                "nn info would truncate this board's longest blob name");
 
@@ -870,27 +871,14 @@ static const struct nn_core_model_backend nn_life_backend = {
 	.staging_is_open = nn_model_staging_is_open,   /* 0 on ethosu (#200) */
 };
 
-/* Refused in this board's own words, before anything is acquired. */
-static void nn_life_spec_refused(struct nn_core_model_job *j)
-{
-	struct nn_op_result *res = j->res;
-	const struct nn_spec *spec = j->spec;
-
-	if (spec == NULL)
-		return;
-	nn_detail_set("this board loads a model by name; it has no such "
-	              "source");
-}
-
 static int nn_life_check_spec(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
 	const struct nn_spec *spec = j->spec;
 	struct nn_grove_job *g = j->board;
 
-	/* A name is the only tag this board takes (.tags), so the shared order
-	 * brings nothing else here.  The window, length and alignment of what the
-	 * name resolves to stay the backend's to refuse (issue #169). */
+	/* A spec is a blob name (issue #196).  The window, length and alignment
+	 * of what it resolves to stay the backend's to refuse (issue #169). */
 	if (blob_name_check(spec->name, NULL) != BLOB_NAME_OK) {
 		nn_detail_set("'%s' is not a blob name (%s)", spec->name,
 		              blob_name_verdict_name(
@@ -1039,8 +1027,6 @@ static const struct nn_core_model_board nn_life_board = {
 	.cs_enter      = nn_core_cs_enter,
 	.cs_exit       = nn_core_cs_exit,
 	.backend       = &nn_life_backend,
-	.tags          = NN_CORE_MODEL_TAG(NN_SPEC_NAME),
-	.spec_refused  = nn_life_spec_refused,
 	.check_spec    = nn_life_check_spec,
 	.admit         = NULL,   /* a stream holds the gate: the claim refuses */
 	.claim_take    = nn_life_claim_take,
@@ -1912,7 +1898,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		return;
 	/* From here every failure gives BOTH the lifecycle and the claim back. */
 	if (!nn_open_done) {
-		nn_detail_set("no model is loaded -- `nn model load --name <name>`");
+		nn_detail_set("no model is loaded -- `nn model load <name>`");
 		(void)nn_core_abort(&nn_core, &nn_core_board);
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return;

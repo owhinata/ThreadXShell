@@ -370,7 +370,7 @@ set(CLI_DEVMEM_DUMP_MAX_LEN "256" CACHE STRING "Max bytes per devmem dump")
 # interpreter + backend live in a separate `tflm` static lib
 # (cmake/tflite-micro.cmake); it enables C++ only for that build.  It carries
 # no model since issue #159 Step 4c: one is loaded from a blob in the QSPI
-# asset store (`nn model load --name`, issue #194; the SD card until then),
+# asset store (`nn model load <name>`, issue #194; the SD card until then),
 # bare or as a container -- the pinned BlazeFace is the `asset-blazeface`
 # container below.  Its configure needs the network, for
 # tflite-micro itself; its build does not.
@@ -381,8 +381,8 @@ set(CLI_DEVMEM_DUMP_MAX_LEN "256" CACHE STRING "Max bytes per devmem dump")
 # local ST Edge AI Core install; those ST-SLA artifacts are NOT committed (public
 # repo, see .gitignore + port/nn/generated/).
 # `stedgeai_reloc` (X-CUBE-AI relocatable network) loads a position-independent
-# `network_rel.bin` (PIC code + weights) from a blob at runtime (`nn model load
-# --name`, issue #194; the SD card until then) and runs it XIP via the ST host
+# `network_rel.bin` (PIC code + weights) from a blob at runtime (`nn model
+# load <name>`, issue #194; the SD card until then) and runs it XIP via the ST host
 # loader (ai_reloc_network.c) + the legacy ai_rel_network_* API -- no model is
 # baked into Flash and no runtime .a is linked (the PIC kernels are embedded in
 # the .bin).  A blob longer than its 448 KB slot is refused at load.
@@ -743,7 +743,7 @@ set(F746_PLUGIN_MEMORY_LD "${BOARD_DIR}/ldscript/plugin_memory.ld")
 # Plugin containers: deliver, validate, RUN (issue #159 Steps 4a and 4b)
 # ---------------------------------------------------------------------------
 #
-# `nn model load --name <blob>` (a file and `--path` until issue #194)
+# `nn model load <blob>` (a file and `--path` until issue #194)
 # recognises a container, validates it with this
 # board's policy (svc/plugin/plugin_load.c -- the validator the host asset build
 # runs too), hands its model section to the backend in place and, since Step
@@ -1171,7 +1171,7 @@ endif()
 
 # --- every blob slot fits the model staging buffer (issue #194) ---------------
 #
-# `nn model load --name` copies a whole payload into the tflm backend's one
+# `nn model load <name>` copies a whole payload into the tflm backend's one
 # staging buffer, so a slot larger than that buffer would store models this
 # firmware can never load.  cmake/check_blob_staging.py (shared with
 # wio-lite-ai) reads the slot table and the buffer's capacity back out of the

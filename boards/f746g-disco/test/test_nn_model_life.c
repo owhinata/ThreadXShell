@@ -23,10 +23,9 @@
  *     all three lines (the stub's reload asks it), and a held session with no
  *     load in flight -- a stream -- still gets the copy;
  *   - nothing is called inside the board's critical section;
- *   - the board is empty from boot, and a tag outside the board's set is
- *     SPEC, worded, nothing touched -- from empty and over a model.  The
- *     grammar names no such tag since issue #196 (a name is the only one), so
- *     the out-of-set tag here is NN_SPEC_NONE, straight to the adapter;
+ *   - the board is empty from boot, and a load with no spec at all is ARG,
+ *     nothing touched -- from empty and over a model (a spec is a name since
+ *     issue #196; what is not one never gets past the grammar);
  *   - since issue #194 the model is a blob, read by name out of the QSPI asset
  *     store (a stand-in, nn_blob_stub.c); a bad
  *     name, a name in no slot, a name in two, unreadable headers, a busy store,
@@ -165,18 +164,18 @@ static struct nn_op_result res;
 static enum nn_model_state state;
 static int stream_holds;   /* the test holds the session, as a stream would */
 
-static void load(uint8_t tag, const char *what)
+/* @p what: the name, or NULL for no spec at all (a caller's mistake). */
+static void load(const char *what)
 {
 	struct nn_spec spec;
 	unsigned acq;
 
 	memset(&spec, 0, sizeof spec);
 	memset(&res, 0, sizeof res);
-	spec.tag  = tag;
 	strncpy(spec.name, what ? what : "", NN_SPEC_NAME_MAX);
 	state = (enum nn_model_state)99;
 	acq = nn_blob_stub.acquires;
-	nn_svc_model_load(&spec, &res, &state);
+	nn_svc_model_load(what ? &spec : NULL, &res, &state);
 	assert(test_tx_masked == 0);
 	assert(res.claim == NN_CLAIM_NONE);
 	/* [!] The blob flag: taken at most once, and never left held. */
@@ -222,30 +221,26 @@ int main(void)
 	/* Boot: nothing in the image, so the first `nn info` finds no model. */
 	info_is(0, "(none)", NN_AVAIL_OK);
 
-	/* A tag this board does not take, from empty: the shared SPEC refusal,
-	 * worded, refused before anything is acquired. */
-	load(NN_SPEC_NONE, NULL);
-	assert(res.status == NN_SVC_ERR_SPEC && state == NN_MODEL_EMPTY);
-	assert(strstr(res.detail, "it has no such source") != NULL);
+	/* No spec at all, from empty: ARG before anything is acquired. */
+	load(NULL);
+	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_EMPTY);
 	assert(stub.reloads == 0 && invalidations == 0 && !stub.has);
-	assert(nn_blob_stub.acquires == 0u);
+	assert(nn_blob_stub.acquires == 0u && nn_blob_stub.finds == 0u);
 
 	/* The first model comes from the store, by name. */
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	assert(res.status == NN_SVC_OK && state == NN_MODEL_NEW && stub.has);
 	info_is(1, "m", NN_AVAIL_OK);
 	stub.reloads  = 0;
 	invalidations = 0;
 
-	/* A spec this board does not take, over a model: SPEC, worded, nothing
-	 * touched, the model kept. */
-	load(NN_SPEC_NONE, NULL);
-	assert(res.status == NN_SVC_ERR_SPEC && state == NN_MODEL_PREVIOUS);
-	assert(strstr(res.detail, "it has no such source") != NULL);
-	assert(stub.reloads == 0 && stub.has);
+	/* No spec at all, over a model: ARG, nothing touched, the model kept. */
+	load(NULL);
+	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
+	assert(stub.reloads == 0 && stub.has && nn_blob_stub.finds == 1u);
 
 	/* A name the store could never have stored: ARG, nothing acquired. */
-	load(NN_SPEC_NAME, "has space");
+	load("has space");
 	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
 	assert(strstr(res.detail, "is not a blob name") != NULL);
 	assert(nn_blob_stub.finds == 1u);   /* the first load's only */
@@ -255,55 +250,61 @@ int main(void)
 	 * (written before the rule): the writer's rule decides what may be
 	 * NAMED, and the store is not asked. */
 	nn_blob_stub_put(2u, "-x", model_bytes, 32u);
-	load(NN_SPEC_NAME, "-x");
-	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
-	assert(strcmp(res.detail, "'-x' is not a blob name (name starts with "
-	                          "'-')") == 0);
-	assert(nn_blob_stub.finds == 1u && stub.reloads == 0);
+	{
+		unsigned acq0 = nn_blob_stub.acquires, rd0 = nn_blob_stub.reads;
+
+		load("-x");
+		assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
+		assert(strcmp(res.detail, "'-x' is not a blob name (name starts "
+		                          "with '-')") == 0);
+		/* Not the blob flag (the QSPI busy), not the lookup, not a read. */
+		assert(nn_blob_stub.acquires == acq0 && nn_blob_stub.reads == rd0);
+		assert(nn_blob_stub.finds == 1u && stub.reloads == 0);
+	}
 
 	/* [!] THE STORE'S ANSWERS, each its own status and words, each over a
 	 * model and each leaving it (PREVIOUS), the flag back every time. */
 	reads = nn_blob_stub.reads;
-	load(NN_SPEC_NAME, "nothere");
+	load("nothere");
 	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
 	assert(strstr(res.detail, "'nothere': ") != NULL &&
 	       strstr(res.detail, "(`blob list` shows what is where)") != NULL);
 	nn_blob_stub_put(2u, "twice", model_bytes, 32u);
 	nn_blob_stub_put(3u, "twice", model_bytes, 32u);
-	load(NN_SPEC_NAME, "twice");
+	load("twice");
 	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
 	assert(strstr(res.detail, "'twice': ") != NULL);
 	nn_blob_stub.find_rc = BLOB_ERR_IO;
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	nn_blob_stub.find_rc = BLOB_OK;
 	assert(res.status == NN_SVC_ERR_HW && state == NN_MODEL_PREVIOUS);
 	assert(strstr(res.detail, "cannot read the blob headers (-2") != NULL);
 	nn_blob_stub.held_elsewhere = 1;     /* a `blob write`, a `qspi test` */
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	nn_blob_stub.held_elsewhere = 0;
 	assert(res.status == NN_SVC_ERR_BUSY && state == (enum nn_model_state)99);
 	assert(strstr(res.detail, "blob busy") != NULL);
 	nn_blob_stub_put(2u, "big", model_bytes, 65u);   /* the stub's region: 64 B */
-	load(NN_SPEC_NAME, "big");
+	load("big");
 	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
 	assert(strcmp(res.detail, "slot 2 is 65 B, staging holds 64 B") == 0);
 	/* A VALID header with a length of 0 (the store's header decode makes
 	 * that INVALID on the board, so this is the adapter's own check): ARG,
 	 * the flag back, not one byte read. */
 	nn_blob_stub_put(2u, "zero", model_bytes, 0u);
-	load(NN_SPEC_NAME, "zero");
+	load("zero");
 	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
 	assert(strcmp(res.detail, "slot 2 is 0 B, staging holds 64 B") == 0);
 	/* [!] None of those read a payload byte. */
 	assert(nn_blob_stub.reads == reads);
 	/* The read itself fails, and the copy disagrees with the header: HW. */
 	nn_blob_stub.read_rc = BLOB_ERR_IO;
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	nn_blob_stub.read_rc = BLOB_OK;
 	assert(res.status == NN_SVC_ERR_HW && state == NN_MODEL_PREVIOUS);
 	assert(strcmp(res.detail, "QSPI read failed (-2)") == 0);
 	nn_blob_stub.info[1].crc32 ^= 1u;
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	nn_blob_stub.info[1].crc32 ^= 1u;
 	assert(res.status == NN_SVC_ERR_HW && state == NN_MODEL_PREVIOUS);
 	assert(strstr(res.detail, "CRC32 mismatch -- stored ") != NULL);
@@ -312,7 +313,7 @@ int main(void)
 
 	/* Refusals before the claim keep their words. */
 	camera_running = 1;
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	/* BUSY reports no state and leaves the caller's untouched (#138). */
 	assert(res.status == NN_SVC_ERR_BUSY && state == (enum nn_model_state)99);
 	assert(strcmp(res.detail, "stop the inference stream first "
@@ -321,12 +322,12 @@ int main(void)
 	assert(res.status == NN_SVC_ERR_BUSY && stub.has);
 	camera_running = 0;
 	sdram_up = 0;
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	assert(res.status == NN_SVC_ERR_STATE && state == NN_MODEL_PREVIOUS);
 	sdram_up = 1;
 	assert(nn_session_try_acquire() == 0);      /* a stream holds it */
 	stream_holds = 1;
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	assert(res.status == NN_SVC_ERR_BUSY && state == (enum nn_model_state)99);
 	assert(strcmp(res.detail, "NN busy (a stream, run or bench is "
 	                          "active)") == 0);
@@ -341,7 +342,7 @@ int main(void)
 	/* A refused model over a model: PREVIOUS, the backend restored it, no
 	 * release, the last result kept. */
 	stub.refuse_next = 1;
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_PREVIOUS);
 	assert(strcmp(res.detail, "the model was refused (-7)") == 0);
 	assert(stub.releases == 0 && invalidations == 0 && stub.has);
@@ -349,7 +350,7 @@ int main(void)
 	/* A load, with `nn info` asked in the middle of the swap: BUSY on all
 	 * three lines -- not a name and a size from two models. */
 	stub.ask_info = 1;
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	assert(res.status == NN_SVC_OK && state == NN_MODEL_NEW);
 	assert(stub.mid.avail_identity == NN_AVAIL_BUSY &&
 	       stub.mid.avail_runtime == NN_AVAIL_BUSY &&
@@ -371,7 +372,7 @@ int main(void)
 	 * "nothing is loaded" -- and the backend is released all the same. */
 	rel = stub.releases;
 	stub.refuse_next = 1;
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_EMPTY);
 	assert(stub.releases == rel + 1 && !stub.has);
 
@@ -381,7 +382,7 @@ int main(void)
 	rel = stub.releases;
 	stub.refuse_next  = 1;
 	stub.restore_lies = 1;
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_EMPTY);
 	assert(stub.releases == rel + 1 && !stub.has);
 	info_is(0, "(none)", NN_AVAIL_OK);
@@ -389,20 +390,20 @@ int main(void)
 	/* A read that fails from empty: EMPTY, no reload. */
 	rl = stub.reloads;
 	nn_blob_stub.read_rc = BLOB_ERR_IO;
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	nn_blob_stub.read_rc = BLOB_OK;
 	assert(res.status == NN_SVC_ERR_HW && state == NN_MODEL_EMPTY);
 	assert(stub.reloads == rl);
 
 	/* A load from the store brings a model back. */
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	assert(res.status == NN_SVC_OK && state == NN_MODEL_NEW && stub.has);
 
 	/* A "success" that left no model: a failure (HW), EMPTY, released. */
 	rel = stub.releases;
 	inv = invalidations;
 	stub.null_handle = 1;
-	load(NN_SPEC_NAME, "a");
+	load("a");
 	assert(res.status == NN_SVC_ERR_HW && state == NN_MODEL_EMPTY);
 	assert(stub.releases == rel + 1 && invalidations == inv + 1);
 	/* The singleton closed; the next open builds nothing. */

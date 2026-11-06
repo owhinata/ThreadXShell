@@ -107,7 +107,7 @@ endif()
 # it into Flash as a C array (189,816 B).  The firmware now carries no model and
 # no decoder: a model -- bare, or in a plugin container that brings its decoder --
 # is sent into the QSPI asset store with `blob write` and loaded with `nn model
-# load --name` (a file on the SD card and `--path` until issue #194), and the pinned
+# load <name>` (a file on the SD card and `--path` until issue #194), and the pinned
 # BlazeFace reaches the board as the `asset-blazeface` container (board.cmake).
 # So a tflm build no longer needs the network at build time; configure still
 # does, for the tflite-micro tree above.  cmake/fetch_model.cmake stays: the
@@ -122,7 +122,7 @@ foreach(_old NN_TFLM_MODEL NN_TFLM_MODEL_OVERRIDE)
             "tflm: ${_old} is IGNORED since issue #159 Step 4c -- this tree still "
             "holds `$CACHE{${_old}}`.  The firmware carries no built-in model any "
             "more: send the model (or its container, `--target asset-blazeface`) "
-            "with `blob write <name> <slot>` and `nn model load --name <name>`.  "
+            "with `blob write <name> <slot>` and `nn model load <name>`.  "
             "To silence this, "
             "pass -U${_old}.")
     endif()

@@ -22,11 +22,9 @@
  * builds, and `help` is right in both.
  */
 #if defined(CONFIG_NN_BACKEND_TFLM) || defined(CONFIG_NN_BACKEND_STEDGEAI_RELOC)
+/* The model is a blob in the QSPI asset store, named as it was stored
+ * (`nn model load <name>`, issue #194; until then a path on the SD card). */
 #define NN_SVC_HAS_MODEL_LOAD  1
-/** ...and the source is a blob in the QSPI asset store, named as it was stored
- *  (`nn model load --name <blob>`, issue #194; until then a path on the SD
- *  card, `--path`, which is gone). */
-#define NN_SVC_HAS_MODEL_NAME  1
 #endif
 /* No built-in source: since issue #159 Step 4c no build of this board carries
  * a model it could adopt by name -- tflm loads from the asset store only, like

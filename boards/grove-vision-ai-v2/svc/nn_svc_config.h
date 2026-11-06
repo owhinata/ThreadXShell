@@ -17,8 +17,6 @@
  *  issue #196).  Always available: this board has no compile-time model at
  *  all. */
 #define NN_SVC_HAS_MODEL_LOAD  1
-/** ...by name, which is how the asset store is addressed here. */
-#define NN_SVC_HAS_MODEL_NAME  1
 
 /** One-shot capture and infer.  The camera and the NPU are both here. */
 #define NN_SVC_HAS_CAMERA      1

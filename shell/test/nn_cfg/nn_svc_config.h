@@ -7,9 +7,8 @@
  * @brief   Host-test stand-in for a board's nn capabilities (issue #122).
  *
  * Only for shell/test/test_nn_cmd_usage.c, which compiles the REAL
- * shell/cmds/cmd_nn.c.  The model loader is on; which sources it takes comes
- * from -D on the compile line, once per board shape, so one test file covers
- * the three combinations the boards declare.
+ * shell/cmds/cmd_nn.c.  The model loader is on; the model is named by one
+ * word on every board (issue #196), so there is no source to choose.
  */
 #ifndef NN_SVC_CONFIG_H
 #define NN_SVC_CONFIG_H

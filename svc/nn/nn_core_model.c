@@ -178,13 +178,12 @@ void nn_core_model_load(struct nn_core_model *m,
 
 	/* ---- before the claim: nothing is acquired, nothing changes ---------- */
 
-	/* [!] THE TAG IS REFUSED BEFORE ANYTHING IS ACQUIRED.  A source this board
-	 * does not have is not a hardware failure and must not cost a bring-up. */
-	if (j->spec == NULL || (unsigned)j->spec->tag >= 32u ||
-	    (b->tags & NN_CORE_MODEL_TAG(j->spec->tag)) == 0u) {
-		if (b->spec_refused != NULL)
-			b->spec_refused(j);
-		nn_core_model_refuse_unclaimed(b, j, NN_SVC_ERR_SPEC, state);
+	/* [!] NO SPEC IS REFUSED BEFORE ANYTHING IS ACQUIRED.  A spec is a name
+	 * since issue #196 -- what is not one was refused by the grammar -- so
+	 * a missing one is a caller's mistake, ERR_ARG, and must not cost a
+	 * bring-up. */
+	if (j->spec == NULL) {
+		nn_core_model_refuse_unclaimed(b, j, NN_SVC_ERR_ARG, state);
 		return;
 	}
 	if (b->check_spec != NULL && (status = b->check_spec(j)) != NN_SVC_OK) {

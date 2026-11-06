@@ -1326,7 +1326,7 @@ add_custom_command(TARGET shell POST_BUILD
 
 # --- every blob slot fits the model staging buffer (issue #193) ---------------
 #
-# `nn model load --name` copies a whole payload into the tflm backend's one
+# `nn model load <name>` copies a whole payload into the tflm backend's one
 # staging buffer, so a slot larger than that buffer would store models this
 # firmware can never load.  The slot table (src/blob_slots.c) and the buffer
 # (NN_TFLM_MODEL_KB, private to the tflm library) are in different places, so

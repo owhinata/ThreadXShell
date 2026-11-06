@@ -71,11 +71,6 @@
 #ifndef NN_SVC_HAS_STREAM_TEST
 #define NN_SVC_HAS_STREAM_TEST 0
 #endif
-/* Which model sources `nn model load` takes -- one macro per tag of the
- * grammar (issue #122 P9). */
-#ifndef NN_SVC_HAS_MODEL_NAME
-#define NN_SVC_HAS_MODEL_NAME    0
-#endif
 
 /* Longest shape string worth carrying: four dimensions of up to ten digits, the
    separators, and the terminator. */
@@ -320,16 +315,11 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 
 #if NN_SVC_HAS_MODEL_LOAD
 /*
- * [!] THE SOURCES LISTED ARE THIS BOARD'S (issue #122 P9).  The usage used to
- * list every tag on every board, while `help` is otherwise an inventory of
- * the board it runs on -- so an operator reading it was offered a source the
- * board did not have and learned otherwise only from the refusal.  One tag is
- * left (`--name`, issue #196); any other word is refused by the grammar.
+ * The model is named by one word, the blob name, on every board (issue #196).
+ * Until then the usage listed this board's tags (issue #122 P9); with one form
+ * left there is nothing per board to list.
  */
-#if !NN_SVC_HAS_MODEL_NAME
-#error "NN_SVC_HAS_MODEL_LOAD with no model source: say which tags this board takes"
-#endif
-#define NN_MODEL_SOURCES_ "--name <name>"
+#define NN_MODEL_SOURCES_ "name"
 
 /* [!] THREE SPELLINGS, BECAUSE THERE ARE THREE CONSUMERS.  A .usage field
  * carries the ARGUMENT SPELLING only, and the dispatcher prints "usage: <command
@@ -353,12 +343,13 @@ static int cmd_nn_model_load(struct cli_instance *sh, int argc, char **argv)
 	enum nn_model_state state = NN_MODEL_EMPTY;
 	int had_model, rc;
 
-	/* argv[0] is "load"; the source starts after it. */
+	/* argv[0] is "load"; the name follows it. */
 	rc = nn_spec_parse(argc - 1, &argv[1], &spec);
 	if (rc == NN_SVC_ERR_SPEC) {
-		cli_error(sh, "nn: '%s' is not a model source.  Say which kind it "
-		              "is -- the same word means different things on "
-		              "different boards\r\n", argv[1]);
+		/* The word quoted is the one the parser judged: the first after
+		 * `load`.  No state line, and the adapter is never called. */
+		cli_error(sh, "nn: '%s' is not a model name -- write the name alone "
+		              "(a name never starts with '-')\r\n", argv[1]);
 		cli_print(sh, nn_model_usage);
 		return 1;
 	}
@@ -1360,8 +1351,16 @@ static const struct cli_cmd nn_stream_subcmds[] = {
 /* ---- registration -------------------------------------------------------- */
 
 #if NN_SVC_HAS_MODEL_LOAD
+/*
+ * [!] `load` TAKES 1..4 WORDS AT THE DISPATCHER, THOUGH THE GRAMMAR IS ONE.
+ * The count stays as wide as the old tagged forms needed (`--addr <a> <len>`
+ * and one more), so that what an operator still types from an old note --
+ * `--name x`, `--addr 0x... 16` -- reaches the parser and is told to write the
+ * name alone, instead of the dispatcher's bare "invalid number of arguments".
+ * The parser decides; a fifth word is the dispatcher's.
+ */
 CLI_SUBCMD_SET_CREATE(nn_model_subcmds,
-	CLI_CMD_ARG_USAGE(load, NULL, "point the model at a source",
+	CLI_CMD_ARG_USAGE(load, NULL, "load a model by its blob name",
 	                  nn_model_load_args, cmd_nn_model_load, 2, 3),
 	CLI_CMD(unload, NULL, "release the model and what it holds",
 	        cmd_nn_model_unload),

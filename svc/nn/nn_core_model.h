@@ -19,7 +19,7 @@
  *
  * THE LOAD, in order; the first step that fails ends it:
  *
- *   1. the spec's tag is one this board takes          (else SPEC)
+ *   1. there is a spec                                 (else ARG; issue #196)
  *   2. the board's own check of the spec's arguments   (check_spec)
  *   3. the board's preconditions                       (admit)
  *   4. the claim                                       (claim_take; BUSY)
@@ -162,9 +162,6 @@ struct nn_core_model_backend {
 	int (*staging_is_open)(void);
 };
 
-/** The bit for @p tag in @ref nn_core_model_board::tags. */
-#define NN_CORE_MODEL_TAG(tag) (1u << (unsigned)(tag))
-
 /**
  * What one board is.  Const, in the board's .rodata.  A hook that may be NULL
  * says so; NULL means the board has nothing to do at that step.
@@ -174,10 +171,6 @@ struct nn_core_model_board {
 	unsigned (*cs_enter)(void);
 	void     (*cs_exit)(unsigned posture);
 	const struct nn_core_model_backend *backend;
-	/** NN_CORE_MODEL_TAG() of every spec tag this board loads from. */
-	uint32_t tags;
-	/** Word a SPEC refusal (the tag is not in @ref tags).  NULL: none. */
-	void (*spec_refused)(struct nn_core_model_job *j);
 	/** The spec's arguments, before anything is acquired.  NULL: none.
 	 *  @return NN_SVC_OK or the status to report */
 	int  (*check_spec)(struct nn_core_model_job *j);

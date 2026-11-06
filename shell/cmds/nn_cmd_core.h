@@ -70,25 +70,28 @@ uint32_t nn_dtype_size(uint8_t dtype);
 char *nn_shape_str(const struct tensor_desc *t, char *buf, size_t cap);
 
 /**
- * Parse the argument list of `nn model load` into a tagged @ref nn_spec.
+ * Parse the argument list of `nn model load` into a @ref nn_spec.
  *
  * @p argv is the list AFTER the `load` word, @p argc its length.  The grammar is
- * closed and decidable without knowing the board:
+ * one word, the blob name (issue #196):
  *
- *   --name <name>
+ *   <name>
  *
- * Any other first word -- `--slot`, `--path`, `builtin` and `--addr` included,
- * which no board takes any more (issue #196) -- is "not a tag this grammar
- * has".
+ * In this order:
+ *   - a first word that starts with '-' is an option, and there are none:
+ *     NN_SVC_ERR_SPEC, however many words follow (`--name x`, `--addr a len`,
+ *     `-foo`, `-`).  The old tagged forms land here, and none comes back;
+ *   - no word, or more than one: NN_SVC_ERR_ARG;
+ *   - one word longer than NN_SPEC_NAME_MAX: NN_SVC_ERR_ARG, never cut (a cut
+ *     name can match a different blob);
+ *   - otherwise the word is the name, copied.  `builtin` or `9` is an ordinary
+ *     name: the board looks it up like any other.
  *
- * [!] A BARE STRING IS NOT ACCEPTED, and that is the point.  A parser that took
- * one would have to guess per board what it names, which is board knowledge in
- * shell/ by a quieter route.  Making the caller say which namespace they mean
- * is what lets a board refuse one it does not have instead of half-implementing
- * it.
+ * The '-' rule is this function's own and agrees with blob_name_check()'s
+ * BLOB_NAME_DASH (a host test compares them); it does not call it.
  *
- * @return NN_SVC_OK, NN_SVC_ERR_ARG (missing or malformed operand) or
- *         NN_SVC_ERR_SPEC (not a tag this grammar has at all)
+ * @return NN_SVC_OK, NN_SVC_ERR_ARG (missing, extra or overlong word) or
+ *         NN_SVC_ERR_SPEC (an option word, which this grammar does not have)
  */
 int nn_spec_parse(int argc, char *const argv[], struct nn_spec *out);
 

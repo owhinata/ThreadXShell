@@ -80,7 +80,10 @@ extern "C" {
 #define NN_SVC_OK              0
 #define NN_SVC_ERR_ARG      (-70)  /**< a null pointer or an out-of-range count  */
 #define NN_SVC_ERR_NOSUP    (-71)  /**< this board does not implement it at all  */
-#define NN_SVC_ERR_SPEC     (-72)  /**< an option word the grammar lacks     */
+/* NN_SVC_ERR_SPEC: a word the grammar does not have, or a stream option this
+ * board does not have -- the parser refusing a `nn model load` word that starts
+ * with '-', and a board refusing `nn stream start --test`. */
+#define NN_SVC_ERR_SPEC     (-72)  /**< not in the grammar / not on this board */
 #define NN_SVC_ERR_STATE    (-73)  /**< no model is active, or one already is    */
 #define NN_SVC_ERR_BUSY     (-74)  /**< a transient claim is held elsewhere      */
 #define NN_SVC_ERR_CANCEL   (-75)  /**< the operator interrupted it              */

@@ -1230,7 +1230,7 @@ not the file's.
 | `shell.bin` (`tflm`) | 621,492 B | 629,436 B (+7,944 B: the store, the shared command, YMODEM receive; the LevelX + FileX volume -8,408 B) |
 | `shell.bin` (`null`) | 417,164 B | 424,404 B |
 | internal SRAM `.data` + `.bss` (`tflm`) | 110,768 B | 101,624 B (-9,144 B: the volume's buffers out, the 4 KB RX ring and the 1 KB staging buffer in) |
-| `nn model load <name>` deepest stack | | about 2.0 KB of the 4 KB console stack (from the `.su` files; the QSPI read side) |
+| `nn model load --name` deepest stack | | about 2.0 KB of the 4 KB console stack (from the `.su` files; the QSPI read side) |
 
 A 1 MB payload is read for a load in sixteen 64 KB pieces (`BLOB_READ_CHUNK`),
 about 250 ms at the 4 KB/ms `qspi test` measured, each piece far below the

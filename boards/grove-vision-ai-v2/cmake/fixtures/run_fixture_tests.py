@@ -41,9 +41,9 @@ exactly one thing broken:
       section the old fixed list
       (.rodata/.data/.text) never read  -> VOCAB
   V2  a forbidden word in .rodata       -> VOCAB
-  V3  `--name<TAB><SP>det` in .rodata
+  V3  `--Name<TAB><SP>DET` in .rodata
       (only the `--name det` one)       -> VOCAB
-  V4  `load<TAB><SP>det` in .rodata
+  V4  `Load<TAB><SP>Det` in .rodata
       (only the `load det` one)         -> VOCAB
 
   Q0  the unmodified probe              -> PASS
@@ -673,8 +673,8 @@ def main():
         f.write('__attribute__((section(".vocab_probe")))\n'
                 'const char vocab_probe_new[] = "faces in a new section";\n'
                 'const char vocab_probe_rodata[] = "faces in rodata";\n'
-                'const char vocab_probe_name_det[] = "--name\\t det";\n'
-                'const char vocab_probe_load_det[] = "load\\t det";\n')
+                'const char vocab_probe_name_det[] = "--Name\\t DET";\n'
+                'const char vocab_probe_load_det[] = "Load\\t Det";\n')
     cc = ninja_compile_command(build, "src/blob_stage.c.obj")
     v_obj = "seam-fixtures/v_vocab_probe.obj"
     v_cc = re.sub(r"-o \S*blob_stage\.c\.obj", f"-o {v_obj}", cc)
@@ -731,10 +731,12 @@ def main():
     # narrowed to want more context (`model\s+load\s+det`) misses it; and the
     # gap is neither one space nor a run of one kind, so an alternative
     # narrowed to a literal space, to spaces only, or to tabs only misses it
-    # too.  `probe` is the string as the gate prints it (show(): a tab as \t).
+    # too.  Both are in mixed case, so a pattern that stops ignoring case
+    # misses them (the firmware could print `Load det` as well as `load det`).
+    # `probe` is the string as the gate prints it (show(): a tab as \t).
     for case, sym, probe in (
-        ("V3", "vocab_probe_name_det", "--name\\t det"),
-        ("V4", "vocab_probe_load_det", "load\\t det"),
+        ("V3", "vocab_probe_name_det", "--Name\\t DET"),
+        ("V4", "vocab_probe_load_det", "Load\\t Det"),
     ):
         elf = f"seam-fixtures/{case.lower()}_{sym}.elf"
         cmd = shell_link.replace("arm-none-eabi-g++ ",

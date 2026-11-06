@@ -386,6 +386,17 @@ static void t_dash_name(void)
 		       strcmp(blob_stub.name[3], "keep") == 0);
 	}
 
+	/* [!] AND INTO AN EMPTY SLOT, where nothing else would refuse it:
+	 * blob_write_run() does not look at the name before it erases, so the
+	 * check in cmd_blob.c is the only thing in front of the erase.  Judged by
+	 * the counts, not by the sentence. */
+	reset();
+	run("blob write -x 5\r");
+	expect("`blob write -x 5` into an empty slot erases and receives nothing",
+	       blob_stub.reserves == 0u && blob_stub.erase_spans == 0u &&
+	       blob_stub.erase_headers == 0u && blob_stub.receives == 0u &&
+	       blob_stub.programs == 0u && blob_stub.state[5] == BLOB_EMPTY);
+
 	/* A '-' that is not the first character is an ordinary name. */
 	reset();
 	run("blob write a-b 12\r");

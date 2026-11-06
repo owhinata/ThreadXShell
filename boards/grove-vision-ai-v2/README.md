@@ -7490,6 +7490,15 @@ at 10,089, so the verdict did not move.  Fixtures V0-V2 in
 links a forbidden word into a new loaded section and is passed by the old fixed
 list, V2 puts one in `.rodata`.
 
+**Telling the operator to load `det` is refused in both spellings (issue
+#196).**  Besides the words, the pattern refuses `--name det` (since issue
+#105) and `load det` (added when the model came to be named alone, `nn model
+load det`). V3 (`--name`, a tab and a space, `det`) and V4 (the same with
+`load`) each match only one of the two, so dropping either one fails exactly one
+fixture; nothing stands in front of the keyword and the gap mixes a tab and a
+space, so narrowing either one (more context, a literal space, one kind of
+blank) fails it too.
+
 **[!] It still does not prove the firmware cannot say "face".**  A string
 assembled at run time out of char literals is in no section.  That is a
 deliberate act, and this gate is aimed at the slip -- the ordinary edit made by

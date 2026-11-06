@@ -41,6 +41,10 @@ exactly one thing broken:
       section the old fixed list
       (.rodata/.data/.text) never read  -> VOCAB
   V2  a forbidden word in .rodata       -> VOCAB
+  V3  `--name<TAB><SP>det` in .rodata
+      (only the `--name det` one)       -> VOCAB
+  V4  `load<TAB><SP>det` in .rodata
+      (only the `load det` one)         -> VOCAB
 
   Q0  the unmodified probe              -> PASS
   Q1  another TU calls the inner name   -> N5
@@ -668,7 +672,9 @@ def main():
         # gathers into .rodata.
         f.write('__attribute__((section(".vocab_probe")))\n'
                 'const char vocab_probe_new[] = "faces in a new section";\n'
-                'const char vocab_probe_rodata[] = "faces in rodata";\n')
+                'const char vocab_probe_rodata[] = "faces in rodata";\n'
+                'const char vocab_probe_name_det[] = "--name\\t det";\n'
+                'const char vocab_probe_load_det[] = "load\\t det";\n')
     cc = ninja_compile_command(build, "src/blob_stage.c.obj")
     v_obj = "seam-fixtures/v_vocab_probe.obj"
     v_cc = re.sub(r"-o \S*blob_stage\.c\.obj", f"-o {v_obj}", cc)
@@ -713,6 +719,34 @@ def main():
                                    "seam-fixtures/v2_rodata.elf", objcopy)
     ok &= expect("V2 a forbidden word in .rodata is caught",
                  rc, ids, 1, {"VOCAB"}, text)
+
+    # V3 / V4 (issue #196): the two ways of telling the operator to load a
+    # model called `det`.  Each string matches exactly ONE alternative of the
+    # pattern and no forbidden word, so removing either alternative lets
+    # exactly one of these through the gate -- and each also asserts it named the
+    # probe's string, so it cannot pass on some other line.
+    #
+    # [!] THE STRINGS ARE THE LEAST EACH ALTERNATIVE NEEDS, AND THE GAP IS A TAB
+    # AND A SPACE.  Nothing stands in front of the keyword, so an alternative
+    # narrowed to want more context (`model\s+load\s+det`) misses it; and the
+    # gap is neither one space nor a run of one kind, so an alternative
+    # narrowed to a literal space, to spaces only, or to tabs only misses it
+    # too.  `probe` is the string as the gate prints it (show(): a tab as \t).
+    for case, sym, probe in (
+        ("V3", "vocab_probe_name_det", "--name\\t det"),
+        ("V4", "vocab_probe_load_det", "load\\t det"),
+    ):
+        elf = f"seam-fixtures/{case.lower()}_{sym}.elf"
+        cmd = shell_link.replace("arm-none-eabi-g++ ",
+                                 f"arm-none-eabi-g++ {v_obj} "
+                                 f"-Wl,-u,{sym} ", 1)
+        cmd = retarget(cmd, "shell.elf", elf)
+        link(build, cmd, case)
+        rc, ids, text = run_vocab_gate(board, build, elf, objcopy)
+        if f'"{probe}"' in text:
+            ids.add("NAMED")
+        ok &= expect(f"{case} `{probe}` in .rodata is caught",
+                     rc, ids, 1, {"VOCAB", "NAMED"}, text)
 
     # --- check_nor_seam.py: who may reach the NOR write path (issue #88) -----
     #

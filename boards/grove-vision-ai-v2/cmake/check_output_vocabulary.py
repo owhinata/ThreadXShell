@@ -53,8 +53,14 @@ FORBIDDEN_WORDS = (
     "blazeface", "detector", "detection", "detections",
 )
 
+# Besides the words, the firmware may not tell the operator to load a model
+# called `det` -- a detector by name.  `--name\s+det` is the spelling that came
+# with issue #105; `load\s+det` (issue #196) catches the same advice once the
+# model is named alone (`nn model load det`).  Both stay: each is a separate
+# alternative with its own negative test.
 FORBIDDEN = re.compile(
-    r"\b(" + "|".join(FORBIDDEN_WORDS) + r")\b" + r"|--name\s+det\b",
+    r"\b(" + "|".join(FORBIDDEN_WORDS) + r")\b" + r"|--name\s+det\b"
+    + r"|\bload\s+det\b",
     re.IGNORECASE,
 )
 

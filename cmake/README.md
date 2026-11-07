@@ -780,7 +780,8 @@ directions against the `LEASE ENTRIES` tables of the tests the board names
 wio-lite-ai's `test/test_nn_active.c`).  A name defined but neither walked nor
 exempted fails, and so does a name walked or exempted that no object defines.
 Each board's `test/host_tests.sh` runs it; wio-lite-ai's also shows it refusing
-two spellings a source-text match would miss.
+two spellings a source-text match would miss (the cases and their verdicts are
+in that board's `test/test_lease_entries.py` since #205).
 
 # Plugin objects and the ABI they were compiled against
 
@@ -893,3 +894,32 @@ must come out byte for byte unchanged, and with a hook path and an `insteadOf`
 injected through `GIT_CONFIG_PARAMETERS` and `GIT_CONFIG_COUNT`, which must
 neither run the hook nor reach the other remote (`GIT_TRACE` shows which
 upload-pack git started).
+
+# Negative-test runners: held to a table of runs and counts (#205)
+
+A negative-test runner whose call is deleted, turned into a no-op or skipped
+when it should not have been prints nothing and fails nothing, so the host
+tests would still end in "host tests passed".  To close that, every runner the
+host tests call -- `cmake/fixtures/run_*.py`, `boards/*/cmake/fixtures/run_*.py`
+and `boards/*/test/test_*.py` -- ends a passing run with exactly one stdout line,
+`negative-tests: <path from the repository root> OK (N cases)`, where N is the
+number of verdicts it actually reached (counted where each is decided, never
+the length of a case list).  The line comes from the runner itself, never from
+an `echo` in a board's script.
+
+`shell/test/run_host_tests.sh` keeps the output of its own runners and of each
+board's `test/host_tests.sh`, and holds every such line against one table in
+that script: the runner, the log it must appear in (the shared runner's or a
+board's), the condition under which it must have run, and N.  The condition is
+decided by the shared runner from facts, never from a board's SKIPPED line,
+using four predicates: always, the pinned toolchain under `tools/`, a board's
+configured build tree, and a named ninja target in that tree.  The comparison
+is both ways and N is an equality, not a floor: a row whose condition holds
+needs its line exactly once with an equal N, a runner none of whose rows holds
+must print nothing, and a line no row names fails.  The table is also held
+against the files matching the three patterns above: each needs a row or a line
+with its reason in the script's exclusion list, so a runner nothing calls fails
+the suite before any negative-test runner is started.  A commit that adds or removes a case therefore changes
+that runner's row in the same commit, and a new runner needs a row.  The rows,
+counts, predicates and exclusions themselves are only in the script; its
+comment above the table is the reference.

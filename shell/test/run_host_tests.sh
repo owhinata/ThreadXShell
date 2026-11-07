@@ -658,6 +658,150 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
     $LDFLAGS -o "$out/test_blazeface_svc"
 "$out/test_blazeface_svc"
 
+# ---- negative-test runners: which must have run, and how many cases ------- *
+# issue #205 (after #204, which did this for one Grove runner) -- a negative-test
+# runner whose call is deleted, turned into `:` or skipped when it should not
+# have been prints nothing and fails nothing: the suite still ends in "host
+# tests passed".  So every runner ends a passing run with exactly one stdout
+# line, "negative-tests: <path from the repository root> OK (N cases)", N being
+# the verdicts it reached, and THIS script holds every such line against the
+# table below.  A row is: the runner / the log its line must be in ("shared"
+# for this script's own calls, else the board whose host_tests.sh calls it) /
+# when it must have run / N under that condition.
+#
+# The condition is decided HERE, from facts, and never from a board's SKIPPED
+# line (a skip that should not have happened reads like a reason).  The
+# predicates, joined with "+", each optionally negated with "!":
+#   always                 -- no requirement
+#   toolchain              -- the pinned arm-none-eabi-gcc under tools/
+#   tree:<board>           -- that board's configured tree (a build.ninja), at
+#                             the path its host_tests.sh uses (neg_tree below)
+#   target:<board>:<name>  -- that tree has a ninja target <name>
+# The board scripts keep their own conditions; the two are independent and are
+# compared both ways: a row whose condition holds needs its line exactly once
+# with N equal to the row's, a (runner, log) none of whose rows holds must have
+# no line, and a line no row names fails.  A board that was not run is not
+# looked at.  [!] N is compared for EQUALITY, not as a floor: with a floor, a
+# case added without raising it would let a later one be dropped unnoticed, so
+# a commit that adds or removes a case changes its row here.
+#
+# And the table is held against the files: every cmake/fixtures/run_*.py,
+# boards/*/cmake/fixtures/run_*.py and boards/*/test/test_*.py needs a row or a
+# line in neg_excluded with its reason -- a runner nothing calls is found here.
+# A row naming a file that does not exist fails as well.
+neg_table="$out/neg_table"
+cat > "$neg_table" <<'EOF'
+cmake/fixtures/run_storage_gate_tests.py                         shared             always      8
+cmake/fixtures/run_add_plugin_arg_tests.py                       shared             always      103
+cmake/fixtures/run_asset_dest_tests.py                           shared             always      45
+cmake/fixtures/run_slot_table_tests.py                           shared             always      12
+cmake/fixtures/run_pinned_input_tests.py                         shared             always      16
+cmake/fixtures/run_fetch_upstream_tests.py                       shared             always      52
+cmake/fixtures/run_git_env_tests.py                              shared             always      58
+boards/f746g-disco/cmake/fixtures/run_layout_tests.py            f746g-disco        always      41
+cmake/fixtures/run_blob_staging_tests.py                         f746g-disco        toolchain   36
+cmake/fixtures/run_blob_staging_tests.py                         f746g-disco        !toolchain  5
+cmake/fixtures/run_model_io_gate_tests.py                        f746g-disco        target:f746g-disco:verify_tflite  278
+boards/f746g-disco/cmake/fixtures/run_verify_tflite_size_tests.py f746g-disco       target:f746g-disco:verify_tflite  6
+boards/grove-vision-ai-v2/test/test_flash_partitions.py          grove-vision-ai-v2 always      30
+boards/grove-vision-ai-v2/test/test_flash_geometry.py            grove-vision-ai-v2 always      14
+boards/grove-vision-ai-v2/test/test_planar_bgr_to_png.py         grove-vision-ai-v2 always      92
+boards/grove-vision-ai-v2/test/test_plugin_stack.py              grove-vision-ai-v2 always      25
+cmake/fixtures/run_plugin_gate_tests.py                          grove-vision-ai-v2 toolchain   107
+cmake/fixtures/run_veneer_cost_tests.py                          grove-vision-ai-v2 toolchain   302
+cmake/fixtures/run_veneer_gate_build_tests.py                    grove-vision-ai-v2 toolchain   57
+boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py    grove-vision-ai-v2 tree:grove-vision-ai-v2+toolchain  25
+cmake/fixtures/run_model_io_gate_tests.py                        grove-vision-ai-v2 target:grove-vision-ai-v2:verify_vela_model  486
+boards/wio-lite-ai/test/test_lease_entries.py                    wio-lite-ai        always      2
+boards/wio-lite-ai/cmake/fixtures/run_reservation_tests.py       wio-lite-ai        toolchain   10
+cmake/fixtures/run_blob_staging_tests.py                         wio-lite-ai        toolchain   36
+cmake/fixtures/run_blob_staging_tests.py                         wio-lite-ai        !toolchain  5
+cmake/fixtures/run_veneer_cost_tests.py                          wio-lite-ai        toolchain   302
+cmake/fixtures/run_veneer_gate_build_tests.py                    wio-lite-ai        toolchain   57
+cmake/fixtures/run_model_io_gate_tests.py                        wio-lite-ai        target:wio-lite-ai:verify_tflite  278
+boards/wio-lite-ai/cmake/fixtures/run_verify_tflite_size_tests.py wio-lite-ai       target:wio-lite-ai:verify_tflite  6
+EOF
+# Files that match the patterns and are deliberately not host-test runners.
+neg_excluded="$out/neg_excluded"
+cat > "$neg_excluded" <<'EOF'
+cmake/fixtures/run_shared_storage_build_tests.py  runs inside the grove-vision-ai-v2 firmware build (board.cmake), not in the host tests
+boards/wio-lite-ai/cmake/fixtures/run_fixture_tests.py  #205 step 3 wires it
+EOF
+
+neg_tree() {  # <board> -> that board's configured tree, as its host_tests.sh finds it
+    case "$1" in
+    f746g-disco)        echo "${F746_TFLM_BUILD_DIR:-$repo/build/f746-tflm}" ;;
+    wio-lite-ai)        echo "${WIO_BUILD_DIR:-$repo/build/wio-lite-ai}" ;;
+    grove-vision-ai-v2) echo "${GROVE_BUILD_DIR:-$repo/build/grove-vision-ai-v2}" ;;
+    *) echo "run_host_tests: negative-test table: no tree known for board '$1'" >&2
+       exit 1 ;;
+    esac
+}
+neg_pred() {  # <predicate>
+    case "$1" in
+    always) return 0 ;;
+    toolchain)
+        _ng=$(ls -d "$repo"/tools/arm-gnu-toolchain-*/bin/arm-none-eabi-gcc 2>/dev/null | tail -1)
+        [ -n "$_ng" ] && [ -x "$_ng" ] ;;
+    tree:*)
+        _nd=$(neg_tree "${1#tree:}") || exit 1
+        [ -f "$_nd/build.ninja" ] ;;
+    target:*)
+        _nr=${1#target:}
+        _nd=$(neg_tree "${_nr%%:*}") || exit 1
+        [ -f "$_nd/build.ninja" ] &&
+            ninja -C "$_nd" -t targets all 2>/dev/null </dev/null | grep -q "^${_nr#*:}:" ;;
+    *) echo "run_host_tests: negative-test table: unknown condition '$1'" >&2
+       exit 1 ;;
+    esac
+}
+neg_cond() {  # <p1+p2+...>: every predicate holds (a "!" one must not)
+    _nrest=$1
+    while [ -n "$_nrest" ]; do
+        _np=${_nrest%%+*}
+        case "$_nrest" in *+*) _nrest=${_nrest#*+} ;; *) _nrest="" ;; esac
+        case "$_np" in
+        '!'*) if neg_pred "${_np#!}"; then return 1; fi ;;
+        *)    if ! neg_pred "$_np"; then return 1; fi ;;
+        esac
+    done
+    return 0
+}
+
+# The inventory, before anything runs (it costs nothing and needs no tree).
+neg_bad=0
+for f in "$repo"/cmake/fixtures/run_*.py "$repo"/boards/*/cmake/fixtures/run_*.py \
+         "$repo"/boards/*/test/test_*.py; do
+    [ -f "$f" ] || continue
+    rel=${f#"$repo"/}
+    if ! awk -v p="$rel" '$1 == p { found = 1 } END { exit !found }' \
+            "$neg_table" "$neg_excluded"; then
+        echo "run_host_tests: $rel is a negative-test runner with no row in the" \
+             "negative-test table and no line in neg_excluded -- nothing checks" \
+             "that it runs" >&2
+        neg_bad=1
+    fi
+done
+while read -r rel _nlog _ncond _nn; do
+    if [ ! -f "$repo/$rel" ]; then
+        echo "run_host_tests: the negative-test table names $rel ($_nlog log)," \
+             "which does not exist" >&2
+        neg_bad=1
+    fi
+done < "$neg_table"
+[ "$neg_bad" -eq 0 ] || exit 1
+
+# This script's own runner calls keep their stdout in one log, as the boards'
+# do; the exit code travels in a file because a pipeline's status is tee's.
+shared_log="$out/shared_tests.log"
+: > "$shared_log"
+shared_py() {  # <python3 arguments...>
+    { _src=0; python3 "$@" || _src=$?; echo "$_src" > "$shared_log.rc"; } \
+        | tee -a "$shared_log"
+    _src=$(cat "$shared_log.rc")
+    [ "$_src" -eq 0 ] || exit "$_src"
+}
+
 # issue #97 -- negative tests for cmake/check_no_mutable_storage.py, the gate that
 # keeps svc/nn/blazeface.c from growing state of its own (each board passes in its
 # own scratch so that it keeps its own placement and its own residency gate).
@@ -668,7 +812,7 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
 # `#if defined(__arm__)`, so a host-side run cannot see it.  That is the whole
 # reason the gate itself is wired per board against the cross compiler rather
 # than once here.  The boards run this same script with their own toolchain.
-python3 "$repo/cmake/fixtures/run_storage_gate_tests.py" \
+shared_py "$repo/cmake/fixtures/run_storage_gate_tests.py" \
     --cc gcc --objdump objdump --nm nm
 
 # issue #108 -- the plugin image gate is shared, and the three facts that differ
@@ -680,7 +824,7 @@ python3 "$repo/cmake/fixtures/run_storage_gate_tests.py" \
 # Since #112 the same configure also registers the firmware-side veneer cost
 # gate (add_plugin() refuses without it) against a dummy executable, so it
 # needs the host C compiler too -- still no cross toolchain.
-python3 "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
+shared_py "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
 
 # issues #159, #195 -- an asset's destination is a slot, both halves required,
 # and the receipt is one text for every board: build_asset.py refuses a
@@ -690,14 +834,14 @@ python3 "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
 # container that fits its slot exactly is published, and a byte over, a slot
 # the table lacks, an unreadable slot table and a non-numeric slot publish
 # nothing.
-python3 "$repo/cmake/fixtures/run_asset_dest_tests.py"
+shared_py "$repo/cmake/fixtures/run_asset_dest_tests.py"
 
 # issue #195 -- the one slot-table tool every board's asset build runs
 # (asset/tools/slot_table.c): each board's shipped table passes and comes out
 # as JSON; a slot outside the interval, overlapping or not whole erase units
 # is refused and leaves no JSON (an earlier one is removed); and the interval
 # checked is the board's own.  Host cc only.
-python3 "$repo/cmake/fixtures/run_slot_table_tests.py"
+shared_py "$repo/cmake/fixtures/run_slot_table_tests.py"
 
 # issue #132 -- the pin is checked again by the FIRST CONSUMER of the fetched
 # model, inside its own command (ninja reruns only the consumer when the file
@@ -705,7 +849,7 @@ python3 "$repo/cmake/fixtures/run_slot_table_tests.py"
 # and cmake/run_with_pinned_input.py in front of an ingest tool.  A one-byte
 # flip must refuse and write nothing, an empty hash must refuse, and a match
 # must go through.  Python only.
-python3 "$repo/cmake/fixtures/run_pinned_input_tests.py"
+shared_py "$repo/cmake/fixtures/run_pinned_input_tests.py"
 
 # issue #136 -- cmake/fetch_upstream.cmake, the per-board pinned fetch of the ST
 # Cube trees (HAL / CMSIS device / CMSIS core).  An existing checkout is only ever
@@ -714,7 +858,7 @@ python3 "$repo/cmake/fixtures/run_pinned_input_tests.py"
 # be fetched again, the second configure must be offline, and a parallel
 # configure must wait for the lock.  Against a local file:// upstream, so no
 # network; needs git, cmake and ninja only.
-python3 "$repo/cmake/fixtures/run_fetch_upstream_tests.py"
+shared_py "$repo/cmake/fixtures/run_fetch_upstream_tests.py"
 
 # issue #158 -- the other two pinned fetches, cmake/fetch_model.cmake and the
 # Grove SDK fetch (boards/grove-vision-ai-v2/cmake/himax_sdk_fetch.cmake), start
@@ -725,7 +869,7 @@ python3 "$repo/cmake/fixtures/run_fetch_upstream_tests.py"
 # objects; and a core.hooksPath or url.<x>.insteadOf carried in
 # GIT_CONFIG_PARAMETERS or GIT_CONFIG_COUNT must neither run a hook nor send the
 # fetch to another remote.  Local file:// upstreams; needs git and cmake only.
-python3 "$repo/cmake/fixtures/run_git_env_tests.py"
+shared_py "$repo/cmake/fixtures/run_git_env_tests.py"
 
 # issue #97 -- the published decode record (svc/nn/nn_det_record.c).  A camera stream
 # decodes on a worker and a console prints on another thread, so what the two
@@ -1165,54 +1309,7 @@ export HOST_TEST_SVC="$svc"
 export HOST_TEST_BACKEND="$backend"
 export HOST_TEST_SHELL_TEST="$here"
 
-# issue #204 -- a board's negative tests run inside that board's host_tests.sh,
-# and a call that is deleted (or turned into `:`) there prints nothing and fails
-# nothing: the suite still ends in "host tests passed".  For Grove's linker-gate
-# fixtures (boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py, the
-# only place the output-vocabulary gate's negative tests run) this runner, not
-# the board script, decides whether they must have run, and then requires the
-# fixture runner's own last line (issue #205's shape, "negative-tests:
-# boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py OK (N cases)")
-# exactly once with N equal to the count declared here.
-#
-# "Must have run" is decided HERE from the same two facts the board script
-# looks at -- a configured tree (GROVE_BUILD_DIR, or build/grove-vision-ai-v2)
-# and the pinned toolchain under tools/ -- and not from the board's SKIPPED
-# line, so a board script that skipped when it should not have is caught too.
-# Without either, nothing is required and the run is as before.
-#
-# The count is the number of fixtures the runner has (main a32a712): F1-F3
-# for check_timer_seam.py (3), P0-P5 for check_placement_budget.py (6), V0-V4
-# for check_output_vocabulary.py (5) and Q0-Q10 for check_nor_seam.py (11) --
-# 25.  [!] It is compared for equality, not as a floor: with a floor, a fixture
-# added without raising it would let a later one be dropped unnoticed.  So
-# adding or removing a fixture fails here until this number is changed in the
-# same commit, which is the point -- the change shows up in the diff.
-grove_fixture_count=25
-grove_fixtures_expected() {
-    _gb="${GROVE_BUILD_DIR:-$repo/build/grove-vision-ai-v2}"
-    _gcc=$(ls -d "$repo"/tools/arm-gnu-toolchain-*/bin/arm-none-eabi-gcc \
-               2>/dev/null | tail -1)
-    [ -f "$_gb/build.ninja" ] && [ -n "$_gcc" ] && [ -x "$_gcc" ]
-}
-grove_fixtures_check() {  # <board log>
-    _pfx='negative-tests: boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py OK ('
-    _hits=$(grep -c '^negative-tests: boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests\.py OK (' "$1" || true)
-    _n=$(sed -n 's|^negative-tests: boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests\.py OK (\([0-9][0-9]*\) cases)$|\1|p' "$1")
-    if [ "$_hits" -ne 1 ] || [ -z "$_n" ] || [ "$_n" -ne "$grove_fixture_count" ]; then
-        echo "run_host_tests: grove-vision-ai-v2 has a configured build tree" \
-             "(${GROVE_BUILD_DIR:-$repo/build/grove-vision-ai-v2}) and the" \
-             "pinned toolchain, so its board tests must end the linker-gate" \
-             "fixtures with one '${_pfx}N cases)' line," \
-             "N = $grove_fixture_count (grove_fixture_count in this" \
-             "script; change it with the fixture list); found $_hits such" \
-             "line(s), N='${_n:-none}'" >&2
-        exit 1
-    fi
-    echo "--- board tests: grove-vision-ai-v2 ran $_n linker-gate fixtures" \
-         "(declared $grove_fixture_count)"
-}
-
+neg_logs="shared"
 for b in $boards; do
     script="$repo/boards/$b/test/host_tests.sh"
     if [ -f "$script" ]; then
@@ -1224,12 +1321,80 @@ for b in $boards; do
             | tee "$log"
         brc=$(cat "$log.rc")
         [ "$brc" -eq 0 ] || exit "$brc"
-        if [ "$b" = grove-vision-ai-v2 ] && grove_fixtures_expected; then
-            grove_fixtures_check "$log"
-        fi
+        neg_logs="$neg_logs $b"
     else
         echo "--- board tests: $b (none)"
     fi
 done
+
+# ---- negative-test runners: the logs against the table (see above) ------- *
+neg_log_file() {  # <log name>
+    if [ "$1" = shared ]; then echo "$shared_log"; else echo "$out/board_tests_$1.log"; fi
+}
+neg_lines() {  # <log file> <runner>: that runner's lines, whatever their shape
+    awk -v p="$2" '$1 == "negative-tests:" && $2 == p' "$1"
+}
+echo "--- negative tests"
+neg_bad=0
+neg_held="$out/neg_held"
+: > "$neg_held"
+while read -r rel nlog ncond nn; do
+    case " $neg_logs " in *" $nlog "*) ;; *) continue ;; esac
+    neg_cond "$ncond" || continue
+    if grep -qxF "$nlog $rel" "$neg_held"; then
+        echo "run_host_tests: the negative-test table has two rows for $rel in" \
+             "the $nlog log whose conditions both hold" >&2
+        neg_bad=1
+        continue
+    fi
+    echo "$nlog $rel" >> "$neg_held"
+    lf=$(neg_log_file "$nlog")
+    hits=$(neg_lines "$lf" "$rel" | wc -l)
+    got=$(neg_lines "$lf" "$rel" | sed -n 's|^negative-tests: [^ ]* OK (\([0-9][0-9]*\) cases)$|\1|p' \
+          | tr '\n' ' ' | sed 's/ $//')
+    if [ "$hits" -ne 1 ] || [ "$got" != "$nn" ]; then
+        echo "run_host_tests: negative tests: $rel in the $nlog log: '$ncond'" \
+             "holds, so one line 'negative-tests: $rel OK ($nn cases)' is" \
+             "required; found $hits line(s), N='${got:-none}', declared $nn" \
+             "(change the row in the table only with the cases)" >&2
+        neg_bad=1
+    else
+        echo "  ok   $rel ($nlog): $got cases, declared $nn, '$ncond' holds"
+    fi
+done < "$neg_table"
+# A (runner, log) none of whose rows holds must have printed nothing.
+while read -r rel nlog ncond nn; do
+    case " $neg_logs " in *" $nlog "*) ;; *) continue ;; esac
+    grep -qxF "$nlog $rel" "$neg_held" && continue
+    echo "$nlog $rel" >> "$neg_held"   # once per pair
+    hits=$(neg_lines "$(neg_log_file "$nlog")" "$rel" | wc -l)
+    if [ "$hits" -ne 0 ]; then
+        echo "run_host_tests: negative tests: $rel in the $nlog log: no row's" \
+             "condition holds (this row: '$ncond'), so it must not have run;" \
+             "found $hits line(s) -- the board script and this table disagree" \
+             "about when it runs" >&2
+        neg_bad=1
+    else
+        echo "  --   $rel ($nlog): not required, '$ncond' does not hold, no line"
+    fi
+done < "$neg_table"
+# Every line in a log that was looked at has the one shape and a row.
+for nlog in $neg_logs; do
+    grep '^negative-tests:' "$(neg_log_file "$nlog")" > "$out/neg_found" || true
+    while IFS= read -r line; do
+        rel=$(printf '%s\n' "$line" | awk '{ print $2 }')
+        if ! printf '%s\n' "$line" | grep -qE '^negative-tests: [^ ]+ OK \([0-9]+ cases\)$'; then
+            echo "run_host_tests: negative tests: a line in the $nlog log is not" \
+                 "'negative-tests: <runner> OK (N cases)': $line" >&2
+            neg_bad=1
+        elif ! awk -v p="$rel" -v l="$nlog" '$1 == p && $2 == l { found = 1 } END { exit !found }' \
+                "$neg_table"; then
+            echo "run_host_tests: negative tests: the $nlog log has a line for" \
+                 "$rel, which has no row for that log in the table: $line" >&2
+            neg_bad=1
+        fi
+    done < "$out/neg_found"
+done
+[ "$neg_bad" -eq 0 ] || exit 1
 
 echo "host tests passed"

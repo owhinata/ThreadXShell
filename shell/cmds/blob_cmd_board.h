@@ -34,6 +34,14 @@ int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink);
 int blob_board_raw_console(struct cli_instance *sh);
 
 /**
+ * May @p sh run `blob erase`?  0 yes; -1 no, having told the operator why
+ * (as one cli_error line starting "blob: ").  Asked before the reservation.
+ * grove-vision-ai-v2 refuses a background job here, because its NOR writer
+ * relies on running in the foreground (issue #203); the other boards answer 0.
+ */
+int blob_board_erase_console(struct cli_instance *sh);
+
+/**
  * The board's own sentence for @p rc, when it has one: who holds a busy part,
  * why a port is faulted, where to look when the device is down.  Returns 1
  * having printed it (as one cli_error line starting "blob: "), or 0 to let

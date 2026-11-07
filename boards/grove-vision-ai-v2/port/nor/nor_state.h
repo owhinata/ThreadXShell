@@ -227,6 +227,11 @@ enum nor_reserve {
 	/** Terminal.  The port is faulted, the state is unknown, or the state
 	 *  and the owner field disagree (nor_owner_consistent()). */
 	NOR_RSV_FAULTED,
+	/** Everything else said GO, but the camera may be moving data (issue
+	 *  #203; see nor_write_decide()).  Not busy in the lease sense and not a
+	 *  fault: nothing was claimed, and the operator's next command is a
+	 *  camera stop, not a wait. */
+	NOR_RSV_CAMERA,
 };
 
 /**
@@ -244,7 +249,7 @@ enum nor_reserve {
  * transactions in one path.
  */
 enum nor_reserve nor_reserve_decide(enum nor_state st, uint32_t live,
-                                    uint32_t owner);
+                                    uint32_t owner, int camera);
 
 /** What an unreserve attempt may do. */
 enum nor_unreserve {
@@ -301,6 +306,7 @@ enum nor_write {
 	NOR_WR_GO = 0,    /**< the caller owns the reservation: claim it       */
 	NOR_WR_BUSY,      /**< readers out, a bring-up in flight, or not ours  */
 	NOR_WR_FAULTED,   /**< terminal: refuse, and keep refusing             */
+	NOR_WR_CAMERA,    /**< ours, but the camera may be moving data (#203)  */
 };
 
 /**
@@ -335,9 +341,19 @@ enum nor_write {
  * As with nor_acquire_decide(), the states that may act are ENUMERATED.
  * "anything that is not WRITING" would let a writer start from OFF, and
  * "state == RESERVED" alone would let a stranger use somebody else's claim.
+ *
+ * [!] AND THE CAMERA IS AN INPUT, READ IN THE SAME SECTION (issue #203).
+ * @p camera is non-zero while the camera may be moving data
+ * (camera_datapath_live(), or the panel sink not detached).  A page program
+ * issued while the camera streamed to the panel came back short or refused on
+ * hardware every time it was tried, and a read-back mismatch is terminal --
+ * so the transaction is refused BEFORE THE WIRE instead, with nothing claimed.
+ * It can only turn a GO into NOR_WR_CAMERA: a fault still reads as a fault and
+ * somebody else's claim still reads as BUSY, because those are the answers the
+ * operator has to act on first.  The same holds for nor_reserve_decide().
  */
 enum nor_write nor_write_decide(enum nor_state st, uint32_t live,
-                                uint32_t owner, uint32_t token);
+                                uint32_t owner, uint32_t token, int camera);
 
 /** Human-readable names, for `nor info` and for the host test's diagnostics. */
 const char *nor_state_name(enum nor_state st);

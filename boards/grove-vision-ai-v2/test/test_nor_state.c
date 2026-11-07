@@ -61,6 +61,7 @@ static const char *wr_name(enum nor_write w)
 	case NOR_WR_GO:      return "GO";
 	case NOR_WR_BUSY:    return "BUSY";
 	case NOR_WR_FAULTED: return "FAULTED";
+	case NOR_WR_CAMERA:  return "CAMERA";
 	}
 	return "?";
 }
@@ -212,7 +213,8 @@ int main(void)
 		};
 		for (unsigned i = 0; i < sizeof(wr) / sizeof(wr[0]); i++) {
 			enum nor_write got = nor_write_decide(wr[i].st, wr[i].live,
-			                                      wr[i].owner, wr[i].token);
+			                                      wr[i].owner, wr[i].token,
+			                                      0);
 			CHECK(got == wr[i].want,
 			      "write_decide(%s, live=0x%x, owner=0x%x, token=0x%x) [%s]"
 			      " = %s, want %s",
@@ -222,7 +224,7 @@ int main(void)
 		}
 
 		/* An unknown state refuses terminally here too. */
-		CHECK(nor_write_decide((enum nor_state)99, 0u, 0u, 0u) ==
+		CHECK(nor_write_decide((enum nor_state)99, 0u, 0u, 0u, 0) ==
 		      NOR_WR_FAULTED,
 		      "an unknown state did not refuse a write terminally");
 
@@ -231,9 +233,34 @@ int main(void)
 		 * reader happened to sit in a bit the check ignored. */
 		for (unsigned slot = 0; slot < (unsigned)NOR_LEASE_SLOTS; slot++)
 			CHECK(nor_write_decide(NOR_ST_RESERVED, 1u << slot, OWNER,
-			                       OWNER) == NOR_WR_BUSY,
+			                       OWNER, 0) == NOR_WR_BUSY,
 			      "a writer started with slot %u holding a lease", slot);
 		(void)OTHER;
+
+		/* [!] THE CAMERA (issue #203) TURNS A GO INTO A REFUSAL AND
+		 * NOTHING ELSE.  Every row again with the camera moving data: the
+		 * one GO becomes CAMERA, and every other answer -- a fault, a
+		 * stranger's claim, a reader -- stays what it was, because that
+		 * is what the operator has to act on first.  A table that let the
+		 * camera through (GO) or masked a fault with it fails here. */
+		for (unsigned i = 0; i < sizeof(wr) / sizeof(wr[0]); i++) {
+			enum nor_write want = (wr[i].want == NOR_WR_GO)
+			                      ? NOR_WR_CAMERA : wr[i].want;
+			enum nor_write got = nor_write_decide(wr[i].st, wr[i].live,
+			                                      wr[i].owner, wr[i].token,
+			                                      1);
+			CHECK(got == want,
+			      "write_decide(%s, live=0x%x, owner=0x%x, token=0x%x, "
+			      "camera) [%s] = %s, want %s",
+			      nor_state_name(wr[i].st), wr[i].live, wr[i].owner,
+			      wr[i].token, wr[i].what, wr_name(got), wr_name(want));
+		}
+		CHECK(nor_write_decide((enum nor_state)99, 0u, 0u, 0u, 1) ==
+		      NOR_WR_FAULTED,
+		      "the camera turned an unknown state into a non-fault");
+		/* Any non-zero is "moving data", not just 1. */
+		CHECK(nor_write_decide(NOR_ST_RESERVED, 0u, OWNER, OWNER, 2) ==
+		      NOR_WR_CAMERA, "camera=2 was read as no camera");
 	}
 
 	/* ---- the reservation tables (issue #91) -------------------------- */
@@ -291,14 +318,32 @@ int main(void)
 		};
 		for (unsigned i = 0; i < sizeof(rsv) / sizeof(rsv[0]); i++) {
 			enum nor_reserve got = nor_reserve_decide(rsv[i].st, rsv[i].live,
-			                                          rsv[i].owner);
+			                                          rsv[i].owner, 0);
 			CHECK(got == rsv[i].want,
 			      "reserve_decide(%s, live=0x%x, owner=0x%x) [%s] = %d, "
 			      "want %d", nor_state_name(rsv[i].st), rsv[i].live,
 			      rsv[i].owner, rsv[i].what, (int)got, (int)rsv[i].want);
 		}
-		CHECK(nor_reserve_decide((enum nor_state)99, 0u, 0u) ==
+		CHECK(nor_reserve_decide((enum nor_state)99, 0u, 0u, 0) ==
 		      NOR_RSV_FAULTED, "an unknown state did not refuse terminally");
+
+		/* [!] And the reservation the same way (issue #203): with the
+		 * camera moving data the one GO becomes CAMERA -- which is what
+		 * refuses a `blob write` before its YMODEM starts -- and nothing
+		 * else moves. */
+		for (unsigned i = 0; i < sizeof(rsv) / sizeof(rsv[0]); i++) {
+			enum nor_reserve want = (rsv[i].want == NOR_RSV_GO)
+			                        ? NOR_RSV_CAMERA : rsv[i].want;
+			enum nor_reserve got = nor_reserve_decide(rsv[i].st, rsv[i].live,
+			                                          rsv[i].owner, 1);
+			CHECK(got == want,
+			      "reserve_decide(%s, live=0x%x, owner=0x%x, camera) [%s] "
+			      "= %d, want %d", nor_state_name(rsv[i].st), rsv[i].live,
+			      rsv[i].owner, rsv[i].what, (int)got, (int)want);
+		}
+		CHECK(nor_reserve_decide((enum nor_state)99, 0u, 0u, 1) ==
+		      NOR_RSV_FAULTED,
+		      "the camera turned an unknown state into a non-fault");
 
 		/* -- unreserve ------------------------------------------------ */
 		static const struct {

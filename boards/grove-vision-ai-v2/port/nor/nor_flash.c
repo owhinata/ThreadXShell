@@ -64,6 +64,10 @@
 
 #include "epk_irq_wrap.h"
 
+/* camera_datapath_live / cam_lcd_sink_linked: what a write refuses on (#203) */
+#include "camera.h"
+#include "cam_lcd_sink.h"
+
 #define LOG_TAG "nor"
 #include "log.h"
 
@@ -521,6 +525,34 @@ void nor_report(struct nor_report *r)
  * contract and nor_write.h for the sequence they belong to.
  */
 
+/*
+ * [!] THE CAMERA, AS THE WRITER SEES IT (issue #203).  On hardware a 64 KB page
+ * program issued while the camera streamed to the panel came back wrong twice
+ * out of two -- once the first page stopped after 232 B and the rest read FF,
+ * once the vendor refused at page 211 and the window's restore check failed too
+ * -- while the same program after `camera stream stop` succeeded three times
+ * out of three.  Which transfer gets in the way is not known.  A read-back
+ * mismatch is terminal (nor_write.c), so the answer is to refuse before the
+ * wire, and this is the question that refusal asks.
+ *
+ * Two halves, because they cover different stretches.  camera_datapath_live()
+ * is the datapath: a stream, a lost producer, and a start or a one-shot capture
+ * from its first register write.  cam_lcd_sink_linked() is the panel sink from
+ * the moment it leaves DETACHED (before the camera starts: the panel is brought
+ * up and rotated first) until its release has detached it after a confirmed
+ * stop -- or never, when it is lost.
+ *
+ * [!] CALLED WITH INTERRUPTS MASKED, from nor_reserve() and nor_write_claim().
+ * Both halves read volatiles only (the sink's under a nested TX_DISABLE, which
+ * restores the mask it found), and the transitions that raise them -- the
+ * sink's DETACHED -> ATTACHING claim under TX_DISABLE, cam_dp_live's store --
+ * are single writes, so a masked read sees each either before or after.
+ */
+int nor_write_camera_live(void)
+{
+	return camera_datapath_live() || cam_lcd_sink_linked();
+}
+
 int nor_reserve(uint32_t *out)
 {
 	enum nor_reserve verdict;
@@ -532,7 +564,8 @@ int nor_reserve(uint32_t *out)
 
 	pm = __get_PRIMASK();
 	__disable_irq();
-	verdict = nor_reserve_decide(nor.state, nor.live, nor.owner);
+	verdict = nor_reserve_decide(nor.state, nor.live, nor.owner,
+	                             nor_write_camera_live());
 	if (verdict == NOR_RSV_GO) {
 		/* [!] THE SEQUENCE, THE OWNER AND THE STATE GO TOGETHER.  Publishing
 		 * NOR_ST_RESERVED first would leave a state whose owner is zero --
@@ -609,9 +642,22 @@ enum nor_write nor_write_claim(uint32_t token)
 	 * claim is published before the section ends.  Two steps would leave an
 	 * interval nor_acquire() only has to land in once for a reader to be
 	 * handed a lease on a window that is about to disappear -- see
-	 * nor_write_decide(). */
+	 * nor_write_decide().  The camera is read in the same section for the
+	 * same reason (issue #203).  A camera is only started from a console
+	 * thread, and a program or a cycle does not yield from here to its commit
+	 * (the vendor spins on its DMA flags) -- [!] BUT THAT KEEPS THE CAMERA
+	 * OUT ONLY WHILE THE WRITER IS THE FOREGROUND SHELL THREAD.  Background
+	 * jobs run below it and cannot preempt it; a writer IN a background job
+	 * is preempted by the foreground, woken by the RX interrupt, and a
+	 * `camera stream start` typed there starts mid-program.  So every command
+	 * that writes refuses to run in the background (`nor write/erase/cycle`
+	 * in cmds/cmd_nor.c, `blob erase` in cmds/cmd_blob_board.c, `blob write`
+	 * in the shared command).  An erase can still yield in the foreground:
+	 * its progress tick prints, and a print may wait on the UART -- the
+	 * README says what that leaves. */
 	__disable_irq();
-	verdict = nor_write_decide(nor.state, nor.live, nor.owner, token);
+	verdict = nor_write_decide(nor.state, nor.live, nor.owner, token,
+	                           nor_write_camera_live());
 	if (verdict == NOR_WR_GO)
 		nor.state = NOR_ST_WRITING;
 	__set_PRIMASK(pm);

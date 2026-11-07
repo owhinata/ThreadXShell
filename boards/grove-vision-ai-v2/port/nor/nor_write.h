@@ -108,6 +108,10 @@ enum nor_write_status {
 	 *  re-probe it, or read back something other than what it wrote.  See
 	 *  nor_write.c for why the last of those has to be terminal. */
 	NOR_WRITE_FAULTED,
+	/** Refused at the claim because the camera may be moving data (issue
+	 *  #203, nor_flash.c's nor_write_camera_live()).  Like a refusal: nothing
+	 *  was claimed, the window never went down, and the port is as it was. */
+	NOR_WRITE_CAMERA,
 };
 
 /** Short name, for the console and the log. */

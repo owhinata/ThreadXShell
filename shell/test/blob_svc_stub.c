@@ -265,6 +265,12 @@ int blob_board_raw_console(struct cli_instance *sh)
 	return 0;
 }
 
+int blob_board_erase_console(struct cli_instance *sh)
+{
+	(void)sh;
+	return 0;
+}
+
 int blob_board_say(struct cli_instance *sh, int rc)
 {
 	if (blob_stub.say_rc != 0 && rc == blob_stub.say_rc) {

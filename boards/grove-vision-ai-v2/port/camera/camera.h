@@ -313,6 +313,22 @@ uint32_t camera_frames_since_bringup(void);
 int camera_stream_start(struct frame_sink *sink);
 int camera_stream_stop(void);
 
+/**
+ * @brief  May the camera's datapath be moving data right now?  (Issue #203.)
+ *
+ * Non-zero while a stream is STREAMING, while the port is CAM_ST_LOST (a
+ * producer that never acknowledged its stop may still be running it), and from
+ * the moment a datapath start begins until a quiesce has left it cold -- which
+ * covers the stretch inside camera_stream_start() and every one-shot capture
+ * before the state says anything.
+ *
+ * [!] IT EXISTS FOR THE NOR WRITER, which refuses to start a transaction while
+ * this is up: on hardware a page program issued while the camera streamed to
+ * the panel came back short or refused, every time (port/nor/nor_flash.c).
+ * Safe to call with interrupts masked: it reads two volatiles and nothing else.
+ */
+int camera_datapath_live(void);
+
 /** Producer and pipeline counters, as `camera stream stats` and `camera profile` print them. */
 struct camera_stats {
 	int      streaming;

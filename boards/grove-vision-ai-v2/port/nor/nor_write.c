@@ -94,6 +94,7 @@ const char *nor_write_status_name(enum nor_write_status s)
 	case NOR_WRITE_NO_TRANSPORT: return "no transport";
 	case NOR_WRITE_INCOMPLETE:   return "incomplete";
 	case NOR_WRITE_FAULTED:      return "faulted";
+	case NOR_WRITE_CAMERA:       return "camera streaming";
 	default:                     break;
 	}
 	return "?";
@@ -360,6 +361,15 @@ static enum nor_write_status run(enum txn_op op, uint32_t token,
 	claim = nor_write_claim(token);
 	if (claim == NOR_WR_BUSY)
 		return NOR_WRITE_BUSY;
+	/* [!] BEFORE THE WIRE, AND NOT A FAULT (issue #203).  A page program
+	 * issued while the camera streams has come back short or refused every
+	 * time it was tried on hardware; refusing here costs nothing and leaves
+	 * the port as it was. */
+	if (claim == NOR_WR_CAMERA) {
+		r->span = span;
+		note(r, "the camera is streaming");
+		return NOR_WRITE_CAMERA;
+	}
 	if (claim != NOR_WR_GO)
 		return NOR_WRITE_FAULTED;
 

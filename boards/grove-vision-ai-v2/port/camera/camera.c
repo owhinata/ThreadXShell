@@ -223,6 +223,15 @@ static int          cam_objects_ok;
 static volatile enum cam_state cam_state;
 static uint8_t  cam_stop_req;
 static uint8_t  cam_datapath_configured;
+/*
+ * [!] RAISED BEFORE cam_start_datapath() TOUCHES ANYTHING, LOWERED ONLY AT THE
+ * END OF cam_quiesce() (issue #203).  camera_datapath_live() reads it for the
+ * NOR writer, with interrupts masked, from a thread that may have preempted a
+ * start half-way -- so it has to be up before the first register write, not
+ * after the last, and cam_state cannot stand in for it: a start publishes
+ * CAM_ST_STREAMING only once the datapath is already running.
+ */
+static volatile uint8_t cam_dp_live;
 static uint8_t  cam_rev_c;
 /* Next datapath configuration uses the RAW leg (INP -> WDMA2, no demosaic). */
 static volatile uint8_t cam_raw_mode;
@@ -1083,6 +1092,10 @@ static int cam_bringup(void)
  */
 static int cam_start_datapath(void)
 {
+	/* First, before any of it (see cam_dp_live).  Every failure below is
+	 * followed by its caller's cam_quiesce(), which is what lowers it. */
+	cam_dp_live = 1u;
+
 	/*
 	 * Give the previous start's datapath rounds back first.  They wrapped
 	 * the same lines this one is about to bring up, and the wrap refuses a
@@ -1201,6 +1214,9 @@ static void cam_quiesce(void)
 	cam_err = 0;
 	cam_frame_ready = 0u;
 	cam_generation++;
+
+	/* Last: the datapath is cold from here (cam_dp_live, issue #203). */
+	cam_dp_live = 0u;
 }
 
 /* ---- the rev-C MIPI bounce ----------------------------------------------- */
@@ -2691,6 +2707,16 @@ static uint32_t cam_prof_us(uint64_t ticks, uint32_t hz)
 	if (hz == 0u)
 		return 0u;
 	return (uint32_t)((ticks * 1000000u) / hz);
+}
+
+/* The NOR writer's question (camera.h).  STREAMING and LOST from the state, the
+ * stretch before and between them from cam_dp_live; nothing else is read, so it
+ * is safe under the writer's masked section. */
+int camera_datapath_live(void)
+{
+	enum cam_state st = cam_state;
+
+	return cam_dp_live != 0u || st == CAM_ST_STREAMING || st == CAM_ST_LOST;
 }
 
 void camera_stream_stats(struct camera_stats *out)

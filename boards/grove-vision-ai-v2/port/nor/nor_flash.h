@@ -168,7 +168,8 @@ void nor_report(struct nor_report *r);
  * @brief  Claim the part for a sequence of write transactions.
  *
  * @param out  receives the token to store; set to 0 on any refusal
- * @return 0 on success, -1 if refused
+ * @return 0 on success, -1 if refused -- including while the camera may be
+ *         moving data (nor_write_camera_live(), issue #203)
  *
  * [!] THE CALLER MUST GUARANTEE nor_unreserve() RUNS ON EVERY EXIT.  This has
  * the same shape as the hazard nor_write.h describes one level down -- a claim
@@ -200,6 +201,16 @@ int nor_unreserve(uint32_t token);
 
 /** The reservation token currently recorded, or 0.  For diagnostics only. */
 uint32_t nor_reservation_owner(void);
+
+/**
+ * @brief  Is the camera in a state a write refuses on?  (Issue #203.)
+ *
+ * The question nor_reserve() and nor_write_claim() ask inside their critical
+ * sections; see nor_flash.c for the evidence and the two halves.  Exported so
+ * that a console refusal can name the camera rather than "busy" -- asked again
+ * for the words, it decides nothing.
+ */
+int nor_write_camera_live(void);
 
 /* --- what a write transaction borrows from the lifecycle (issue #88) -------
  *

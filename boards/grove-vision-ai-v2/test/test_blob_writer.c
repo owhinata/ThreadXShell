@@ -249,6 +249,9 @@ static void t_results(void)
 	} map[] = {
 		{ NOR_WRITE_OK,           BLOB_OK,        "OK" },
 		{ NOR_WRITE_BUSY,         BLOB_ERR_BUSY,  "BUSY" },
+		/* issue #203: refused at the claim, worth retrying after a
+		 * camera stop -- busy, never a fault and never IO */
+		{ NOR_WRITE_CAMERA,       BLOB_ERR_BUSY,  "CAMERA" },
 		{ NOR_WRITE_FAULTED,      BLOB_ERR_FAULT, "FAULTED" },
 		/* [!] none of these is a fault (nor_write.h) */
 		{ NOR_WRITE_REFUSED,      BLOB_ERR_IO,    "REFUSED before the wire" },

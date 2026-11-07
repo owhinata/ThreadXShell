@@ -150,7 +150,7 @@ uint32_t nor_reservation_make(uint32_t seq)
 }
 
 enum nor_reserve nor_reserve_decide(enum nor_state st, uint32_t live,
-                                    uint32_t owner)
+                                    uint32_t owner, int camera)
 {
 	/* Asked before the state is enumerated, because a disagreement means the
 	 * enumeration below is reasoning over bookkeeping that is already wrong. */
@@ -161,7 +161,10 @@ enum nor_reserve nor_reserve_decide(enum nor_state st, uint32_t live,
 	case NOR_ST_XIP:
 		/* Read WITH the state, not after it -- the same rule
 		 * nor_write_decide() follows, and for the same reason. */
-		return (live == 0u) ? NOR_RSV_GO : NOR_RSV_BUSY;
+		if (live != 0u)
+			return NOR_RSV_BUSY;
+		/* Last, so it only ever replaces a GO (issue #203, nor_state.h). */
+		return camera ? NOR_RSV_CAMERA : NOR_RSV_GO;
 	/* OFF is a reader's errand (nor_state.h); ENABLING is one in flight;
 	 * RESERVED and WRITING are somebody else's claim.  All clear on their
 	 * own, so all are BUSY rather than terminal. */
@@ -216,7 +219,7 @@ enum nor_unreserve nor_unreserve_decide(enum nor_state st, uint32_t owner,
 }
 
 enum nor_write nor_write_decide(enum nor_state st, uint32_t live,
-                                uint32_t owner, uint32_t token)
+                                uint32_t owner, uint32_t token, int camera)
 {
 	if (!nor_owner_consistent(st, owner))
 		return NOR_WR_FAULTED;
@@ -232,7 +235,10 @@ enum nor_write nor_write_decide(enum nor_state st, uint32_t live,
 		 * that were never true at the same instant. */
 		if (token == 0u || token != owner)
 			return NOR_WR_BUSY;
-		return (live == 0u) ? NOR_WR_GO : NOR_WR_BUSY;
+		if (live != 0u)
+			return NOR_WR_BUSY;
+		/* Last, so it only ever replaces a GO (issue #203, nor_state.h). */
+		return camera ? NOR_WR_CAMERA : NOR_WR_GO;
 	/* XIP is now "unclaimed", not "ready to write" (issue #91). */
 	case NOR_ST_XIP:
 	case NOR_ST_OFF:

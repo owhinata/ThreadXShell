@@ -13,6 +13,7 @@
  * UART0, and name who holds the NOR or why its port is faulted.
  */
 #include "cli.h"
+#include "cli_instance.h" /* sh->fg: a background job's view (#203) */
 #include "blob_cmd_board.h"
 #include "blob_err.h"
 #include "cmd_xfer.h"
@@ -29,6 +30,24 @@ int blob_board_raw_console(struct cli_instance *sh)
 {
 	(void)sh;
 	return 0;
+}
+
+/*
+ * [!] FOREGROUND ONLY (issue #203), in the words `blob write` uses.  The NOR
+ * writer refuses while the camera streams, and that check holds only because
+ * nothing can start the camera between a transaction's claim and its commit.
+ * That is true for a writer on the foreground shell thread -- background jobs
+ * run below it and cannot preempt it -- and false for one in a background job:
+ * a foreground `camera stream start` woken by the RX interrupt preempts the
+ * writer mid-program.  So the background is refused before the reservation.
+ */
+int blob_board_erase_console(struct cli_instance *sh)
+{
+	if (sh->fg == NULL)
+		return 0;
+	cli_error(sh, "blob: cannot run in the background -- drop the trailing "
+	              "'&'\r\n");
+	return -1;
 }
 
 int blob_board_say(struct cli_instance *sh, int rc)

@@ -29,6 +29,14 @@ int blob_board_raw_console(struct cli_instance *sh)
 	return net_shell_guard(sh, "ymodem") ? -1 : 0;
 }
 
+/* Any console, foreground or background: the busy flag is what orders an
+ * erase against everything else on this board. */
+int blob_board_erase_console(struct cli_instance *sh)
+{
+	(void)sh;
+	return 0;
+}
+
 int blob_board_say(struct cli_instance *sh, int rc)
 {
 	switch (rc) {

@@ -42,6 +42,7 @@
  * there on the strength of it -- and now something can.
  */
 #include "cli.h"
+#include "cli_instance.h"     /* sh->fg: a background job's view (#203) */
 
 #include <stdint.h>
 #include <string.h>
@@ -400,6 +401,25 @@ static int nor_cmd_bring_up(struct cli_instance *sh)
  * belongs to.  What it buys these commands is that a background job cannot
  * take a lease between the bring-up above and the transaction below.
  */
+/*
+ * [!] A WRITE SUBCOMMAND RUNS IN THE FOREGROUND ONLY (issue #203), in the words
+ * `blob write` uses.  The writer refuses while the camera streams, and the
+ * check holds only because nothing can start the camera between a
+ * transaction's claim and its commit -- true for a writer on the foreground
+ * shell thread, which background jobs run below and cannot preempt, and false
+ * for one in a background job: a foreground `camera stream start`, woken by the
+ * RX interrupt, preempts it mid-program.  Asked first, before `nor write`
+ * fills the staging buffer.
+ */
+static int nor_cmd_foreground(struct cli_instance *sh)
+{
+	if (sh->fg == NULL)
+		return 0;
+	cli_error(sh, "nor: cannot run in the background -- drop the trailing "
+	              "'&'\r\n");
+	return -1;
+}
+
 int nor_cmd_writer_enter(struct cli_instance *sh, uint32_t *token)
 {
 	*token = 0u;
@@ -417,6 +437,17 @@ int nor_cmd_writer_enter(struct cli_instance *sh, uint32_t *token)
 	return -1;
 }
 
+/* [!] ONE SENTENCE FOR THE CAMERA REFUSAL (issue #203), said by both places
+ * that can meet it: the reservation (nor_cmd_say_busy(), for `nor` and `blob`
+ * alike) and a transaction claim (nor_cmd_report()).  It names the commands
+ * to type: the camera's own stop, after nn's when nn holds the camera too --
+ * `camera stream stop` is refused while nn does. */
+static void say_camera(struct cli_instance *sh, const char *who_asks)
+{
+	cli_error(sh, "%s: busy -- the camera is streaming (camera stream stop; "
+	              "nn stream stop first if nn holds it)\r\n", who_asks);
+}
+
 void nor_cmd_say_busy(struct cli_instance *sh, const char *who_asks)
 {
 	struct nor_report r;
@@ -432,6 +463,15 @@ void nor_cmd_say_busy(struct cli_instance *sh, const char *who_asks)
 		cli_error(sh, "%s: busy -- %lu reader(s) hold the window "
 		              "(mask 0x%lx)\r\n", who_asks,
 		          (unsigned long)r.readers, (unsigned long)r.live);
+	/* In the decision's own order: readers first, then the camera
+	 * (nor_reserve_decide()) -- and the camera ONLY FROM XIP, the one state
+	 * where nothing else refuses a reservation.  RESERVED or WRITING is
+	 * another writer whatever the camera is doing, and naming the camera
+	 * there would send the operator to stop something that is not in the
+	 * way.  Asked again for the words only; the refusal was decided under
+	 * the reservation's critical section. */
+	else if (r.state == NOR_ST_XIP && nor_write_camera_live())
+		say_camera(sh, who_asks);
 	else
 		cli_error(sh, "%s: busy -- another writer holds the part\r\n",
 		          who_asks);
@@ -495,6 +535,10 @@ static int nor_cmd_report(struct cli_instance *sh, enum nor_write_status st,
 		cli_error(sh, "nor: busy -- a reader holds the window, or it has "
 		              "never been brought up\r\n");
 		return 1;
+	case NOR_WRITE_CAMERA:
+		/* Nothing was claimed and nothing went on the wire (#203). */
+		say_camera(sh, "nor");
+		return 1;
 	case NOR_WRITE_REFUSED:
 		cli_error(sh, "nor: refused -- %s\r\n",
 		          r->fail ? r->fail : "outside what this port may write");
@@ -549,6 +593,8 @@ static int cmd_nor_cycle(struct cli_instance *sh, int argc, char **argv)
 	(void)argc;
 	(void)argv;
 
+	if (nor_cmd_foreground(sh) != 0)
+		return 1;
 	if (nor_cmd_writer_enter(sh, &token) != 0)
 		return 1;
 	/* [!] SAID BEFORE IT RUNS, and phrased as the COST OF THE OPERATION rather
@@ -602,6 +648,8 @@ static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
 	int rc;
 
 	(void)argc;
+	if (nor_cmd_foreground(sh) != 0)
+		return 1;
 	if (cli_parse_u32(argv[1], &addr) != 0 ||
 	    cli_parse_u32(argv[2], &len) != 0) {
 		cli_error(sh, "nor: bad number\r\n");
@@ -694,6 +742,8 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 	uint32_t addr, len, token, byte = 0u, t0, t1;
 	int rc, constant = 0;
 
+	if (nor_cmd_foreground(sh) != 0)
+		return 1;
 	if (cli_parse_u32(argv[1], &addr) != 0 ||
 	    cli_parse_u32(argv[2], &len) != 0 ||
 	    (argc >= 4 && cli_parse_u32(argv[3], &byte) != 0)) {

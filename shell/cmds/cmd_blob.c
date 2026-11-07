@@ -741,6 +741,9 @@ static int cmd_blob_erase(struct cli_instance *sh, int argc, char **argv)
 	rc = blob_slot_geometry(slot, &base, NULL, NULL);
 	if (rc != BLOB_OK)
 		return blob_complain(sh, rc);
+	/* The board may refuse this console first (blob_cmd_board.h). */
+	if (blob_board_erase_console(sh) != 0)
+		return 1;
 	/*
 	 * No `confirm` token: a blob is an asset that came from a file the PC
 	 * still has, in a slot the operator named explicitly on the line.

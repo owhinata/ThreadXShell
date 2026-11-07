@@ -57,9 +57,10 @@ static int refusal(void)
 /*
  * The writer reservation (#91), after bringing the port up if nobody has --
  * nor_reserve() starts from an up window, and the first lease is what brings
- * it up.  Refused while a reader holds the window or another writer the part
- * (BUSY), or for good on a faulted port (FAULT): told apart because only one of
- * them is worth retrying.
+ * it up.  Refused while a reader holds the window, another writer the part or
+ * the camera is streaming (BUSY; the last since issue #203, so a `blob write`
+ * is refused before YMODEM starts), or for good on a faulted port (FAULT):
+ * told apart because only one of them is worth retrying.
  */
 int blob_svc_reserve(uint32_t *token)
 {
@@ -84,12 +85,15 @@ void blob_svc_unreserve(uint32_t token)
 /* The writer's status as a shared result.  [!] Only FAULTED is terminal: a
  * refusal before the wire (REFUSED) and a part that did not answer the JEDEC
  * read (NO_TRANSPORT) are not faults, and neither is a vendor that gave up part
- * way (INCOMPLETE) -- the port's own rules (nor_write.h), kept as they are. */
+ * way (INCOMPLETE) -- the port's own rules (nor_write.h), kept as they are.
+ * A claim refused because the camera is streaming (CAMERA, issue #203) is
+ * BUSY: worth retrying once the camera stops, and blob_board_say() names it. */
 static int result_of(enum nor_write_status st)
 {
 	switch (st) {
 	case NOR_WRITE_OK:      return BLOB_OK;
 	case NOR_WRITE_BUSY:    return BLOB_ERR_BUSY;
+	case NOR_WRITE_CAMERA:  return BLOB_ERR_BUSY;
 	case NOR_WRITE_FAULTED: return BLOB_ERR_FAULT;
 	default:                break;
 	}

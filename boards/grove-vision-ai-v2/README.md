@@ -3398,7 +3398,10 @@ Two things follow from that, and both are visible in the output:
 there is exactly one and it is a slot the command knows: `busy -- \`nn\` has a
 model open (nn model unload)` is actionable and `busy` is not. Two holders, or a slot
 added later that nobody taught the mapping about, fall back to the generic
-answer -- a wrong name is worse than none.
+answer -- a wrong name is worse than none.  With no reader out and the camera
+streaming, a writer is refused with `busy -- the camera is streaming (camera
+stream stop; nn stream stop first if nn holds it)` (issue #203, see "Why a
+write is refused while the camera streams" under `blob`).
 
 [!] **The decision cannot be produced from a console even now that the writer
 exists.** Two callers arriving in the same window needs two threads, and this
@@ -4383,15 +4386,25 @@ cannot be brought back and was never ours.
 
 #### Writing one: `blob write <name> [slot]`
 
-> [!] **Known defect (issue #203): write right after a reset.**  On this
-> board a `blob write` issued after `nn` has run in the same boot -- `nn model
-> load`, a stream, then `nn model unload` -- failed at its first 64 KB program
-> in two attempts out of two: the read-back did not match (`blob: a program did
-> not take`, `first bad at ...: read ff` in `dmesg`) and the NOR port went to
-> its terminal fault, so `reboot` is needed.  The same write issued straight
-> after a reset succeeded, and the other blobs were intact (`blob verify`).
-> The write transaction is unchanged since issue #92; the cause is not known.
-> Until #203 is settled: `reboot`, then `blob write`, then `nn model load`.
+> [!] **Stop the camera first (issue #203).**  Every NOR write -- `blob write`,
+> `blob erase`, `nor write`, `nor erase`, `nor cycle` -- is refused while the
+> camera is streaming, before anything goes on the wire:
+>
+> ```
+> blob: busy -- the camera is streaming (camera stream stop; nn stream stop first if nn holds it)
+> ```
+>
+> **After `nn stream start` (or `nn run`), the camera keeps streaming** even once the stream
+> and the model are gone: `nn stream stop` takes nn's drawing off and `nn model
+> unload` closes the model, but the camera stays on the panel under the
+> operator's own hold (#142's holders) until `camera stream stop`.  So the
+> sequence before a `blob write` is `nn stream stop`, `nn model unload`,
+> `camera stream stop`.  The refusal leaves the port as it was (not faulted,
+> no reservation held); `nor info` and the reads (`blob list`, `blob verify`)
+> are not affected.  The same commands also refuse to run as a background job
+> (`cannot run in the background -- drop the trailing '&'`), which the camera
+> check depends on.  Why, and what was measured: "Why a write is refused while
+> the camera streams" below.
 
 ```
 blob write <name> [slot]    receive a file over YMODEM into a slot
@@ -4486,6 +4499,86 @@ receiver's 120 s handshake budget with no way to interrupt it, and picocom runs
 `sb` from its own hook, so Ctrl+C does not reach the sender either.  Giving the
 handshake phase an abort would need a new hook through the protocol's IO vtable,
 which is a separate issue.
+
+#### Why a write is refused while the camera streams (issue #203)
+
+The vendor's page program (`hx_lib_qspi_eeprom_write`: the 256 B page goes
+to the SPI master by DMA, and the call spins on the DMA completion flag)
+does not survive a streaming camera.  Measured on the board with firmware
+5acf240, 64 KB `nor write` into erased `blob` flash:
+
+| state before the write | result |
+|---|---|
+| straight after a reset | 2 / 2 OK (one `nor write`, one `blob write` from the issue's report) |
+| after `nn model load` / `nn model unload` only | 1 / 1 OK |
+| after `camera stream start` then `camera stream stop` | 1 / 1 OK |
+| `lcd loop` drawing to the panel, no camera | 1 / 1 OK (background `nor write` under a foreground `lcd loop 2000`) |
+| camera streaming to the panel | 0 / 4 -- two `blob write`s in the issue's report (first page cut at 140 B); one `nor write` whose first page stopped after 232 B with the rest reading FF; one `nor write` where the vendor refused at page 211 and the window's restore check failed (`flash window still aliases`) |
+
+The two failures in the original report (issue #203: `nn model load`, a
+stream, `nn model unload`, then `blob write`) were the same state, because
+the camera was still streaming.  A read-back mismatch is terminal for the NOR
+port (`port/nor/nor_write.c`: it cannot be told apart from a window that lies
+about the array), so the rule refuses before the wire instead of letting the
+write fail there.  Erases (a few bytes on the wire per sector) were not seen
+to fail, and are refused anyway: they are part of the same writes.
+
+**Not established:** which transfer interferes.  One thing was ruled out,
+once: the panel's own SPI DMA.  A background `nor write 0xec0000 0x10000 &`
+run under a foreground `lcd loop 2000` (the panel redrawn continuously over
+SPI DMA, no camera) read back all 64 KB (`ok : 65536 B done, 65536 B read
+back`), in 170 ms against the usual 168 ms, completing 171 ms after `lcd:
+st7789 up` in `dmesg`.  So the direct panel commands (`lcd fill`, `clear`,
+`loop`, `bar`) are not part of the refusal.  What remains suspect is the
+camera datapath's DMA or its interrupts, or something else the stream does;
+only "camera streaming vs. not" was measured beyond that one run.
+
+[!] **Recovery after such a fault can need a power cycle, not a reboot.**  After
+the write that failed the window's restore check (`flash window still
+aliases`), the next reset left the board not booting at all -- not even the
+1st bootloader's banner, the shape of a bootloader that cannot read the
+application from the NOR.  Unplugging and replugging USB (a power cycle)
+brought it back.  So a NOR fault of this kind is recovered by removing power;
+`reboot` or the reset button may not be enough.
+
+How the refusal is decided (`port/nor/nor_flash.c`, `nor_write_camera_live()`):
+
+- **what counts as streaming**: `camera_datapath_live()` -- a stream
+  (`CAM_ST_STREAMING`), a producer that never acknowledged its stop
+  (`CAM_ST_LOST`, which refuses writes until a reset), and the datapath from
+  the first register write of a start or a one-shot capture until its
+  quiesce -- or the panel sink not detached (`cam_lcd_sink_linked()`, which
+  also covers the panel being brought up before the camera starts).
+- **where**: inside the critical section of the reservation (`nor_reserve()`,
+  so `blob write` is refused before YMODEM starts) and of every transaction's
+  claim (`nor_write_claim()`), in the same table as the lease and owner checks
+  (`nor_reserve_decide()` / `nor_write_decide()` in `port/nor/nor_state.c`,
+  walked by `test/test_nor_state.c`).  The camera can only turn a "go" into
+  this refusal; a faulted port or another holder still answers first.
+- **every writing command runs in the foreground only**: `nor write`,
+  `nor erase`, `nor cycle` and `blob erase` answer `nor: cannot run in the
+  background -- drop the trailing '&'` (`blob:` for the last), as `blob write`
+  already did.  This is what the check rests on: a camera is started only from
+  a console thread, and a program or a cycle does not yield between its claim
+  and its commit (the vendor spins) -- which keeps the camera out only while
+  the writer is the foreground shell thread, because background jobs run below
+  it.  A writer in a background job is preempted by the foreground (woken by
+  the RX interrupt), and a `camera stream start` typed there would start in the
+  middle of a page program; the review of #203 found that path.
+- **what can still start the camera after the check**: two openings remain,
+  both needing a background job that starts the camera later (`watch ...
+  camera stream start &`, or `sleep N; ... &`): between two transactions of a
+  `blob write` (the foreground waits on the UART there) -- the next claim then
+  refuses, and the write ends with the slot incomplete but the port not
+  faulted; and inside an erase, whose progress line can wait on the UART --
+  that erase carries on with the camera running (erases were not seen to
+  fail), and the program after it is refused.
+- **what the operator sees in the first case** is the shared command's
+  ordinary program failure (`blob: <result> (... B erased, ... B received of
+  ... declared, ... tx)`), not the camera sentence: the console belongs to the
+  YMODEM transfer when the program is refused, and the shared command has no
+  board hook on that path.  The reason is in `dmesg`, from
+  `src/blob_writer.c`: `program 0x...+...: camera streaming (0 done)`.
 
 ### One operator, and therefore no CMSIS-NN
 

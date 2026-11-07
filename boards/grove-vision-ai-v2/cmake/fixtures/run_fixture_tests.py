@@ -416,12 +416,16 @@ def main():
     # count and raw frame), aliased like the create_objects() pair -- nothing
     # in a fixture ELF is executed.  And issue #68's `reboot` (cmd_system.c),
     # which stops the camera before it resets: it is the system command, not
-    # a camera consumer, so its one entry point is aliased too.
+    # a camera consumer, so its one entry point is aliased too.  And issue
+    # #203's question the NOR writer asks before every reservation and claim
+    # (port/nor/nor_flash.c): the NOR port stays, so its two camera reads are
+    # aliased as well.
     f2_alias = ("camera_create_objects", "cam_lcd_sink_create_objects",
                 "cam_lcd_sink_hold", "cam_lcd_sink_release",
                 "cam_lcd_sink_overlay_remove", "camera_stream_stats",
                 "camera_frames_since_bringup", "camera_raw_frame",
-                "camera_stream_stop")
+                "camera_stream_stop", "camera_datapath_live",
+                "cam_lcd_sink_linked")
     f2 = f2_objs.replace(
         "arm-none-eabi-g++ ",
         "arm-none-eabi-g++ " +

@@ -51,6 +51,19 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
+
+
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided
+# (main()'s `ran`, raised for each case that reaches its verdict, not the length
+# of a list).
+def negative_tests_ok(cases):
+    me = os.path.realpath(__file__)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(me)))
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), cases))
+
+
 GATE = os.path.join(REPO, "cmake", "check_veneer_base_cost.py")
 
 ARCHES = {
@@ -2427,7 +2440,7 @@ def main():
         print(f"run_veneer_cost_tests: FAILED ({bad} of {ran})",
               file=sys.stderr)
         return 1
-    print(f"run_veneer_cost_tests: all {ran} cases behave as specified")
+    negative_tests_ok(ran)
     return 0
 
 

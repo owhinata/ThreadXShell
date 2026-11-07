@@ -186,32 +186,13 @@ gcc $CFLAGS -I "$here/plugin_run_shim" -I "$board/svc" \
 # [!] And it is seen to fail, for the two spellings a source-text match missed
 # (the review of #130 step 4): a definition whose return type is on the line
 # above, and one behind __attribute__.  Each is appended to a copy of
-# nn_active.c, compiled like the original, and must be refused BY NAME.
-for lease_neg in two_line attribute; do
-    lease_src="$out/lease_neg_$lease_neg.c"
-    cp "$board/port/nn/nn_active.c" "$lease_src"
-    if [ "$lease_neg" = two_line ]; then
-        printf 'int\nnn_active_neg_two_line(void)\n{\n\treturn 0;\n}\n' >> "$lease_src"
-    else
-        printf '__attribute__((noinline)) int nn_active_neg_attribute(void)\n{\n\treturn 0;\n}\n' >> "$lease_src"
-    fi
-    gcc $CFLAGS -Wno-missing-prototypes $lease_inc_active -c "$lease_src" \
-        -o "$out/lease_neg_$lease_neg.o"
-    if python3 "$lease_check" \
-            --obj "$out/lease_neg_$lease_neg.o" $lease_objs_rest \
-            $lease_tests > "$out/lease_neg_$lease_neg.txt" 2>&1; then
-        echo "check_lease_entries: FAIL -- the $lease_neg entry was not refused" >&2
-        exit 1
-    fi
-    if ! grep -q "nn_active_neg_$lease_neg is defined but neither walked" \
-            "$out/lease_neg_$lease_neg.txt"; then
-        echo "check_lease_entries: FAIL -- the $lease_neg entry was refused" \
-             "for some other reason:" >&2
-        cat "$out/lease_neg_$lease_neg.txt" >&2
-        exit 1
-    fi
-    echo "check_lease_entries: refuses an unwalked entry ($lease_neg spelling)"
-done
+# nn_active.c, compiled like the original, and must be refused BY NAME.  The
+# cases and their verdicts are in test/test_lease_entries.py (issue #205), so
+# the line that says they ran is printed by the code that decided them.
+python3 "$here/test_lease_entries.py" --check "$lease_check" \
+    --source "$board/port/nn/nn_active.c" --out "$out" \
+    --cflags "$CFLAGS -Wno-missing-prototypes $lease_inc_active" \
+    -- $lease_objs_rest $lease_tests
 
 # issue #55 -- the MLPerf Tiny harness (port/mlperf/mlperf_th.cc), driven through
 # UPSTREAM'S OWN PARSER (lib/mlperf-tiny/benchmark/api/internally_implemented.cpp,

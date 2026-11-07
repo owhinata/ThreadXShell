@@ -40,6 +40,20 @@ PACKET = 128
 
 fails = 0
 
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided.
+# The count goes up where a verdict is reached, not from the length of a list.
+decided = 0
+
+
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = me
+    for _ in range(4):          # boards/<board>/test/<this file>
+        root = os.path.dirname(root)
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), decided))
+
 
 def run(partitions, images=(), writing=(), flash_size=FLASH, image_max=()):
     argv = [sys.executable, CHECKER, "--flash-size", hex(flash_size),
@@ -57,8 +71,9 @@ def run(partitions, images=(), writing=(), flash_size=FLASH, image_max=()):
 
 def check(name, want_ok, partitions, images=(), writing=(), expect_text=None,
           flash_size=FLASH, image_max=()):
-    global fails
+    global fails, decided
     r = run(partitions, images, writing, flash_size, image_max)
+    decided += 1
     got_ok = (r.returncode == 0)
     out = r.stdout + r.stderr
 
@@ -82,7 +97,7 @@ def make(tmp, name, size):
 
 
 def main():
-    global fails
+    global fails, decided
 
     # The real layout, so the tests exercise the shape actually shipped.
     #
@@ -127,6 +142,7 @@ def main():
             return ((start // G) * G, ((start + reserved + G - 1) // G) * G)
 
         covered = sorted(span(st, n) for _, st, n in REAL)
+        decided += 1
         cursor = 0
         for start, end in covered:
             if start != cursor:
@@ -288,6 +304,7 @@ def main():
                 [sys.executable, CHECKER, "--flash-size", hex(FLASH),
                  "--erase-granularity", hex(G)] + argv,
                 capture_output=True, text=True)
+            decided += 1
             if r.returncode == 0:
                 print(f"  FAIL {why} is accepted")
                 fails += 1
@@ -303,6 +320,7 @@ def main():
             [sys.executable, CHECKER, "--flash-size", hex(FLASH),
              "--partition", "a:0x0:0x1000"],
             capture_output=True, text=True)
+        decided += 1
         if r.returncode == 0:
             print("  FAIL a missing --erase-granularity is accepted")
             fails += 1
@@ -312,7 +330,7 @@ def main():
     if fails:
         print(f"test_flash_partitions: {fails} failure(s)")
         return 1
-    print("test_flash_partitions: all cases pass")
+    negative_tests_ok()
     return 0
 
 

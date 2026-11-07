@@ -55,6 +55,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BOARD = os.path.dirname(HERE)
 REPO = os.path.dirname(os.path.dirname(BOARD))
 
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided.
+# The count goes up where a verdict is reached, not from the length of a list.
+decided = 0
+
+
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = me
+    for _ in range(4):          # boards/<board>/test/<this file>
+        root = os.path.dirname(root)
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), decided))
+
 INCLUDES = ["-I", os.path.join(BOARD, "port", "nn"),
             "-I", os.path.join(BOARD, "port", "nn", "npu"),
             "-I", os.path.join(REPO, "shell", "include"),
@@ -213,6 +227,7 @@ def ct_cases(real):
 
 
 def run_ct(real):
+    global decided
     bad = 0
     for what, values, extra, want, must_say in ct_cases(real):
         with tempfile.TemporaryDirectory() as work:
@@ -235,6 +250,7 @@ def run_ct(real):
             ok = rc != 0 and names == want and not other
             said = "refused by exactly %d assert(s)" % len(want)
         if not ok:
+            decided += 1
             print("  FAIL %-58s" % what)
             if must_say is None:
                 print("        wanted %s" % (sorted(want) or "a clean compile"))
@@ -243,6 +259,7 @@ def run_ct(real):
                 print("        " + ln)
             bad += 1
         else:
+            decided += 1
             print("  ok   %-58s %s" % (what, said))
     return bad
 
@@ -272,6 +289,7 @@ def run_probe(work, values):
 
 
 def run_rt(real):
+    global decided
     bad = 0
     # Two sentinel triples, rotated, so a slot that happened to be hard-wired
     # to one of the numbers cannot match both times.
@@ -287,6 +305,7 @@ def run_rt(real):
         with tempfile.TemporaryDirectory() as work:
             table, out = run_probe(work, v)
         if table is None:
+            decided += 1
             print("  FAIL %-58s the validator run failed" % label)
             lines = out.strip().splitlines()
             for ln in [ln for ln in lines if "FAIL" in ln] or lines[:10]:
@@ -295,6 +314,7 @@ def run_rt(real):
             continue
         refused = sum(1 for ln in out.splitlines() if "PLUGIN_ERR_STACK" in ln
                       or "stack request refused" in ln)
+        decided += 1
         print("  ok   %-58s one byte past every limit refused (%d refusals)"
               % (label, refused))
         if shell is None:
@@ -305,10 +325,12 @@ def run_rt(real):
                                          want[s])
                  for s in SLOTS if table.get(s) != want[s]]
         if wrong:
+            decided += 1
             print("  FAIL %-58s %s" % (label + ": slot -> allowance",
                                        ", ".join(wrong)))
             bad += 1
         else:
+            decided += 1
             print("  ok   %-58s every slot got the allowance of its threads"
                   % (label + ": slot -> allowance"))
     # The thread masks (GROVE_PLUGIN_STACK_RUNS), against this file's table.
@@ -320,9 +342,11 @@ def run_rt(real):
              for s in SLOTS
              if runs.get(s) != sum(bit[t] for t in THREADS[s])]
     if wrong:
+        decided += 1
         print("  FAIL %-58s %s" % ("slot -> threads", ", ".join(wrong)))
         bad += 1
     else:
+        decided += 1
         print("  ok   %-58s the report's masks are the table's"
               % "slot -> threads")
     return bad
@@ -345,7 +369,7 @@ def main():
     if bad:
         print("test_plugin_stack: FAILED (%d)" % bad, file=sys.stderr)
         return 1
-    print("test_plugin_stack: all cases behave as specified")
+    negative_tests_ok()
     return 0
 
 

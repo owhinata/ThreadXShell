@@ -1120,13 +1120,15 @@ class Runner:
 
         print()
         failed = [r for r in results if not r[0]]
+        decided = 0
         for ok, name, detail in results:
+            decided += 1
             print(f"  {'PASS' if ok else 'FAIL'}  {name}{'' if ok else ': ' + detail}")
         print()
         if failed:
             print(f"check_boot_safety fixtures: {len(failed)} of {len(results)} FAILED")
             return 1
-        print(f"check_boot_safety fixtures: all {len(results)} passed")
+        negative_tests_ok(decided)
         return 0
 
     def _one_postlink(self, spec):
@@ -1270,6 +1272,19 @@ class Runner:
 
     def _golden_size(self):
         return self._golden()[1]
+
+
+# issue #205 -- the last line every negative-test runner prints when it passes,
+# the same for all of them: this file's path from the repository root (two
+# runners are called run_fixture_tests.py) and how many cases this run decided
+# (one per verdict a fixture or baseline returned where it reached it).
+def negative_tests_ok(cases):
+    me = os.path.realpath(__file__)
+    root = me
+    for _ in range(5):          # boards/<board>/cmake/fixtures/<this file>
+        root = os.path.dirname(root)
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), cases))
 
 
 def main():

@@ -32,6 +32,18 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHECKER = os.path.join(HERE, os.pardir, "check_no_mutable_storage.py")
 
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided.
+# The count goes up where a verdict is reached, not from the length of a list.
+decided = 0
+
+
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(me)))
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), decided))
+
 CLEAN = """
 int f(int x) { return x + 1; }
 static const int table[4] = { 1, 2, 3, 4 };
@@ -80,6 +92,7 @@ def is_cross(cc):
 
 
 def main():
+    global decided
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cc", required=True)
     ap.add_argument("--objdump", required=True)
@@ -109,6 +122,7 @@ def main():
             try:
                 subprocess.run(cmd, check=True, capture_output=True, text=True)
             except subprocess.CalledProcessError as exc:
+                decided += 1
                 print("  FAIL %-14s did not compile: %s" %
                       (name, exc.stderr.strip().splitlines()[:1]))
                 failures += 1
@@ -122,6 +136,7 @@ def main():
             done = subprocess.run(check, capture_output=True, text=True)
             rc = done.returncode
             if rc not in (0, 1):
+                decided += 1
                 print("  FAIL %-14s checker itself errored (%d): %s" %
                       (name, rc, done.stderr.strip().splitlines()[:1]))
                 failures += 1
@@ -137,8 +152,10 @@ def main():
 
             got_fail = rc != 0
             if got_fail == expect_fail:
+                decided += 1
                 print("  ok   %-14s %s (%s)" % (name, note, why))
             else:
+                decided += 1
                 print("  FAIL %-14s expected %s, checker returned %d (%s)" %
                       (name, "rejection" if expect_fail else "acceptance",
                        rc, why))
@@ -163,9 +180,11 @@ def main():
              "--nm", "/bin/false", "--label", "nm_broken", obj],
             capture_output=True, text=True).returncode
         if rc == 2:
+            decided += 1
             print("  ok   %-14s reported CANNOT_CHECK, not a pass (a checker that "
                   "cannot run its own COMMON pass must not say OK)" % "nm_broken")
         else:
+            decided += 1
             print("  FAIL %-14s returned %d; an nm that will not execute must give "
                   "2, never 0" % ("nm_broken", rc))
             failures += 1
@@ -173,7 +192,7 @@ def main():
     if failures:
         print("run_storage_gate_tests: %d failure(s)" % failures)
         return 1
-    print("run_storage_gate_tests: all fixtures behave as specified")
+    negative_tests_ok()
     return 0
 
 

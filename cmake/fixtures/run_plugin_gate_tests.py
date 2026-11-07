@@ -31,6 +31,19 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))   # cmake/fixtures -> repo root
+
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided.
+# The count goes up where a verdict is reached, not from the length of a list.
+decided = 0
+
+
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(me)))
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), decided))
+
 PLUGIN = os.path.join(REPO, "asset", "plugins", "blazeface")
 # The link script, the base veneers and the freestanding libc remnant are shared
 # by every plugin (issue #103), so a fixture assembles the two directories the
@@ -1672,6 +1685,7 @@ def abi_table_mismatches(work):
 
 
 def main():
+    global decided
     ap = argparse.ArgumentParser()
     ap.add_argument("--cc", required=True)
     ap.add_argument("--nm", required=True)
@@ -1690,18 +1704,22 @@ def main():
         label = f"{board}:{name}"
         if got != expect_fail:
             if got == "build":
+                decided += 1
                 print(f"  FAIL {label:24s} did not compile -- "
                       f"{out.splitlines()[0] if out else ''}")
                 bad += 1
                 continue
+            decided += 1
             print(f"  FAIL {label:24s} expected {expect_fail}, got {got}"
                   f"\n        {out.strip()[:300]}")
             bad += 1
         elif must_say and must_say not in out:
+            decided += 1
             print(f"  FAIL {label:24s} {got} as expected, but the output does "
                   f"not say '{must_say}':\n        {out.strip()[:300]}")
             bad += 1
         else:
+            decided += 1
             print(f"  ok   {label:24s} {why}")
 
     for name, flags, word, expect, why in ASSERT_CASES:
@@ -1718,10 +1736,12 @@ def main():
         else:
             got = "error"
         if got != expect:
+            decided += 1
             print(f"  FAIL {'firmware:' + name:24s} expected {expect}, got "
                   f"{got}\n        {err.strip()[:300]}")
             bad += 1
         else:
+            decided += 1
             print(f"  ok   {'firmware:' + name:24s} {why}")
 
     for name, flags, word, expect, why in FW_ELF_CASES:
@@ -1734,10 +1754,12 @@ def main():
         else:
             got = "error"
         if got != expect:
+            decided += 1
             print(f"  FAIL {'image:' + name:24s} expected {expect}, got {got}"
                   f"\n        {out.strip()[:300]}")
             bad += 1
         else:
+            decided += 1
             print(f"  ok   {'image:' + name:24s} {why}")
 
     for case in EMIT_CASES:
@@ -1760,10 +1782,12 @@ def main():
                                              else "build")))
         label = f"{board}:{name}"
         if got != expect_fail or (must_say and must_say not in out):
+            decided += 1
             print(f"  FAIL {label:24s} expected {expect_fail}, got {got}"
                   f"\n        {out.strip()[:400]}")
             bad += 1
         else:
+            decided += 1
             print(f"  ok   {label:24s} {why}")
 
     for case in HANDED_CASES:
@@ -1778,18 +1802,22 @@ def main():
                                                   else "build"))
         label = f"{board}:{name}"
         if got != expect or (must_say and must_say not in out):
+            decided += 1
             print(f"  FAIL {label:24s} expected {expect}, got {got}"
                   f"\n        {out.strip()[:600]}")
             bad += 1
         else:
+            decided += 1
             print(f"  ok   {label:24s} {why}")
 
     wbad = walk_units()
     if wbad:
         for m in wbad:
             print(f"  FAIL {'walk_units':24s} {m}")
+        decided += 1
         bad += 1
     else:
+        decided += 1
         print(f"  ok   {'walk_units':24s} (A0, A1) on hand-written graphs: a "
               "sibling deeper than the crossing, a crossing one level down, "
               "no crossing, a bare veneer")
@@ -1799,15 +1827,17 @@ def main():
     if mism:
         for m in mism:
             print(f"  FAIL {'abi_table':24s} {m}")
+        decided += 1
         bad += 1
     else:
+        decided += 1
         print(f"  ok   {'abi_table':24s} the gate's ABI values match "
               "svc/plugin/plugin_abi.h")
 
     if bad:
         print("run_plugin_gate_tests: FAILED", file=sys.stderr)
         return 1
-    print("run_plugin_gate_tests: all fixtures behave as specified")
+    negative_tests_ok()
     return 0
 
 

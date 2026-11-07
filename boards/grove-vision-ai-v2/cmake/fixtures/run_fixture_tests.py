@@ -294,6 +294,18 @@ def link_only(cmd, output="shell.elf"):
 RAN = 0
 
 
+# issue #205 -- the last line every negative-test runner prints when it passes,
+# the same for all of them: this file's path from the repository root (two
+# runners are called run_fixture_tests.py) and RAN.
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = me
+    for _ in range(5):          # boards/<board>/cmake/fixtures/<this file>
+        root = os.path.dirname(root)
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), RAN))
+
+
 def expect(name, got_rc, got_ids, want_rc, want_ids, text):
     global RAN
 
@@ -936,7 +948,7 @@ def main():
     if not ok:
         print("run_fixture_tests: FAIL", file=sys.stderr)
         return 1
-    print(f"run_fixture_tests: OK ({RAN} fixtures)")
+    negative_tests_ok()
     return 0
 
 

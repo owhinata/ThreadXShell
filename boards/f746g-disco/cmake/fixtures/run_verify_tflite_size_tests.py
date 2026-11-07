@@ -51,8 +51,22 @@ CASES = [
 bad = 0
 
 
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided.
+# The count goes up where a verdict is reached, not from the length of a list.
+decided = 0
+
+
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(me)))))
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), decided))
+
+
 def judge(name, ok, detail=""):
-    global bad
+    global bad, decided
+    decided += 1
     print("  %s %-22s %s" % ("ok  " if ok else "FAIL", name, "" if ok else detail))
     if not ok:
         bad += 1
@@ -87,7 +101,7 @@ def main():
         print("run_verify_tflite_size_tests: %d case(s) FAILED" % bad,
               file=sys.stderr)
         return 1
-    print("run_verify_tflite_size_tests: OK")
+    negative_tests_ok()
     return 0
 
 

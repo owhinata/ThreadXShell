@@ -45,6 +45,25 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
+
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided.
+# The count goes up where a verdict is reached, not from the length of a list.
+DECIDED = 0
+
+
+def decided():
+    global DECIDED
+    DECIDED += 1
+
+
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(me)))
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), DECIDED))
+
+
 # Where the helpers under test are; --cmake-dir points it at a mutated copy.
 CMAKE_DIR = os.path.join(REPO, "cmake")
 
@@ -582,9 +601,11 @@ def policy_args_cases():
             want += ["--stack", "%d=%d" % (i, 100 + (6 - i))]
         got = build_asset.policy_args(layout, full)
         if got != want:
+            decided()
             print("  FAIL %-22s %s, not %s" % ("policy_args", got, want))
             bad += 1
         else:
+            decided()
             print("  ok   %-22s by name through the layout's indices"
                   % "policy_args")
         for name, rows, says in (
@@ -602,10 +623,12 @@ def policy_args_cases():
             except Exception as e:            # a crash is not the refusal
                 msg = "%s: %s" % (type(e).__name__, e)
             if msg is None or says not in msg:
+                decided()
                 print("  FAIL %-22s expected a refusal saying %r, got %r"
                       % (name, says, msg))
                 bad += 1
             else:
+                decided()
                 print("  ok   %-22s refused: %s" % (name, says))
     return bad
 
@@ -619,8 +642,10 @@ def judge(name, rc, out, expect, why_ok):
         ok = rc != 0 and " ".join(expect.split()) in " ".join(out.split())
         why = "refused: " + expect
     if ok:
+        decided()
         print("  ok   %-22s %s" % (name, why))
         return 0
+    decided()
     print("  FAIL %-22s rc=%d, expected %s\n%s"
           % (name, rc, expect or "success", out[-800:]))
     return 1
@@ -660,6 +685,7 @@ def main():
             rc, out = configure(work, args, gate=gate, twice=twice)
             missing = wired(work) if expect is None and rc == 0 else []
         if missing:
+            decided()
             print("  FAIL %-22s configures, but the check's command line "
                   "lacks %s" % (name, missing))
             bad += 1
@@ -677,6 +703,7 @@ def main():
             rc, out = configure(work, dict(FULL), plugin=plugin, table=table)
             missing = wired(work) if expect is None and rc == 0 else []
         if missing:
+            decided()
             print("  FAIL %-22s configures, but a command line lacks %s"
                   % (name, missing))
             bad += 1
@@ -711,6 +738,7 @@ def main():
             lacking = [w for w in want_in if inputs is None or not any(
                 t == w or t.endswith("/" + w) for t in inputs)]
             if lacking:
+                decided()
                 print("  FAIL %-22s configures, but the container's edge does "
                       "not take %s as inputs (inputs: %s)"
                       % (name, lacking, inputs))
@@ -729,6 +757,7 @@ def main():
                                 r"--model-sha256=%s(\s|$)" % sha) + dest
                     if not re.search(w, text)]
             if need:
+                decided()
                 print("  FAIL %-22s configures, but the asset's command lacks "
                       "%s" % (name, need))
                 bad += 1
@@ -757,6 +786,7 @@ def main():
             text = build_text(work) if expect is None and rc == 0 else ""
         if expect is None and rc == 0 and not re.search(
                 r"--model-sha256=%s(\s|$)" % PIN_HASH, text):
+            decided()
             print("  FAIL %-22s configures, but the pack does not carry the "
                   "pin's hash" % name)
             bad += 1
@@ -771,15 +801,17 @@ def main():
                  "'Unix Makefiles'", "")
     err = header_rebuild(CMAKE_DIR)
     if err:
+        decided()
         print("  FAIL %-22s %s" % ("header_rebuild", err))
         bad += 1
     else:
+        decided()
         print("  ok   %-22s touching svc/plugin/plugin_abi.h recompiles plugin_main, "
               "plugin_base, plugin_fmt and plugin_text" % "header_rebuild")
     if bad:
         print("run_add_plugin_arg_tests: FAILED", file=sys.stderr)
         return 1
-    print("run_add_plugin_arg_tests: all cases behave as specified")
+    negative_tests_ok()
     return 0
 
 

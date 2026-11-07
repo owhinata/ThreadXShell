@@ -168,6 +168,19 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
+
+
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided
+# (in main(): one per verdict the trees recorded in `results` where they reached
+# it, and one per tree that failed -- not the length of the list of trees).
+def negative_tests_ok(cases):
+    me = os.path.realpath(__file__)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(me)))
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), cases))
+
+
 COPIED = ("veneer_cost_gate.cmake", "check_veneer_base_cost.py",
           "thumb_stack_analysis.py", "check_plugin_image.py",
           "check_policy_probe.py", "plugin_stack_table.cmake",
@@ -1949,7 +1962,7 @@ def main():
         return 1
 
     print("run_veneer_gate_build_tests:")
-    results, bad = [], 0
+    results, bad, decided = [], 0, 0
     runs = [
         ("main", lambda p: main_tree(p, results)),
         ("asset_alone", lambda p: asset_tree(p, "asset-bare", "bare.nnc",
@@ -1974,6 +1987,7 @@ def main():
         name_re_case(args.cmake_dir, results)
     except Fail as e:
         bad += 1
+        decided += 1
         print("  FAIL %-15s %s" % ("delivery_name_re", e))
     for name, fn in runs:
         with tempfile.TemporaryDirectory() as work:
@@ -1982,13 +1996,15 @@ def main():
                            args.cmake_dir, args.cc))
             except Fail as e:
                 bad += 1
+                decided += 1
                 print("  FAIL %-15s %s" % (name, e))
     for name, why in results:
+        decided += 1
         print("  ok   %-15s %s" % (name, why))
     if bad:
         print("run_veneer_gate_build_tests: FAILED", file=sys.stderr)
         return 1
-    print("run_veneer_gate_build_tests: the gate cannot be built around")
+    negative_tests_ok(decided)
     return 0
 
 

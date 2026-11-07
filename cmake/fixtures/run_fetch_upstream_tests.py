@@ -44,8 +44,22 @@ HELPER = os.path.join(REPO, "cmake", "fetch_upstream.cmake")
 bad = 0
 
 
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided.
+# The count goes up where a verdict is reached, not from the length of a list.
+decided = 0
+
+
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(me)))
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), decided))
+
+
 def check(name, ok, why):
-    global bad
+    global bad, decided
+    decided += 1
     print("  %s %-34s %s" % ("ok  " if ok else "FAIL", name, why))
     if not ok:
         bad += 1
@@ -306,4 +320,4 @@ finally:
 if bad:
     print("fetch_upstream tests: %d FAILED" % bad)
     sys.exit(1)
-print("fetch_upstream tests passed")
+negative_tests_ok()

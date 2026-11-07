@@ -45,6 +45,19 @@ SDK_PROBES = ["EPII_CM55M_APP_S/device/WE2_core.c",
 
 bad = 0
 
+
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided.
+# The count goes up where a verdict is reached, not from the length of a list.
+decided = 0
+
+
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(me)))
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), decided))
+
 # Nothing git-shaped from the caller's shell reaches the harness's own git
 # calls or the baseline runs; each case adds exactly what it tests.
 CLEAN = {k: v for k, v in os.environ.items()
@@ -54,7 +67,8 @@ CLEAN.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
 
 
 def check(name, ok, why):
-    global bad
+    global bad, decided
+    decided += 1
     print("  %s %-44s %s" % ("ok  " if ok else "FAIL", name, why))
     if not ok:
         bad += 1
@@ -306,4 +320,4 @@ finally:
 if bad:
     print("git environment tests: %d FAILED" % bad)
     sys.exit(1)
-print("git environment tests passed")
+negative_tests_ok()

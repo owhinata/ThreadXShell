@@ -75,6 +75,20 @@ EXPECT = {
 
 fails = 0
 
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided.
+# The count goes up where a verdict is reached, not from the length of a list.
+decided = 0
+
+
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = me
+    for _ in range(4):          # boards/<board>/test/<this file>
+        root = os.path.dirname(root)
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), decided))
+
 
 def configure(tmp, defines=()):
     """Configure a do-nothing project that only includes the file under test."""
@@ -103,8 +117,9 @@ def configure(tmp, defines=()):
 
 
 def expect_ok(tmp, name, defines=()):
-    global fails
+    global fails, decided
     r, values = configure(tmp, defines)
+    decided += 1
     if r.returncode != 0:
         print(f"  FAIL {name}: configure refused\n{r.stdout}{r.stderr}")
         fails += 1
@@ -114,8 +129,9 @@ def expect_ok(tmp, name, defines=()):
 
 
 def expect_refused(tmp, name, defines, must_mention):
-    global fails
+    global fails, decided
     r, _ = configure(tmp, defines)
+    decided += 1
     # [!] Collapse whitespace before matching.  CMake reflows message() text, so
     # "... and 'lots' is\n  not even a number" is one phrase to a reader and two
     # lines to `in`.  Matching the raw output makes the test depend on the
@@ -134,7 +150,7 @@ def expect_refused(tmp, name, defines, must_mention):
 
 
 def main():
-    global fails
+    global fails, decided
 
     if shutil.which("cmake") is None:
         print("test_flash_geometry: no cmake on PATH -- SKIP")
@@ -158,6 +174,7 @@ def main():
                     print(f"  FAIL {key} is {got}, wanted 0x{want:X}")
                     mismatched += 1
             fails += mismatched
+            decided += 1
             if not mismatched:
                 print(f"  ok   all {len(EXPECT)} geometry values are as shipped")
 
@@ -168,6 +185,7 @@ def main():
             gran = int(values["GROVE_ERASE_GRAN"], 0)
             copies = int(values["GROVE_SLOT_HDR_COPIES"], 0)
             size = int(values["GROVE_FLASH_SIZE"], 0)
+            decided += 1
             if int(values["GROVE_FW_RESERVED"], 0) != slot * slots:
                 print("  FAIL GROVE_FW_RESERVED is not slot size * slot count")
                 fails += 1
@@ -185,6 +203,7 @@ def main():
             # -DGROVE_SLOT_HDR_COPIES=1 destroys, and it is worth stating as a
             # property rather than trusting that the span happens to be enough.
             hdr = int(values["GROVE_SLOT_HDR_ADDR"], 0)
+            decided += 1
             if hdr > size - 0x2000:
                 print(f"  FAIL the slot-header reservation starts at 0x{hdr:X}, "
                       f"above the backup copy at 0x{size - 0x2000:X}")
@@ -228,7 +247,7 @@ def main():
     if fails:
         print(f"test_flash_geometry: {fails} failure(s)")
         return 1
-    print("test_flash_geometry: all cases pass")
+    negative_tests_ok()
     return 0
 
 

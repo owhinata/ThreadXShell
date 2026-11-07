@@ -23,6 +23,20 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 GATE = os.path.join(os.path.dirname(HERE), "check_plugin_reservation.py")
 
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided.
+# The count goes up where a verdict is reached, not from the length of a list.
+decided = 0
+
+
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = me
+    for _ in range(5):          # boards/<board>/cmake/fixtures/<this file>
+        root = os.path.dirname(root)
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), decided))
+
 # `end` is PROVIDEd, so it exists only if something references it -- in the
 # firmware that is src/retarget.c.  The fixture references it the same way, or
 # every case would fail on "no heap floor" instead of on what it was built for.
@@ -153,6 +167,7 @@ def build(cc, work, overrides, ldflags):
 
 
 def main():
+    global decided
     ap = argparse.ArgumentParser()
     ap.add_argument("--cc", required=True)
     ap.add_argument("--nm", required=True)
@@ -168,10 +183,12 @@ def main():
                 ok = who == "link" and expect in err
                 why = "linker: " + (expect or "")
                 if not ok:
+                    decided += 1
                     print(f"  FAIL {name:17s} the fixture did not link -- it "
                           f"tests nothing:\n{err.strip()[:400]}")
                     bad += 1
                 else:
+                    decided += 1
                     print(f"  ok   {name:17s} {why} (never reaches the gate)")
                 continue
             r = subprocess.run([sys.executable, GATE, elf, "--nm", args.nm,
@@ -185,15 +202,17 @@ def main():
             ok = who == "gate" and r.returncode == 1 and expect in out
             why = "gate: " + expect
         if ok:
+            decided += 1
             print(f"  ok   {name:17s} {why}")
         else:
             bad += 1
+            decided += 1
             print(f"  FAIL {name:17s} rc={r.returncode}, expected "
                   f"{expect or 'a pass'}\n{out.strip()[:400]}")
     if bad:
         print("run_reservation_tests: FAILED", file=sys.stderr)
         return 1
-    print("run_reservation_tests: all fixtures behave as specified")
+    negative_tests_ok()
     return 0
 
 

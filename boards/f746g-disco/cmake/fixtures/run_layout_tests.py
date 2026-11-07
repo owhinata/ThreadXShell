@@ -33,6 +33,21 @@ BOARD_DIR = os.path.dirname(CMAKE_DIR)
 GATE = os.path.join(CMAKE_DIR, "check_f746_layout.py")
 BOARD_CMAKE = os.path.join(BOARD_DIR, "board.cmake")
 
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided.
+# The count goes up where a verdict is reached, not from the length of a list.
+decided = 0
+
+
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = me
+    for _ in range(5):          # boards/<board>/cmake/fixtures/<this file>
+        root = os.path.dirname(root)
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), decided))
+
+
 sys.dont_write_bytecode = True   # importing the gate must not litter cmake/
 sys.path.insert(0, CMAKE_DIR)
 import check_f746_layout as gate  # noqa: E402  (REQUIRED / HANDLERS / regions)
@@ -178,7 +193,9 @@ def main():
     failures = []
 
     def expect(case, syms, args, rc, *needles, **kw):
+        global decided
         got_rc, out = run(tmp, case, syms, args, **kw)
+        decided += 1
         ok = got_rc == rc and all(n in out for n in needles)
         print(f"  {'ok  ' if ok else 'FAIL'} {case}: rc {got_rc}"
               + ("" if ok else f" (want {rc}, needles {needles})\n{out}"))
@@ -342,7 +359,7 @@ def main():
         print(f"run_layout_tests: {len(failures)} case(s) FAILED: {', '.join(failures)}",
               file=sys.stderr)
         return 1
-    print("run_layout_tests: OK")
+    negative_tests_ok()
     return 0
 
 

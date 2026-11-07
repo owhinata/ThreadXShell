@@ -1171,8 +1171,9 @@ export HOST_TEST_SHELL_TEST="$here"
 # fixtures (boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py, the
 # only place the output-vocabulary gate's negative tests run) this runner, not
 # the board script, decides whether they must have run, and then requires the
-# fixture runner's own last line "run_fixture_tests: OK (N fixtures)" exactly
-# once with N equal to the count declared here.
+# fixture runner's own last line (issue #205's shape, "negative-tests:
+# boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py OK (N cases)")
+# exactly once with N equal to the count declared here.
 #
 # "Must have run" is decided HERE from the same two facts the board script
 # looks at -- a configured tree (GROVE_BUILD_DIR, or build/grove-vision-ai-v2)
@@ -1195,13 +1196,14 @@ grove_fixtures_expected() {
     [ -f "$_gb/build.ninja" ] && [ -n "$_gcc" ] && [ -x "$_gcc" ]
 }
 grove_fixtures_check() {  # <board log>
-    _hits=$(grep -c '^run_fixture_tests: OK (' "$1" || true)
-    _n=$(sed -n 's/^run_fixture_tests: OK (\([0-9][0-9]*\) fixtures)$/\1/p' "$1")
+    _pfx='negative-tests: boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py OK ('
+    _hits=$(grep -c '^negative-tests: boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests\.py OK (' "$1" || true)
+    _n=$(sed -n 's|^negative-tests: boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests\.py OK (\([0-9][0-9]*\) cases)$|\1|p' "$1")
     if [ "$_hits" -ne 1 ] || [ -z "$_n" ] || [ "$_n" -ne "$grove_fixture_count" ]; then
         echo "run_host_tests: grove-vision-ai-v2 has a configured build tree" \
              "(${GROVE_BUILD_DIR:-$repo/build/grove-vision-ai-v2}) and the" \
              "pinned toolchain, so its board tests must end the linker-gate" \
-             "fixtures with one 'run_fixture_tests: OK (N fixtures)' line," \
+             "fixtures with one '${_pfx}N cases)' line," \
              "N = $grove_fixture_count (grove_fixture_count in this" \
              "script; change it with the fixture list); found $_hits such" \
              "line(s), N='${_n:-none}'" >&2

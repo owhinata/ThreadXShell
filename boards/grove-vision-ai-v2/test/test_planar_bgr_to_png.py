@@ -34,6 +34,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SCRIPT = os.path.join(HERE, "..", "scripts", "planar_bgr_to_png.py")
 
 
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided
+# (main()'s `checks`, raised where each comparison is made).
+def negative_tests_ok(cases):
+    me = os.path.realpath(__file__)
+    root = me
+    for _ in range(4):          # boards/<board>/test/<this file>
+        root = os.path.dirname(root)
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), cases))
+
+
 def load(path):
     spec = importlib.util.spec_from_file_location("planar_bgr_to_png", path)
     mod = importlib.util.module_from_spec(spec)
@@ -161,7 +173,7 @@ def main() -> int:
     if fails:
         print(f"test_planar_bgr_to_png: {fails} of {checks} checks FAILED")
         return 1
-    print(f"test_planar_bgr_to_png: {checks} checks OK")
+    negative_tests_ok(checks)
     return 0
 
 

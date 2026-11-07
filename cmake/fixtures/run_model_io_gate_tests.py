@@ -758,6 +758,20 @@ DEPTH_TOOL = os.path.join(HERE, "model_io", "schema_table_depth.py")
 CHECK_HDR = os.path.join(REPO, "svc", "nn", "tflm", "nn_tflm_model_check.h")
 SCHEMA_REL = os.path.join("tensorflow", "compiler", "mlir", "lite", "schema", "schema.fbs")
 
+# issue #205 -- the last line every negative-test runner prints when it passes:
+# this file's path from the repository root and how many cases this run decided.
+# The count goes up where a verdict is reached (the schema depth check is one of
+# them), not from the length of the case lists: a loop that silently ran
+# nothing must show up as a smaller number.
+decided = 0
+
+
+def negative_tests_ok():
+    me = os.path.realpath(__file__)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(me)))
+    print("negative-tests: %s OK (%d cases)"
+          % (os.path.relpath(me, root), decided))
+
 
 def gate_compile_flags(build_dir, gate):
     """The -I / -D flags of the gate's own compile line."""
@@ -785,6 +799,8 @@ def gate_compile_flags(build_dir, gate):
 
 def schema_depth_check(flags):
     """0 on success: the gate's schema is acyclic and within the depth limit."""
+    global decided
+    decided += 1
     import re
     m = re.search(r"#define\s+NN_TFLM_VERIFY_MAX_DEPTH\s+(\d+)u", open(CHECK_HDR).read())
     if not m:
@@ -823,6 +839,7 @@ def schema_depth_check(flags):
 
 
 def main():
+    global decided
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir", required=True)
     ap.add_argument("--gate", required=True,
@@ -941,6 +958,7 @@ def main():
                 ok = ok and took < WITNESS_SECONDS
                 why += (f" within {WITNESS_SECONDS} s (fastest of {WITNESS_RUNS}: "
                         f"{took:.3f} s)")
+            decided += 1
             if ok:
                 print(f"  ok   {args.gate} {name}: {why}")
             else:
@@ -984,6 +1002,7 @@ def main():
                     and not any(c in text for c in others) \
                     and OK_LINE[args.style] not in text
                 why = f"rc 1 with {want} (and no other code)"
+            decided += 1
             if ok:
                 print(f"  ok   {args.gate} {label}: {why}")
             else:
@@ -995,10 +1014,7 @@ def main():
 
     if failures:
         sys.exit(f"run_model_io_gate_tests: {failures} case(s) failed for {gate_path}")
-    n = len(CASES) + (len(PL_CASES) + 2 * len(PL_WALK_CASES) + 2 * len(PL_SCAN_BOTH)
-                      + 2 * len(CS_CASES)
-                      if args.style == "vela" else 0) + len(op_runs)
-    print(f"run_model_io_gate_tests: OK ({n} cases + schema depth, {gate_path})")
+    negative_tests_ok()
 
 
 if __name__ == "__main__":

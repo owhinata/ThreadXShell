@@ -1726,6 +1726,18 @@ ceiling of 2,864 (4096 - 208 - 1024).  The 2,216 in the table includes `nn
 run` and was not re-measured.  The other rows did not move (`nn_work` 352;
 `cam_prev` 0 with the preview off), and the veneer cost stays 176 / 640 B.
 
+**Re-measured after issue #199** (the `nn info` copy carries the transition
+counter's value and the later lines are checked against it; 2026-11-07,
+firmware `5acf240`).  Procedure: `nn model load blazeface` -> `nn info` ->
+`nn stream start --frames 30` -> `nn info` -> `nn stream stats`:
+`at call : shell 1432/4096 (entry, shapes_ok, report, param)`, `nn_work` 360,
+`cam_prev` 0.  The firmware before #199 (`de9d2ed`) printed `shell 1344` by
+the same steps less the two `nn info`, which is a different path: by the
+compiler's stack-usage records, `cmd_nn_info`'s frame went 896 -> 912 B and
+`nn_svc_common_thresh_get` is no longer inlined into it (8 B), so `nn info`'s
+path to param_get is 24 B deeper than before and the shell line's high-water is
+now that path.  1,432 is well inside the ceiling of 2,864.
+
 `nn stream stats` prints them on two lines (issue #126 -- as one, the worst
 case was 101 B and the 96 B line cut it):
 

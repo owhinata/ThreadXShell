@@ -6951,6 +6951,19 @@ the shared code build the painter (the board hands only its drawing target):
 the plugin is called from, reads 8 B less than it did (it is the entry depth,
 no longer 16 B over it).  The table above was not re-derived for these and,
 except for the draw row's 8 B, stays an upper bound.
+
+Measured on hardware 2026-11-07, firmware `5acf240` (issue #199: the `nn info`
+copy carries the transition counter's value and the later lines are checked
+against it).  Procedure: `nn model load blazeface` -> `nn info` -> `nn stream
+start --frames 30` -> `nn info` -> `nn stream stats`, lines ended with CR:
+`entry : con 1024/4096` (8 B over the previous firmware: the larger copy on
+`nn model load`'s stack), `shapes_ok : con 1448/4096`, `decode : work
+752/8192`, `draw : panel 264/2048`, `param_get : con 792/4096` (the `nn info`
+path; `nn thresh` reaches it at 504 on this firmware).  The firmware before
+#199 (`de9d2ed`) printed entry 1016, shapes_ok 1448, decode 752, draw 264 and
+param_get 504 by the same steps less the two `nn info`, so the only moves are
+the copy's 8 B and `nn info`'s own path.  The least `left`, 2,648 B at
+shapes_ok, stays far over the 1,232 B a 1,024 B allowance needs.
 "real need" is the next section's.
 
 #### The veneer charge is derived from the image, and checked

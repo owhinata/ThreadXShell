@@ -1443,6 +1443,16 @@ What runs where, and why each piece is this board's or shared:
   allowance.  Not re-measured, so the console figure above stays an upper
   bound and the GUIX one is 8 B short of it.
 
+  Measured on hardware 2026-11-07, firmware `5acf240` (issue #199: the
+  `nn info` copy carries the transition counter's value and the later lines
+  are checked against it), by `nn model load blazeface` -> `nn info` ->
+  `nn stream start --frames 30` -> `nn info` -> `nn stream stats`, with no
+  `nn run`: `shell 1472/4096`, `nn-worker 440/4096`, `guix 244/4096`.  The
+  firmware before #199 (`de9d2ed`) printed `shell 1464` by the same steps
+  less the two `nn info` -- the 8 B is the larger copy on the console's
+  stack.  Both are far under the 2,240 B in the table, which includes `nn
+  run` and stays the upper bound.
+
 #### The draw budget
 
 A plugin's draw is charged pixels and primitives (`svc/plugin/plugin_paint_budget.c`);

@@ -333,6 +333,12 @@ void nn_svc_info(struct nn_svc_info *out)
 	nn_svc_common_info(out, nn_life_seq);
 }
 
+/* Whether a copy still describes what is open (issue #199): the same read. */
+int nn_svc_info_stands(const struct nn_svc_info *info)
+{
+	return nn_svc_common_info_stands(info, nn_life_seq);
+}
+
 /* ---- model lifecycle -----------------------------------------------------
  *
  * The ORDER is svc/nn/nn_core_model.c's -- one copy for every board (issue #131

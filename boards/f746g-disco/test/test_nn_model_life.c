@@ -32,7 +32,11 @@
  *     a blob longer than the staging buffer, a payload read that fails and a
  *     copy whose CRC disagrees with the header each refuse with their own
  *     status and words; and the blob flag is taken once and given back once on
- *     every one of those paths and on success.
+ *     every one of those paths and on success;
+ *   - (issue #199) a copy `nn info` took stands while nothing changes what is
+ *     open -- a load refused before the claim, a stream holding the session
+ *     -- and stops standing once a load or an unload has run; a copy taken
+ *     in the middle of a swap never stands.
  */
 #include <assert.h>
 #include <stdio.h>
@@ -334,6 +338,14 @@ int main(void)
 	/* ...and `nn info` during a stream still gets the copy: no load is in
 	 * flight, the counter has not moved. */
 	info_is(1, "m", NN_AVAIL_OK);
+	{
+		/* (issue #199) taken without the session, it carries the value
+		 * both reads agreed on, and stands */
+		struct nn_svc_info c;
+
+		nn_svc_info(&c);
+		assert(c.seq_known && nn_svc_info_stands(&c));
+	}
 	stream_holds = 0;
 	nn_session_release();
 	assert(stub.reloads == 0 && invalidations == 0);
@@ -357,11 +369,22 @@ int main(void)
 	       stub.mid.avail_tensors == NN_AVAIL_BUSY);
 	assert(stub.mid.model[0] == '\0' && stub.mid.arena_used == 0u);
 	assert(stub.mid.arena_bytes == 524288u);
+	/* (issue #199) the mid-swap copy belongs to no one state, and never
+	 * stands -- not even now that the counter is even again */
+	assert(!stub.mid.seq_known && !nn_svc_info_stands(&stub.mid));
 	assert(invalidations == 1);
 	info_is(1, "m", NN_AVAIL_OK);
 
 	/* Unload: empty, idempotent, the last result goes. */
-	unload();
+	{
+		/* (issue #199) an unload is a change too */
+		struct nn_svc_info c;
+
+		nn_svc_info(&c);
+		assert(nn_svc_info_stands(&c));
+		unload();
+		assert(!nn_svc_info_stands(&c));
+	}
 	assert(res.status == NN_SVC_OK && !stub.has && stub.releases == 1);
 	assert(invalidations == 2);
 	info_is(0, "(none)", NN_AVAIL_OK);
@@ -398,6 +421,23 @@ int main(void)
 	/* A load from the store brings a model back. */
 	load("a");
 	assert(res.status == NN_SVC_OK && state == NN_MODEL_NEW && stub.has);
+
+	/* [!] WHICH STATE A COPY IS OF (issue #199): it stands until a load
+	 * runs, and not after -- the same name, a new model all the same. */
+	{
+		struct nn_svc_info c;
+
+		nn_svc_info(&c);
+		assert(c.seq_known && nn_svc_info_stands(&c));
+		load(NULL);                       /* refused before the claim */
+		assert(res.status == NN_SVC_ERR_ARG);
+		assert(nn_svc_info_stands(&c));
+		load("a");                        /* a whole load */
+		assert(res.status == NN_SVC_OK && state == NN_MODEL_NEW);
+		assert(!nn_svc_info_stands(&c));
+		nn_svc_info(&c);                  /* a new copy is of the new one */
+		assert(c.seq_known && nn_svc_info_stands(&c));
+	}
 
 	/* A "success" that left no model: a failure (HW), EMPTY, released. */
 	rel = stub.releases;

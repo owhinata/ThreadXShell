@@ -403,6 +403,18 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nn_run_says"
 "$out/test_nn_run_says"
 
+# issue #199 -- where `nn info`'s model section comes from and which state of
+# the load order the copy belongs to (port/nn/nn_info_hold.c): the gate taken,
+# a stream and an ordinary operation carry the counter when it is even; a load
+# or an unload holding the gate carries none at any of its moments, nor does an
+# owner this board does not write.  None of these holders can be lined up from
+# one console.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" -I "$HOST_TEST_SVC/blob" \
+    "$here/test_nn_info_hold.c" "$board/port/nn/nn_info_hold.c" \
+    $LDFLAGS -o "$out/test_nn_info_hold"
+"$out/test_nn_info_hold"
+
 # issue #122 -- the gate's claim and the count of threshold calls inside the
 # plugin: in svc/ since issue #163 (svc/nn/nn_param_calls.c) and walked by
 # shell/test/test_nn_param_calls.c.

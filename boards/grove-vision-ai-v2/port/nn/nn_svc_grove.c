@@ -68,6 +68,7 @@
 #include "nn_run_says.h"   /* a NO_RESULT run's words (#174) */
 #include "nn_stream_state.h"
 #include "nn_core_model.h"
+#include "nn_info_hold.h"  /* nn info's holder -> sections and value (#199) */
 #include "nor_flash.h"    /* NOR_XIP_BASE */
 #include "npu_hw.h"
 #include "tx_api.h"       /* tx_time_get() -- ThreadX ticks, 1 ms here */
@@ -324,10 +325,26 @@ static const struct nn_core_board nn_core_board = {
 
 /* ---- info ---------------------------------------------------------------- */
 
+/* The load order's state (svc/nn/nn_core_model.h), whose lifecycle is below:
+ * defined here because `nn info` copies its transition counter with the model
+ * section (issue #199). */
+static struct nn_core_model nn_model_life;
+
+/* The counter, read in this board's critical section. */
+static uint32_t nn_life_seq(void)
+{
+	unsigned posture = nn_core_cs_enter();
+	uint32_t v       = nn_model_life.seq;
+
+	nn_core_cs_exit(posture);
+	return v;
+}
+
 void nn_svc_info(struct nn_svc_info *out)
 {
 	uint8_t  owner_snap, open_snap;
-	uint32_t used_snap;
+	uint32_t used_snap, seq_snap;
+	struct nn_info_hold hold;
 	char     from_snap[BLOB_NAME_MAX + 1];
 	/* The model's display name is the backend's one copy (svc/nn/nn.h's
 	 * nn_model_name(): the blob name; issue #169).
@@ -367,6 +384,12 @@ void nn_svc_info(struct nn_svc_info *out)
 		out->avail_runtime  = (uint8_t)NN_AVAIL_OK;
 		out->avail_tensors  = nn_open_done ? (uint8_t)NN_AVAIL_OK
 		                                   : (uint8_t)NN_AVAIL_NA;
+		/* [!] The value the copy carries is read BEFORE the gate goes back
+		 * (issue #199): a load takes this gate, so under it the counter
+		 * cannot move; read after, it could be a whole later load's. */
+		nn_info_hold_of(1, (unsigned)NN_OWNER_OP, nn_life_seq(), &hold);
+		out->seq_known = hold.seq_known;
+		out->seq       = hold.seq;
 		nn_release();
 		return;
 	}
@@ -395,9 +418,15 @@ void nn_svc_info(struct nn_svc_info *out)
 	 * reload can rewrite it, and it is read in the same section as the owner
 	 * test for the reason above.  Only used when a stream holds the gate. */
 	used_snap  = open_snap ? nn_activations_bytes(m) : 0u;
+	/* And the counter, in this same section as the owner it is judged by
+	 * (issue #199; nn_info_hold.h says which owners keep it still). */
+	seq_snap   = nn_model_life.seq;
 	TX_RESTORE
 
-	if (owner_snap != (uint8_t)NN_OWNER_STREAM) {
+	nn_info_hold_of(0, owner_snap, seq_snap, &hold);
+	out->seq_known = hold.seq_known;
+	out->seq       = hold.seq;
+	if (hold.from != (uint8_t)NN_INFO_FROM_STREAM) {
 		/* An operation has it.  Only what CANNOT be in flight is reported: the
 		   arena reservation above is a link-time constant, and nothing else.
 		   [!] BUSY, NOT WITHHELD (issue #122 P4): WITHHELD tells the operator
@@ -433,6 +462,12 @@ void nn_svc_info(struct nn_svc_info *out)
 	out->arena_used    = used_snap;
 	out->avail_runtime = (uint8_t)NN_AVAIL_OK;
 	out->avail_tensors = open_snap ? (uint8_t)NN_AVAIL_OK : (uint8_t)NN_AVAIL_NA;
+}
+
+/* Whether a copy still describes what is open (issue #199). */
+int nn_svc_info_stands(const struct nn_svc_info *info)
+{
+	return nn_svc_info_seq_stands(info, nn_life_seq());
 }
 
 /* ---- resolving a model in the asset store -------------------------------- */
@@ -788,8 +823,10 @@ nn_resolve_blob(struct nn_op_result *res, uint32_t token, const char *name,
  * would put a gap between the answer and the parse -- and the answer is an
  * ADDRESS.  Over an open model the NPU is already up and holding that lease,
  * and the lookup runs under it.
+ *
+ * The order's state, nn_model_life, is defined with `nn info` above, which
+ * copies its counter (issue #199).
  */
-static struct nn_core_model nn_model_life;
 
 /** One load's resolution, on the console's stack: nothing in it is the
  *  adapter's until commit(). */

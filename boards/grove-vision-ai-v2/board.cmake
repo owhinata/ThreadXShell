@@ -778,6 +778,9 @@ add_library(shell_objs OBJECT
     # interprets the tensors, or whether anything does.
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_desc.c"
     "${BOARD_DIR}/port/nn/nn_svc_grove.c"
+    # Where `nn info`'s model section comes from and which state of the load
+    # order it belongs to (issue #199): pure, walked by test/test_nn_info_hold.c.
+    "${BOARD_DIR}/port/nn/nn_info_hold.c"
     "${BOARD_DIR}/port/nn/nn_stream_state.c"
     # The inference worker and who may touch its input (issue #129): the
     # thread and its join here, and since issue #140 the worker's half of the

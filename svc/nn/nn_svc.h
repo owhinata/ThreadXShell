@@ -297,7 +297,55 @@ struct nn_svc_info {
 	uint8_t  avail_identity;  /**< model / source / model_active            */
 	uint8_t  avail_runtime;   /**< arena_used, and any live hardware state  */
 	uint8_t  avail_tensors;   /**< nn_svc_input / _output / _output_count   */
+
+	/*
+	 * [!] WHICH STATE THIS COPY BELONGS TO (issue #199): the shared load
+	 * order's transition counter (svc/nn/nn_core_model.h; odd while a load or
+	 * an unload changes what is open, +2 for each), read INSIDE THE SAME
+	 * PROTECTION AS THE COPY -- under the claim when the board took it, or
+	 * between the two reads that showed it did not move.  A value read after
+	 * the claim was given back could belong to a load that ran whole in
+	 * between, and the next model's lines would then pass as this one's.
+	 *
+	 * Whatever is read after this returns (the tensors, the threshold, the
+	 * container's claims) describes the same model only if the counter still
+	 * holds this value: nn_svc_info_stands().
+	 *
+	 * [!] NO VALUE IS NOT "NO LOAD IN THIS BUILD".  A build with no `nn model
+	 * load` never moves its counter, so its copies carry 0 and always stand.
+	 * seq_known == 0 is a copy that belongs to no one state -- a BUSY copy, or
+	 * one taken while a load or an unload held the claim -- and nothing read
+	 * after it stands.
+	 */
+	uint8_t  seq_known;   /**< non-zero when @ref seq is this copy's       */
+	uint32_t seq;         /**< the counter's value the copy belongs to     */
 };
+
+/**
+ * Whether a copy still describes the state now, given the counter's value
+ * @p now, read in the board's critical section.  Pure; the one comparison all
+ * three boards' nn_svc_info_stands() make.
+ *
+ * True only when the copy has a value, the value is even (no load or unload
+ * was in flight) and the counter still holds it.  [!] AN EQUAL TEST IS ENOUGH:
+ * the counter is 32 bits and wraps, but coming back to the same value takes
+ * 2^31 loads, which no single `nn info` outlives.
+ */
+static inline int nn_svc_info_seq_stands(const struct nn_svc_info *info,
+                                         uint32_t now)
+{
+	return info != NULL && info->seq_known != 0u &&
+	       (info->seq & 1u) == 0u && info->seq == now;
+}
+
+/**
+ * Does @p info still describe what is open (issue #199)?  The board reads its
+ * transition counter in its own critical section and asks
+ * nn_svc_info_seq_stands().  A line read after nn_svc_info() returned is of
+ * the copy's model when this answers true AFTER that line was read; a copy
+ * with no value never stands.  Never blocks, takes no claim.
+ */
+int nn_svc_info_stands(const struct nn_svc_info *info);
 
 /** Copy @p src into a fixed field, always NUL-terminated, never truncating into
  *  something that could read as a different name.  NULL @p src gives "". */

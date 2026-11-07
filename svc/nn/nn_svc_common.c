@@ -20,6 +20,8 @@
 
 /* ---- nn info ------------------------------------------------------------- */
 
+/* A BUSY copy carries no value (issue #199): nn_svc_common_info() cleared
+ * seq_known first and sets it only once the copy stands. */
 static void nn_svc_common_busy(struct nn_svc_info *out)
 {
 	out->model_active   = 0u;
@@ -54,8 +56,16 @@ void nn_svc_common_info(struct nn_svc_info *out, uint32_t (*life_seq)(void))
 		nn_svc_common_busy(out);
 		return;
 	}
-	if (rc != 0 || m == NULL)
+	if (rc != 0 || m == NULL) {
+		/* The backend could not open: "nothing loaded", which is true and
+		 * not BUSY.  The copy is of the state the counter shows right after
+		 * (issue #199), when that is even; a load that lands later fails
+		 * nn_svc_info_stands() like any other. */
+		seq1 = life_seq();
+		out->seq_known = (uint8_t)((seq1 & 1u) == 0u);
+		out->seq       = out->seq_known ? seq1 : 0u;
 		return;
+	}
 
 	/*
 	 * [!] THE NAME IS COPIED UNDER THE SESSION WHEN THE SESSION IS FREE, and
@@ -80,9 +90,17 @@ void nn_svc_common_info(struct nn_svc_info *out, uint32_t (*life_seq)(void))
 	out->model_active = nn_model_present(m) ? 1u : 0u;
 	nn_svc_str(out->model, sizeof out->model, nn_model_name(m));
 	out->arena_used  = out->model_active ? nn_activations_bytes(m) : 0u;
+	/*
+	 * [!] THE SECOND READ IS TAKEN BEFORE THE SESSION IS GIVEN BACK (issue
+	 * #199): it is the value the copy carries (below), and a load claims this
+	 * same session, so under it the counter cannot move.  Read after the
+	 * release, a load that ran whole in between would lend the copy its own
+	 * value, and the next model's tensors would pass as this one's.  Not
+	 * held, the two reads either side of the copy decide it, as before.
+	 */
+	seq1 = life_seq();
 	if (held)
 		nn_session_release();
-	seq1 = life_seq();
 
 	/*
 	 * [!] A LOAD IN FLIGHT IS BUSY, NOT "NO MODEL" OR A NAME AND A SIZE FROM
@@ -97,6 +115,12 @@ void nn_svc_common_info(struct nn_svc_info *out, uint32_t (*life_seq)(void))
 		nn_svc_common_busy(out);
 		return;
 	}
+	/* Which state the copy is of (issue #199): seq1, read under the session
+	 * or equal to seq0.  An odd value cannot come from either -- a load in
+	 * flight holds the session, and an odd seq0 does not stand -- but one
+	 * is never carried: it would belong to no one state. */
+	out->seq_known = (uint8_t)((seq1 & 1u) == 0u);
+	out->seq       = seq1;
 
 	/* [!] Say plainly when nothing is being inferred, so a latency from
 	 * `nn bench` is never mistaken for a model's. */
@@ -110,6 +134,12 @@ void nn_svc_common_info(struct nn_svc_info *out, uint32_t (*life_seq)(void))
 	out->avail_runtime  = (uint8_t)NN_AVAIL_OK;
 	out->avail_tensors  = out->model_active ? (uint8_t)NN_AVAIL_OK
 	                                        : (uint8_t)NN_AVAIL_NA;
+}
+
+int nn_svc_common_info_stands(const struct nn_svc_info *info,
+                              uint32_t (*life_seq)(void))
+{
+	return nn_svc_info_seq_stands(info, life_seq());
 }
 
 /* ---- nn thresh ----------------------------------------------------------- */

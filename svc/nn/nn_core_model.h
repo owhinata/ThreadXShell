@@ -82,8 +82,10 @@
  * the last, and only then -- a load refused before the lease never moves it.
  * A reader that cannot take the claim reads it on both sides of its copy and
  * asks nn_core_model_copy_stands().  A board that answers `nn info` from the
- * claim's holder instead (grove-vision-ai-v2) keeps the counter and never
- * reads it.
+ * claim's holder instead (grove-vision-ai-v2) does not need that test, but
+ * since issue #199 every board reads the counter into its `nn info` copy
+ * (nn_svc_info::seq), so that the lines read after it can be checked against
+ * it (nn_svc_info_stands()).
  *
  * [!] IT OWNS NO STORAGE.  The state is the board's @ref nn_core_model, the
  * facts its const @ref nn_core_model_board; the derived audit

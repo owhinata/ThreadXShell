@@ -19,6 +19,13 @@
  * shows no load between its two reads; it is BUSY otherwise, and BUSY when the
  * backend's memory is held by another command (NN_ERR_SCRATCH_HELD).  The
  * inference API is stubbed here.
+ *
+ * And which state the copy belongs to (issue #199): a copy taken under the
+ * session carries the counter read BEFORE the session went back, so a load
+ * that runs whole right after the release fails the check; one taken without
+ * it carries the value only when both reads agree and it is even; a BUSY copy
+ * carries none and never stands; and a build with no load (the counter at 0
+ * for ever) always stands.
  */
 #include <stdio.h>
 #include <string.h>
@@ -225,6 +232,12 @@ static struct nn_backend_info bi = { "tflm", "2.17" };
 static int open_rc, session_rc, session_held;
 static uint32_t seqs[2];
 static int seq_reads;
+/* [!] A LIVE COUNTER (issue #199): when `live` is set the counter is
+ * live_ctr, and the session's release first lets a whole load run when
+ * `load_on_release` asks -- another console's `nn model load` landing in the
+ * moment after `nn info` gave the session back. */
+static int live, load_on_release;
+static uint32_t live_ctr;
 
 const struct nn_backend_info *nn_backend(void) { return &bi; }
 uint32_t nn_arena_reserved(void) { return 4096u; }
@@ -241,7 +254,14 @@ int nn_session_try_acquire(void)
 		session_held = 1;
 	return session_rc;
 }
-void nn_session_release(void) { session_held = 0; }
+void nn_session_release(void)
+{
+	session_held = 0;
+	if (load_on_release) {
+		load_on_release = 0;
+		live_ctr += 2u;   /* odd, then even again: one whole load */
+	}
+}
 int nn_model_present(const struct nn_model *m) { return m->present; }
 static const char *model_name = "det";
 const char *nn_model_name(const struct nn_model *m)
@@ -257,6 +277,8 @@ uint32_t nn_activations_bytes(const struct nn_model *m)
 
 static uint32_t life_seq(void)
 {
+	if (live)
+		return live_ctr;
 	return seqs[seq_reads++ & 1];
 }
 
@@ -284,6 +306,8 @@ static void info_case(const char *what, int orc, int src, int present,
 		      out.avail_tensors == NN_AVAIL_BUSY &&
 		      out.model[0] == '\0' && out.model_active == 0u &&
 		      out.arena_used == 0u, line);
+		/* (c) a BUSY copy belongs to no one state (issue #199) */
+		CHECK(out.seq_known == 0u, line);
 		return;
 	}
 	CHECK(out.avail_identity == NN_AVAIL_OK &&
@@ -292,6 +316,139 @@ static void info_case(const char *what, int orc, int src, int present,
 	      out.model_active == (present ? 1u : 0u) &&
 	      out.arena_used == (present ? 1234u : 0u) &&
 	      strcmp(out.model, "det") == 0, line);
+	/* The value is the second read: taken under the session when it was
+	 * free, and equal to the first when it was not (issue #199). */
+	CHECK(out.seq_known == 1u && out.seq == s1, line);
+}
+
+/*
+ * ---- nn info: which state the copy belongs to (issue #199) ----------------
+ *
+ * One copy against a live counter, then the check after the counter has (or
+ * has not) moved.
+ */
+static void copy_at(struct nn_svc_info *out, int src, uint32_t ctr,
+                    int load_after_release)
+{
+	open_rc = 0;
+	session_rc = src;
+	session_held = 0;
+	the_model.present = 1;
+	live = 1;
+	live_ctr = ctr;
+	load_on_release = load_after_release;
+	memset(out, 0x5A, sizeof *out);
+	nn_svc_common_info(out, life_seq);
+}
+
+static int stands_at(const struct nn_svc_info *in, uint32_t now)
+{
+	live = 1;
+	live_ctr = now;
+	return nn_svc_common_info_stands(in, life_seq);
+}
+
+static void test_info_stands(void)
+{
+	struct nn_svc_info out;
+
+	printf("nn_svc_common_info: which state the copy belongs to\n");
+
+	/* (a) [!] The session taken: the value is read before it goes back, so a
+	 * whole load right after the release fails the check.  A value read
+	 * after the release would be the load's, and pass. */
+	copy_at(&out, 0, 4u, 1);
+	CHECK(out.avail_identity == NN_AVAIL_OK && out.seq_known == 1u &&
+	      out.seq == 4u, "(a) session free: the copy is of state 4");
+	CHECK(live_ctr == 6u, "(a) the load ran after the release");
+	CHECK(!nn_svc_common_info_stands(&out, life_seq),
+	      "(a) a load between the release and the next read: does not stand");
+	copy_at(&out, 0, 4u, 0);
+	CHECK(nn_svc_common_info_stands(&out, life_seq),
+	      "(a) no load after the release: stands");
+	CHECK(!stands_at(&out, 5u), "(a) a load in flight now: does not stand");
+	CHECK(!stands_at(&out, 6u), "(a) a load ran whole since: does not stand");
+	/* An odd counter under the session cannot happen (a load holds it); if
+	 * it ever did, the copy is shown as before but carries no value. */
+	copy_at(&out, 0, 5u, 0);
+	CHECK(out.avail_identity == NN_AVAIL_OK && out.seq_known == 0u &&
+	      !stands_at(&out, 5u), "(a) session free, odd counter: no value");
+
+	/* (b) The session held (a stream): the value only when both reads agree
+	 * and are even. */
+	live = 0;
+	info_case("(b) held, both reads 4", 0, -1, 1, 4u, 4u, 0);
+	copy_at(&out, -1, 4u, 0);
+	CHECK(out.seq_known == 1u && out.seq == 4u && stands_at(&out, 4u),
+	      "(b) held, counter still: the copy is of state 4 and stands");
+	CHECK(!stands_at(&out, 6u), "(b) held, then a load ran: does not stand");
+	live = 0;
+	info_case("(b) held, 4 then 6: busy, no value", 0, -1, 1, 4u, 6u, 1);
+	info_case("(b) held, 5 then 5: busy, no value", 0, -1, 1, 5u, 5u, 1);
+	info_case("(b) held, 5 then 7: busy, no value", 0, -1, 1, 5u, 7u, 1);
+
+	/* (c) A BUSY copy never stands -- not even at the counter value its
+	 * cleared field happens to read. */
+	live = 0;
+	open_rc = NN_ERR_SCRATCH_HELD;
+	memset(&out, 0x5A, sizeof out);
+	nn_svc_common_info(&out, life_seq);
+	CHECK(out.seq_known == 0u && !stands_at(&out, out.seq) &&
+	      !stands_at(&out, 0u), "(c) scratch held: no value, never stands");
+	seqs[0] = 4u;
+	seqs[1] = 6u;
+	seq_reads = 0;
+	live = 0;
+	open_rc = 0;
+	session_rc = -1;
+	memset(&out, 0x5A, sizeof out);
+	nn_svc_common_info(&out, life_seq);
+	CHECK(out.avail_identity == NN_AVAIL_BUSY && out.seq_known == 0u &&
+	      !stands_at(&out, 4u) && !stands_at(&out, 6u),
+	      "(c) the counter moved: no value, never stands");
+	/* The open failed (the backend never came up): "nothing loaded", not
+	 * BUSY, so the copy carries the counter read right after -- when even --
+	 * and a load that lands later fails the check. */
+	open_rc = -1;
+	live = 1;
+	live_ctr = 4u;
+	memset(&out, 0x5A, sizeof out);
+	nn_svc_common_info(&out, life_seq);
+	CHECK(out.avail_identity == NN_AVAIL_OK && out.seq_known == 1u &&
+	      out.seq == 4u && stands_at(&out, 4u) && !stands_at(&out, 6u),
+	      "the open failed, counter even: the value, stands until a load");
+	live_ctr = 5u;
+	memset(&out, 0x5A, sizeof out);
+	nn_svc_common_info(&out, life_seq);
+	CHECK(out.avail_identity == NN_AVAIL_OK && out.seq_known == 0u &&
+	      !stands_at(&out, 5u), "the open failed, counter odd: no value");
+	live = 0;
+
+	/* (d) A build with no load: the counter is 0 for ever, and every copy --
+	 * the session free or held -- stands. */
+	copy_at(&out, 0, 0u, 0);
+	CHECK(out.seq_known == 1u && out.seq == 0u && stands_at(&out, 0u),
+	      "(d) no load in this build, session free: stands");
+	copy_at(&out, -1, 0u, 0);
+	CHECK(out.seq_known == 1u && out.seq == 0u && stands_at(&out, 0u),
+	      "(d) no load in this build, session held: stands");
+
+	/* The shared comparison itself: no value, an odd value, a different
+	 * value. */
+	memset(&out, 0, sizeof out);
+	out.seq_known = 1u;
+	out.seq = 7u;
+	CHECK(!nn_svc_info_seq_stands(&out, 7u), "an odd value never stands");
+	out.seq = 8u;
+	CHECK(nn_svc_info_seq_stands(&out, 8u) &&
+	      !nn_svc_info_seq_stands(&out, 10u), "an even value: equal only");
+	out.seq_known = 0u;
+	CHECK(!nn_svc_info_seq_stands(&out, 8u), "no value never stands");
+	CHECK(!nn_svc_info_seq_stands(NULL, 0u), "NULL never stands");
+
+	live = 0;
+	open_rc = 0;
+	session_rc = 0;
 }
 
 static void test_info(void)
@@ -354,6 +511,7 @@ int main(void)
 {
 	test_thresh();
 	test_info();
+	test_info_stands();
 	if (fails) {
 		printf("test_nn_svc_common: %d of %d checks FAILED\n", fails, checks);
 		return 1;

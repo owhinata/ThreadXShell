@@ -56,6 +56,22 @@ extern "C" {
  */
 void nn_svc_common_info(struct nn_svc_info *out, uint32_t (*life_seq)(void));
 
+/*
+ * [!] AND THE COPY CARRIES WHICH STATE IT IS OF (issue #199): the counter's
+ * value, read before the session is given back when it was taken, else the
+ * value both reads agreed on.  A BUSY copy -- the backend's memory held, or the
+ * counter moved -- carries none.  A copy from an open that failed ("nothing
+ * loaded", not BUSY) carries the counter read right after the failure, when it
+ * is even.
+ */
+
+/**
+ * nn_svc_info_stands() for a board that answers `nn info` through
+ * nn_svc_common_info(): @p life_seq is the same read of the counter.
+ */
+int nn_svc_common_info_stands(const struct nn_svc_info *info,
+                              uint32_t (*life_seq)(void));
+
 /**
  * What `nn thresh` reaches, the board's.
  *

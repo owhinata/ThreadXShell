@@ -238,13 +238,22 @@ static int seq_reads;
  * moment after `nn info` gave the session back. */
 static int live, load_on_release;
 static uint32_t live_ctr;
+/* A failed open gives its initialisation back, and another console may open
+ * again and run a whole load before `nn info` reads the counter: the open
+ * moves the live counter by a whole load just before it fails. */
+static int load_in_failed_open;
 
 const struct nn_backend_info *nn_backend(void) { return &bi; }
 uint32_t nn_arena_reserved(void) { return 4096u; }
 int nn_model_open(struct nn_model **out)
 {
-	if (open_rc != 0)
+	if (open_rc != 0) {
+		if (load_in_failed_open) {
+			load_in_failed_open = 0;
+			live_ctr += 2u;
+		}
 		return open_rc;
+	}
 	*out = &the_model;
 	return 0;
 }
@@ -422,6 +431,16 @@ static void test_info_stands(void)
 	nn_svc_common_info(&out, life_seq);
 	CHECK(out.avail_identity == NN_AVAIL_OK && out.seq_known == 0u &&
 	      !stands_at(&out, 5u), "the open failed, counter odd: no value");
+	/* [!] A whole load between the failed open and the read after it: the
+	 * "nothing loaded" copy must not take the load's value (the threshold
+	 * and the container lines would then pass as the new model's). */
+	live_ctr = 4u;
+	load_in_failed_open = 1;
+	memset(&out, 0x5A, sizeof out);
+	nn_svc_common_info(&out, life_seq);
+	CHECK(live_ctr == 6u && out.model_active == 0u && out.seq_known == 0u &&
+	      !stands_at(&out, 6u),
+	      "the open failed, a load ran before the second read: no value");
 	live = 0;
 
 	/* (d) A build with no load: the counter is 0 for ever, and every copy --
@@ -465,7 +484,8 @@ static void test_info(void)
 	info_case("session held, a load ran between", 0, -1, 1, 4u, 6u, 1);
 	info_case("scratch held (f746g-disco's sdram test)",
 	          NN_ERR_SCRATCH_HELD, 0, 1, 4u, 4u, 1);
-	CHECK(seq_reads == 0, "scratch held: the counter is not read");
+	/* (the first read is before the open since issue #199; the copy carries
+	 * no value -- checked in test_info_stands()) */
 
 	/* the open failed for another reason: nothing but the backend and arena */
 	open_rc = -1;

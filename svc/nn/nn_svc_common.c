@@ -47,6 +47,12 @@ void nn_svc_common_info(struct nn_svc_info *out, uint32_t (*life_seq)(void))
 	 * build, so it needs no claim and stands even when the rest is busy. */
 	out->arena_bytes = nn_arena_reserved();
 
+	/* [!] THE FIRST READ COMES BEFORE THE OPEN (issue #199): a failed open
+	 * gives its initialisation back, so another console can open again and
+	 * run a whole load before this call reads anything.  Only two reads
+	 * around everything this copy rests on -- the open included -- can say
+	 * nothing ran in between. */
+	seq0 = life_seq();
 	rc = nn_model_open(&m);
 	if (rc == NN_ERR_SCRATCH_HELD) {
 		/* Another command holds the backend's memory and nothing was opened
@@ -58,11 +64,12 @@ void nn_svc_common_info(struct nn_svc_info *out, uint32_t (*life_seq)(void))
 	}
 	if (rc != 0 || m == NULL) {
 		/* The backend could not open: "nothing loaded", which is true and
-		 * not BUSY.  The copy is of the state the counter shows right after
-		 * (issue #199), when that is even; a load that lands later fails
-		 * nn_svc_info_stands() like any other. */
+		 * not BUSY.  The copy is of the state the counter showed on both
+		 * sides of the open, when the two reads agree and are even (issue
+		 * #199); a load that ran in between leaves it with no value, and one
+		 * that lands later fails nn_svc_info_stands() like any other. */
 		seq1 = life_seq();
-		out->seq_known = (uint8_t)((seq1 & 1u) == 0u);
+		out->seq_known = (uint8_t)(seq0 == seq1 && (seq1 & 1u) == 0u);
 		out->seq       = out->seq_known ? seq1 : 0u;
 		return;
 	}
@@ -82,7 +89,6 @@ void nn_svc_common_info(struct nn_svc_info *out, uint32_t (*life_seq)(void))
 	 * whether the copy describes one model (below).  Copied, not borrowed: the
 	 * backend owns the name and a reload replaces it.
 	 */
-	seq0 = life_seq();
 	held = (nn_session_try_acquire() == 0);
 	/* [!] "A MODEL IS THERE", NOT "THE SINGLETON OPENED" (issue #122 P2,
 	 * #131 P16): the singleton stays open with nothing in it after boot and

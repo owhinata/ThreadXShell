@@ -61,8 +61,10 @@ void nn_svc_common_info(struct nn_svc_info *out, uint32_t (*life_seq)(void));
  * value, read before the session is given back when it was taken, else the
  * value both reads agreed on.  A BUSY copy -- the backend's memory held, or the
  * counter moved -- carries none.  A copy from an open that failed ("nothing
- * loaded", not BUSY) carries the counter read right after the failure, when it
- * is even.
+ * loaded", not BUSY) carries the counter when the reads before the open and
+ * after the failure agree and are even, and none otherwise: a failed open
+ * gives its initialisation back, so another console may open and load in
+ * between.
  */
 
 /**

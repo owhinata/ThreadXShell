@@ -189,6 +189,12 @@ verdict would be a circular test.  Assertions are on the exit code *and* the
 diagnostic ID, so a check that starts failing for a different reason than
 intended is itself a test failure.
 
+The wio host tests (`shell/test/run_host_tests.sh`, or `... wio-lite-ai`) run
+this same command on their own whenever a configured tree (`build/wio-lite-ai`,
+or `WIO_BUILD_DIR`) and the pinned toolchain are present, after bringing
+`boot_image` and `shell` up to date; the shared runner then requires the
+runner's `negative-tests: ... OK (N cases)` line with N equal to its table.
+
 ## Flashing the bootloader (ST-Link mode=UR) -- this is the brick, be careful
 
 [!] **There is deliberately no build target for this.**  Writing sector 0 is the

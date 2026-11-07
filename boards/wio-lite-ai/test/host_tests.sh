@@ -361,6 +361,43 @@ else
          "under $HOST_TEST_REPO/tools/ (configure a wio build once to fetch it)" >&2
 fi
 
+# issue #205 -- negative tests for cmake/check_boot_safety.py, the gate that
+# stands between a bootloader image and sector 0 (boot/README.md, "To exercise
+# the gate's own failure paths").  Until #205 only that README command ran
+# them: a gate never seen to fail.  The fixtures re-link the reference
+# bootloader's own objects from a CONFIGURED tree (compile_commands.json, the
+# link line out of `ninja -t commands boot_image`, CMakeCache's nm / objdump)
+# and also run the gate on boot-reference/boot.{elf,bin} and shell.{elf,bin},
+# so they need that tree AND the pinned toolchain; they write only under
+# <tree>/boot-fixtures/.
+#
+# The tree is $HOST_TEST_REPO/build/wio-lite-ai, or WIO_BUILD_DIR to use
+# another.  It is brought up to date first, with exactly the two targets the
+# fixtures read: boot_image (the REFERENCE build -- no target in this tree
+# writes sector 0, and none is made) and shell (shell.elf / shell.bin).  On an
+# unbuilt tree that is what builds the objects; on a built one it is cheap
+# (boot_image relinks on every build by design, board.cmake).  Not `all`: the
+# assets and the model gates are not inputs here.  No tree, or no pinned
+# toolchain: a loud SKIP.
+boot_build="${WIO_BUILD_DIR:-$HOST_TEST_REPO/build/wio-lite-ai}"
+if [ ! -f "$boot_build/build.ninja" ]; then
+    echo "run_fixture_tests (boot safety): SKIPPED -- no configured wio-lite-ai" \
+         "build tree at $boot_build (set WIO_BUILD_DIR to use another)" >&2
+elif [ -z "$gate_cc" ] || [ ! -x "$gate_cc" ]; then
+    echo "run_fixture_tests (boot safety): SKIPPED -- no arm-none-eabi toolchain" \
+         "under $HOST_TEST_REPO/tools/ (configure a wio build once to fetch it)" >&2
+else
+    if ! cmake --build "$boot_build" --target boot_image shell \
+            > "$out/wio_boot_fixture_build.log" 2>&1; then
+        tail -n 40 "$out/wio_boot_fixture_build.log" >&2
+        echo "run_fixture_tests (boot safety): FAIL -- could not bring" \
+             "$boot_build up to date (cmake --build --target boot_image shell)" >&2
+        exit 1
+    fi
+    python3 "$board/cmake/fixtures/run_fixture_tests.py" \
+        --build-dir "$boot_build" --board-dir "$board"
+fi
+
 # issue #142 -- the OCTOSPI1 guard word (src/psram_guard.c): users of the memory
 # (scan-out, capture, nn stream, bench) run together, and only a command that
 # reconfigures the controller (psram, membench, devmem, wifi flash) needs it to

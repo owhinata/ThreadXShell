@@ -718,6 +718,7 @@ cmake/fixtures/run_blob_staging_tests.py                         wio-lite-ai    
 cmake/fixtures/run_blob_staging_tests.py                         wio-lite-ai        !toolchain  5
 cmake/fixtures/run_veneer_cost_tests.py                          wio-lite-ai        toolchain   302
 cmake/fixtures/run_veneer_gate_build_tests.py                    wio-lite-ai        toolchain   57
+boards/wio-lite-ai/cmake/fixtures/run_fixture_tests.py           wio-lite-ai        tree:wio-lite-ai+toolchain  34
 cmake/fixtures/run_model_io_gate_tests.py                        wio-lite-ai        target:wio-lite-ai:verify_tflite  278
 boards/wio-lite-ai/cmake/fixtures/run_verify_tflite_size_tests.py wio-lite-ai       target:wio-lite-ai:verify_tflite  6
 EOF
@@ -725,7 +726,6 @@ EOF
 neg_excluded="$out/neg_excluded"
 cat > "$neg_excluded" <<'EOF'
 cmake/fixtures/run_shared_storage_build_tests.py  runs inside the grove-vision-ai-v2 firmware build (board.cmake), not in the host tests
-boards/wio-lite-ai/cmake/fixtures/run_fixture_tests.py  #205 step 3 wires it
 EOF
 
 neg_tree() {  # <board> -> that board's configured tree, as its host_tests.sh finds it

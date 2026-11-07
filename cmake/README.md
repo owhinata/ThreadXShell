@@ -900,12 +900,14 @@ upload-pack git started).
 A negative-test runner whose call is deleted, turned into a no-op or skipped
 when it should not have been prints nothing and fails nothing, so the host
 tests would still end in "host tests passed".  To close that, every runner the
-host tests call -- `cmake/fixtures/run_*.py`, `boards/*/cmake/fixtures/run_*.py`
-and `boards/*/test/test_*.py` -- ends a passing run with exactly one stdout line,
+host tests call -- the `.py` and `.sh` files under `cmake/fixtures/`,
+`boards/*/cmake/fixtures/` and `boards/*/test/` -- ends a passing run with
+exactly one stdout line,
 `negative-tests: <path from the repository root> OK (N cases)`, where N is the
 number of verdicts it actually reached (counted where each is decided, never
-the length of a case list).  The line comes from the runner itself, never from
-an `echo` in a board's script.
+the length of a case list; each entry of a table of expected values and each
+separately reported comparison is its own case).  The line comes from the
+runner itself, never from an `echo` in a board's script.
 
 `shell/test/run_host_tests.sh` keeps the output of its own runners and of each
 board's `test/host_tests.sh`, and holds every such line against one table in
@@ -917,9 +919,16 @@ configured build tree, and a named ninja target in that tree.  The comparison
 is both ways and N is an equality, not a floor: a row whose condition holds
 needs its line exactly once with an equal N, a runner none of whose rows holds
 must print nothing, and a line no row names fails.  The table is also held
-against the files matching the three patterns above: each needs a row or a line
-with its reason in the script's exclusion list, so a runner nothing calls fails
-the suite before any negative-test runner is started.  A commit that adds or removes a case therefore changes
-that runner's row in the same commit, and a new runner needs a row.  The rows,
+against every `.py` and `.sh` file under those three directories, at any depth:
+each needs a row or a line with its reason in the script's exclusion list, so a
+runner nothing calls fails the suite before any negative-test runner is
+started.  Before anything runs, each row is checked too: its log is `shared` or
+a board with a `test/host_tests.sh`, so are the boards its condition names, a
+named target is defined in that board's or the shared CMake sources, and no
+predicate is `!always`; and the text `negative-tests:` may appear only in the
+runners the table names (and the shared runner's own negative-test sections),
+so a script cannot print the line for a runner it did not run.  A commit that
+adds or removes a case therefore changes that runner's row in the same commit,
+and a new runner needs a row.  The rows,
 counts, predicates and exclusions themselves are only in the script; its
 comment above the table is the reference.

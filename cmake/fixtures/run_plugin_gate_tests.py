@@ -1187,24 +1187,29 @@ def walk_units():
     image = FakeImage()
     cases = [("e", (108, 24)), ("n", (112, 68)), ("leaf", (4, None)),
              ("a", (100, None)), ("v", (16, 16)), ("x", (16, None))]
-    bad = []
+    # One case per comparison, counted where it is made (issue #205).
+    bad, checked = [], 0
     for entry, want in cases:
         walk = tsa.Walk(image, crossings={addr["v"], addr["x"]})
         own, cross, _ok = walk.parts(addr[entry])
+        checked += 1
         if (own, cross) != want:
             bad.append("%s: got %r, want %r" % (entry, (own, cross), want))
     walk = tsa.Walk(image, crossings={addr["v"], addr["x"]})
+    checked += 1
     if walk.body_errors(addr["v"]) != ([], True):
         bad.append("v: its register branch should cross, not be refused")
     errs, crosses = walk.body_errors(addr["x"])
+    checked += 1
     if crosses or len(errs) != 1:
         bad.append("x: a load into pc in a veneer must stay refused (%r)"
                    % (errs,))
     walk = tsa.Walk(image, crossings=set())
     errs, crosses = walk.body_errors(addr["v"])
+    checked += 1
     if crosses or len(errs) != 1:
         bad.append("v: outside the crossing set its branch must be refused")
-    return bad
+    return bad, checked
 
 
 # Expected outcome per fixture: "accept", "gate" (check_plugin_image refuses) or
@@ -1677,11 +1682,17 @@ def abi_table_mismatches(work):
     r = subprocess.run(["gcc", "-std=c11", "-I", os.path.join(REPO, "svc", "plugin"),
                         prog, "-o", exe], capture_output=True, text=True)
     if r.returncode != 0:
-        return ["cannot build the ABI probe:\n" + r.stderr]
+        return ["cannot build the ABI probe:\n" + r.stderr], 0
     out = subprocess.run([exe], capture_output=True, text=True).stdout
     got = dict(ln.split() for ln in out.splitlines())
-    return ["%s: gate says %d, plugin_abi.h says %s" % (n, gate.ABI[n], got[n])
-            for n in names if int(got[n]) != gate.ABI[n]]
+    # One case per name, counted where it is compared (issue #205).
+    mism, compared = [], 0
+    for n in names:
+        compared += 1
+        if int(got[n]) != gate.ABI[n]:
+            mism.append("%s: gate says %d, plugin_abi.h says %s"
+                        % (n, gate.ABI[n], got[n]))
+    return mism, compared
 
 
 def main():
@@ -1810,27 +1821,25 @@ def main():
             decided += 1
             print(f"  ok   {label:24s} {why}")
 
-    wbad = walk_units()
+    wbad, wchecked = walk_units()
+    decided += wchecked
     if wbad:
         for m in wbad:
             print(f"  FAIL {'walk_units':24s} {m}")
-        decided += 1
         bad += 1
     else:
-        decided += 1
         print(f"  ok   {'walk_units':24s} (A0, A1) on hand-written graphs: a "
               "sibling deeper than the crossing, a crossing one level down, "
               "no crossing, a bare veneer")
 
     with tempfile.TemporaryDirectory() as work:
-        mism = abi_table_mismatches(work)
+        mism, compared = abi_table_mismatches(work)
+    decided += compared
     if mism:
         for m in mism:
             print(f"  FAIL {'abi_table':24s} {m}")
-        decided += 1
         bad += 1
     else:
-        decided += 1
         print(f"  ok   {'abi_table':24s} the gate's ABI values match "
               "svc/plugin/plugin_abi.h")
 

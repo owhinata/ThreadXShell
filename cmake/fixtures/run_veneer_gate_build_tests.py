@@ -172,8 +172,8 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 
 # issue #205 -- the last line every negative-test runner prints when it passes:
 # this file's path from the repository root and how many cases this run decided
-# (in main(): one per verdict the trees recorded in `results` where they reached
-# it, and one per tree that failed -- not the length of the list of trees).
+# (CHECKED: one per check that passed, counted in expect() and in
+# delivery_name_re -- not the length of `results` or of the list of trees).
 def negative_tests_ok(cases):
     me = os.path.realpath(__file__)
     root = os.path.dirname(os.path.dirname(os.path.dirname(me)))
@@ -821,9 +821,17 @@ class Project:
         return found
 
 
+# issue #205 -- one case per check that passed: every expect() below, and each
+# string delivery_name_re tries.  A tree's line in `results` sums up several of
+# these, so it is not what is counted.
+CHECKED = 0
+
+
 def expect(cond, why, out=""):
+    global CHECKED
     if not cond:
         raise Fail(why + ("\n" + out[-2000:] if out else ""))
+    CHECKED += 1
 
 
 def make_edit_visible(p, path):
@@ -1909,6 +1917,8 @@ def name_re_case(cmake_dir, results):
     bad = []
 
     def want(text, hit):
+        global CHECKED
+        CHECKED += 1
         m = rx.search(text)
         if hit and (m is None or m.group(1) != "shell.bin"):
             bad.append("%r should name shell.bin" % text)
@@ -1917,6 +1927,8 @@ def name_re_case(cmake_dir, results):
 
     # The #149 shapes, and the documented over-match (first, so a failure
     # names them before the per-character list).
+    global CHECKED
+    CHECKED += 3                # the three below, each its own case
     if gate.firmware_name_re(["fw"]).search("/tmp/tmpab12fw/b"):
         bad.append("'/tmp/tmpab12fw/b' should not name fw")
     if rx.search("/tmp/xshell.elf/b"):
@@ -1962,7 +1974,7 @@ def main():
         return 1
 
     print("run_veneer_gate_build_tests:")
-    results, bad, decided = [], 0, 0
+    results, bad = [], 0
     runs = [
         ("main", lambda p: main_tree(p, results)),
         ("asset_alone", lambda p: asset_tree(p, "asset-bare", "bare.nnc",
@@ -1987,7 +1999,6 @@ def main():
         name_re_case(args.cmake_dir, results)
     except Fail as e:
         bad += 1
-        decided += 1
         print("  FAIL %-15s %s" % ("delivery_name_re", e))
     for name, fn in runs:
         with tempfile.TemporaryDirectory() as work:
@@ -1996,15 +2007,13 @@ def main():
                            args.cmake_dir, args.cc))
             except Fail as e:
                 bad += 1
-                decided += 1
                 print("  FAIL %-15s %s" % (name, e))
     for name, why in results:
-        decided += 1
         print("  ok   %-15s %s" % (name, why))
     if bad:
         print("run_veneer_gate_build_tests: FAILED", file=sys.stderr)
         return 1
-    negative_tests_ok(decided)
+    negative_tests_ok(CHECKED)
     return 0
 
 

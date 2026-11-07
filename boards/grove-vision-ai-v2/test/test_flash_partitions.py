@@ -141,6 +141,8 @@ def main():
         def span(start, reserved):
             return ((start // G) * G, ((start + reserved + G - 1) // G) * G)
 
+        # Two cases (issue #205): no gap between the spans, and the last one
+        # reaching the end of the part -- each can be dropped on its own.
         covered = sorted(span(st, n) for _, st, n in REAL)
         decided += 1
         cursor = 0
@@ -150,6 +152,7 @@ def main():
                       f"..0x{start:06x} unclaimed")
                 fails += 1
             cursor = max(cursor, end)
+        decided += 1
         if cursor != FLASH:
             print(f"  FAIL the shipped layout stops at 0x{cursor:06x}, not the "
                   f"end of a 0x{FLASH:x} B flash")

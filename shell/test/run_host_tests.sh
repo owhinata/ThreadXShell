@@ -685,10 +685,18 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
 # case added without raising it would let a later one be dropped unnoticed, so
 # a commit that adds or removes a case changes its row here.
 #
-# And the table is held against the files: every cmake/fixtures/run_*.py,
-# boards/*/cmake/fixtures/run_*.py and boards/*/test/test_*.py needs a row or a
-# line in neg_excluded with its reason -- a runner nothing calls is found here.
-# A row naming a file that does not exist fails as well.
+# And the table is held against the files: every .py and .sh file anywhere
+# under cmake/fixtures/, boards/*/cmake/fixtures/ and boards/*/test/ is taken
+# for a runner and needs a row or a line in neg_excluded with its reason -- a
+# runner nothing calls is found here.  Each row is checked before anything
+# runs, so that a row which could never be looked at fails instead of reading
+# as coverage: its file exists, its log is "shared" or a board with a
+# test/host_tests.sh, the boards its condition names are such boards, a
+# target:<board>:<name> names a target that board's CMake sources (or the
+# shared ones) define, no predicate is "!always", and N is a number.  Last,
+# the line's text may appear only in the runners the table names and in the
+# two negative-test sections of this script: a board script that echoes it
+# would otherwise pass for the runner.
 neg_table="$out/neg_table"
 cat > "$neg_table" <<'EOF'
 cmake/fixtures/run_storage_gate_tests.py                         shared             always      8
@@ -703,13 +711,13 @@ cmake/fixtures/run_blob_staging_tests.py                         f746g-disco    
 cmake/fixtures/run_blob_staging_tests.py                         f746g-disco        !toolchain  5
 cmake/fixtures/run_model_io_gate_tests.py                        f746g-disco        target:f746g-disco:verify_tflite  278
 boards/f746g-disco/cmake/fixtures/run_verify_tflite_size_tests.py f746g-disco       target:f746g-disco:verify_tflite  6
-boards/grove-vision-ai-v2/test/test_flash_partitions.py          grove-vision-ai-v2 always      30
-boards/grove-vision-ai-v2/test/test_flash_geometry.py            grove-vision-ai-v2 always      14
+boards/grove-vision-ai-v2/test/test_flash_partitions.py          grove-vision-ai-v2 always      31
+boards/grove-vision-ai-v2/test/test_flash_geometry.py            grove-vision-ai-v2 always      23
 boards/grove-vision-ai-v2/test/test_planar_bgr_to_png.py         grove-vision-ai-v2 always      92
-boards/grove-vision-ai-v2/test/test_plugin_stack.py              grove-vision-ai-v2 always      25
-cmake/fixtures/run_plugin_gate_tests.py                          grove-vision-ai-v2 toolchain   107
+boards/grove-vision-ai-v2/test/test_plugin_stack.py              grove-vision-ai-v2 always      118
+cmake/fixtures/run_plugin_gate_tests.py                          grove-vision-ai-v2 toolchain   141
 cmake/fixtures/run_veneer_cost_tests.py                          grove-vision-ai-v2 toolchain   302
-cmake/fixtures/run_veneer_gate_build_tests.py                    grove-vision-ai-v2 toolchain   57
+cmake/fixtures/run_veneer_gate_build_tests.py                    grove-vision-ai-v2 toolchain   385
 boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py    grove-vision-ai-v2 tree:grove-vision-ai-v2+toolchain  25
 cmake/fixtures/run_model_io_gate_tests.py                        grove-vision-ai-v2 target:grove-vision-ai-v2:verify_vela_model  486
 boards/wio-lite-ai/test/test_lease_entries.py                    wio-lite-ai        always      2
@@ -717,16 +725,26 @@ boards/wio-lite-ai/cmake/fixtures/run_reservation_tests.py       wio-lite-ai    
 cmake/fixtures/run_blob_staging_tests.py                         wio-lite-ai        toolchain   36
 cmake/fixtures/run_blob_staging_tests.py                         wio-lite-ai        !toolchain  5
 cmake/fixtures/run_veneer_cost_tests.py                          wio-lite-ai        toolchain   302
-cmake/fixtures/run_veneer_gate_build_tests.py                    wio-lite-ai        toolchain   57
+cmake/fixtures/run_veneer_gate_build_tests.py                    wio-lite-ai        toolchain   385
 boards/wio-lite-ai/cmake/fixtures/run_fixture_tests.py           wio-lite-ai        tree:wio-lite-ai+toolchain  34
 cmake/fixtures/run_model_io_gate_tests.py                        wio-lite-ai        target:wio-lite-ai:verify_tflite  278
 boards/wio-lite-ai/cmake/fixtures/run_verify_tflite_size_tests.py wio-lite-ai       target:wio-lite-ai:verify_tflite  6
 EOF
-# Files that match the patterns and are deliberately not host-test runners.
+# Files under those directories that are deliberately not host-test runners.
+# [!] Being listed here does not let a file print the line (see the end).
 neg_excluded="$out/neg_excluded"
 cat > "$neg_excluded" <<'EOF'
 cmake/fixtures/run_shared_storage_build_tests.py  runs inside the grove-vision-ai-v2 firmware build (board.cmake), not in the host tests
+cmake/fixtures/model_io/schema_table_depth.py     a helper run_model_io_gate_tests.py runs and counts as part of its own case
+boards/f746g-disco/test/host_tests.sh             the board's dispatcher: it calls runners, it is not one
+boards/grove-vision-ai-v2/test/host_tests.sh      the board's dispatcher: it calls runners, it is not one
+boards/wio-lite-ai/test/host_tests.sh             the board's dispatcher: it calls runners, it is not one
 EOF
+# The boards a row may name: every one with a dispatcher, selected or not.
+neg_boards=""
+for f in "$repo"/boards/*/test/host_tests.sh; do
+    [ -f "$f" ] && neg_boards="$neg_boards $(basename "$(dirname "$(dirname "$f")")")"
+done
 
 neg_tree() {  # <board> -> that board's configured tree, as its host_tests.sh finds it
     case "$1" in
@@ -768,11 +786,26 @@ neg_cond() {  # <p1+p2+...>: every predicate holds (a "!" one must not)
     return 0
 }
 
-# The inventory, before anything runs (it costs nothing and needs no tree).
+# The inventory and the rows, before anything runs (it costs nothing and needs
+# no tree).
 neg_bad=0
-for f in "$repo"/cmake/fixtures/run_*.py "$repo"/boards/*/cmake/fixtures/run_*.py \
-         "$repo"/boards/*/test/test_*.py; do
-    [ -f "$f" ] || continue
+neg_board_ok() {  # <board>: one with a dispatcher, and a tree neg_tree knows
+    case " $neg_boards " in *" $1 "*) ;; *) return 1 ;; esac
+    ( neg_tree "$1" ) >/dev/null 2>&1
+}
+neg_target_defined() {  # <board> <name>: a target the CMake sources define
+    _nre=$(printf '%s' "$2" | sed 's/[.+]/\\&/g')
+    for _nf in "$repo/CMakeLists.txt" "$repo"/cmake/*.cmake \
+               "$repo/boards/$1/board.cmake" "$repo/boards/$1"/cmake/*.cmake; do
+        [ -f "$_nf" ] || continue
+        grep -qE '(add_custom_target|add_executable|add_library)\([[:space:]]*'"$_nre"'([[:space:])]|$)|OUTPUT[[:space:]]+"\$\{CMAKE_BINARY_DIR\}/'"$_nre"'"' \
+            "$_nf" && return 0
+    done
+    return 1
+}
+find "$repo/cmake/fixtures" "$repo"/boards/*/cmake/fixtures "$repo"/boards/*/test \
+    -type f \( -name '*.py' -o -name '*.sh' \) 2>/dev/null | sort > "$out/neg_files"
+while IFS= read -r f; do
     rel=${f#"$repo"/}
     if ! awk -v p="$rel" '$1 == p { found = 1 } END { exit !found }' \
             "$neg_table" "$neg_excluded"; then
@@ -781,14 +814,89 @@ for f in "$repo"/cmake/fixtures/run_*.py "$repo"/boards/*/cmake/fixtures/run_*.p
              "that it runs" >&2
         neg_bad=1
     fi
-done
+done < "$out/neg_files"
 while read -r rel _nlog _ncond _nn; do
+    _nrow="the negative-test table's row for $rel ($_nlog log, '$_ncond')"
     if [ ! -f "$repo/$rel" ]; then
-        echo "run_host_tests: the negative-test table names $rel ($_nlog log)," \
-             "which does not exist" >&2
+        echo "run_host_tests: $_nrow names a file that does not exist" >&2
         neg_bad=1
     fi
+    if [ "$_nlog" != shared ] && ! neg_board_ok "$_nlog"; then
+        echo "run_host_tests: $_nrow: the log '$_nlog' is neither 'shared' nor" \
+             "a board with a test/host_tests.sh (boards:$neg_boards), so its" \
+             "line would never be looked for" >&2
+        neg_bad=1
+    fi
+    case "$_nn" in
+    ''|*[!0-9]*) echo "run_host_tests: $_nrow: N '$_nn' is not a number" >&2
+                 neg_bad=1 ;;
+    esac
+    _nrest=$_ncond
+    while [ -n "$_nrest" ]; do
+        _np=${_nrest%%+*}
+        case "$_nrest" in *+*) _nrest=${_nrest#*+} ;; *) _nrest="" ;; esac
+        _npb=""
+        case "${_np#!}" in
+        always)
+            if [ "$_np" != always ]; then _npb="'$_np' never holds"; fi ;;
+        toolchain) ;;
+        tree:*)
+            _ntb=${_np#*tree:}
+            neg_board_ok "$_ntb" ||
+                _npb="'$_ntb' is not a board with a test/host_tests.sh" ;;
+        target:*)
+            _nr=${_np#*target:}
+            _ntb=${_nr%%:*}
+            _ntn=${_nr#*:}
+            if [ "$_ntb" = "$_nr" ] || ! neg_board_ok "$_ntb"; then
+                _npb="'$_ntb' is not a board with a test/host_tests.sh"
+            elif ! printf '%s\n' "$_ntn" | grep -qE '^[A-Za-z0-9_.+-]+$'; then
+                _npb="'$_ntn' is not a target name"
+            elif ! neg_target_defined "$_ntb" "$_ntn"; then
+                _npb="no target '$_ntn' is defined in CMakeLists.txt,"
+                _npb="$_npb cmake/*.cmake, boards/$_ntb/board.cmake or"
+                _npb="$_npb boards/$_ntb/cmake/*.cmake"
+            fi ;;
+        *) _npb="'$_np' is not a condition" ;;
+        esac
+        if [ -n "$_npb" ]; then
+            echo "run_host_tests: $_nrow: $_npb, so the row could never be" \
+                 "held against a run" >&2
+            neg_bad=1
+        fi
+    done
 done < "$neg_table"
+# The line's text anywhere else that the host tests could run: only the runners
+# the table names may print it, and this script mentions it only in its two
+# negative-test sections (this one and the one at the end).  README text is not
+# run, so *.md is left out; so are upstream, fetched and built trees.
+find "$repo" \( -path "$repo/.git" -o -path "$repo/_ref" -o -path "$repo/lib" \
+        -o -path "$repo/build" -o -path "$repo/build-*" -o -path "$repo/tools" \
+        -o -path "$repo/.venv*" -o -path "$repo/boards/*/lib" \
+        -o -path "$repo/boards/*/sdk" -o -path "$out" -o -name __pycache__ \) \
+        -prune -o -type f ! -name '*.md' -exec grep -lIF 'negative-tests:' {} + \
+        2>/dev/null | sort > "$out/neg_texts"
+while IFS= read -r f; do
+    rel=${f#"$repo"/}
+    if [ "$rel" = shell/test/run_host_tests.sh ]; then
+        awk -v p="$rel" '
+            /^# ---- negative-test runners: which must have run/       { s = 1 }
+            /^# This script.s own runner calls keep their stdout/       { s = 0 }
+            /^# ---- negative-test runners: the logs against the table/ { s = 1 }
+            !s && index($0, "negative-tests:") { print p ":" NR ": " $0 }' \
+            "$f" > "$out/neg_spoof"
+    elif awk -v p="$rel" '$1 == p { found = 1 } END { exit !found }' "$neg_table"; then
+        continue
+    else
+        grep -nF 'negative-tests:' "$f" | sed "s|^|$rel:|" > "$out/neg_spoof"
+    fi
+    if [ -s "$out/neg_spoof" ]; then
+        echo "run_host_tests: the text 'negative-tests:' belongs to the runners" \
+             "the table names (each prints its own line); it is also here:" >&2
+        cat "$out/neg_spoof" >&2
+        neg_bad=1
+    fi
+done < "$out/neg_texts"
 [ "$neg_bad" -eq 0 ] || exit 1
 
 # This script's own runner calls keep their stdout in one log, as the boards'

@@ -164,9 +164,12 @@ def main():
             # not broken out of, so with no `break` it reports "ok" even after
             # every value mismatched -- a fail-open in the test itself, which is
             # the exact shape of the finding this file exists to pin.
+            # One case per value (issue #205): dropping an entry from EXPECT
+            # must change the count, not only the coverage.
             mismatched = 0
             for key, want in EXPECT.items():
                 got = values.get(key)
+                decided += 1
                 if got is None:
                     print(f"  FAIL {key} is not reported at all")
                     mismatched += 1
@@ -174,7 +177,6 @@ def main():
                     print(f"  FAIL {key} is {got}, wanted 0x{want:X}")
                     mismatched += 1
             fails += mismatched
-            decided += 1
             if not mismatched:
                 print(f"  ok   all {len(EXPECT)} geometry values are as shipped")
 
@@ -185,17 +187,21 @@ def main():
             gran = int(values["GROVE_ERASE_GRAN"], 0)
             copies = int(values["GROVE_SLOT_HDR_COPIES"], 0)
             size = int(values["GROVE_FLASH_SIZE"], 0)
-            decided += 1
-            if int(values["GROVE_FW_RESERVED"], 0) != slot * slots:
-                print("  FAIL GROVE_FW_RESERVED is not slot size * slot count")
-                fails += 1
-            elif int(values["GROVE_SLOT_HDR_RESERVED"], 0) != gran * copies:
-                print("  FAIL GROVE_SLOT_HDR_RESERVED is not erase block * copies")
-                fails += 1
-            elif int(values["GROVE_SLOT_HDR_ADDR"], 0) != size - gran * copies:
-                print("  FAIL GROVE_SLOT_HDR_ADDR is not flash size - reservation")
-                fails += 1
-            else:
+            # One case per derivation (issue #205), each compared on its own.
+            derived_bad = 0
+            for key, want, what in (
+                    ("GROVE_FW_RESERVED", slot * slots,
+                     "slot size * slot count"),
+                    ("GROVE_SLOT_HDR_RESERVED", gran * copies,
+                     "erase block * copies"),
+                    ("GROVE_SLOT_HDR_ADDR", size - gran * copies,
+                     "flash size - reservation")):
+                decided += 1
+                if int(values[key], 0) != want:
+                    print(f"  FAIL {key} is not {what}")
+                    derived_bad += 1
+            fails += derived_bad
+            if not derived_bad:
                 print("  ok   the derived values follow from the measurements")
 
             # [!] The reservation must cover BOTH copies of the slot header:

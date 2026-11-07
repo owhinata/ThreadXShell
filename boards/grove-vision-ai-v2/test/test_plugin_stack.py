@@ -314,39 +314,44 @@ def run_rt(real):
             continue
         refused = sum(1 for ln in out.splitlines() if "PLUGIN_ERR_STACK" in ln
                       or "stack request refused" in ln)
-        decided += 1
+        # One case per verdict the validator reached (issue #205): each
+        # expect() in test_plugin_stack.c prints one "ok   slot" line.
+        decided += sum(1 for ln in out.splitlines()
+                       if ln.startswith("  ok   slot "))
         print("  ok   %-58s one byte past every limit refused (%d refusals)"
               % (label, refused))
         if shell is None:
             continue
         # The mapping, slot by slot, against this file's own table.
         want = {s: v["GROVE_PLUGIN_STACK_" + EXPECT[s]] for s in SLOTS}
-        wrong = ["%s=%d (want %s=%d)" % (s, table.get(s, -1), EXPECT[s],
-                                         want[s])
-                 for s in SLOTS if table.get(s) != want[s]]
-        if wrong:
+        # One case per slot, counted where it is compared (issue #205).
+        wrong = []
+        for s in SLOTS:
             decided += 1
+            if table.get(s) != want[s]:
+                wrong.append("%s=%d (want %s=%d)" % (s, table.get(s, -1),
+                                                     EXPECT[s], want[s]))
+        if wrong:
             print("  FAIL %-58s %s" % (label + ": slot -> allowance",
                                        ", ".join(wrong)))
             bad += 1
         else:
-            decided += 1
             print("  ok   %-58s every slot got the allowance of its threads"
                   % (label + ": slot -> allowance"))
     # The thread masks (GROVE_PLUGIN_STACK_RUNS), against this file's table.
     # The bit order is nn_probe.h's contexts, asserted in nn_probe_rtos.c.
     bit = {"worker": 1, "panel": 2, "console": 4, "bg": 8}
     runs = table["_runs"] if table else {}
-    wrong = ["%s=%#x (want %#x)" % (s, runs.get(s, -1),
-                                    sum(bit[t] for t in THREADS[s]))
-             for s in SLOTS
-             if runs.get(s) != sum(bit[t] for t in THREADS[s])]
-    if wrong:
+    wrong = []
+    for s in SLOTS:             # one case per slot (issue #205)
         decided += 1
+        mask = sum(bit[t] for t in THREADS[s])
+        if runs.get(s) != mask:
+            wrong.append("%s=%#x (want %#x)" % (s, runs.get(s, -1), mask))
+    if wrong:
         print("  FAIL %-58s %s" % ("slot -> threads", ", ".join(wrong)))
         bad += 1
     else:
-        decided += 1
         print("  ok   %-58s the report's masks are the table's"
               % "slot -> threads")
     return bad

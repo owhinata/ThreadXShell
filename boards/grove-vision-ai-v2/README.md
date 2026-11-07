@@ -2373,6 +2373,7 @@ a header is listed; `nn run`'s wait table and the console-call count moved to
 | `port/nn/nn_preproc.c` | camera producer (fill); wherever a box is mapped back | The camera's frame size and pixel format against the model input; pure and host-tested because a wrong box costs a NOR flash cycle to investigate. |
 | `port/nn/nn_rec.c` | worker (publish), panel and console (snapshot) | The record's storage and its lock, a short interrupt-disabled section rather than a mutex (`nn_rec.h` says why). |
 | `port/nn/nn_outputs.c` | inference worker | How many NPU outputs this board decodes (`NN_MAX_IO`); pure, the reads behind a callback. |
+| `port/nn/nn_info_hold.c` | console (`nn info`) | None: where `nn info`'s model section comes from (the gate it took, a stream's hold, or busy) and whether the copy carries the load order's counter -- only for the gate taken, a stream or an ordinary operation, with an even counter; pure, host-tested by `test/test_nn_info_hold.c` (issue #199). |
 | `port/nn/nn_run_says.c` | console (`nn run`'s ending) | None: this board's one-shot endings in words -- the shared `nn_shot_says()` sentence where `svc/nn/nn_shot` names the ending, its own for an unreadable output, a publish the record did not take and a stop first; pure, host-tested by `test/test_nn_run_says.c` (issue #174). |
 | `port/nn/nn_stream_state.c` | console (`nn stream stop`) | The stop's order as a table over two separate proofs -- the overlay's count at zero (permits the worker join, the record boundary and nn's leave) and a confirmed camera stop (the only thing that permits the sink's unlink) -- and the retryable / terminal classification of the codes; pure, host-tested. |
 | `port/camera/cam_lcd_sink.c` | camera producer (`consume()`), panel thread, console (hold / release / overlay) | Not an nn file, but nn runs on it: the one panel sink, the holder table (`svc/camera/cam_holders`) and the overlay pointer with its count. |
@@ -2717,9 +2718,19 @@ shared order's commit makes them the open model's, and its forget clears them,
 each in one short interrupt-masked copy.  `nn info` copies the claims, the
 order's transition counter and the loader's state in one masked section and
 prints afterwards, so it asks no gate: a bench or a `nn run` holding the gate no
-longer hides the lines (until #174 they read `busy (another nn command)`), and
-only a load or an unload between its steps answers
-`plugin  : (a model load is in progress -- ask again)`.  The other answers:
+longer hides the lines (until #174 they read `busy (another nn command)`).  A
+load or an unload answers
+`plugin  : -- another nn command is using the model; ask again when it returns`
+-- between its steps, and since issue #199 also when it ran since the model
+section was copied, or held the gate when it was: the copy carries the load
+order's counter it belongs to, and the claims (like the tensor and threshold
+lines before them) are checked against it.  Which holders give the copy a
+value is `port/nn/nn_info_hold.c`'s: the gate taken by `nn info` itself, a
+stream, or an ordinary operation (`nn run`, `nn bench`, `nn out`) -- none of
+which a load can run beside -- and only with an even counter; a load or an
+unload holding the gate (which moves the counter inside its hold) and any
+other owner give none, so every line after the model section is busy.  The
+other answers:
 
 ```
 plugin  : (none) -- reservation 131072 B at 0x341e0000

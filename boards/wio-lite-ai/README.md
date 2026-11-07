@@ -1312,8 +1312,9 @@ hardware is a claim about code that has been read, not about code that has been
 run.
 
 All of it happens while the shared order's transition counter is odd and
-before the session is given back, so `nn info` on another console says *a model
-load is in progress* rather than pairing one load's model with another's plugin.
+before the session is given back, so `nn info` on another console says the model
+is busy (`-- another nn command is using the model; ask again when it returns`)
+rather than pairing one load's model with another's plugin.
 
 `nn info` then shows what the container **claims** (`plugin : <name> (build
 <id>, crc <digest>), running` -- or `validated, not loaded` when the plugin was
@@ -1325,11 +1326,15 @@ refused) the model; a refused load that left the previous model active (since
 issue #191 only a refusal in the read-only checks) keeps the previous claims; a
 bare load, a load that ends with no model and `nn model unload` clear them.  `nn info` takes
 no lock (it has to answer while a stream holds the NN session), so between the
-backend adopting a model and the claims being settled it says `a model load is
-in progress` rather than pairing one model with the other's claims -- and the
-`from` line names the blob the claims came with, so a load that lands between
-`nn info`'s model line and its plugin line shows up as a mismatch instead of
-passing silently.  The *running* word comes out of that same masked section, so
+backend adopting a model and the claims being settled it says
+`plugin  : -- another nn command is using the model; ask again when it returns`
+rather than pairing one model with the other's claims.  Since issue #199 a load
+that lands whole between `nn info`'s model line and its plugin line is caught
+too: the model section's copy carries the load order's counter it belongs to,
+and the tensor, threshold and plugin lines are each read and then checked
+against it, so everything after the point the load landed reads busy (one
+`tensors :` line, then `thresh  :` and `plugin  :`) instead of describing the
+next model.  The `from` line still names the blob the claims came with.  The *running* word comes out of that same masked section, so
 it cannot describe a different load from the manifest printed beside it.
 
 ### [!] What decodes, draws and reports, and the lease that separates them

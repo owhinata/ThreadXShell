@@ -66,6 +66,7 @@ src cmds svc cmake test README。wio のみ boot も）。
   `NN_STREAM_GEN_ANY` は操作者専用で**待ち手は渡さない**。機械は `svc/nn/nn_stream_life.c` の 1 本。
 - **[!] start の admission も機械が持つ** — **worker を触る前に STARTING を claim し失敗なら abort**。
   `commit()` は STARTING 以外、`finish/retry/poison` は STOPPING 以外を拒否する。
+- **[!] `nn info` の写しは自分が属する遷移カウンタの値を持ち、後の行（テンソル・閾値・container）は読んでから照合し、落ちたら以降は busy**（値は写しと同じ保護区間で読む。`plugin_claims_get()` も同じ値と照合。#199）。
 - **[!] `nn run` も one-shot として同じ機械を claim する**（re-arm 不可・操作者の stop は拒否・自分の世代で
   止め、retryable なら操作者が回収）。**種類は claim と同じ 1 呼び出しで判定する**（#120）。
 - **[!] worker のカウンタは世代と一致しない**ので stats は commit 時に基準を latch する。**record は境界で

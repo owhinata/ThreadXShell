@@ -53,8 +53,8 @@
   **[!] painter は全部 CPU**（DMA2D の静止は START の読み戻しだけで書込み完了は RM が保証しない・plugin で表示を恒久故障に落とさない）。
   **[!] スタックは 2 つの量**で、veneer の下のファーム側コストは**過大が安全側**（**コールバック自身のフレームだけでは「crossing の下」にならない**）。
 - **`nn dets` は record を読むだけ、panel は kind も見る（無解釈の publish は 7 節）。`nn info` の claim は
-  開いているモデルに従い**、reload 後の状態は `nn_model_reload()` 自身の戻り値で決める。**監査は
-  `AUDIT_SHARED` だけ。**
+  開いているモデルに従い**、reload 後の状態は `nn_model_reload()` 自身の戻り値で決める。**`nn info` の
+  写しは遷移カウンタの値を持ち、後の行は読んでから照合、落ちたら busy（値は写しと同じ保護区間で読む、#199）。監査は `AUDIT_SHARED` だけ。**
 
 ### 7. `nn`・`camera`・`blob` は 3 ボード共有の 1 コマンド（各 1 つ）
 

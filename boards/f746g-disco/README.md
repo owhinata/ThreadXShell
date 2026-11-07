@@ -789,6 +789,17 @@ backend. What that changed here:
   the two-console race cannot be hit by typing, so
   `test/test_nn_model_life.c` holds it (its stub reload asks `nn info` in the
   middle of the swap).
+- [!] **The lines after the model section are of the same model, or busy**
+  (issue #199): the copy carries which state of the load order it is of, and
+  the tensor, threshold and plugin lines are each read and then checked
+  against it. A load that runs whole on the other console between two of them
+  turns everything after that point into
+  `-- another nn command is using the model; ask again when it returns` (one
+  `tensors :` line, then `thresh  :` and `plugin  :`), so the report never
+  pairs one model's name with another's tensors or claims.
+  `test/test_nn_model_life.c` checks that a copy stops standing once a load or
+  an unload has run; the line-by-line injection is the shared
+  `shell/test/test_nn_info_one_state.c`.
 - Whether a model was open is read under the NN session, so a backend that
   says it restored a model when none was open ends `nothing is loaded` and is
   emptied, rather than `the previous model is still active`. Every load that
@@ -1839,7 +1850,8 @@ camera res | format | fps | set   (this board's own)
   the command prints a reason), and the first model open after boot -- which is
   where a backend with a model in the image (`null`, `stedgeai`) adopts it into
   the arena -- builds nothing: there a fresh-boot `nn info` answers busy
-  instead, and opens normally once the test is over.  On `tflm` and
+  instead -- the threshold and plugin lines too, since that copy belongs to no
+  one state (issue #199) -- and opens normally once the test is over.  On `tflm` and
   `stedgeai_reloc` the first open builds nothing in `.sdram.ai`, so it is not
   refused: `nn info` during the test says `model : (none)` (issue #159 Step 4c).  The claim refuses while another nn command
   or a stream is active, or while the first open is building (`sdram: nn is

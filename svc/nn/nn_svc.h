@@ -417,10 +417,19 @@ typedef int (*nn_svc_write_fn)(void *ctx, const char *s, size_t len);
  * printing is slow, and holding an inference gate across a console write would
  * stall a producer thread for the length of a UART line.
  *
+ * [!] AND IT SPEAKS OF THE SAME MODEL AS @p info OR NOT AT ALL (issue #199).
+ * The lines above it were printed from @p info; a board whose lines describe
+ * the open model checks the counter it snapshots against @p info's value
+ * (nn_svc_info_seq_stands()) in that same masked section, and says the model
+ * is busy when they differ or @p info carries none -- never the claims of a
+ * load that landed after the copy.
+ *
+ * @param info   the copy `nn info` printed from; never NULL when called
  * @param write  never NULL when called
  * @param ctx    opaque, passed straight back
  */
-void nn_svc_info_extra(nn_svc_write_fn write, void *ctx);
+void nn_svc_info_extra(const struct nn_svc_info *info, nn_svc_write_fn write,
+                       void *ctx);
 
 /* ---- an external decoder's own account of its result --------------------- */
 

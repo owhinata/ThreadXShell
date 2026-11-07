@@ -2362,10 +2362,12 @@ extern uint8_t __plugin_start[], __plugin_end[];
  * transition counter and the loader's state are copied out in ONE masked
  * section and written afterwards: a console line takes as long as a UART takes.
  * No gate is asked, so a bench or a `nn run` holding it does not hide the
- * claims; only a load or an unload between its steps does ("a model load is in
- * progress").
+ * claims; only a load or an unload does -- between its steps, or since the
+ * copy `nn info` printed from (issue #199) -- and so does a copy that carries
+ * no value (a load or an unload held the gate when it was taken).
  */
-void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
+void nn_svc_info_extra(const struct nn_svc_info *info, nn_svc_write_fn write,
+                       void *ctx)
 {
 	struct plugin_claims c;
 	enum plugin_claims_seen seen;
@@ -2379,7 +2381,7 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	 * manifest beside another's runtime state.  plugin_run_active() reads one
 	 * word. */
 	posture = nn_core_cs_enter();
-	seen = plugin_claims_get(&nn_claims, nn_model_life.seq, &c);
+	seen = plugin_claims_get(&nn_claims, nn_model_life.seq, info, &c);
 	running = plugin_run_active();
 	nn_core_cs_exit(posture);
 	plugin_claims_info(write, ctx, seen, &c, running,

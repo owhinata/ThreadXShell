@@ -402,8 +402,9 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
 
 # issue #159 -- the open model's container claims and the `nn info` lines around
 # those stack lines (svc/plugin/plugin_claims), shared by wio-lite-ai and
-# f746g-disco, and grove-vision-ai-v2 since issue #174: an odd transition counter is "a load is in progress" whatever is
-# stored, and each state's lines, with the board's own "from" words passed
+# f746g-disco, and grove-vision-ai-v2 since issue #174: a counter that is odd,
+# or not the value `nn info`'s copy belongs to, or a copy with no value, is BUSY
+# whatever is stored (issue #199), and each state's lines, with the board's own "from" words passed
 # through -- including for a model-only container, whose from-line is where
 # f746g-disco repeats the CRC its load printed.
 gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
@@ -417,8 +418,9 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
 # previous model restored, nothing left, the plugin refused, bare, the lookup or
 # the lease refused), the claims are the ACTUALLY open model's, and a reader that
 # copies the counter and the store in one critical section at any hook sees
-# either "a load is in progress" or the open model's claims.  A refused swap and
-# a refused plugin cannot be typed.
+# either BUSY or the open model's claims -- and BUSY whenever the counter has
+# moved since the `nn info` copy it is checked against (issue #199).  A refused
+# swap and a refused plugin cannot be typed.
 gcc $CFLAGS -I "$inc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
     "$here/test_plugin_claims_order.c" "$svc/nn/nn_core_model.c" "$svc/nn/nn_swap.c" \
     $LDFLAGS -o "$out/test_plugin_claims_order"
@@ -866,6 +868,28 @@ gcc $CFLAGS -Wno-unused-function -DCLI_USE_COLOR=0 \
     $glue \
     $LDFLAGS -o "$out/test_nn_cmd_usage"
 "$out/test_nn_cmd_usage"
+
+# issue #199 -- one `nn info` never prints two models, through the REAL
+# dispatcher, shell/cmds/cmd_nn.c and the container lines
+# (svc/plugin/plugin_claims.c), over a stand-in adapter with two states that
+# differ in every line.  Another console's whole load is injected at each read
+# the command makes (after the copy, after in[0], after the output count, after
+# each output, after the threshold, before the claims): no line of the second
+# state is printed, what came before is unchanged and the rest is busy.  With no
+# load the output is the bytes it was before; an unreadable tensor still says
+# `unavailable just now`.  Two consoles interleaving between single calls cannot
+# be typed.
+gcc $CFLAGS -Wno-unused-function -DCLI_USE_COLOR=0 \
+    $glue_inc -I "$here/shim" -I "$here/nn_cfg" -I "$inc" -I "$core" \
+    -I "$here/../cmds" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
+    "$here/test_nn_info_one_state.c" "$here/../cmds/cmd_nn.c" \
+    "$here/../cmds/nn_cmd_core.c" \
+    "$svc/plugin/plugin_claims.c" "$svc/plugin/plugin_info.c" \
+    "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
+    "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
+    $glue \
+    $LDFLAGS -o "$out/test_nn_info_one_state"
+"$out/test_nn_info_one_state"
 
 # issue #142 review / #143 -- which stream a stop waits for (svc/camera/cam_gen.h).  A
 # `camera stream stop &` (wio) or a `camera off` (f746, wio) below a console that

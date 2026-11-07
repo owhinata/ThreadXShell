@@ -223,14 +223,16 @@ static void nn_claims_set(const struct plugin_claims *c)
  * beside no plugin at all.  plugin_run_active() reads one word, so taking it
  * here costs nothing.
  */
-static enum plugin_claims_seen nn_claims_snapshot(struct plugin_claims *out,
+static enum plugin_claims_seen nn_claims_snapshot(const struct nn_svc_info *info,
+                                                  struct plugin_claims *out,
                                                   int *running)
 {
 	enum plugin_claims_seen seen;
 	TX_INTERRUPT_SAVE_AREA
 
 	TX_DISABLE
-	seen = plugin_claims_get(&nn_claims, nn_model_life.seq, out);
+	/* checked against the value `nn info` printed from (issue #199) */
+	seen = plugin_claims_get(&nn_claims, nn_model_life.seq, info, out);
 	if (running != NULL)
 		*running = plugin_run_active();
 	TX_RESTORE
@@ -2006,7 +2008,8 @@ int nn_svc_thresh_set(unsigned milli)
  */
 extern uint8_t __plugin_start[], __plugin_end[];   /* the linker's reservation */
 
-void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
+void nn_svc_info_extra(const struct nn_svc_info *info, nn_svc_write_fn write,
+                       void *ctx)
 {
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	struct plugin_claims c;
@@ -2018,13 +2021,14 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	/* One snapshot, and every word printed is read from it: re-reading the
 	 * flag afterwards could describe a load another console finished in
 	 * between.  The lines are svc/plugin/plugin_claims.c's. */
-	seen = nn_claims_snapshot(&c, &running);
+	seen = nn_claims_snapshot(info, &c, &running);
 	plugin_claims_info(write, ctx, seen, &c, running,
 	                   (uint32_t)(uintptr_t)__plugin_start,
 	                   (uint32_t)(__plugin_end - __plugin_start),
 	                   plugin_board_policy.veneer_cost);
 #else
 	/* The null backend cannot load a model, so no container can be open. */
+	(void)info;
 	(void)write;
 	(void)ctx;
 #endif

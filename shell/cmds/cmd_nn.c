@@ -169,11 +169,8 @@ static void nn_print_tensor(struct cli_instance *sh, const char *tag, int idx,
  * The contract names the value (NN_SVC_THRESH_NONE); this is where it is said
  * out loud, once, so `nn info` and `nn thresh` cannot drift apart about it.
  */
-static int nn_print_thresh(struct cli_instance *sh)
+static void nn_say_thresh(struct cli_instance *sh, int rc, unsigned milli)
 {
-	unsigned milli = NN_SVC_THRESH_NONE;
-	int rc = nn_svc_thresh_get(&milli);
-
 	/* [!] NOT "none" (issue #122 P6).  A decoder that could not be asked is
 	 * not a decoder without a threshold, and an operator told the second goes
 	 * off to load a container over one that works. */
@@ -188,6 +185,16 @@ static int nn_print_thresh(struct cli_instance *sh)
 		              "threshold\r\n");
 	else
 		cli_print(sh, "thresh  : %u/1000\r\n", milli);
+}
+
+/* Read it, then say it.  Two steps, so that `nn info` can ask between them
+ * whether the answer is still of the model it printed (issue #199). */
+static int nn_print_thresh(struct cli_instance *sh)
+{
+	unsigned milli = NN_SVC_THRESH_NONE;
+	int rc = nn_svc_thresh_get(&milli);
+
+	nn_say_thresh(sh, rc, milli);
 	return rc;
 }
 
@@ -230,10 +237,33 @@ static int nn_info_write(void *ctx, const char *s, size_t len)
 	return (int)done;
 }
 
+/*
+ * [!] EVERY LINE AFTER THE COPY IS OF THE COPY'S MODEL, OR BUSY (issue #199).
+ * The tensors, the threshold and the container's lines are read one call at a
+ * time after nn_svc_info() returned, and another console's `nn model load` can
+ * run whole between any two of them.  So each is read first and then checked:
+ * nn_svc_info_stands() says whether the counter still holds the value the copy
+ * belongs to.  Checked AFTER the read, because a check before it would pass and
+ * the read could then be the next model's.  Once a check fails nothing more is
+ * read, and the rest is said once in the model line's own words for BUSY.
+ */
+static int nn_info_still(const struct nn_svc_info *info, int *moved)
+{
+	if (!*moved && !nn_svc_info_stands(info))
+		*moved = 1;
+	return !*moved;
+}
+
+static void nn_info_busy(struct cli_instance *sh, const char *what)
+{
+	cli_print(sh, "%s: %s\r\n", what, nn_avail_text(NN_AVAIL_BUSY));
+}
+
 static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nn_svc_info info;
-	int i, n;
+	int i, n, rc, moved = 0;
+	unsigned milli;
 
 	(void)argc; (void)argv;
 
@@ -277,15 +307,26 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 	} else if (info.model_active) {
 		struct tensor_desc t;
 
-		if (nn_svc_input(&t) == NN_SVC_OK)
+		/* Read, check, then print -- each line of the copy's model.  A failed
+		 * check ends the section with ONE busy line: the count read before
+		 * it is no longer this model's to print by. */
+		rc = nn_svc_input(&t);
+		if (!nn_info_still(&info, &moved))
+			nn_info_busy(sh, "tensors ");
+		else if (rc == NN_SVC_OK)
 			nn_print_tensor(sh, "in", 0, &t);
 		else
 			cli_warn(sh, "  in[0]   unavailable just now\r\n");
-		n = nn_svc_output_count();
-		if (n < 0)
+		n = moved ? 0 : nn_svc_output_count();
+		if (!moved && !nn_info_still(&info, &moved))
+			nn_info_busy(sh, "tensors ");
+		else if (!moved && n < 0)
 			cli_warn(sh, "  out[]   unavailable just now\r\n");
-		for (i = 0; i < n; i++) {
-			if (nn_svc_output((unsigned)i, &t) == NN_SVC_OK)
+		for (i = 0; !moved && i < n; i++) {
+			rc = nn_svc_output((unsigned)i, &t);
+			if (!nn_info_still(&info, &moved))
+				nn_info_busy(sh, "tensors ");
+			else if (rc == NN_SVC_OK)
 				nn_print_tensor(sh, "out", i, &t);
 			else
 				cli_warn(sh, "  out[%d]  unavailable just now\r\n", i);
@@ -298,15 +339,27 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 #endif
 	}
 
-	(void)nn_print_thresh(sh);
+	/* The threshold: read, check, then say -- not read at all once a check
+	 * has failed.  `nn thresh` keeps its one wording (nn_say_thresh()). */
+	if (moved) {
+		nn_info_busy(sh, "thresh  ");
+	} else {
+		milli = NN_SVC_THRESH_NONE;
+		rc = nn_svc_thresh_get(&milli);
+		if (!nn_info_still(&info, &moved))
+			nn_info_busy(sh, "thresh  ");
+		else
+			nn_say_thresh(sh, rc, milli);
+	}
 
 	/* Whatever this board wants to add, in its own words.  Last, so the shared
-	 * lines always appear in the same place whatever a board says after them. */
+	 * lines always appear in the same place whatever a board says after them.
+	 * It checks its own snapshot against the copy's value (issue #199). */
 	{
 		struct nn_info_sink sink;
 
 		sink.sh = sh;
-		nn_svc_info_extra(nn_info_write, &sink);
+		nn_svc_info_extra(&info, nn_info_write, &sink);
 	}
 	return 0;
 }

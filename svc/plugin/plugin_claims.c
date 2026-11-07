@@ -28,10 +28,14 @@ void plugin_claims_info(nn_svc_write_fn write, void *ctx,
 
 	if (write == NULL)
 		return;
-	if (seen == PLUGIN_CLAIMS_LOADING) {
+	if (seen == PLUGIN_CLAIMS_BUSY) {
+		/* [!] THE MODEL LINE'S OWN WORDS FOR BUSY (issue #199;
+		 * shell/cmds/nn_cmd_core.c's nn_avail_text(NN_AVAIL_BUSY), which svc/
+		 * cannot call): a load that has already finished is as much a reason
+		 * as one in flight, so this does not say "in progress". */
 		(void)nn_info_line(write, ctx,
-		                   "plugin  : (a model load is in progress -- ask "
-		                   "again)\r\n");
+		                   "plugin  : -- another nn command is using the "
+		                   "model; ask again when it returns\r\n");
 		return;
 	}
 	if (seen != PLUGIN_CLAIMS_VALID || c == NULL) {

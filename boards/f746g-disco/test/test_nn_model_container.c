@@ -379,11 +379,15 @@ static int sink(void *ctx, const char *s, size_t len)
 	return (int)len;
 }
 
+/* What `nn info` does: the copy, then the board's lines checked against it. */
 static const char *info_extra(void)
 {
+	struct nn_svc_info i;
+
 	out_len = 0u;
 	out[0] = '\0';
-	nn_svc_info_extra(sink, NULL);
+	nn_svc_info(&i);
+	nn_svc_info_extra(&i, sink, NULL);
 	assert(test_tx_masked == 0);
 	return out;
 }

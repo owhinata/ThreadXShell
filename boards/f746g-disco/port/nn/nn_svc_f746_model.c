@@ -749,7 +749,8 @@ void nn_svc_model_unload(struct nn_op_result *res)
 #if defined(CONFIG_NN_BACKEND_TFLM)
 extern uint8_t __plugin_start[], __plugin_end[];   /* the linker's reservation */
 
-void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
+void nn_svc_info_extra(const struct nn_svc_info *info, nn_svc_write_fn write,
+                       void *ctx)
 {
 	struct plugin_claims c;
 	enum plugin_claims_seen seen;
@@ -763,7 +764,8 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	 * manifest beside another's runtime state.  plugin_run_active() reads one
 	 * word. */
 	posture = nn_life_cs_enter();
-	seen = plugin_claims_get(&nn_claims, nn_model_life.seq, &c);
+	/* checked against the value `nn info` printed from (issue #199) */
+	seen = plugin_claims_get(&nn_claims, nn_model_life.seq, info, &c);
 	running = plugin_run_active();
 	nn_life_cs_exit(posture);
 	plugin_claims_info(write, ctx, seen, &c, running,
@@ -774,8 +776,10 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 #else
 /* The other backends cannot take a container, so they have nothing to add.
  * Silence is a legal answer: these lines are the board's own subject. */
-void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
+void nn_svc_info_extra(const struct nn_svc_info *info, nn_svc_write_fn write,
+                       void *ctx)
 {
+	(void)info;
 	(void)write;
 	(void)ctx;
 }

@@ -30,10 +30,15 @@
  * read the new model beside the old claims.  The shared order's transition
  * counter is odd from before the reload to after the claims are settled, and a
  * reader that sees it odd -- in the same critical section as its copy -- says
- * "a load is in progress" instead of reporting either set.  @ref
- * plugin_claims.from names what the claims came with, because `nn info`
- * prints the model and the plugin lines from two separate calls and a load
- * landing BETWEEN them is then visible to whoever reads them.
+ * the model is busy instead of reporting either set.  @ref
+ * plugin_claims.from names what the claims came with.
+ *
+ * [!] AND THE COUNTER MUST BE THE ONE `nn info` PRINTED FROM (issue #199).
+ * `nn info` prints the model and the plugin lines from two separate calls, so
+ * an even counter is not enough: a load that ran whole between them leaves it
+ * even and its claims beside the previous model's name.  The snapshot is
+ * compared with the value the model section's copy carries, and anything but
+ * that one value -- odd, different, or a copy with no value -- is BUSY.
  *
  * PLAIN DATA: struct plugin_view carries integer offsets and copied bytes, no
  * callable pointer.
@@ -46,7 +51,7 @@
 
 #include <stdint.h>
 
-#include "nn_svc.h"         /* nn_svc_write_fn */
+#include "nn_svc.h"         /* nn_svc_write_fn, nn_svc_info_seq_stands() */
 #include "plugin_load.h"    /* struct plugin_view */
 
 #ifdef __cplusplus
@@ -77,7 +82,11 @@ struct plugin_claims_store {
 enum plugin_claims_seen {
 	PLUGIN_CLAIMS_NONE    = 0,   /**< the open model is not a container's */
 	PLUGIN_CLAIMS_VALID   = 1,   /**< *out describes the open model        */
-	PLUGIN_CLAIMS_LOADING = 2,   /**< a load / unload is between its steps */
+	/** Not the state `nn info` printed from: a load or an unload is between
+	 *  its steps, or one ran since the copy, or the copy carries no value
+	 *  (issue #199) -- one answer, because an operator does the same about
+	 *  all three: ask again. */
+	PLUGIN_CLAIMS_BUSY    = 2,
 };
 
 /**
@@ -101,16 +110,19 @@ static inline void plugin_claims_set(struct plugin_claims_store *s,
 }
 
 /**
- * Snapshot them: LOADING when @p life_seq (the shared order's transition
- * counter, read in the SAME critical section) is odd; otherwise VALID with
- * @p out filled, or NONE.  Inside the board's critical section.
+ * Snapshot them: BUSY unless @p life_seq (the shared order's transition
+ * counter, read in the SAME critical section) is the value @p info -- the copy
+ * `nn info` printed its model section from -- belongs to (issue #199);
+ * otherwise VALID with @p out filled, or NONE.  Inside the board's critical
+ * section.
  */
 static inline enum plugin_claims_seen
 plugin_claims_get(const struct plugin_claims_store *s, uint32_t life_seq,
-                  struct plugin_claims *out)
+                  const struct nn_svc_info *info, struct plugin_claims *out)
 {
-	if ((life_seq & 1u) != 0u)
-		return PLUGIN_CLAIMS_LOADING;
+	/* odd, a different value, or no value: nn_svc_info_seq_stands() */
+	if (!nn_svc_info_seq_stands(info, life_seq))
+		return PLUGIN_CLAIMS_BUSY;
 	if (!s->valid)
 		return PLUGIN_CLAIMS_NONE;
 	*out = s->c;
@@ -120,7 +132,8 @@ plugin_claims_get(const struct plugin_claims_store *s, uint32_t life_seq,
 /**
  * @brief  Write `nn info`'s plugin lines from one snapshot.
  *
- *   LOADING                -> "plugin  : (a model load is in progress ...)"
+ *   BUSY                   -> "plugin  : -- another nn command is using the
+ *                             model; ask again when it returns"
  *   NONE                   -> "plugin  : (none) -- reservation ..."
  *   a container, no plugin -> "plugin  : (none in this container) -- ..."
  *                             and its "from" line

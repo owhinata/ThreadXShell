@@ -78,6 +78,24 @@ static void fill(struct plugin_claims *c, int has_plugin)
 	strcpy(c->from, "/bf.nnc, 194232 B, file crc32 12E129EE");
 }
 
+/* `nn info`'s copy, belonging to the state @p seq -- or carrying no value. */
+static struct nn_svc_info copy_;
+
+static const struct nn_svc_info *at(uint32_t seq)
+{
+	memset(&copy_, 0, sizeof copy_);
+	copy_.seq_known = (uint8_t)((seq & 1u) == 0u);
+	copy_.seq = seq;
+	return &copy_;
+}
+
+static const struct nn_svc_info *unknown(uint32_t seq)
+{
+	memset(&copy_, 0, sizeof copy_);
+	copy_.seq = seq;
+	return &copy_;
+}
+
 static void test_store(void)
 {
 	struct plugin_claims_store st;
@@ -85,17 +103,32 @@ static void test_store(void)
 
 	printf("the store and its snapshot:\n");
 	memset(&st, 0, sizeof st);
-	ok("empty: NONE", plugin_claims_get(&st, 0u, &got) == PLUGIN_CLAIMS_NONE);
+	ok("empty: NONE",
+	   plugin_claims_get(&st, 0u, at(0u), &got) == PLUGIN_CLAIMS_NONE);
 	fill(&c, 1);
 	plugin_claims_set(&st, &c);
 	memset(&got, 0, sizeof got);
 	ok("set: VALID, a whole copy",
-	   plugin_claims_get(&st, 2u, &got) == PLUGIN_CLAIMS_VALID &&
+	   plugin_claims_get(&st, 2u, at(2u), &got) == PLUGIN_CLAIMS_VALID &&
 	   memcmp(&got, &c, sizeof c) == 0);
-	ok("[!] an odd counter is LOADING even with claims stored",
-	   plugin_claims_get(&st, 3u, &got) == PLUGIN_CLAIMS_LOADING);
+	/* [!] THREE REASONS, ONE ANSWER (issue #199): odd, a value other than
+	 * the copy's, and a copy with no value are all BUSY, claims stored or
+	 * not -- and *out is not touched. */
+	memset(&got, 0x5A, sizeof got);
+	ok("[!] an odd counter is BUSY even with claims stored",
+	   plugin_claims_get(&st, 3u, at(3u), &got) == PLUGIN_CLAIMS_BUSY);
+	ok("[!] a counter the copy is not of is BUSY (a load ran since)",
+	   plugin_claims_get(&st, 4u, at(2u), &got) == PLUGIN_CLAIMS_BUSY);
+	ok("[!] a copy with no value is BUSY, even at the same number",
+	   plugin_claims_get(&st, 2u, unknown(2u), &got) == PLUGIN_CLAIMS_BUSY);
+	ok("[!] a NULL copy is BUSY",
+	   plugin_claims_get(&st, 2u, NULL, &got) == PLUGIN_CLAIMS_BUSY);
+	ok("...and none of them wrote the snapshot", got.from[0] == 0x5A);
 	plugin_claims_set(&st, NULL);
-	ok("cleared: NONE", plugin_claims_get(&st, 4u, &got) == PLUGIN_CLAIMS_NONE);
+	ok("cleared: NONE",
+	   plugin_claims_get(&st, 4u, at(4u), &got) == PLUGIN_CLAIMS_NONE);
+	ok("cleared, and a copy of another state: BUSY, not NONE",
+	   plugin_claims_get(&st, 4u, at(2u), &got) == PLUGIN_CLAIMS_BUSY);
 }
 
 static void test_lines(void)
@@ -104,10 +137,12 @@ static void test_lines(void)
 
 	printf("the `nn info` lines:\n");
 	clear();
-	plugin_claims_info(sink, NULL, PLUGIN_CLAIMS_LOADING, NULL, 0,
+	plugin_claims_info(sink, NULL, PLUGIN_CLAIMS_BUSY, NULL, 0,
 	                   0x20048000u, 32768u, 640u);
-	ok("loading: one line, and it says ask again", lines() == 1u &&
-	   strstr(out, "plugin  : (a model load is in progress -- ask again)\r\n"));
+	ok("busy: one line, the model line's words for busy (issue #199)",
+	   strcmp(out, "plugin  : -- another nn command is using the model; ask "
+	               "again when it returns\r\n") == 0);
+	ok("...never \"in progress\"", strstr(out, "progress") == NULL);
 
 	clear();
 	plugin_claims_info(sink, NULL, PLUGIN_CLAIMS_NONE, NULL, 0,

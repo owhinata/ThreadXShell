@@ -61,8 +61,17 @@ void nn_svc_info(struct nn_svc_info *out)
 {
 	memset(out, 0, sizeof *out);
 	out->model_active = info_model_active;
+	out->seq_known = 1u;   /* a build whose counter never moves (#199) */
 }
-void nn_svc_info_extra(nn_svc_write_fn write, void *ctx) { (void)write; (void)ctx; }
+int nn_svc_info_stands(const struct nn_svc_info *info)
+{
+	return nn_svc_info_seq_stands(info, 0u);
+}
+void nn_svc_info_extra(const struct nn_svc_info *info, nn_svc_write_fn write,
+                       void *ctx)
+{
+	(void)info; (void)write; (void)ctx;
+}
 void nn_svc_model_load(const struct nn_spec *spec, struct nn_op_result *res,
                        enum nn_model_state *state)
 {

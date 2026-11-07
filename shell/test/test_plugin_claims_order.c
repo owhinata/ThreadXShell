@@ -28,8 +28,14 @@
  *
  * and, at EVERY hook the order calls and after each operation, what a `nn info`
  * reader would see: the counter and the store copied in one critical section
- * either say LOADING or describe the open model -- never the new model beside
+ * either say BUSY or describe the open model -- never the new model beside
  * the old claims, nor the other way round.
+ *
+ * And (issue #199) against which copy: the reader's snapshot is checked
+ * against the value an `nn info` copy carries.  A copy taken at that moment
+ * behaves as above; one taken before the operation began is BUSY as soon as
+ * the counter has moved -- odd, or even again with other claims -- and the
+ * same as the fresh one while it has not; a copy with no value is always BUSY.
  */
 #include <stdio.h>
 #include <string.h>
@@ -70,6 +76,8 @@ static struct plugin_claims_store store;
 static struct plugin_claims next;    /* what the lookup resolved into */
 static int cs_depth;
 static const char *phase = "";
+/* `nn info`'s copy from before the current operation (issue #199). */
+static struct nn_svc_info before;
 
 static unsigned cs_enter(void) { cs_depth++; return 0u; }
 static void cs_exit(unsigned p) { (void)p; cs_depth--; }
@@ -82,12 +90,33 @@ static void reader(const char *where)
 	unsigned p = cs_enter();
 	char what[160];
 
+	struct plugin_claims c_old;
+	enum plugin_claims_seen seen_old, seen_none;
+	struct nn_svc_info now, none;
+	uint32_t seq;
+
 	memset(&c, 0, sizeof c);
-	seen = plugin_claims_get(&store, life.seq, &c);
+	memset(&c_old, 0, sizeof c_old);
+	memset(&none, 0, sizeof none);
+	/* a copy taken at this moment carries the counter when it is even */
+	memset(&now, 0, sizeof now);
+	now.seq_known = (uint8_t)((life.seq & 1u) == 0u);
+	now.seq = life.seq;
+	seen = plugin_claims_get(&store, life.seq, &now, &c);
+	seen_old = plugin_claims_get(&store, life.seq, &before, &c_old);
+	seen_none = plugin_claims_get(&store, life.seq, &none, &c_old);
+	seq = life.seq;
 	cs_exit(p);
 	snprintf(what, sizeof what, "%s: reader at %s", phase, where);
-	if (seen == PLUGIN_CLAIMS_LOADING)
+	CHECK(seen_none == PLUGIN_CLAIMS_BUSY, what);   /* no value: always */
+	if (seq != before.seq)
+		CHECK(seen_old == PLUGIN_CLAIMS_BUSY, what);
+	else
+		CHECK(seen_old == seen, what);
+	if (seen == PLUGIN_CLAIMS_BUSY) {
+		CHECK((seq & 1u) != 0u, what);   /* only while it is odd */
 		return;   /* the honest answer while a change is in progress */
+	}
 	if (open_now.id == 0 || !open_now.container) {
 		CHECK(seen == PLUGIN_CLAIMS_NONE, what);
 		return;
@@ -230,6 +259,8 @@ static void load(const char *what, int id, int container)
 	j.spec = &spec;
 	j.res = &res;
 	j.board = &t;
+	before.seq_known = 1u;
+	before.seq = life.seq;
 	nn_core_model_load(&life, &board, &j, &st);
 	reader("the end");
 	CHECK((life.seq & 1u) == 0u, "the counter is even when the load returns");
@@ -245,6 +276,8 @@ static void unload(const char *what)
 	j.spec = NULL;
 	j.res = &res;
 	j.board = NULL;
+	before.seq_known = 1u;
+	before.seq = life.seq;
 	nn_core_model_unload(&life, &board, &j);
 	reader("the end");
 	CHECK((life.seq & 1u) == 0u, "the counter is even when the unload returns");

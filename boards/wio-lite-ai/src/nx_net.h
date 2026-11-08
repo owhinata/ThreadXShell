@@ -28,10 +28,11 @@
  * While the tap is in, the module's own lwIP receives nothing, so anything that runs on
  * that lwIP is refused while the host stack is up -- see nx_net_guard().
  * owhinata/wio-lite-ai#23 U4 moved the two things that wanted a TCP connection off it
- * entirely: `net echo` (app/nx_echo.c) and the telnet console now open NetX sockets on THIS
- * interface, and therefore REQUIRE the host stack rather than being refused by it.  What is
- * left on the module's lwIP -- `net info`, `net ip`, `net dhcp` -- keeps its
- * eRPC backend, which is also what keeps a regression test against an untouched module
+ * entirely: `net echo` and the telnet console opened NetX sockets on THIS interface, and
+ * therefore REQUIRED the host stack rather than being refused by it.  `net echo` was a
+ * bring-up test server and was removed by issue #216; the telnet console is the one left.
+ * What is left on the module's lwIP -- `net info`, `net ip`, `net dhcp` -- keeps its eRPC
+ * backend, which is also what keeps a regression test against an untouched module
  * firmware alive.
  *
  * ---- the failure rule ----------------------------------------------------------
@@ -86,12 +87,13 @@ struct cli_instance;
  * claimed to survive a hostile ICMP flood or arbitrary IP fragmentation; those are
  * legitimate Ethernet drops.
  *
- * The _Static_assert that ties these to LINK_DATA_TX_BUFS lives in app/nx_echo.c, which
- * already includes nx_api.h for NX_ARP_MAX_QUEUE_DEPTH -- putting it in app/link_data.h
- * would make the DATA channel depend on NetX headers.
+ * The _Static_assert that ties these to LINK_DATA_TX_BUFS lives in app/nx_link_driver.c,
+ * the translation unit that owns the transmit path and already includes the NetX headers
+ * for NX_ARP_MAX_QUEUE_DEPTH -- putting it in app/link_data.h would make the DATA channel
+ * depend on NetX headers.
  */
 #define NXN_TCP_TX_DEPTH      4u   /* nx_tcp_socket_transmit_configure max_queue_depth  */
-#define NXN_TCP_SOCKETS_MAX   2u   /* telnet console + `net echo` can be live together  */
+#define NXN_TCP_SOCKETS_MAX   1u   /* the telnet console is the only TCP socket         */
 #define NXN_TX_SPARE          4u   /* room for single ICMP / DHCP / ARP frames          */
 
 /*
@@ -191,9 +193,9 @@ void nx_net_mac_get(uint8_t mac[6]);
 void nx_net_modstats_get(struct nx_net_modstats *out);
 
 /*
- * The NetX objects, for the things that put a socket on this interface (app/nx_echo.c,
- * app/net_shell.c).  Typed as void * so that a caller which only needs to pass them along
- * does not have to include nx_api.h; cast to NX_IP * / NX_PACKET_POOL *.
+ * The NetX objects, for the things that put a socket on this interface (app/net_shell.c).
+ * Typed as void * so that a caller which only needs to pass them along does not have to
+ * include nx_api.h; cast to NX_IP * / NX_PACKET_POOL *.
  *
  * NULL until nx_net_init() has succeeded.  Both are valid from then on regardless of the
  * session state -- the IP instance exists from boot with address 0.0.0.0 and the link

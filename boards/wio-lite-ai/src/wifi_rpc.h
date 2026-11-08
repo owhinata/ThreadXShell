@@ -232,7 +232,8 @@ int wifi_rpc_scan_record(const uint8_t *buf, uint16_t got, uint16_t idx,
  * The socket-offload wrappers lived here in two waves, and both are gone.  bind /
  * listen / accept / recv / send / shutdown / getpeername served owhinata/wio-lite-ai#21's
  * TCP-on-the-module era; owhinata/wio-lite-ai#23 U4 moved `net echo` and the telnet console
- * onto the host's own NetX Duo stack and they were deleted with it (history: 41d1ff0~1).  The
+ * onto the host's own NetX Duo stack and they were deleted with it (history: 41d1ff0~1;
+ * `net echo` itself was removed later, by issue #216).  The
  * datagram side -- socket / setsockopt / sendto / recvfrom (+ its async _begin) /
  * close / errno, which carried `net ping`'s raw ICMP and the `net conc` diagnostic --
  * followed in owhinata/wio-lite-ai#28 when ping became host-stack-only and conc was retired.
@@ -268,7 +269,8 @@ int wifi_rpc_scan_record(const uint8_t *buf, uint16_t got, uint16_t idx,
  * interrupt-driven ring -- while a 280-byte REQUEST (send of 256 B) never gets answered.
  *
  * A send request frame is 24 + payload bytes (4 framing + 8 header/seq + 4 fd + 4 binary
- * length + 4 flags).  Swept on board #2 with `net echo 2323 <txchunk>`, echoing 1000 B:
+ * length + 4 flags).  Swept on board #2 with the module-side `net echo 2323 <txchunk>`
+ * (removed since), echoing 1000 B:
  *
  *     payload  64  96 128 160        256
  *     frame    88 120 152 184        280

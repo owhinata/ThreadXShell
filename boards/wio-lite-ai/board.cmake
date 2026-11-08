@@ -1052,7 +1052,6 @@ add_executable(shell
     "${BOARD_DIR}/src/wifi_connect.c"
     "${BOARD_DIR}/src/rtl_link.c"
     "${BOARD_DIR}/src/net_shell.c"
-    "${BOARD_DIR}/src/nx_echo.c"
     "${BOARD_DIR}/src/nx_link_driver.c"
     "${BOARD_DIR}/src/nx_net.c"
     "${BOARD_DIR}/port/threadx/tx_glue.c"

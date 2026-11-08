@@ -86,8 +86,8 @@
  * while a command computes, below the USB pump (8) and the IWDG petter (5).  Integer
  * marshalling only (no printf) and frames are assembled in static BSS, so the stack
  * stays shallow: measured on board #2 after 69k scheduling activations covering every
- * path (including a 1992-byte scan reply and the `net echo` data loop) the high-water
- * mark was 268 B of 1536.
+ * path (including a 1992-byte scan reply and the data loop of `net echo`, a test command
+ * removed since by issue #216) the high-water mark was 268 B of 1536.
  *
  * owhinata/wio-lite-ai#23 U3 raised it to 3072 on the argument that the DATA receive callback
  * had become a NetX driver -- allocating a packet, copying up to 1514 bytes into it and
@@ -699,7 +699,8 @@ static int erpc_rx_step(void)
  * The budget is what keeps the module's 127-byte input ring from silently dropping
  * bytes now that several requests can be in flight (see ERPC_WIRE_BUDGET).  A lone
  * frame is always sent, whatever its size, so behaviour for a single call -- including
- * the deliberately oversized probes `net echo <port> 256` uses -- is exactly as it was.
+ * the deliberately oversized probes `net echo <port> 256` used (that command is gone since
+ * issue #216) -- is exactly as it was.
  */
 static int erpc_send_one(void)
 {

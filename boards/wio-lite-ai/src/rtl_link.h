@@ -55,8 +55,9 @@ struct cli_instance;
 enum { RTL_LINK_READY = 0, RTL_LINK_ERR = 1, RTL_LINK_OFF = 2 };
 
 /* How long a claim waits for the coarse mutex before giving up.  Bounded on purpose:
- * a command may hold the link for a long time (`net echo` until Ctrl+C, DHCP for 30 s),
- * and a second console must get a "busy" message rather than hang silently. */
+ * a command may hold the link for a long time (DHCP for 30 s; the `net echo` that issue
+ * #216 removed held it until Ctrl+C), and a second console must get a "busy" message
+ * rather than hang silently. */
 #define RTL_LINK_CLAIM_WAIT_MS 2000u
 
 /* ---- (a) thread-agnostic core ------------------------------------------------- */

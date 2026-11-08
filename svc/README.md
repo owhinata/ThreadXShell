@@ -1037,7 +1037,7 @@ outside `net` and are not declared there.
 | Property | f746g-disco | wio-lite-ai |
 |---|---|---|
 | The counters of `net info` | the Ethernet driver's, TCP's (`nx_tcp_info_get()`) and the packet pool's | the module's DATA counters accumulated across bridge re-arms, and the link driver's |
-| `net`'s own subcommands (above NetX) | `mjpeg` | none (`net echo` goes in #216) |
+| `net`'s own subcommands (above NetX) | `mjpeg` | none (`net echo` was removed by #216) |
 | Where the NetX objects are placed | the packet pool in `.sdram.eth` (SDRAM, non-cacheable through the MPU), the control blocks in internal SRAM | the packet pool, the IP thread's stack and the console's TX ring in DTCM (only the CPU touches a frame) |
 
 Today wio-lite-ai's `net info` also asks the module, over eRPC, whether it is
@@ -1120,7 +1120,7 @@ What the board hands the shared code is storage and facts, never behaviour:
 The NetX objects are created and placed by the board (it knows the memory map
 and the driver), and the NetX driver and the link layer stay the board's.
 f746g-disco's `mjpeg` is plugged in the way a board's own `camera`
-subcommands are; wio-lite-ai's `net echo` is removed by #216 rather than
+subcommands are; wio-lite-ai's `net echo` was removed by #216 rather than
 plugged in.  The link layer's commands stay outside `net`: f746g-disco gets
 `eth` (#217) for the PHY renegotiation and the link state, and wio-lite-ai
 keeps `wifi`.
@@ -1138,7 +1138,7 @@ line, as `cmd_camera.c` does.
 | f746g-disco `port/netxduo/nx_glue.c` | the NetX objects and their placement, static / DHCP / ping, the counters, the link notice and the poll hook | #220: the address work and the hook go to the shared code; creation, placement and counters stay |
 | f746g-disco `port/netxduo/nx_shell.c` | the telnet console (resident) | #221: the shared listener; the storage stays |
 | f746g-disco `port/netxduo/nx_eth_driver.c`, `port/eth/eth_link.c` | the NetX driver; the MAC / PHY and the eth-link thread | the link layer, unchanged except the poll hook leaving (#220) |
-| wio-lite-ai `cmds/cmd_net.c` | `info ip dhcp ping echo shell` | #216: `echo` goes; #219: shared; #221: `shell` goes |
+| wio-lite-ai `cmds/cmd_net.c` | `info ip dhcp ping shell` (`echo` was removed by #216) | #219: shared; #221: `shell` goes |
 | wio-lite-ai `src/nx_net.c` | the NetX objects, static / DHCP / ping, and the bridge session's resident thread (re-arm, states, failure rule, WiFi reconnect) | #220: the address work goes to the shared code; #222: the resident thread moves to the link layer, leaving creation and injection |
 | wio-lite-ai `src/net_shell.c` | the telnet console (`start` / `stop` / `status`, auto-arm) | #221: the shared listener, resident; the storage stays |
 | wio-lite-ai `src/nx_link_driver.c`, `src/link_data.c`, `src/rtl_link.c` | the NetX driver; the DATA channel and the RTL8720DN link | the link layer |

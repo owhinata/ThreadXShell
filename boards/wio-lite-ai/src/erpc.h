@@ -112,7 +112,8 @@ static inline uint32_t erpc_get_u32le(const uint8_t *p)
  * answered fits in the ring", so the service thread sends a queued frame only when
  * either nothing is on the wire (a lone frame behaves exactly as it did before this
  * budget existed -- including the deliberately oversized ones `net echo <port> 256`
- * uses to reproduce the measured cliff) or the frame still fits this budget.
+ * used to reproduce the measured cliff; that command is gone since issue #216) or the
+ * frame still fits this budget.
  * A reply proves the module consumed that request's bytes, which is what frees them.
  *
  * That ring is gone in the owhinata/wio-lite-ai#23 U0-2 firmware (`2.1.3+wio-n4`), which

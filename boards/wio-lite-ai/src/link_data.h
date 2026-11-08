@@ -87,7 +87,7 @@ enum {
  * here is a silent drop, which is exactly right for Ethernet and exactly wrong for a
  * stream: TCP pays for it with a retransmit timeout measured in hundreds of milliseconds.
  * The bound this number has to satisfy is written down in app/nx_net.h ("the transmit
- * budget") and checked by a _Static_assert in app/nx_echo.c.
+ * budget") and checked by a _Static_assert in app/nx_link_driver.c.
  */
 #define LINK_DATA_RX_BUFS     8u
 #define LINK_DATA_TX_BUFS     16u

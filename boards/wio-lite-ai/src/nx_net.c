@@ -1298,7 +1298,7 @@ void nx_net_mac_get(uint8_t mac[6])
 void nx_net_modstats_get(struct nx_net_modstats *out)
 {
 	/* Paired with nxn_mod_accumulate(): a consistent snapshot, not nine independent
-	 * reads (`net info` and `net echo` both quote drops as a fraction of frames). */
+	 * reads (`net info` quotes drops as a fraction of frames). */
 	uint32_t pm = __get_PRIMASK();
 
 	__disable_irq();

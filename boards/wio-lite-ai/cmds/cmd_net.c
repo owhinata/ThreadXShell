@@ -11,9 +11,8 @@
  *   net ip <a.b.c.d/mask> [gw]   set a static address
  *   net dhcp                     (re)acquire an address via DHCP
  *   net ping <a.b.c.d> [count]   ICMP echo from the host stack
- *   net echo [port]              TCP echo server on the host stack (owhinata/wio-lite-ai#23
- * U4-1) net shell start|stop|status  the telnet console (a NetX socket,
- * owhinata/wio-lite-ai#23 U4-2)
+ *   net shell start|stop|status  the telnet console (a NetX socket,
+ *                                owhinata/wio-lite-ai#23 U4-2)
  *
  * This is the Wio counterpart of ../stm32f746g-disco's `net` command.  There the backend
  * is NetX Duo over the on-chip Ethernet MAC; here it is NetX Duo over the
@@ -36,7 +35,6 @@
 #include "wifi_rpc.h"
 #include "rtl_link.h"
 #include "net_shell.h"
-#include "nx_echo.h"  /* `net echo` on the host stack (issue #23 U4-1) */
 #include "nx_net.h"   /* the host stack (issue #23 U3), armed by `wifi connect` */
 #include "nx_link_driver.h" /* link state for the `net ping` precondition (issue #30 B2a) */
 
@@ -333,42 +331,6 @@ static int cmd_net_ping(struct cli_instance *sh, int argc, char **argv)
 	return 1;
 }
 
-/* ---- `net echo`: TCP echo server on the host stack (owhinata/wio-lite-ai#23 U4-1) ------- */
-/*
- * The bring-up rehearsal for the telnet console, as its eRPC ancestor was for
- * owhinata/wio-lite-ai#21 -- one command, one thread, no concurrency of its own, exercising
- * listen / accept / receive / send / disconnect / relisten before a console rides on them.
- *
- * What changed in U4 is what is underneath.  The old version reached the module's lwIP
- * through an eRPC round trip per chunk, so what it measured was dominated by that
- * turnaround and it had to defend against a far end still running a call the host had
- * given up on (the "link dirty" latch, the leaked fds, the ban on aborting accept/recv).
- * None of that exists here: the stack is on this MCU, every wait is bounded and
- * cancellable, and a Ctrl+C stops the server rather than being deferred to the end of a
- * 12-second accept window.
- *
- * The server itself is app/nx_echo.c -- nothing above app/nx_net.h includes nx_api.h.
- */
-static int cmd_net_echo(struct cli_instance *sh, int argc, char **argv)
-{
-	uint32_t port = NX_ECHO_PORT_DEFAULT, v;
-
-	if (net_nx_settled(sh) != 0)
-		return 1;
-	if (!nx_net_is_up()) {
-		cli_error(sh, "net echo: no host stack -- `wifi connect` brings it up\r\n");
-		return 1;
-	}
-	if (argc >= 2) {
-		if (cli_parse_u32(argv[1], &v) != 0 || v == 0u || v > 65535u) {
-			cli_error(sh, "net: bad port '%s' (1..65535)\r\n", argv[1]);
-			return 1;
-		}
-		port = v;
-	}
-	return nx_echo_run(sh, (uint16_t)port);
-}
-
 /* ---- `net shell`: the telnet console (owhinata/wio-lite-ai#23 U4-2) --------------------- */
 /*
  * The console itself lives in app/net_shell.c; these are just its controls.  Since U4-2 it
@@ -464,13 +426,10 @@ CLI_SUBCMD_SET_CREATE(net_subcmds,
 	CLI_CMD_ARG(dhcp, NULL, "(re)acquire an address via DHCP",    cmd_net_dhcp, 1, 0),
 	CLI_CMD_ARG_USAGE(ping, NULL, "ICMP echo <a.b.c.d> [count]",
 	                  "<a.b.c.d> [count]", cmd_net_ping, 2, 1),
-	CLI_CMD_ARG_USAGE(echo, NULL,
-	                  "TCP echo server [port] on the host stack (Ctrl+C stops)",
-	                  "[port]", cmd_net_echo, 1, 1),
 	CLI_CMD_ARG(shell, net_shell_subcmds,
 	            "telnet shell console (start [port] / stop / status)", NULL, 1, 0),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(net, net_subcmds,
-                 "IPv4 (L3) over the onboard RTL8720 (info / ip / dhcp / ping / echo / shell)",
+                 "IPv4 (L3) over the onboard RTL8720 (info / ip / dhcp / ping / shell)",
                  NULL, 1, 0);

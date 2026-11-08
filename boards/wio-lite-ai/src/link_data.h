@@ -104,11 +104,16 @@ struct link_data_stats {
 	uint32_t rx_no_consumer;         /* frame complete but nobody is attached */
 	uint32_t tx_queued;              /* frames waiting for the service thread now */
 	uint32_t rx_inuse;               /* RX buffers currently out of the pool */
+	uint32_t tx_stale;               /* send() refused: no consumer, or a generation
+	                                  * older than the last attach / detach / reset /
+	                                  * fence (issue #218) */
 };
 
 /*
  * Attach the one consumer of received DATA frames.  Returns 0, or -1 if another
  * consumer is already attached (the channel has exactly one owner, like the console).
+ * A successful attach moves the send generation, so a consumer that also sends reads
+ * link_data_send_gen() AFTER this call.
  *
  * @rx runs ON THE LINK SERVICE THREAD (priority 10) with NO link lock held, once per
  * received frame.  Its return value transfers ownership of the buffer:
@@ -132,6 +137,9 @@ int  link_data_attach(int (*rx)(void *ctx, uint8_t chan, uint8_t *p, uint16_t n)
  * shows nothing in flight -> link_data_tx_pending() == 0 and the reader is at a frame
  * boundary).  The exception is a teardown that takes the module down with it
  * (`wifi reset`, force-quiesce, UART close), where nothing survives to be desynchronised.
+ *
+ * Moves the send generation (and resets, see link_data_reset()), so a send decided
+ * before the detach can no longer be queued after it.
  */
 void link_data_detach(void);
 
@@ -139,12 +147,33 @@ void link_data_detach(void);
 int  link_data_attached(void);
 
 /*
- * Queue one DATA frame for transmission.  Copies @p (@n bytes, <= LINK_DATA_PAYLOAD_MAX)
- * and wakes the link service thread.  Returns 0, or -1 if the link is down, the
- * arguments are bad, or no pool buffer is free -- the last is a DROP, counted in
- * @tx_drops, which is the correct behaviour for a channel carrying Ethernet.
+ * The send generation (issue #218; the rules and the wrap argument are in
+ * link_send_gen.h).  It moves on a consumer attach, on detach / link_data_reset(), and
+ * on link_data_send_fence().  A sender reads it where it decides to send and passes it
+ * to link_data_send(); a frame whose generation has moved is dropped, so nothing a
+ * sender decided before one of those events can be queued after it -- even a sender
+ * that was preempted for a long time between its decision and its enqueue.
+ *
+ * link_data_send_fence() is for a gate that closes without detaching: the NetX driver
+ * calls it in the same interrupt-masked step that drops its link_up flag.  Both calls
+ * mask interrupts briefly and may be made from inside another masked region.
  */
-int  link_data_send(uint8_t chan, const uint8_t *p, uint16_t n);
+uint32_t link_data_send_gen(void);
+void     link_data_send_fence(void);
+
+/*
+ * Queue one DATA frame for transmission.  Copies @p (@n bytes, <= LINK_DATA_PAYLOAD_MAX)
+ * and wakes the link service thread.  @gen is the send generation the caller read.
+ * Returns 0, or -1 if:
+ *   - the arguments are bad;
+ *   - no consumer is attached, or @gen is not the current generation -- checked when the
+ *     buffer is taken AND again when the filled buffer is queued (the copy runs with
+ *     interrupts enabled, so a fence can land during it); counted in @tx_stale;
+ *   - no pool buffer is free, or a reset ran during the copy -- a DROP, counted in
+ *     @tx_drops, which is the correct behaviour for a channel carrying Ethernet.
+ * Callable from any thread; it never blocks.
+ */
+int  link_data_send(uint8_t chan, const uint8_t *p, uint16_t n, uint32_t gen);
 
 /* Return a buffer the receive callback kept (returned 1).  Ignores NULL and any
  * pointer that is not a live RX payload. */
@@ -157,7 +186,8 @@ int  link_data_tx_pending(void);
 void link_data_stats(struct link_data_stats *out);
 
 /*
- * Drop everything: queued transmits, completed receives, buffers claimed by the reader.
+ * Drop everything: queued transmits, completed receives, buffers claimed by the reader,
+ * and move the send generation (a frame being copied right now is dropped at its enqueue).
  * Called from app/erpc.c whenever the link is opened, closed or abandoned -- all points
  * where the byte stream restarts and anything half-received is meaningless.
  *

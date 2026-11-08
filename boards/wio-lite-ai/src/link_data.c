@@ -21,7 +21,9 @@
 #include "tx_api.h"       /* tx_event_flags_set via erpc_data_posted() */
 #include "stm32h7xx_hal.h"/* __get_PRIMASK / __disable_irq / __set_PRIMASK */
 #include "erpc.h"         /* erpc_crc16, erpc_data_posted */
+#include "mem_sections.h" /* DTCM_BSS: the send generation is CPU-only */
 #include "link_data.h"
+#include "link_send_gen.h"
 
 #include <string.h>
 
@@ -75,6 +77,16 @@ static uint8_t  ld_epoch;                        /* bumped by link_data_reset() 
 
 static uint8_t  ld_ready;                        /* pools initialised */
 static uint8_t  ld_rx_inuse;                     /* claimed or queued RX buffers */
+
+/*
+ * The send generation (issue #218, the rules are in link_send_gen.h): moved by attach,
+ * detach / reset and link_data_send_fence(), compared by link_data_send() when it takes
+ * a buffer and again when it queues it.  It is NOT the per-buffer epoch above, which
+ * keeps doing its own job (a reset landing mid-copy); the two are checked side by side
+ * and share one exit.  Only ever read or written inside ld_enter() / ld_exit().
+ * Not in ld_ctr, so link_data_reset()'s memset of the counters cannot rewind it.
+ */
+static uint32_t ld_send_gen DTCM_BSS;
 
 static int    (*ld_rx_cb)(void *ctx, uint8_t chan, uint8_t *p, uint16_t n);
 static void    *ld_rx_ctx;
@@ -137,6 +149,7 @@ static void ld_reclaim_locked(void)
 	unsigned i;
 
 	ld_epoch++;
+	ld_send_gen = link_send_gen_next(ld_send_gen);   /* the stream restarts */
 	ld_rx_done_head = ld_rx_done_tail = 0u;
 	ld_tx_head      = ld_tx_tail      = 0u;
 	ld_rx_free_n    = 0u;
@@ -213,6 +226,9 @@ int link_data_attach(int (*rx)(void *ctx, uint8_t chan, uint8_t *p, uint16_t n),
 	} else {
 		ld_rx_cb  = rx;
 		ld_rx_ctx = ctx;
+		/* A frame read under an earlier generation was meant for whoever was here
+		 * before (or for nobody); the new owner reads the generation after this. */
+		ld_send_gen = link_send_gen_next(ld_send_gen);
 	}
 	ld_exit(p);
 	return rc;
@@ -224,6 +240,9 @@ void link_data_detach(void)
 
 	ld_rx_cb  = NULL;
 	ld_rx_ctx = NULL;
+	/* Moved here as well as in the reset below, so no sender can queue in the gap
+	 * between the two sections. */
+	ld_send_gen = link_send_gen_next(ld_send_gen);
 	ld_exit(p);
 	link_data_reset();                       /* nothing left to deliver it to */
 }
@@ -240,7 +259,24 @@ int link_data_attached(void)
 /* ------------------------------------------------------------------ *
  *  transmit
  * ------------------------------------------------------------------ */
-int link_data_send(uint8_t chan, const uint8_t *p, uint16_t n)
+uint32_t link_data_send_gen(void)
+{
+	uint32_t p = ld_enter();
+	uint32_t g = ld_send_gen;
+
+	ld_exit(p);
+	return g;
+}
+
+void link_data_send_fence(void)
+{
+	uint32_t p = ld_enter();
+
+	ld_send_gen = link_send_gen_next(ld_send_gen);
+	ld_exit(p);
+}
+
+int link_data_send(uint8_t chan, const uint8_t *p, uint16_t n, uint32_t gen)
 {
 	struct link_data_buf *b;
 	uint32_t pm;
@@ -251,6 +287,13 @@ int link_data_send(uint8_t chan, const uint8_t *p, uint16_t n)
 
 	pm = ld_enter();
 	ld_init_locked();
+	/* First comparison, in the same section that takes the buffer: a sender whose
+	 * generation is gone never gets one (and never copies). */
+	if (link_send_gen_admit(ld_rx_cb != NULL, ld_send_gen, gen) != LINK_SEND_GEN_OK) {
+		ld_ctr.tx_stale++;
+		ld_exit(pm);
+		return -1;
+	}
 	if (ld_tx_free_n == 0u) {
 		ld_ctr.tx_drops++;               /* no buffer: drop, as an Ethernet link may */
 		ld_exit(pm);
@@ -272,13 +315,21 @@ int link_data_send(uint8_t chan, const uint8_t *p, uint16_t n)
 	b->crc = erpc_crc16(b->body, b->len);
 
 	pm = ld_enter();
-	if (ld_tx_epoch[idx] != ld_epoch) {
-		/* link_data_reset() ran while we were copying: this frame belongs to a link
-		 * that no longer exists.  The slot is still OURS to give back (reset never
-		 * takes a held one), so release it here. */
+	if (ld_tx_epoch[idx] != ld_epoch ||
+	    link_send_gen_still(ld_send_gen, gen) != LINK_SEND_GEN_OK) {
+		/* Second comparison, in the section that queues.  Either link_data_reset()
+		 * ran while we were copying (the epoch: this frame belongs to a link that no
+		 * longer exists), or the generation moved since the sender read it (a fence,
+		 * an attach or a detach -- the copy ran unmasked, so this is the last point
+		 * that can still stop it).  One exit for both, so the slot is given back
+		 * exactly once; it is still OURS to give back (reset never takes a held
+		 * one).  Counted where the cause shows: the epoch as a drop, as before. */
+		if (ld_tx_epoch[idx] != ld_epoch)
+			ld_ctr.tx_drops++;
+		else
+			ld_ctr.tx_stale++;
 		ld_tx_state[idx] = LD_FREE;
 		ld_tx_free[ld_tx_free_n++] = (uint8_t)idx;
-		ld_ctr.tx_drops++;
 		ld_exit(pm);
 		return -1;
 	}

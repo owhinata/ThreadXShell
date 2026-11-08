@@ -15,6 +15,8 @@
 #include "nx_rarp.h"
 #include "nx_packet.h"
 
+#include "stm32h7xx_hal.h" /* __get_PRIMASK / __disable_irq / __set_PRIMASK */
+
 #include "link_data.h"
 #include "nx_net.h"      /* the transmit budget asserted just below */
 
@@ -69,8 +71,10 @@ static struct {
  * Staging buffer for a chained NX_PACKET.  With a 1600-byte pool payload and a 1514-byte
  * maximum frame, NetX has no reason to chain, so this should never be used -- which is
  * exactly why it exists: an unexpected chain becomes a counted, correct transmit rather
- * than a truncated frame or a walk off the end of a fragment.  Only ever touched on the
- * NetX IP thread, which is the only caller of the transmit path.
+ * than a truncated frame or a walk off the end of a fragment.  The transmit path runs on
+ * whichever thread called into NetX (see the context table in nx_link_driver.h), so this
+ * buffer is NOT owned by one thread: what serialises it is that every NetX path into the
+ * driver's send holds the IP instance's nx_ip_protection mutex.
  */
 static uint8_t tx_coalesce[ETH_FRAME_MAX] __attribute__((aligned(8)));
 
@@ -101,6 +105,8 @@ static void link_tx(NX_IP_DRIVER *req)
 	uint8_t   *eh;
 	const uint8_t *frame;
 	ULONG      len;
+	uint32_t   pm, gen;
+	uint8_t    up;
 
 	if (cmd == NX_LINK_ARP_SEND || cmd == NX_LINK_ARP_RESPONSE_SEND)
 		etype = ETHTYPE_ARP;
@@ -109,7 +115,23 @@ static void link_tx(NX_IP_DRIVER *req)
 	else
 		etype = ETHTYPE_IP;
 
-	if (!g.link_up) {
+	/*
+	 * The gate (issue #218).  link_up and the DATA channel's send generation are read in
+	 * ONE masked step, and nx_link_driver_set_link(0) clears the one and fences the other
+	 * in one masked step too.  So either this send sees the link down here, or it holds
+	 * a generation that the fence has already made stale -- and link_data_send() refuses
+	 * a stale generation when it takes a buffer and again when it queues it.  A sender
+	 * preempted anywhere after this point (this runs on the caller's thread, at that
+	 * thread's priority) therefore cannot put a frame on the channel after the link was
+	 * dropped, however late it resumes.
+	 */
+	pm = __get_PRIMASK();
+	__disable_irq();
+	up  = g.link_up;
+	gen = link_data_send_gen();
+	__set_PRIMASK(pm);
+
+	if (!up) {
 		g.st.tx_link_down++;
 		_nx_packet_transmit_release(pkt);
 		return;
@@ -156,10 +178,15 @@ static void link_tx(NX_IP_DRIVER *req)
 		len   = (ULONG)(d - tx_coalesce);
 	}
 
-	if (link_data_send(LINK_DATA_CHAN_ETH, frame, (uint16_t)len) != 0) {
-		/* The DATA transmit pool was full.  Dropping is what an Ethernet device
-		 * does when its ring is full, and the protocols above expect it. */
-		g.st.tx_no_buf++;
+	if (link_data_send(LINK_DATA_CHAN_ETH, frame, (uint16_t)len, gen) != 0) {
+		/* Either the gate closed behind us (the generation moved: counted as a
+		 * link-down drop, which is what it is), or the DATA transmit pool was full.
+		 * Dropping is what an Ethernet device does when its ring is full, and the
+		 * protocols above expect it.  The split is for the counters only. */
+		if (link_data_send_gen() != gen)
+			g.st.tx_link_down++;
+		else
+			g.st.tx_no_buf++;
 	} else {
 		g.st.tx_frames++;
 		g.st.tx_bytes += len;
@@ -375,10 +402,23 @@ int nx_link_driver_set_mac(const uint8_t mac[6])
 
 void nx_link_driver_set_link(int up)
 {
+	uint32_t pm;
+
 	if (g.ip == NX_NULL)
 		return;
 
+	/*
+	 * Down clears the flag and fences the DATA channel's send generation in ONE masked
+	 * step (issue #218, see link_tx()): every send that had already passed the gate is
+	 * holding the old generation and is refused when it tries to queue.  Up does not
+	 * fence -- nothing decided while the link was down can be holding a buffer.
+	 */
+	pm = __get_PRIMASK();
+	__disable_irq();
 	g.link_up = up ? 1u : 0u;
+	if (!up)
+		link_data_send_fence();
+	__set_PRIMASK(pm);
 	/*
 	 * Only flag the change; the IP thread asks NX_LINK_GET_STATUS for the real state and
 	 * runs the status-change callback, which updates the interface flag and nothing else

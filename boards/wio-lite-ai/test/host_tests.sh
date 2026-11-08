@@ -408,6 +408,19 @@ gcc $CFLAGS -I "$board/src" \
     $LDFLAGS -o "$out/test_psram_guard"
 "$out/test_psram_guard"
 
+# issue #218 -- the DATA channel's send generation (src/link_send_gen.h) and the
+# real src/link_data.c that applies it: a send decided before an attach, a detach,
+# a reset or the NetX driver's fence is refused, including one whose fence lands
+# just before the buffer is taken, just before it is queued, or during the copy
+# -- the windows a preempted sender opens, which a console cannot stage.
+# link_data_shim/ supplies the PRIMASK accessors (traced, and where the test lands
+# its preemption) and an empty tx_api.h; erpc_crc16() / erpc_data_posted() are
+# the test's own.  mem_sections.h is the real one.
+gcc $CFLAGS -I "$here/link_data_shim" -I "$board/src" -I "$board/include" \
+    "$here/test_link_send_gen.c" "$board/src/link_data.c" \
+    $LDFLAGS -o "$out/test_link_send_gen"
+"$out/test_link_send_gen"
+
 # issue #113 -- has the DMA2D stopped writing the PSRAM (port/ltdc/dma2d_quiesce.c):
 # a timeout whose ABORT is read back as stopped loses that frame only, one that is
 # not read back stopped (or a START already set before the setup) is permanent and

@@ -791,10 +791,11 @@ static void link_print_dhost(struct cli_instance *sh)
 	/* no-buf is NOT loss here: the bench offers frames as fast as it can and a full pool
 	 * is the link telling it to wait, which it does.  A frame counted here was never
 	 * queued, so it never entered the sequence the far end checks. */
-	cli_print(sh, "  host data tx: %lu frames, %lu B, no-buf %lu (queued %lu, rx-in-use %lu)\r\n",
+	cli_print(sh, "  host data tx: %lu frames, %lu B, no-buf %lu, stale %lu (queued %lu, "
+	          "rx-in-use %lu)\r\n",
 	          (unsigned long)ds.tx_frames, (unsigned long)ds.tx_bytes,
-	          (unsigned long)ds.tx_drops, (unsigned long)ds.tx_queued,
-	          (unsigned long)ds.rx_inuse);
+	          (unsigned long)ds.tx_drops, (unsigned long)ds.tx_stale,
+	          (unsigned long)ds.tx_queued, (unsigned long)ds.rx_inuse);
 }
 
 static void link_dbench_report(struct cli_instance *sh, const char *dir, uint32_t bytes)
@@ -847,7 +848,7 @@ static int link_data_settle(struct cli_instance *sh)
 static int cmd_link_dbench(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t bytes = LINK_BENCH_DEF, secs = LINK_BENCH_SECS, tx, rx;
-	uint32_t st[LINK_DSTAT_WORDS], t_start;
+	uint32_t st[LINK_DSTAT_WORDS], t_start, gen;
 	const char *dir = "both";
 	uint8_t mode;
 	int rc = 0;
@@ -889,6 +890,10 @@ static int cmd_link_dbench(struct cli_instance *sh, int argc, char **argv)
 		rtl_link_end(sh);
 		return 1;
 	}
+	/* Our send generation: read AFTER our own attach, which moves it (issue #218).  A
+	 * link reset during the run moves it again and our sends are then refused, which the
+	 * loop below treats like a full pool. */
+	gen = link_data_send_gen();
 
 	/* The module sinks what we send and sources what we want back.  Its source stops
 	 * on its own after the requested time as well as on CFG(off), so a host that dies
@@ -915,7 +920,7 @@ static int cmd_link_dbench(struct cli_instance *sh, int argc, char **argv)
 			continue;
 		}
 		erpc_put_u32le(link_dtx, link_db.tx_frames);
-		if (link_data_send(LINK_DATA_CHAN_BENCH, link_dtx, (uint16_t)tx) == 0) {
+		if (link_data_send(LINK_DATA_CHAN_BENCH, link_dtx, (uint16_t)tx, gen) == 0) {
 			link_db.tx_frames++;
 			link_db.tx_bytes += tx;
 		} else {

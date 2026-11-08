@@ -11,7 +11,7 @@
  * f746 project -- the NX_LINK_* dispatch -- with the MAC, its DMA descriptors, the
  * zero-copy allocate/link callbacks and the PHY all replaced by two calls:
  *
- *      transmit   link_data_send(LINK_DATA_CHAN_ETH, frame, len)
+ *      transmit   link_data_send(LINK_DATA_CHAN_ETH, frame, len, gen)
  *      receive    the link_data_attach() callback, nx_link_driver_rx()
  *
  * It knows nothing about the RTL8720, the eRPC link, or how the bridge is turned on and
@@ -21,8 +21,15 @@
  *
  * ---- context ------------------------------------------------------------------
  *
- *   nx_link_driver()      the NetX IP thread (and, at create time, whoever calls
- *                         nx_ip_create)
+ *   nx_link_driver()      control commands: the NetX IP thread (and, at create time,
+ *                         whoever calls nx_ip_create).  SENDS (NX_LINK_PACKET_SEND,
+ *                         ARP / RARP) run on WHICHEVER THREAD called into NetX -- the IP
+ *                         thread, DHCP, the telnet server, a CLI or bg job doing a
+ *                         ping -- each at its own priority and holding the IP instance's
+ *                         nx_ip_protection mutex.  So a send can be preempted between
+ *                         its link_up test and its enqueue; the DATA channel's send
+ *                         generation is what keeps such a send from landing after the
+ *                         link was dropped (issue #218, link_tx() and link_send_gen.h)
  *   nx_link_driver_rx()   THE LINK SERVICE THREAD, priority 10, no link lock held,
  *                         and contractually obliged to return quickly -- nothing is
  *                         draining the UART's receive ring while it runs
@@ -58,7 +65,9 @@ int nx_link_driver_set_mac(const uint8_t mac[6]);
 void nx_link_driver_set_speed(uint32_t bits_per_sec);
 
 /*
- * Raise or drop the link.  Down means every transmit is dropped and counted; NetX is told
+ * Raise or drop the link.  Down means every transmit is dropped and counted -- including
+ * one that had already passed the link_up test, because dropping the link also fences
+ * the DATA channel's send generation in the same masked step (issue #218); NetX is told
  * through _nx_ip_driver_link_status_event(), which wakes the IP thread to ask
  * NX_LINK_GET_STATUS and run the status-change callback -- which updates the interface
  * flag and nothing more (app/nx_net.c explains why it must not start DHCP from there).

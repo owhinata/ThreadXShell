@@ -37,91 +37,11 @@ static const char *duplex_name(enum eth_duplex d)
 	return (d == ETH_LINK_DUPLEX_FULL) ? "full" : (d == ETH_LINK_DUPLEX_HALF) ? "half" : "?";
 }
 
-/* Parse a base-10 unsigned (for the ping count). */
-static int parse_uint(const char *s, uint32_t *out)
-{
-	uint32_t v = 0;
-
-	if (s == NULL || *s == '\0')
-		return -1;
-	for (const char *p = s; *p != '\0'; p++) {
-		if (*p < '0' || *p > '9')
-			return -1;
-		v = v * 10u + (uint32_t)(*p - '0');
-	}
-	*out = v;
-	return 0;
-}
-
-/* Parse "a.b.c.d" into a host-order u32. */
-static int parse_ipv4(const char *s, uint32_t *out)
-{
-	uint32_t b[4];
-	int i = 0;
-	const char *p = s;
-
-	for (;;) {
-		uint32_t v = 0;
-		int digits = 0;
-
-		while (*p >= '0' && *p <= '9') {
-			v = v * 10u + (uint32_t)(*p - '0');
-			if (v > 255u)
-				return -1;
-			p++;
-			digits++;
-		}
-		if (digits == 0 || i > 3)
-			return -1;
-		b[i++] = v;
-		if (*p == '\0')
-			break;
-		if (*p != '.')
-			return -1;
-		p++;
-	}
-	if (i != 4)
-		return -1;
-	*out = (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];
-	return 0;
-}
-
-/* Parse "a.b.c.d/mask" into address + netmask (host order). */
-static int parse_ipv4_cidr(const char *s, uint32_t *ip, uint32_t *mask)
-{
-	char buf[20];
-	const char *slash = NULL;
-	uint32_t bits;
-	size_t n = 0;
-
-	for (const char *p = s; *p != '\0'; p++) {
-		if (*p == '/') { slash = p + 1; break; }
-		if (n >= sizeof buf - 1)
-			return -1;
-		buf[n++] = *p;
-	}
-	buf[n] = '\0';
-	if (slash == NULL || parse_ipv4(buf, ip) != 0)
-		return -1;
-	if (parse_uint(slash, &bits) != 0 || bits > 32u)
-		return -1;
-	*mask = (bits == 0) ? 0u : (0xFFFFFFFFu << (32u - bits));
-	return 0;
-}
-
 static void print_octets(struct cli_instance *sh, const char *label, uint32_t a)
 {
 	cli_print(sh, "%s%lu.%lu.%lu.%lu", label, (unsigned long)((a >> 24) & 0xFF),
 	          (unsigned long)((a >> 16) & 0xFF), (unsigned long)((a >> 8) & 0xFF),
 	          (unsigned long)(a & 0xFF));
-}
-
-static unsigned mask_bits(uint32_t mask)
-{
-	unsigned n = 0;
-
-	while (mask & 0x80000000u) { n++; mask <<= 1; }
-	return n;
 }
 
 /* Guard: the link driver (P1) must be initialised. */
@@ -159,7 +79,7 @@ static void net_print_ip(struct cli_instance *sh, const struct nx_net_info *ni)
 {
 	if (ni->ip_valid) {
 		print_octets(sh, "ip:    ", ni->ip);
-		cli_print(sh, "/%u ", mask_bits(ni->mask));
+		cli_print(sh, "/%u ", cli_ipv4_mask_bits(ni->mask));
 		/* 0 is "no gateway", not an address (issue #19): printing 0.0.0.0 reads
 		   as a configured one. */
 		if (ni->gw != 0u)
@@ -305,11 +225,11 @@ static int cmd_net_ping(struct cli_instance *sh, int argc, char **argv)
 
 	if (!net_ip_ready(sh))
 		return 1;
-	if (parse_ipv4(argv[1], &ip) != 0) {
+	if (cli_parse_ipv4(argv[1], &ip) != 0) {
 		cli_error(sh, "net: bad address '%s'\r\n", argv[1]);
 		return 1;
 	}
-	if (argc >= 3 && parse_uint(argv[2], &c) == 0 && c > 0 && c <= 100)
+	if (argc >= 3 && cli_parse_u32(argv[2], &c) == 0 && c > 0 && c <= 100)
 		count = (int)c;
 
 	cli_print(sh, "PING %s, %d probes:\r\n", argv[1], count);
@@ -348,11 +268,11 @@ static int cmd_net_ip(struct cli_instance *sh, int argc, char **argv)
 
 	if (!net_ip_ready(sh))
 		return 1;
-	if (parse_ipv4_cidr(argv[1], &ip, &mask) != 0) {
+	if (cli_parse_ipv4_cidr(argv[1], &ip, &mask) != 0) {
 		cli_error(sh, "net: bad address '%s' (use a.b.c.d/mask)\r\n", argv[1]);
 		return 1;
 	}
-	if (argc >= 3 && parse_ipv4(argv[2], &gw) != 0) {
+	if (argc >= 3 && cli_parse_ipv4(argv[2], &gw) != 0) {
 		cli_error(sh, "net: bad gateway '%s'\r\n", argv[2]);
 		return 1;
 	}

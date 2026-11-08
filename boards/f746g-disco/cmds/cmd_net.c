@@ -513,6 +513,17 @@ static int cmd_net_mjpeg_stats(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)st.relisten_last);
 	cli_print(sh, "teardown:  disconnect failed %lu, unaccept failed %lu\r\n",
 	          (unsigned long)st.disconnect_fail, (unsigned long)st.unaccept_fail);
+	/* issue #202, second change: sends retried instead of closing, why
+	   connections closed, and the passive open armed once per client. */
+	cli_print(sh, "retried:   %lu sends, longest wait %lu ms\r\n",
+	          (unsigned long)st.send_retried, (unsigned long)st.stall_max);
+	cli_print(sh, "closed:    tcp ended %lu, stalled 10 s %lu\r\n",
+	          (unsigned long)st.close_tcp, (unsigned long)st.close_stall);
+	cli_print(sh, "accept:    armed %lu, failed %lu (last 0x%02lx), re-armed %lu\r\n",
+	          (unsigned long)st.accept_armed, (unsigned long)st.accept_fail,
+	          (unsigned long)st.accept_last, (unsigned long)st.accept_rearm);
+	cli_print(sh, "pending:   relisten answered pending %lu (taken as success)\r\n",
+	          (unsigned long)st.relisten_pending_ok);
 	return 0;
 }
 

@@ -47,10 +47,25 @@
                                             never exceeds it, so no oversized drop */
 #define MJPEG_PRIORITY       14          /* below IP(12)/DHCP(13), with net-shell */
 #define MJPEG_STACK          2048u
-#define MJPEG_ACCEPT_TICKS   500u        /* accept timeout -> stop latency         */
+#define MJPEG_ACCEPT_TICKS   500u        /* connect poll slice -> stop latency     */
 #define MJPEG_POLL_TICKS     200u        /* frame wait -> disconnect latency       */
 #define MJPEG_ALLOC_TICKS    100u        /* packet alloc wait                      */
 #define MJPEG_SEND_TICKS     NX_IP_PERIODIC_RATE  /* per-chunk send wait (1 s)     */
+/* Retransmission (issue #202).  The first retransmit 300 ms after a send, then
+   doubling (shift 1): 0.3 + 0.6 + 1.2 + 2.4 + 4.8 s, so with 4 retries TCP
+   resets a connection that has acknowledged nothing for ~9.3 s.  NetX counts
+   this timeout in ticks and decrements it every 100 ms
+   (nx_tcp_fast_periodic_processing.c:119-124, nx_tcp_enable.c:111), so a
+   value that is not a multiple of 100 rounds up.  It used to be a fixed 2 s,
+   longer than the 1 s send wait that then gave up on the connection: one lost
+   burst of 8 packets was enough to close it. */
+#define MJPEG_RTO_TICKS      300u
+#define MJPEG_RTO_RETRIES    4u
+#define MJPEG_RTO_SHIFT      1u
+/* Close a connection only when TCP says it is gone, or when no send has gone
+   through for this long (wall clock from the start of the first failing send,
+   not a count of sends or retransmits). */
+#define MJPEG_STALL_TICKS    (10u * NX_IP_PERIODIC_RATE)
 #define MJPEG_BOUNDARY       "mjpegstream"
 /* Teardown budgets (ticks, WALL CLOCK; 1 tick = 1 ms).  The sink drain is short
    -- a healthy consume() is one memcpy from its put -- while the server thread
@@ -116,13 +131,39 @@ static struct {
 	uint32_t fail_bytes;
 	uint32_t fail_frames;
 	/* The re-accept after a client (issue #202).  relisten_fail counts every
-	   failure, relisten_pending the NX_CONNECTION_PENDING ones among them. */
+	   failure, relisten_pending the NX_CONNECTION_PENDING ones among them --
+	   which stays 0 since PENDING is taken as the success it is
+	   (relisten_pending_ok below, mjpeg_relisten()). */
 	uint32_t relisten_fail;
 	uint32_t relisten_pending;
 	uint32_t relisten_last;
 	uint32_t disconnect_fail;
 	uint32_t unaccept_fail;
+	/* The second change of issue #202: sends retried instead of closing the
+	   connection, why connections were closed, and the passive open. */
+	uint32_t send_retried;           /* sends retried with the same bytes        */
+	uint32_t stall_max;              /* longest wait for a send to go through, ms */
+	uint32_t close_tcp;              /* TCP ended the connection                 */
+	uint32_t close_stall;            /* no send went through for 10 s            */
+	uint32_t accept_armed;           /* accept armed (once per connection)       */
+	uint32_t accept_fail;            /* the arm answered anything else           */
+	uint32_t accept_last;            /* its last code                            */
+	uint32_t accept_rearm;           /* the arm fell back (reset) and was redone */
+	uint32_t relisten_pending_ok;    /* NX_CONNECTION_PENDING taken as success   */
 } mstats;
+
+/* Send results inside one connection (issue #202). */
+enum mjpeg_tx {
+	MJPEG_TX_OK = 0,
+	MJPEG_TX_STALLED,       /* nothing went through for MJPEG_STALL_TICKS      */
+	MJPEG_TX_GONE,          /* TCP says the connection is gone                 */
+	MJPEG_TX_STOP,          /* `net mjpeg stop`                                */
+};
+
+/* The send stall clock (issue #202): set at the start of the first failing
+   send since the last one that went through.  Server thread only. */
+static int   stall_on;
+static ULONG stall_t0;
 
 /* The connection being served (issue #202).  Reset at every accept and written
    only by the server thread; outside mstats so that eth_open()'s reset, which
@@ -250,9 +291,15 @@ static void mjpeg_send_failed(UINT sr)
 	mstats.fail_bytes  = conn_bytes;
 	mstats.fail_frames = conn_frames;
 
-	LOG_WRN("send failed (0x%02x) after %lu pkts / %lu B, %lu frames",
-	        (unsigned)sr, (unsigned long)conn_pkts, (unsigned long)conn_bytes,
-	        (unsigned long)conn_frames);
+	/* The three answers that mean "not now" are retried (mjpeg_send()). */
+	if (sr == NX_TX_QUEUE_DEPTH || sr == NX_WINDOW_OVERFLOW || sr == NX_NO_PACKET)
+		LOG_WRN("send retried (0x%02x) after %lu pkts / %lu B, %lu frames",
+		        (unsigned)sr, (unsigned long)conn_pkts,
+		        (unsigned long)conn_bytes, (unsigned long)conn_frames);
+	else
+		LOG_WRN("send failed (0x%02x) after %lu pkts / %lu B, %lu frames",
+		        (unsigned)sr, (unsigned long)conn_pkts,
+		        (unsigned long)conn_bytes, (unsigned long)conn_frames);
 	/* NetX zeroes the socket's packet counters at accept, so sent / rexmit
 	   are this connection's. */
 	if (nx_tcp_socket_info_get(&sock, &sent, NX_NULL, NX_NULL, NX_NULL,
@@ -265,16 +312,67 @@ static void mjpeg_send_failed(UINT sr)
 		        (unsigned long)rexmit);
 }
 
+/* A send that did not go through but left the connection up (issue #202): start
+   the stall clock at the first one, and say whether it has run out.  @p t_try is
+   when the failing attempt began, so the 1 s it waited counts. */
+static int mjpeg_stalled(ULONG t_try)
+{
+	if (!stall_on) {
+		stall_on = 1;
+		stall_t0 = t_try;
+	}
+	return (ULONG)(tx_time_get() - stall_t0) >= (ULONG)MJPEG_STALL_TICKS;
+}
+
+/* One went through: stop the stall clock, keeping the longest wait. */
+static void mjpeg_went_through(void)
+{
+	if (stall_on) {
+		ULONG d = tx_time_get() - stall_t0;
+
+		if (d > mstats.stall_max)
+			mstats.stall_max = (uint32_t)d;   /* ticks = ms */
+		stall_on = 0;
+	}
+}
+
+/* Is the socket still in a state nx_tcp_socket_send() serves
+   (nx_tcp_socket_send_internal.c:325-333)? */
+static int mjpeg_sock_connected(void)
+{
+	UINT st = sock.nx_tcp_socket_state;
+
+	return st == NX_TCP_ESTABLISHED || st == NX_TCP_CLOSE_WAIT;
+}
+
 /* Send @p len bytes in MSS-sized packets (NetX fragments a >MSS payload itself,
-   double-spending the pool -- so we chunk).  Returns 0, or -1 on pool/send fail. */
-static int mjpeg_send(const uint8_t *data, ULONG len)
+   double-spending the pool -- so we chunk).
+
+   [!] A send that does not go through is RETRIED with the same bytes; nothing is
+   skipped and the connection is not closed (issue #202).  Every part announces
+   its Content-Length, so dropping the rest of a frame would hand a receiver that
+   trusts it the next part's bytes as the end of this JPEG.  "Not now" is the
+   queue staying full (NX_TX_QUEUE_DEPTH), the peer's window staying closed
+   (NX_WINDOW_OVERFLOW) or the pool running dry.  Only TCP saying the connection
+   is gone (MJPEG_TX_GONE) or MJPEG_STALL_TICKS without one send going through
+   (MJPEG_TX_STALLED) closes it.
+
+   On a failed nx_tcp_socket_send() the packet is ours again, but NetX may have
+   sent its head already: a packet longer than the usable window is sent in
+   pieces, and after each piece the original is trimmed -- prepend advanced and
+   length reduced to what is still unsent (nx_tcp_socket_send_internal.c:972-
+   1003) -- before the wait that can fail (:1012-1059, the codes set by
+   nx_tcp_transmit_cleanup.c:185-197, or :1084-1104 without a wait).  So what
+   went out is the chunk minus the packet's remaining length, and the retry
+   packs only the rest, from our own buffer. */
+static enum mjpeg_tx mjpeg_send(const uint8_t *data, ULONG len)
 {
 	NX_PACKET_POOL *pool = (NX_PACKET_POOL *)nx_net_pool();
 	ULONG mss = 0, off = 0;
 	UINT sr;
 
 	if (pool == NULL)
-		return -1;
+		return MJPEG_TX_GONE;      /* the stack is gone                            */
 	if (nx_tcp_socket_mss_get(&sock, &mss) != NX_SUCCESS || mss == 0
 	    || mss > MJPEG_MSS_CAP)
 		mss = MJPEG_MSS_CAP;
@@ -282,61 +380,88 @@ static int mjpeg_send(const uint8_t *data, ULONG len)
 	while (off < len) {
 		NX_PACKET *pkt;
 		ULONG n = len - off;
+		ULONG t_try, sent;
 
 		/* Abort mid-frame on stop/disconnect so a slow peer cannot hold the frame
 		   loop past nx_mjpeg_stop()'s bounded teardown wait (a full frame is up to
 		   ~180 MSS chunks).  The partial frame breaks this multipart part, but the
-		   connection is being torn down anyway. */
-		if (!mjpeg_run || !client_connected)
-			return -1;
+		   connection is being torn down anyway.  mjpeg_run first: a stop clears
+		   both. */
+		if (!mjpeg_run)
+			return MJPEG_TX_STOP;
+		if (!client_connected)
+			return MJPEG_TX_GONE;  /* the disconnect callback: TCP ended it        */
 		if (n > mss)
 			n = mss;
+		t_try = tx_time_get();
 		if (nx_packet_allocate(pool, &pkt, NX_TCP_PACKET, MJPEG_ALLOC_TICKS)
 		    != NX_SUCCESS) {
 			mstats.pool_fail++;
-			return -1;
+			goto retry;
 		}
 		if (nx_packet_data_append(pkt, (VOID *)(data + off), n, pool,
 		                          MJPEG_ALLOC_TICKS) != NX_SUCCESS) {
 			nx_packet_release(pkt);
 			mstats.pool_fail++;
-			return -1;
+			goto retry;
 		}
 		sr = nx_tcp_socket_send(&sock, pkt, MJPEG_SEND_TICKS);
-		if (sr != NX_SUCCESS) {
-			nx_packet_release(pkt);
-			mjpeg_send_failed(sr);
-			return -1;
+		if (sr == NX_SUCCESS) {
+			mjpeg_went_through();
+			conn_pkts++;
+			conn_bytes += n;
+			off += n;
+			continue;
 		}
-		conn_pkts++;
-		conn_bytes += n;
-		off += n;
+		/* What NetX had already sent of this chunk (see above). */
+		sent = (pkt->nx_packet_length < n) ? n - pkt->nx_packet_length : 0u;
+		nx_packet_release(pkt);
+		mjpeg_send_failed(sr);
+		/* Gone: NX_NOT_CONNECTED, or any other answer from a socket that is
+		   no longer connected.  An unknown answer from a connected socket is
+		   retried like "not now", under the same 10 s rule. */
+		if (sr == NX_NOT_CONNECTED || !mjpeg_sock_connected())
+			return MJPEG_TX_GONE;
+		if (sent != 0u) {
+			mjpeg_went_through();
+			conn_bytes += sent;
+			off += sent;
+		}
+retry:
+		mstats.send_retried++;
+		if (mjpeg_stalled(t_try))
+			return MJPEG_TX_STALLED;
 	}
-	return 0;
+	return MJPEG_TX_OK;
 }
 
-/* Send one multipart part from mjpeg_buf.  Returns 0, or -1 (disconnect). */
-static int mjpeg_send_frame(void)
+/* Send one multipart part from mjpeg_buf.  Each mjpeg_send() either delivers
+   all its bytes or ends the connection, so a part is never cut short. */
+static enum mjpeg_tx mjpeg_send_frame(void)
 {
 	char hdr[96];
 	ULONG n = buf_len;                 /* stable while buf_busy (consume waits)   */
+	enum mjpeg_tx r;
 	int hl = snprintf(hdr, sizeof hdr,
 	                  "--" MJPEG_BOUNDARY "\r\n"
 	                  "Content-Type: image/jpeg\r\n"
 	                  "Content-Length: %lu\r\n\r\n", (unsigned long)n);
 
 	if (hl < 0 || (size_t)hl >= sizeof hdr)
-		return -1;
-	if (mjpeg_send((const uint8_t *)hdr, (ULONG)hl) != 0)
-		return -1;
-	if (mjpeg_send(mjpeg_buf, n) != 0)
-		return -1;
-	if (mjpeg_send((const uint8_t *)"\r\n", 2u) != 0)
-		return -1;
+		return MJPEG_TX_GONE;      /* cannot happen: n is at most 6 digits         */
+	r = mjpeg_send((const uint8_t *)hdr, (ULONG)hl);
+	if (r != MJPEG_TX_OK)
+		return r;
+	r = mjpeg_send(mjpeg_buf, n);
+	if (r != MJPEG_TX_OK)
+		return r;
+	r = mjpeg_send((const uint8_t *)"\r\n", 2u);
+	if (r != MJPEG_TX_OK)
+		return r;
 	mstats.sent_frames++;
 	mstats.sent_bytes += n;
 	conn_frames++;
-	return 0;
+	return MJPEG_TX_OK;
 }
 
 /* ---- HTTP server thread --------------------------------------------------- */
@@ -347,26 +472,48 @@ static void mjpeg_disconnect_cb(NX_TCP_SOCKET *s)
 	client_connected = 0;          /* serve loop ends; must NOT touch buf_busy   */
 }
 
+/* Count why a connection ended (issue #202).  A stop or the producer going away
+   is not the connection's doing and is not counted. */
+static void mjpeg_count_close(enum mjpeg_tx r)
+{
+	if (r == MJPEG_TX_GONE) {
+		mstats.close_tcp++;
+	} else if (r == MJPEG_TX_STALLED) {
+		mstats.close_stall++;
+		LOG_WRN("no send went through for %u s -- closing",
+		        (unsigned)(MJPEG_STALL_TICKS / NX_IP_PERIODIC_RATE));
+	}
+}
+
 /* Serve one accepted client: skip its GET, send the multipart header, then push
-   frames until disconnect / stop / producer death. */
+   frames until disconnect / stop / producer death / a 10 s send stall.  While a
+   send is retried the producer's frames fall into drop_busy. */
 static void mjpeg_serve(void)
 {
 	NX_PACKET *req;
+	enum mjpeg_tx r;
+
+	/* Open the output gate BEFORE sending: the per-chunk send abort (mjpeg_send)
+	   keys off client_connected, and the producer's consume() begins staging
+	   frames into mjpeg_buf from here.  Start with an empty handoff + no stale
+	   frame signal.
+	   [!] And BEFORE waiting for the request: the disconnect callback clears
+	   client_connected, and one that fires during that wait (a FIN or RST right
+	   after the handshake) would be undone by setting it afterwards (issue
+	   #202). */
+	buf_busy = 0;
+	while (tx_semaphore_get(&frame_sem, TX_NO_WAIT) == TX_SUCCESS)
+		;
+	stall_on = 0;
+	client_connected = 1;
 
 	/* Skip the HTTP request (one packet, best-effort -- path is ignored). */
 	if (nx_tcp_socket_receive(&sock, &req, MJPEG_POLL_TICKS) == NX_SUCCESS)
 		nx_packet_release(req);
 
-	/* Open the output gate BEFORE sending: the per-chunk send abort (mjpeg_send)
-	   keys off client_connected, and the producer's consume() begins staging
-	   frames into mjpeg_buf from here.  Start with an empty handoff + no stale
-	   frame signal. */
-	buf_busy = 0;
-	while (tx_semaphore_get(&frame_sem, TX_NO_WAIT) == TX_SUCCESS)
-		;
-	client_connected = 1;
-
-	if (mjpeg_send((const uint8_t *)http_header, sizeof http_header - 1u) != 0) {
+	r = mjpeg_send((const uint8_t *)http_header, sizeof http_header - 1u);
+	if (r != MJPEG_TX_OK) {
+		mjpeg_count_close(r);
 		client_connected = 0;
 		return;
 	}
@@ -374,15 +521,22 @@ static void mjpeg_serve(void)
 	for (;;) {
 		(void)tx_semaphore_get(&frame_sem, MJPEG_POLL_TICKS);
 		if (!mjpeg_run || !client_connected || producer_dead) {
+			/* The disconnect callback cleared client_connected: TCP ended it
+			   (FIN or RST from the peer, or NetX's own retransmit giving up --
+			   nx_tcp_socket_connection_reset.c:131-142). */
+			if (mjpeg_run && !client_connected)
+				mjpeg_count_close(MJPEG_TX_GONE);
 			buf_busy = 0;          /* clear the unsent handoff before leaving     */
 			break;
 		}
 		if (buf_busy) {
-			int r = mjpeg_send_frame();
+			r = mjpeg_send_frame();
 
 			buf_busy = 0;          /* HTTP thread is the SOLE clearer (all exits) */
-			if (r != 0)
-				break;             /* send error -> disconnect                    */
+			if (r != MJPEG_TX_OK) {
+				mjpeg_count_close(r);
+				break;
+			}
 		}
 	}
 	client_connected = 0;
@@ -397,9 +551,9 @@ static int mjpeg_socket_setup(NX_IP *ip)
 		return -1;
 	}
 	/* Cap the TX queue so a fast stream cannot drain eth_pool away from RX/shell;
-	   2 s retransmit, 10 retries, x2 backoff. */
-	nx_tcp_socket_transmit_configure(&sock, NX_MJPEG_TX_QUEUE,
-	                                 2u * NX_IP_PERIODIC_RATE, 10, 1);
+	   retransmit from 300 ms, doubling, 4 retries (see MJPEG_RTO_TICKS). */
+	nx_tcp_socket_transmit_configure(&sock, NX_MJPEG_TX_QUEUE, MJPEG_RTO_TICKS,
+	                                 MJPEG_RTO_RETRIES, MJPEG_RTO_SHIFT);
 	if (nx_tcp_server_socket_listen(ip, NX_MJPEG_PORT, &sock, 1, NX_NULL)
 	    != NX_SUCCESS) {
 		LOG_ERR("listen :%u failed", (unsigned)NX_MJPEG_PORT);
@@ -438,9 +592,97 @@ static void mjpeg_thread_commit(void)
 	cam_own_drain_finish(&mjpeg_own, step, parked);
 }
 
+/* End the connection with a 1 s disconnect, but only in the states
+   nx_tcp_socket_disconnect() serves (nx_tcp_socket_disconnect.c:107-117:
+   ESTABLISHED, SYN_SENT, SYN_RECEIVED, CLOSE_WAIT).  In any other state the
+   connection is already over -- typically the peer closed first and TCP has
+   moved on, or a reset put the socket back to LISTEN -- and the call would only
+   answer NX_NOT_CONNECTED (0x38), a warning for a normal goodbye (issue #202).
+   A 1 s wait that runs out (0x41) is still counted and logged. */
+static void mjpeg_disconnect(void)
+{
+	UINT st = sock.nx_tcp_socket_state;
+	UINT r;
+
+	if (st != NX_TCP_ESTABLISHED && st != NX_TCP_SYN_SENT
+	    && st != NX_TCP_SYN_RECEIVED && st != NX_TCP_CLOSE_WAIT)
+		return;
+	r = nx_tcp_socket_disconnect(&sock, NX_IP_PERIODIC_RATE);
+	if (r != NX_SUCCESS) {
+		mstats.disconnect_fail++;
+		LOG_WRN("disconnect failed (0x%02x)", (unsigned)r);
+	}
+}
+
+/* Arm the passive open.  CALL EXACTLY ONCE PER CONNECTION (issue #202, as
+   owhinata/wio-lite-ai#23 found for the wio telnet and echo servers).
+
+   [!] Re-entering nx_tcp_server_socket_accept() with a timeout, to stay
+   responsive to a stop, is what this file used to do and it is NOT legal.
+   Every entry from LISTEN draws a new initial sequence number and, when a SYN
+   has already bound the socket, sends a new SYN-ACK
+   (nx_tcp_server_socket_accept.c:102-125).  A 500 ms slice that ran out in the
+   middle of a handshake therefore answered the peer's ACK with the wrong
+   numbers: the peer reset, and the reset left the socket in LISTEN, still in
+   the port table, with the peer's address cleared
+   (nx_tcp_socket_connection_reset.c:87,
+   nx_tcp_socket_block_cleanup.c:74-84 and :125).
+   From then on every accept on it allocated a SYN-ACK in
+   _nx_tcp_packet_send_control() (nx_tcp_packet_send_control.c:152) that no
+   branch sends or frees, since the address family is 0 (:328-335): one packet
+   leaked per slice, 36 of the pool's 39 on hardware, after which no client
+   could connect.  So arm once with NX_NO_WAIT and wait with
+   nx_tcp_socket_state_wait(), which may be re-entered freely; a socket that
+   falls back to LISTEN is unaccepted and relistened before it is armed again,
+   so accept never sees a bound LISTEN socket without a peer. */
+static int mjpeg_arm_accept(void)
+{
+	UINT s = nx_tcp_server_socket_accept(&sock, NX_NO_WAIT);
+
+	/* NX_IN_PROGRESS is the expected answer with NX_NO_WAIT; NX_SUCCESS means a
+	   client had already completed the handshake. */
+	if (s == NX_SUCCESS || s == NX_IN_PROGRESS) {
+		mstats.accept_armed++;
+		return 0;
+	}
+	mstats.accept_fail++;
+	mstats.accept_last = (uint32_t)s;
+	LOG_ERR("accept arm failed (0x%02x)", (unsigned)s);
+	return -1;
+}
+
+/* Put the unaccepted socket back on the listen slot.  Returns 0, or -1 when
+   the socket must be re-created.
+
+   NX_CONNECTION_PENDING is a success: a SYN was already queued, and relisten
+   has bound the socket to it and left it in LISTEN for the next accept, which
+   answers with the SYN-ACK (nx_tcp_server_socket_relisten.c:60-61 and
+   :343-396, "this is also a successful status").  It used to be handled as a
+   failure, which threw away the second connection a browser opens and rebuilt
+   the socket (issue #202). */
+static int mjpeg_relisten(NX_IP *ip)
+{
+	UINT r = nx_tcp_server_socket_relisten(ip, NX_MJPEG_PORT, &sock);
+
+	if (r == NX_SUCCESS)
+		return 0;
+	if (r == NX_CONNECTION_PENDING) {
+		mstats.relisten_pending_ok++;
+		LOG_INF("relisten: a connection was already queued (0x%02x)",
+		        (unsigned)r);
+		return 0;
+	}
+	mstats.relisten_fail++;
+	mstats.relisten_last = (uint32_t)r;
+	LOG_ERR("relisten failed (0x%02x)", (unsigned)r);
+	return -1;
+}
+
 static void mjpeg_entry(ULONG arg)
 {
 	NX_IP *ip = (NX_IP *)nx_net_ip();
+	int armed = 0;             /* accept armed on this socket and not undone       */
+	int resetup;               /* relisten / arm failed: re-create the socket      */
 
 	(void)arg;
 	for (;;) {
@@ -462,6 +704,13 @@ static void mjpeg_entry(ULONG arg)
 			continue;
 		}
 		mjpeg_listening = 1;       /* nx_mjpeg_start() waits for this              */
+		armed = 0;                 /* a new socket: listening, not yet armed       */
+		/* A new socket has no connection yet: `this conn` must not show the
+		   last one of the previous stream (issue #202). */
+		conn_frames = 0;
+		conn_pkts   = 0;
+		conn_bytes  = 0;
+		resetup = 0;
 		LOG_INF("listening on :%u (http mjpeg)", (unsigned)NX_MJPEG_PORT);
 
 		/* Serve until an explicit `net mjpeg stop` (mjpeg_run=0) or a non-recover
@@ -471,13 +720,52 @@ static void mjpeg_entry(ULONG arg)
 		   for good" from "paused for recovery" (owhinata/stm32f746g-disco#101, avoids the stale-close
 		   race).  A relisten failure breaks out to a full socket re-setup. */
 		while (mjpeg_run) {
-			/* Accept + serve while the base is delivering (producer_dead=0). */
+			/* Accept + serve while the base is delivering (producer_dead=0).
+			   The arm survives a producer pause: `armed` lives outside this loop
+			   and only a new socket, a finished connection or a fallen arm clear
+			   it -- re-arming an armed socket is exactly the call that must not
+			   be repeated (see mjpeg_arm_accept()). */
 			while (mjpeg_run && !producer_dead) {
-				UINT r;
+				UINT r, st;
 
-				if (nx_tcp_server_socket_accept(&sock, MJPEG_ACCEPT_TICKS)
-				    != NX_SUCCESS)
-					continue;      /* timeout -> re-accept (re-checks run)    */
+				if (!armed) {
+					if (mjpeg_arm_accept() != 0) {
+						resetup = 1;
+						break; /* -> re-setup the socket (below)         */
+					}
+					armed = 1;
+				}
+				/* Poll, do not re-arm.  state_wait touches nothing
+				   (nx_tcp_socket_state_wait.c:103-118). */
+				if (nx_tcp_socket_state_wait(&sock, NX_TCP_ESTABLISHED,
+				                             MJPEG_ACCEPT_TICKS) != NX_SUCCESS) {
+					st = sock.nx_tcp_socket_state;
+					/* ESTABLISHED: completed between the poll and this read --
+					   the next poll returns at once.  SYN_RECEIVED: armed and
+					   waiting (with or without a handshake under way). */
+					if (st == NX_TCP_ESTABLISHED || st == NX_TCP_SYN_RECEIVED)
+						continue;
+					/* The arm is gone: LISTEN after a reset or a handshake
+					   NetX gave up on (_nx_tcp_socket_block_cleanup() puts a
+					   server socket back to LISTEN still bound, with the
+					   peer's address cleared), or a connection that came and
+					   went between two polls.  Undo and arm again. */
+					mstats.accept_rearm++;
+					LOG_WRN("socket left the passive open (state %u) -- "
+					        "re-arming", (unsigned)st);
+					mjpeg_disconnect();
+					armed = 0;
+					r = nx_tcp_server_socket_unaccept(&sock);
+					if (r != NX_SUCCESS) {
+						mstats.unaccept_fail++;
+						LOG_WRN("unaccept failed (0x%02x)", (unsigned)r);
+					}
+					if (mjpeg_relisten(ip) != 0) {
+						resetup = 1;
+						break; /* -> re-setup the socket (below)         */
+					}
+					continue;      /* arms at the top                        */
+				}
 				mstats.conns++;
 				conn_frames = 0;
 				conn_pkts   = 0;
@@ -487,32 +775,25 @@ static void mjpeg_entry(ULONG arg)
 				/* issue #202: this connection's frames, not the total. */
 				LOG_INF("client disconnected (%lu frames)",
 				        (unsigned long)conn_frames);
-				r = nx_tcp_socket_disconnect(&sock, NX_IP_PERIODIC_RATE);
-				if (r != NX_SUCCESS) {
-					mstats.disconnect_fail++;
-					LOG_WRN("disconnect failed (0x%02x)", (unsigned)r);
-				}
+				mjpeg_disconnect();
+				armed = 0;
 				r = nx_tcp_server_socket_unaccept(&sock);
 				if (r != NX_SUCCESS) {
 					mstats.unaccept_fail++;
 					LOG_WRN("unaccept failed (0x%02x)", (unsigned)r);
 				}
-				r = nx_tcp_server_socket_relisten(ip, NX_MJPEG_PORT, &sock);
-				if (r != NX_SUCCESS) {
-					/* Counted and named (issue #202); the handling is
-					   unchanged, NX_CONNECTION_PENDING included. */
-					mstats.relisten_fail++;
-					if (r == NX_CONNECTION_PENDING)
-						mstats.relisten_pending++;
-					mstats.relisten_last = (uint32_t)r;
-					LOG_ERR("relisten failed (0x%02x)", (unsigned)r);
+				if (mjpeg_relisten(ip) != 0) {
+					resetup = 1;
 					break;     /* -> re-setup the socket (below)         */
 				}
 			}
 			if (!mjpeg_run)
 				break;             /* explicit stop                          */
-			if (!producer_dead)
-				break;             /* relisten failed -> full socket re-setup */
+			/* Relisten / arm failed -> full socket re-setup.  Tested apart from
+			   producer_dead: a failure that coincides with a producer pause
+			   would otherwise resume on a socket that is off the listen slot. */
+			if (resetup || !producer_dead)
+				break;
 
 			/* producer_dead: the base tore this sink down.  Released (a
 			   non-recover base stop) -> fully stop; still enabled (an overrun
@@ -533,8 +814,25 @@ static void mjpeg_entry(ULONG arg)
 			   producer_dead still 1) -> the outer while re-checks and stops. */
 		}
 
-		/* Stopped: tear the socket down and park. */
+		/* Stopped: tear the socket down and park.  An armed socket that never
+		   saw a client sits in SYN_RECEIVED, which unaccept refuses
+		   (nx_tcp_server_socket_unaccept.c:107-116); disconnect puts a server
+		   socket there back to LISTEN (nx_tcp_socket_disconnect.c:147-202).  It
+		   sends a FIN only when the socket has a peer interface, which the
+		   listen / relisten that preceded the arm cleared unless a SYN bound
+		   it -- and then the peer is real.  A connection that completed just
+		   as the stop came (the poll saw ESTABLISHED and the loop then ended)
+		   is reset the same way (NX_NO_WAIT: RST, back to LISTEN,
+		   nx_tcp_socket_disconnect.c:206-228). */
 		mjpeg_listening = 0;
+		{
+			UINT st = sock.nx_tcp_socket_state;
+
+			if (st == NX_TCP_SYN_RECEIVED || st == NX_TCP_ESTABLISHED
+			    || st == NX_TCP_CLOSE_WAIT)
+				(void)nx_tcp_socket_disconnect(&sock, NX_NO_WAIT);
+		}
+		armed = 0;
 		nx_tcp_server_socket_unaccept(&sock);
 		nx_tcp_server_socket_unlisten(ip, NX_MJPEG_PORT);
 		nx_tcp_socket_delete(&sock);
@@ -775,6 +1073,15 @@ bool nx_mjpeg_stats_get(struct nx_mjpeg_stats *out)
 		out->conn_frames      = conn_frames;
 		out->conn_pkts        = conn_pkts;
 		out->conn_bytes       = conn_bytes;
+		out->send_retried     = mstats.send_retried;
+		out->stall_max        = mstats.stall_max;
+		out->close_tcp        = mstats.close_tcp;
+		out->close_stall      = mstats.close_stall;
+		out->accept_armed     = mstats.accept_armed;
+		out->accept_fail      = mstats.accept_fail;
+		out->accept_last      = mstats.accept_last;
+		out->accept_rearm     = mstats.accept_rearm;
+		out->relisten_pending_ok = mstats.relisten_pending_ok;
 	}
 	return mjpeg_run != 0;
 }

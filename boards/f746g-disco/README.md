@@ -2117,12 +2117,69 @@ Nothing on a per-frame or per-flip path touches a pixel-clock-domain register;
 keep it that way (no `HAL_LTDC_SetAddress*`, `HAL_LTDC_SetPitch*`,
 `HAL_LTDC_SetWindow*`, `HAL_LTDC_ConfigLayer*` or CPSR / CDSR reads there).
 
+### `net mjpeg` retries a send, it does not drop the connection (issue #202)
+
+`net mjpeg` (`port/netxduo/nx_mjpeg.c`) serves one HTTP client at a time with a
+`multipart/x-mixed-replace` stream, one part per JPEG frame, each part with a
+`Content-Length`.
+
+- **A send that does not go through is retried with the same bytes; nothing
+  is skipped.**  Each frame goes out in packets of at most 1,400 bytes, and
+  each `nx_tcp_socket_send()` waits up to 1 s.  When one does not go through
+  (the 8 unacknowledged packets the socket allows are still out, the peer's
+  window is closed, or the packet pool is empty), the server sends the same
+  bytes again.  NetX may already have sent the head of that packet (a packet
+  larger than the usable window goes out in pieces), so only the unsent rest
+  is sent again.  Every part therefore carries exactly its `Content-Length`
+  bytes, and the stream stays correct for any receiver; the receiver sees the
+  picture pause.  The camera's frames that arrive meanwhile are counted in
+  `dropped: busy`.
+- **The connection is closed only when TCP ends it, or after 10 s without one
+  send going through.**  TCP ends it on a FIN or RST from the peer, or when its
+  own retransmissions run out.  The 10 s are wall clock (`tx_time_get()`),
+  counted from the start of the first send that failed since the last one that
+  went through.
+- **Retransmission starts at 300 ms and doubles, 4 retries**
+  (`nx_tcp_socket_transmit_configure()`): retransmits 0.3, 0.9, 2.1 and 4.5 s
+  after a packet that is not acknowledged, and TCP resets the connection at
+  about 9.3 s.  It used to be 2 s, so one lost burst of packets outlasted the
+  1 s send wait and the server gave up on the client.
+- **`accept` is armed once per connection.**  The server arms
+  `nx_tcp_server_socket_accept()` with `NX_NO_WAIT` and then polls
+  `nx_tcp_socket_state_wait()` every 500 ms (which changes nothing in the
+  socket) so that a stop is seen.  Calling `accept` again on every timeout, as
+  it used to, makes NetX draw a new sequence number and send a new SYN-ACK; a
+  timeout in the middle of a handshake made the peer reset, and from then on
+  each `accept` leaked one packet of the pool until no client could connect
+  (the same fault as owhinata/wio-lite-ai#23).  When the socket falls back to
+  LISTEN (reset by the peer, or a handshake TCP gave up on) the server unaccepts
+  it, relistens and arms again.
+- **A relisten answered `NX_CONNECTION_PENDING` (0x48) is a success**: a second
+  connection (a browser opens one for the favicon) was already queued and the
+  next `accept` takes it.  It used to be handled as a failure and the socket was
+  re-created.
+- The ETH RX DMA ring has 8 descriptors (`ETH_RX_DESC_CNT=8U` in
+  `board.cmake`; the HAL default is 4).  Each one holds a packet of the 64 KB
+  NetX pool while it is armed.
+
+**Measured (2026-11-08, camera JPEG at 14.9 fps, the PC on Wi-Fi):**
+
+| What | Before | After |
+|---|---|---|
+| A reader that always reads, 60 s, three runs | dropped after 1.2 / 6.3 / 20.7 s | all three held 60 s (5.3 to 6.5 fps) |
+| Why it dropped | 8 in-flight packets of a frame lost outside the board (driver drops 0, HAL refusals 0, the PC's window open), the 2 s retransmit outlasted the 1 s send wait | the same bursts still happen (6 to 15 retried sends per minute); each one is a 1.2 to 1.5 s pause, longest wait 2.0 s, no close |
+| Packet pool after the tests | 39 -> 25 -> 0 once a handshake was interrupted (every `accept` leaked one) | 31 of 39 after every test (8 are armed RX descriptors) |
+| ETH RX DMA "buffer unavailable" | 183 in 25 s with 4 descriptors | 0 in 3 x 60 s; 2 during 20 rapid connect/abort cycles |
+| 20 (then 10) connect/abort cycles with `curl -m 0.3` | -- | all served, 2 re-arms, the next reader held its 15 to 20 s |
+| 20 s of the raw stream | -- | 109 of 109 complete parts: `Content-Length` matched, `FF D8` ... `FF D9` |
+
+A second client that connects while one is being served waits for the first
+to leave (one socket, listen backlog 1); its SYN stays queued, so a reader
+with a 5 s connect timeout gives up.
+
 ### Network counters: `net info` and `net mjpeg stats` (issue #202)
 
-`net mjpeg` (`port/netxduo/nx_mjpeg.c`) gives up on a client when one
-`nx_tcp_socket_send()` has not gone through within 1 s, and closes the
-connection.  These counters tell where the packets went; they observe only and
-change nothing in the TCP settings, the waits or the teardown.
+These counters tell where the packets of `net mjpeg` went.  They observe only.
 
 `net info`, once the IP stack is up, adds these lines below `telnet:`.  They
 count from boot and are never reset; the driver, TCP and pool groups are read one
@@ -2162,7 +2219,14 @@ at fail:   <n> frames, <n> pkts, <n> bytes on that connection
 this conn: <n> frames, <n> pkts, <n> bytes
 relisten:  failed <n> (pending <n>), last 0x<2 hex>
 teardown:  disconnect failed <n>, unaccept failed <n>
+retried:   <n> sends, longest wait <n> ms
+closed:    tcp ended <n>, stalled 10 s <n>
+accept:    armed <n>, failed <n> (last 0x<2 hex>), re-armed <n>
+pending:   relisten answered pending <n> (taken as success)
 ```
+
+`errors: send` counts every failed `nx_tcp_socket_send()`, including those
+that were then retried.
 
 - **`send fail`** splits `errors: send` by what `nx_tcp_socket_send()` answered:
   `window` NX_WINDOW_OVERFLOW (0x39, the peer's window stayed closed), `queue`
@@ -2171,27 +2235,52 @@ teardown:  disconnect failed <n>, unaccept failed <n>
   anything else.  `last` is the last failing code.
 - **`at fail`** is what the connection had sent when the last send failed;
   **`this conn`** is the current connection, or the last one when no client is
-  attached.  Packets and bytes are those `nx_tcp_socket_send()` accepted,
+  attached; it starts from 0 when `net mjpeg start` creates the socket.  Packets and bytes are those `nx_tcp_socket_send()` accepted,
   multipart boundaries and the HTTP header included.
 - **`relisten`** counts `nx_tcp_server_socket_relisten()` failures after a
-  client left; `pending` is how many of them were NX_CONNECTION_PENDING (0x48: a
-  connection request was already queued and is now under way -- NetX documents
-  it as a successful status, but this code still handles it as a failure).
-  Each one is followed, as before, by a full socket re-create (`relisten
-  failed`, `stopped`, `listening` in `dmesg`).
+  client left or after a fallen `accept`; each one is followed by a full socket
+  re-create (`relisten failed`, `stopped`, `listening` in `dmesg`).  `pending`
+  counted the NX_CONNECTION_PENDING answers among the failures while they were
+  handled as one; it now stays 0, and the **`pending:`** line counts them.
+- **`teardown`** counts the failures of the 1 s `nx_tcp_socket_disconnect()`
+  and of `nx_tcp_server_socket_unaccept()` when a connection ends (and when a
+  fallen `accept` is undone).  The disconnect is called only in the states NetX
+  accepts it in (ESTABLISHED, SYN_SENT, SYN_RECEIVED, CLOSE_WAIT); when the
+  peer has already closed and TCP has moved past those, it is skipped and not
+  counted.  The socket is put back to listening after either.
+- **`retried`** counts the sends retried with the same bytes (after a failed
+  `nx_tcp_socket_send()` or an empty pool); `longest wait` is the longest time
+  from the start of a failing send until one went through again, in ms.
+- **`closed`** is why connections ended: `tcp ended` is TCP ending it (a FIN or
+  RST from the peer, NetX's retransmissions running out, or a send answering
+  that the socket is no longer connected); `stalled 10 s` is the server closing
+  it after 10 s without one send going through.  A `net mjpeg stop` or the
+  camera going away is not counted.
+- **`accept`**: `armed` counts the `accept` arms (one per connection, plus one
+  per re-arm); `failed` the arms that answered anything other than
+  NX_IN_PROGRESS or NX_SUCCESS, which re-create the socket; `re-armed` the
+  times the armed socket fell back (LISTEN after a reset, or a connection that
+  came and went between two polls) and was unaccepted, relistened and armed
+  again.
 
 `dmesg` lines from `mjpeg`:
 
 - `client disconnected (<n> frames)` -- the frames sent on that connection (until
   issue #202 the session total);
-- `send failed (0x<code>) after <n> pkts / <n> B, <n> frames`, then `socket:
+- `send retried (0x<code>) after <n> pkts / <n> B, <n> frames` when the answer
+  was 0x49, 0x39 or 0x01 and the same bytes are sent again, otherwise `send
+  failed (0x<code>) ...` with the same fields; either is followed by `socket:
   state <n>, txq <n>, txwin <n>, rxwin <n>, sent <n>, rexmit <n>`
   (`nx_tcp_socket_info_get()` at that moment: the TCP state, 5 established; the
   packets queued unacknowledged; the peer's advertised window; the receive
   window; and the packets sent and retransmitted on this connection, which NetX
   zeroes at accept);
 - `disconnect failed (0x<code>)`, `unaccept failed (0x<code>)`, `relisten failed
-  (0x<code>)`.
+  (0x<code>)`;
+- `no send went through for 10 s -- closing`;
+- `socket left the passive open (state <n>) -- re-arming` (2 is LISTEN);
+- `accept arm failed (0x<code>)`;
+- `relisten: a connection was already queued (0x48)`.
 
 ## Debugging
 

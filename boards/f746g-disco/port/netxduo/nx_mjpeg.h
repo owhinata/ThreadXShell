@@ -63,13 +63,23 @@ struct nx_mjpeg_stats {
 	uint32_t fail_bytes;     /**< bytes the connection had sent at that failure    */
 	uint32_t fail_frames;    /**< frames the connection had sent at that failure   */
 	uint32_t relisten_fail;  /**< nx_tcp_server_socket_relisten() failures         */
-	uint32_t relisten_pending; /**< of those, NX_CONNECTION_PENDING                */
+	uint32_t relisten_pending; /**< of those, NX_CONNECTION_PENDING (now always 0) */
 	uint32_t relisten_last;  /**< the last failing relisten code                   */
 	uint32_t disconnect_fail;/**< nx_tcp_socket_disconnect() failures              */
 	uint32_t unaccept_fail;  /**< nx_tcp_server_socket_unaccept() failures         */
 	uint32_t conn_frames;    /**< the current / last connection: frames sent       */
 	uint32_t conn_pkts;      /**< ... packets nx_tcp_socket_send() took            */
 	uint32_t conn_bytes;     /**< ... bytes in them                                */
+	/* issue #202, second change */
+	uint32_t send_retried;   /**< sends retried with the same bytes (conn kept)    */
+	uint32_t stall_max;      /**< longest wait for a send to go through, ms        */
+	uint32_t close_tcp;      /**< connections TCP ended (FIN / RST / retransmit)   */
+	uint32_t close_stall;    /**< connections closed after 10 s without a send     */
+	uint32_t accept_armed;   /**< accept armed (once per connection)               */
+	uint32_t accept_fail;    /**< arms that answered anything else                 */
+	uint32_t accept_last;    /**< the last failing arm code                        */
+	uint32_t accept_rearm;   /**< arms that fell back (reset) and were redone      */
+	uint32_t relisten_pending_ok; /**< relisten NX_CONNECTION_PENDING, a success   */
 };
 
 /**

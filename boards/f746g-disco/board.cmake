@@ -186,9 +186,21 @@ target_compile_definitions(bsp_iface INTERFACE USE_HAL_DRIVER STM32F746xx
     #   high-water at or below half the ring (2,047 B), which `blob write`
     #   prints.  Here, not in the backend header, because cli_backend_uart.h
     #   is included by more than one TU and all of them must agree.
+    #
+    # ETH_RX_DESC_CNT=8U (issue #202): the ETH RX DMA descriptor ring, 4 in
+    #   stm32f7xx_hal_eth.h's #ifndef default.  `net mjpeg` saw the DMA run out
+    #   of receive buffers 183 times in 25 s with 4.  This board has no
+    #   stm32f7xx_hal_conf.h of its own (it is copied from the upstream
+    #   template), so the override is here, and on every TU for the same
+    #   reason as the knobs above: ETH_HandleTypeDef carries an
+    #   RxDesc[ETH_RX_DESC_CNT] array, and the HAL and port/eth/eth_link.c must
+    #   agree on its size.  Each armed descriptor holds one packet of the NetX
+    #   pool (port/netxduo/nx_eth_driver.c, HAL_ETH_RxAllocateCallback).
+    #   ETH_TX_DESC_CNT stays at the HAL's 4.
     CLI_CPU_CYCLES_PER_US=108
     CLI_INSTANCE_TIME_SLICE=0
-    CLI_UART_RX_BUFFER_SIZE=4096)
+    CLI_UART_RX_BUFFER_SIZE=4096
+    ETH_RX_DESC_CNT=8U)
 target_compile_options(bsp_iface INTERFACE
     ${MCU_OPTS} -Wall -fdata-sections -ffunction-sections -g -gdwarf-2)
 target_link_options(bsp_iface INTERFACE

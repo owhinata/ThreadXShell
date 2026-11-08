@@ -39,6 +39,9 @@
 #ifdef TX_EXECUTION_PROFILE_ENABLE
 #include "tx_execution_profile.h"  /* EXECUTION_TIME, _tx_execution_*_time_get (issue #19) */
 #endif
+/* The state kept between runs is the board's object, not this file's: a shared
+ * command owns no mutable storage (issue #206). */
+#include "thread_cmd_board.h"
 
 #include <stdint.h>
 #include <stdio.h>           /* snprintf for the cpu% field */
@@ -98,10 +101,11 @@ static ULONG stack_peak_used(const TX_THREAD *t)
 }
 
 /*
- * Single-run guard.  The cpu% snapshot below is process-wide static state with
- * no locking of its own, so two concurrent runs (`thread` at the prompt while a
- * `thread &` background job walks the same table) would interleave their reads
- * and their commit and produce garbage windows for both.  Board-independent:
+ * Single-run guard.  The cpu% snapshot below is process-wide state (the
+ * board's thread_cmd_board_state) with no locking of its own, so two
+ * concurrent runs (`thread` at the prompt while a `thread &` background job
+ * walks the same table) would interleave their reads and their commit and
+ * produce garbage windows for both.  Board-independent:
  * TX_DISABLE/TX_RESTORE are the same PRIMASK critical section on all three
  * ports, so no CMSIS header is needed here.
  *
@@ -109,24 +113,22 @@ static ULONG stack_peak_used(const TX_THREAD *t)
  * without it the command is a pure read of ThreadX-owned state.
  */
 #ifdef TX_EXECUTION_PROFILE_ENABLE
-static volatile UINT thread_busy;
-
 static int thread_try_acquire(void)
 {
 	TX_INTERRUPT_SAVE_AREA
 	int ok;
 
 	TX_DISABLE
-	ok = (thread_busy == 0u);
+	ok = (thread_cmd_board_state.busy == 0u);
 	if (ok)
-		thread_busy = 1u;
+		thread_cmd_board_state.busy = 1u;
 	TX_RESTORE
 	return ok;
 }
 
 static void thread_release(void)
 {
-	thread_busy = 0u;
+	thread_cmd_board_state.busy = 0u;
 }
 #else
 /* No snapshot to protect without the kit: the command is then a pure read of
@@ -164,31 +166,26 @@ __attribute__((weak)) int cli_thread_cpu_source_ok(const char **why)
  * port/threadx/tx_glue.c).  Only the RATIO matters here, so the counter's rate
  * never enters the arithmetic: cpu% = delta_thread / window, where window =
  * delta(all threads + isr + idle) over the window since the previous `thread`
- * run.  The previous snapshot lives here (threads are static and never deleted,
- * so a small pointer-keyed table suffices).  Before the first committed run the
+ * run.  The previous snapshot lives in the board's thread_cmd_board_state
+ * (thread_cmd_board.h; threads are static and never deleted, so a small
+ * pointer-keyed table suffices).  Before the first committed run the
  * table is empty and every baseline is 0; the kit's totals are monotonic and
  * nothing resets them, so 0 means "since profiling started" and the first run
  * prints real numbers over that window (plus a one-line note saying so).
  */
-#define THREAD_CPU_PREV_MAX 16
-struct cpu_snap { TX_THREAD *t; EXECUTION_TIME prev; };
-static struct cpu_snap cpu_prev[THREAD_CPU_PREV_MAX];
-static UINT           cpu_prev_count;
-static EXECUTION_TIME cpu_prev_thread, cpu_prev_isr, cpu_prev_idle;
-static int            cpu_baseline_committed;   /* 0 until the first commit below */
-
 static EXECUTION_TIME cpu_prev_lookup(const TX_THREAD *t)
 {
+	const struct thread_cmd_state *st = &thread_cmd_board_state;
 	UINT i;
-	for (i = 0; i < cpu_prev_count; i++)
-		if (cpu_prev[i].t == t)
-			return cpu_prev[i].prev;
+	for (i = 0; i < st->prev_count; i++)
+		if (st->prev[i].t == t)
+			return st->prev[i].prev;
 	return 0;   /* unseen thread -> baseline 0 (its first window may read high once) */
 }
 
 /* This run's snapshot, keyed the same way.  Returns 0 when the thread was not
  * sampled (more threads exist than the table holds). */
-static int cpu_cur_lookup(const struct cpu_snap *snap, UINT n,
+static int cpu_cur_lookup(const struct thread_cpu_snap *snap, UINT n,
                           const TX_THREAD *t, EXECUTION_TIME *out)
 {
 	UINT i;
@@ -225,7 +222,8 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 	ULONG count, i;
 #ifdef TX_EXECUTION_PROFILE_ENABLE
 	EXECUTION_TIME tt = 0, it = 0, id = 0, window;
-	struct cpu_snap next_prev[THREAD_CPU_PREV_MAX];
+	struct thread_cmd_state *st = &thread_cmd_board_state;
+	struct thread_cpu_snap next_prev[THREAD_CPU_PREV_MAX];
 	UINT next_count = 0;
 	const char *cpu_why = NULL;
 	int  cpu_ok;
@@ -293,7 +291,7 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 	TX_RESTORE
 
 #ifdef TX_EXECUTION_PROFILE_ENABLE
-	window = (tt - cpu_prev_thread) + (it - cpu_prev_isr) + (id - cpu_prev_idle);
+	window = (tt - st->prev_thread) + (it - st->prev_isr) + (id - st->prev_idle);
 	cli_print(sh, "%-20s %-6s %3s %8s %6s %5s %5s %6s\r\n",
 	          "name", "state", "pri", "runs", "size", "peak", "use%", "cpu%");
 #else
@@ -349,24 +347,24 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 
 #ifdef TX_EXECUTION_PROFILE_ENABLE
 	/* Pseudo-rows so the cpu% column sums to ~100%: idle headroom and ISR load. */
-	cpu_fmt(cpubuf, sizeof cpubuf, have, id - cpu_prev_idle, window);
+	cpu_fmt(cpubuf, sizeof cpubuf, have, id - st->prev_idle, window);
 	cli_print(sh, "%-20s %-6s %3s %8s %6s %5s %5s %6s\r\n",
 	          "(idle)", "", "", "", "", "", "", cpubuf);
-	cpu_fmt(cpubuf, sizeof cpubuf, have, it - cpu_prev_isr, window);
+	cpu_fmt(cpubuf, sizeof cpubuf, have, it - st->prev_isr, window);
 	cli_print(sh, "%-20s %-6s %3s %8s %6s %5s %5s %6s\r\n",
 	          "(isr)", "", "", "", "", "", "", cpubuf);
-	if (have && !cpu_baseline_committed)
+	if (have && !st->baseline_committed)
 		cli_print(sh, "cpu%%: window is since profiling started"
 		              " (later runs: since the previous thread)\r\n");
 
 	/* Commit this snapshot as the baseline for the next `thread`. */
 	for (i = 0; i < next_count; i++)
-		cpu_prev[i] = next_prev[i];
-	cpu_prev_count  = next_count;
-	cpu_prev_thread = tt;
-	cpu_prev_isr    = it;
-	cpu_prev_idle   = id;
-	cpu_baseline_committed = 1;
+		st->prev[i] = next_prev[i];
+	st->prev_count  = next_count;
+	st->prev_thread = tt;
+	st->prev_isr    = it;
+	st->prev_idle   = id;
+	st->baseline_committed = 1;
 #endif
 
 done:

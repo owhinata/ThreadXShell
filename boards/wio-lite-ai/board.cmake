@@ -471,6 +471,7 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_builtin.c"
     "${BOARD_DIR}/cmds/cmd_system.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_thread.c"
+    "${BOARD_DIR}/cmds/cmd_thread_board.c"   # the shared `thread`'s state (#206)
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_console.c"
     "${BOARD_DIR}/cmds/cmd_free.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_sleep.c"

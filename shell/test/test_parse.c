@@ -376,6 +376,46 @@ static void test_value_parsers(void)
 	assert(cli_ipv4_mask_bits(0xFFFFFF00u) == 24u);
 	assert(cli_ipv4_mask_bits(0u) == 0u);
 	assert(cli_ipv4_mask_bits(0xFFFFFFFFu) == 32u);
+
+	/*
+	 * Edge cases the board copies agreed on before #207 replaced them with
+	 * the functions above, so callers that moved over keep the same answers.
+	 */
+	assert(cli_parse_u32("010", &v) == 0 && v == 10u);   /* decimal, not octal */
+	assert(cli_parse_u32("+1", &v) != 0);                 /* no sign          */
+	assert(cli_parse_u32(" 1", &v) != 0);                 /* no leading space */
+	assert(cli_parse_u32("4294967320", &v) != 0);         /* wraps to 24      */
+	assert(cli_parse_ipv4("01.2.3.4", &ip) == 0 && ip == 0x01020304u);
+	assert(cli_parse_ipv4("000000000001.2.3.4", &ip) == 0 && ip == 0x01020304u);
+	assert(cli_parse_ipv4("1..2.3", &ip) != 0);
+	assert(cli_parse_ipv4(".1.2.3.4", &ip) != 0);
+	assert(cli_parse_ipv4("1.2.3.4.", &ip) != 0);
+	assert(cli_parse_ipv4("", &ip) != 0);
+
+	/* the prefix length goes through cli_parse_u32: hex and leading zeros
+	 * are read, a sign or a value that would wrap past 2^32 is not */
+	assert(cli_parse_ipv4_cidr("1.2.3.4/0x18", &ip, &mask) == 0 &&
+	       ip == 0x01020304u && mask == 0xFFFFFF00u);
+	assert(cli_parse_ipv4_cidr("1.2.3.4/024", &ip, &mask) == 0 &&
+	       mask == 0xFFFFFF00u);
+	ip = mask = 0x5A5A5A5Au;
+	assert(cli_parse_ipv4_cidr("1.2.3.4/4294967296", &ip, &mask) != 0);
+	assert(mask == 0x5A5A5A5Au);                          /* mask untouched   */
+	assert(cli_parse_ipv4_cidr("1.2.3.4/4294967320", &ip, &mask) != 0);
+	assert(cli_parse_ipv4_cidr("1.2.3.4/+24", &ip, &mask) != 0);
+	assert(cli_parse_ipv4_cidr("1.2.3.4/-1", &ip, &mask) != 0);
+	assert(cli_parse_ipv4_cidr("1.2.3.4/24/", &ip, &mask) != 0);
+	assert(cli_parse_ipv4_cidr("1.2.3.4//24", &ip, &mask) != 0);
+
+	/* the address part is copied into a 20-byte buffer: 19 characters fit,
+	 * 20 are rejected rather than cut short (the first 19 of the second
+	 * input are a valid address, so cutting it short would accept it) */
+	assert(cli_parse_ipv4_cidr("0000000000001.2.3.4/24", &ip, &mask) == 0 &&
+	       ip == 0x01020304u);
+	assert(cli_parse_ipv4_cidr("0000000000001.2.3.45/24", &ip, &mask) != 0);
+
+	/* a netmask with gaps counts only the leading 1 bits */
+	assert(cli_ipv4_mask_bits(0xFF00FF00u) == 8u);        /* 255.0.255.0      */
 }
 
 int main(void)

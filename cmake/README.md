@@ -89,7 +89,10 @@ direct objects and the members of the static libraries it takes) whose source
 is this repository's own: not under `lib/`, `boards/<board>/lib/` or
 `boards/<board>/sdk/`, and not generated in the build tree. Each is replayed
 with the same argv rules as the storage audit (in parallel); one that cannot be
-replayed fails rather than being skipped.
+replayed fails rather than being skipped. The set is taken from `build.ninja`,
+not from the compile DB: every such object a compile edge produces must have
+exactly one `compile_commands.json` entry with that output and that source, so
+a stale or cut DB cannot hide a translation unit from these rules.
 
 - (a) Its dependencies (`gcc -M`, which also lists files found through
   `-isystem`) may not include a `.c`, `.cc`, `.cpp` or `.cxx` other than
@@ -117,7 +120,9 @@ not a defence against a hostile change; these are left to diff review:
 - a copy of an optional shared command placed in `boards/<board>/cmds/` on a
   board where its property is `OFF`;
 - an object produced by a custom command rather than a compile in
-  `compile_commands.json` (nothing replays it).
+  `compile_commands.json` (nothing replays it);
+- the `svc/ymodem.c` exception covers the whole translation unit, so a new
+  static added to it passes as well (#210 removes the exception itself).
 
 ## Negative tests
 

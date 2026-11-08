@@ -67,6 +67,8 @@ REGISTRATION = ".shell_root_cmds"
 INCLUDED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx"}
 # Existing protocol staging buffers and last-run diagnostics; moving these out
 # would change ownership/reentrancy and is not part of the stateless nn contract.
+# [!] The exception covers the whole TU: a new static added to ymodem.c passes
+# too. #210 removes the exception rather than narrowing it to symbols.
 EXCEPTIONS = {"svc/ymodem.c": "existing s_block, s_rdata and s_diag (non-reentrant protocol)"}
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".s", ".S"}
 # Which suffixes each driver may compile. Together these are SOURCE_SUFFIXES.
@@ -293,7 +295,8 @@ def capabilities(path):
 
 
 def shell_link(ninja_path, link_target):
-    """(objects the link takes directly, objects of the archives it takes).
+    """(objects the link takes directly, objects of the archives it takes,
+    and for each of those objects the source its compile edge reads, or None).
 
     Read with check_delivery_gate.py's parser. Only the inputs before `|` are
     linked as written; an archive's members are listed separately so that a
@@ -332,7 +335,16 @@ def shell_link(ninja_path, link_target):
         e = producer.get(norm(i))
         if e is not None and "STATIC_LIBRARY" in e.rule:
             archived |= {norm(j) for j in e.explicit}
-    return direct, archived
+    # #206 review: which source each linked object is compiled from, read from
+    # the graph itself (the first explicit input of a CMake compile edge), so
+    # the compile DB can be held to it. An object no compile edge produces (a
+    # prebuilt, a custom command) has none.
+    origin = {}
+    for obj in direct | archived:
+        e = producer.get(obj)
+        compiles = e is not None and "_COMPILER__" in e.rule and e.explicit
+        origin[obj] = norm(e.explicit[0]) if compiles else None
+    return direct, archived, origin
 
 
 def own_source(src, root, build):
@@ -352,17 +364,33 @@ def may_register(src, root):
         len(parts) > 3 and parts[0] == "boards" and parts[2] == "cmds")
 
 
-def linked_units(database, root, build, objects):
-    """Every compile of an own source whose object the shell link takes."""
-    units = []
+def linked_units(database, root, build, origin):
+    """Every compile of an own source whose object the shell link takes.
+
+    Both ways (#206 review): a DB entry whose output the link takes is a unit,
+    and every linked object build.ninja compiles from an own source must have
+    exactly one DB entry with that output and that source -- a stale or cut
+    compile DB would otherwise hide a TU from rules (a)(b)(c).
+    """
+    by_output = {}
     for entry in json.loads(Path(database).read_text()):
         cwd = Path(entry["directory"])
-        src = canonical(entry["file"], cwd)
-        if not own_source(src, root, build):
+        output = canonical(output_of(entry_argv(entry)), cwd)
+        by_output.setdefault(output, []).append(entry)
+    units, checked = [], 0
+    for obj, src in sorted(origin.items()):
+        if src is None or not own_source(src, root, build):
             continue
-        argv = entry_argv(entry)
-        if canonical(output_of(argv), cwd) in objects:
-            units.append((src, entry, argv))
+        checked += 1
+        entries = by_output.get(obj, [])
+        need(len(entries) == 1, f"the shell link takes {obj}, compiled from "
+             f"{src.relative_to(root).as_posix()}, which has {len(entries)} entries "
+             "in compile_commands.json (exactly one is required)")
+        entry = entries[0]
+        cwd = Path(entry["directory"])
+        need(canonical(entry["file"], cwd) == src,
+             f"compile_commands.json compiles {obj} from {entry['file']}, build.ninja from {src}")
+        units.append((src, entry, entry_argv(entry)))
     need(units, "no own source reaches the shell link")
     return units
 
@@ -560,13 +588,13 @@ def audit(args):
     targets, wanted = inventory(args.inventory, root)
     selected = select(args.database, targets, wanted, root)
     marks = command_marks(root)
-    direct, archived = shell_link(args.ninja, args.link_target)
+    direct, archived, origin = shell_link(args.ninja, args.link_target)
     report["commands"] = check_commands(selected, root, marks, capabilities(args.capabilities),
                                         direct, archived)
     shipped = sum(bool(r["shipped_by"]) for r in report["commands"])
     build = Path(args.ninja).parent.resolve()
     with tempfile.TemporaryDirectory(prefix="shared-storage-") as scratch:
-        rules = check_units(linked_units(args.database, root, build, direct | archived),
+        rules = check_units(linked_units(args.database, root, build, origin),
                             root, cc, cxx, args.objdump, scratch)
         report["rules"] = rules
         print(f"shared_storage: rules: {rules['units']} own TUs in the {args.link_target} link "

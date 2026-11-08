@@ -380,6 +380,27 @@ def rules(root, tmp, args):
                        "coverage verified")
     assert re.search(r"shared_storage: rules: \d+ own TUs in the shell link checked for included "
                      r"sources, 2 register 2 distinct root commands", text), text
+    # The compile DB must cover every own object the link takes (#206 review):
+    # a stale or cut DB would otherwise hide a registering board TU from (b)(c).
+    build = tmp / "rules-baseline"
+    audit = [sys.executable, str(CMAKE / "check_shared_storage_build.py"), "--root", str(root),
+             "--database", str(build / "compile_commands.json"),
+             "--inventory", str(build / "shared-storage/inventory"),
+             "--ninja", str(build / "build.ninja"),
+             "--capabilities", str(build / "shared-storage/capabilities.txt"),
+             "--cc", args.cc, "--cxx", args.cxx, "--objdump", args.objdump, "--nm", args.nm]
+    base = (build / "compile_commands.json").read_text()
+    entries = json.loads(base)
+    board = [e for e in entries if e["file"].endswith("/boards/fix/cmds/board_cmd.c")]
+    assert len(board) == 1, board
+    for label, data, count in (("dropped", [e for e in entries if e not in board], 0),
+                               ("duplicated", entries + board, 2)):
+        (build / "compile_commands.json").write_text(json.dumps(data))
+        run(audit, False, "boards/fix/cmds/board_cmd.c, which has %d entries in "
+            "compile_commands.json (exactly one is required)" % count)
+        print("ok rule DB entry of a linked board TU", label, "refused")
+    (build / "compile_commands.json").write_text(base)
+    run(audit, contains="coverage verified")
     # (a) a board TU that includes a shared command ships it outside the audit.
     write(root, "boards/fix/src/inc.c", '#include "../../../shell/cmds/cmd_blob.c"\n')
     first_build("a-include", ["boards/fix/src/inc.c"], False,

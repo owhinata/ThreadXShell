@@ -34,40 +34,6 @@
 #include <stdint.h>
 #include <string.h>
 
-static int parse_u32(const char *s, uint32_t *out)
-{
-	uint32_t base = 10;
-	uint32_t val = 0;
-	const char *p = s;
-
-	if (p == NULL || *p == '\0')
-		return -1;
-	if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-		base = 16;
-		p += 2;
-		if (*p == '\0')
-			return -1;
-	}
-	for (; *p != '\0'; p++) {
-		uint32_t digit;
-		char c = *p;
-
-		if (c >= '0' && c <= '9')
-			digit = (uint32_t)(c - '0');
-		else if (base == 16 && c >= 'a' && c <= 'f')
-			digit = (uint32_t)(c - 'a' + 10);
-		else if (base == 16 && c >= 'A' && c <= 'F')
-			digit = (uint32_t)(c - 'A' + 10);
-		else
-			return -1;
-		if (val > (0xFFFFFFFFu - digit) / base)
-			return -1;
-		val = val * base + digit;
-	}
-	*out = val;
-	return 0;
-}
-
 /* Colour name or numeric RGB565 (0x.... / decimal, 0..0xFFFF). */
 static int parse_color(const char *s, uint16_t *out)
 {
@@ -92,7 +58,7 @@ static int parse_color(const char *s, uint16_t *out)
 			return 0;
 		}
 	}
-	if (parse_u32(s, &v) == 0 && v <= 0xFFFFu) {
+	if (cli_parse_u32(s, &v) == 0 && v <= 0xFFFFu) {
 		*out = (uint16_t)v;
 		return 0;
 	}

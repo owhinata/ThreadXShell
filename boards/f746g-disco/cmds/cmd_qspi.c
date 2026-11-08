@@ -57,41 +57,6 @@ static const char *qspi_strerror(int rc)
 	}
 }
 
-/* Strict 32-bit parse: 0x-prefixed hex or decimal (same contract as devmem). */
-static int parse_u32(const char *s, uint32_t *out)
-{
-	uint32_t base = 10;
-	uint32_t val = 0;
-	const char *p = s;
-
-	if (p == NULL || *p == '\0')
-		return -1;
-	if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-		base = 16;
-		p += 2;
-		if (*p == '\0')
-			return -1;
-	}
-	for (; *p != '\0'; p++) {
-		uint32_t digit;
-		char c = *p;
-
-		if (c >= '0' && c <= '9')
-			digit = (uint32_t)(c - '0');
-		else if (base == 16 && c >= 'a' && c <= 'f')
-			digit = (uint32_t)(c - 'a' + 10);
-		else if (base == 16 && c >= 'A' && c <= 'F')
-			digit = (uint32_t)(c - 'A' + 10);
-		else
-			return -1;
-		if (val > (0xFFFFFFFFu - digit) / base)
-			return -1;
-		val = val * base + digit;
-	}
-	*out = val;
-	return 0;
-}
-
 static int cmd_qspi_probe(struct cli_instance *sh, int argc, char **argv)
 {
 	uint8_t id[3];
@@ -219,11 +184,11 @@ static int cmd_qspi_read(struct cli_instance *sh, int argc, char **argv)
 	uint32_t addr, len = 64;
 	int rc;
 
-	if (parse_u32(argv[1], &addr) != 0) {
+	if (cli_parse_u32(argv[1], &addr) != 0) {
 		cli_error(sh, "qspi: bad address '%s'\r\n", argv[1]);
 		return 1;
 	}
-	if (argc >= 3 && parse_u32(argv[2], &len) != 0) {
+	if (argc >= 3 && cli_parse_u32(argv[2], &len) != 0) {
 		cli_error(sh, "qspi: bad length '%s'\r\n", argv[2]);
 		return 1;
 	}
@@ -248,7 +213,7 @@ static int cmd_qspi_read(struct cli_instance *sh, int argc, char **argv)
 /* Parse + gate a destructive target: must be subsector-aligned and in range. */
 static int parse_subsector(struct cli_instance *sh, const char *s, uint32_t *addr)
 {
-	if (parse_u32(s, addr) != 0) {
+	if (cli_parse_u32(s, addr) != 0) {
 		cli_error(sh, "qspi: bad address '%s'\r\n", s);
 		return -1;
 	}

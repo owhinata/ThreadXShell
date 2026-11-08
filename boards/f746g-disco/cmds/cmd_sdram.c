@@ -72,40 +72,6 @@ struct test_range {
 	uint32_t           words;
 };
 
-static int parse_u32(const char *s, uint32_t *out)
-{
-	uint32_t base = 10;
-	uint32_t val = 0;
-	const char *p = s;
-
-	if (p == NULL || *p == '\0')
-		return -1;
-	if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-		base = 16;
-		p += 2;
-		if (*p == '\0')
-			return -1;
-	}
-	for (; *p != '\0'; p++) {
-		uint32_t digit;
-		char c = *p;
-
-		if (c >= '0' && c <= '9')
-			digit = (uint32_t)(c - '0');
-		else if (base == 16 && c >= 'a' && c <= 'f')
-			digit = (uint32_t)(c - 'a' + 10);
-		else if (base == 16 && c >= 'A' && c <= 'F')
-			digit = (uint32_t)(c - 'A' + 10);
-		else
-			return -1;
-		if (val > (0xFFFFFFFFu - digit) / base)
-			return -1;
-		val = val * base + digit;
-	}
-	*out = val;
-	return 0;
-}
-
 static int cmd_sdram_info(struct cli_instance *sh, int argc, char **argv)
 {
 	(void)argc;
@@ -191,7 +157,7 @@ static int cmd_sdram_test(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	if (argc > 1) {
-		if (parse_u32(argv[1], &bytes) != 0 || bytes == 0u ||
+		if (cli_parse_u32(argv[1], &bytes) != 0 || bytes == 0u ||
 		    bytes > SDRAM_SIZE_BYTES || (bytes & 3u) != 0u) {
 			cli_error(sh, "sdram: bad length (4-byte multiple, "
 			              "4..%lu)\r\n",

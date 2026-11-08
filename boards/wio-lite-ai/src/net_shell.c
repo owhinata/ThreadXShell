@@ -830,6 +830,12 @@ static int nsh_unwind(void)
 	g_ctx.connected = 0;
 	g_link_live     = 0u;
 	nsh_tx_discard();
+	/* The same rule as nsh_end_session(): a command may still be running for the
+	 * client this stop is taking away (a `watch` was found still streaming into the
+	 * NEXT session, issue #218).  0x03 is what Ctrl+C delivers, so pushing one cancels
+	 * it and leaves the instance idle for whoever connects after the next arm. */
+	if (nsh_rx_put(0x03u) && g_ctx.sh != NULL)
+		cli_transport_notify_rx(g_ctx.sh);
 
 	if (!g_sock_created)
 		return 0;

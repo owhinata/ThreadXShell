@@ -268,11 +268,11 @@ void tx_application_define(void *first_unused_memory)
 	 * immediately, so with the FMC down this would fault instead of failing soft
 	 * (like ltdc_init above).  Non-blocking -- eth_init() does GPIO/MAC/PHY setup
 	 * and spawns the eth-link monitor thread but never waits for the link, so it
-	 * is safe before the scheduler / IWDG arm.  On failure the `net` command
-	 * reports it; nothing else stops. */
+	 * is safe before the scheduler / IWDG arm.  On failure the `eth` and `net`
+	 * commands report it; nothing else stops. */
 	if (sdram_is_up()) {
 		if (eth_init() != 0) {
-			printf("eth: init failed (net command disabled)\r\n");
+			printf("eth: init failed (eth and net commands disabled)\r\n");
 		} else if (nx_net_init() != 0) {
 			/* NetX Duo IPv4 (owhinata/stm32f746g-disco#49 P2): pool/IP/ARP/ICMP/UDP/DHCP.
       Only

@@ -555,6 +555,7 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_gui.c"
     "${BOARD_DIR}/cmds/cmd_xfer.c"
     "${BOARD_DIR}/cmds/cmd_sdram.c"
+    "${BOARD_DIR}/cmds/cmd_eth.c"
     "${BOARD_DIR}/cmds/cmd_net.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"

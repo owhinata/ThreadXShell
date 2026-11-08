@@ -1636,10 +1636,11 @@ TUs. Each audit replays its producer's compile command. See the
 
 ```
 blob      camera    console   coremark  crash     devmem
-dmesg     echo      free      gui       help      jobs
-kill      lcd       membench  net       nn        qspi
-reboot    sd        sdram     sleep     thread    touch
-uptime    usleep    version   watch     wdt       xfer
+dmesg     echo      eth       free      gui       help
+jobs      kill      lcd       membench  net       nn
+qspi      reboot    sd        sdram     sleep     thread
+touch     uptime    usleep    version   watch     wdt
+xfer
 ```
 
 `help` lists them with one-line descriptions; `help <cmd>` and
@@ -1648,7 +1649,8 @@ uptime    usleep    version   watch     wdt       xfer
 Subsystems behind them: LTDC + GUIX (`gui`, `lcd`), OV5640 over DCMI
 (`camera`), the QSPI NOR as the asset store (`blob`, `qspi`; a LevelX + FileX
 volume with an `fs` command until issue #194), microSD (`sd`), FT5336 touch
-(`touch`), Ethernet with NetX Duo (`net`), the NN backends (`nn`), and YMODEM
+(`touch`), the Ethernet MAC and PHY (`eth`) with NetX Duo on top (`net`), the
+NN backends (`nn`), and YMODEM
 transfer over the console (`xfer send` to the PC, `blob write` from it).
 
 This board runs two shell instances -- `sh>` on the VCP and `net>` on telnet --
@@ -2183,7 +2185,8 @@ with a 5 s connect timeout gives up.
 
 These counters tell where the packets of `net mjpeg` went.  They observe only.
 
-`net info`, once the IP stack is up, adds these lines below `telnet:`.  They
+`net info` prints these lines below `telnet:` (it refuses while the IP stack
+is not up, issue #217).  They
 count from boot and are never reset; the driver, TCP and pool groups are read one
 after another, not as one snapshot.
 
@@ -2283,6 +2286,52 @@ that were then retried.
 - `socket left the passive open (state <n>) -- re-arming` (2 is LISTEN);
 - `accept arm failed (0x<code>)`;
 - `relisten: a connection was already queued (0x48)`.
+
+### The Ethernet link layer: the `eth` command (issue #217)
+
+The on-board Ethernet is two layers, and each has its own command.  `eth` is
+the link layer -- the ETH MAC, the LAN8742A PHY over RMII and the link state --
+and `net` is everything on NetX Duo above it (address, DHCP, ping, the telnet
+console, `net mjpeg`, the counters).  This is the same split as wio-lite-ai's
+`wifi` and `net`.  Until issue #217 the link operations were `net link` and the
+`mac:` / `phy:` / `link:` lines of `net info`; they moved to `eth` unchanged.
+
+| File | What it holds |
+|---|---|
+| `port/eth/eth_link.c` | Bring-up (RMII pins, `HAL_ETH_Init`, the PHY reset and auto-negotiation), the link snapshot and the `eth-link` thread that polls the PHY every 200 ms and logs link transitions to `dmesg` |
+| `port/eth/eth_phy.c` | The LAN8742A over MDIO: discovery, reset, auto-negotiation, link read |
+| `port/netxduo/nx_eth_driver.c` | The NetX driver on top of the MAC (frames, link events to NetX) |
+| `cmds/cmd_eth.c` | The `eth` command; it includes only `eth_link.h` |
+
+`eth_init()` runs at boot only when the SDRAM is up (the DMA descriptors live
+in `.sdram.eth`).  If it did not run or failed, both subcommands refuse with
+`eth: not initialized`; the NetX stack is then not created either, so `net`
+refuses with `net: IP stack not up`.
+
+`eth info` prints the identity and the link as the `eth-link` thread last read
+it (so it can lag a real change by up to one poll):
+
+```
+sh> eth info
+mac:   <6 hex bytes, colon separated>
+phy:   addr <0..31>, id <4 hex>:<4 hex> (LAN8742)
+link:  up (100M full)
+```
+
+The `link:` line is `link:  down` with no cable or peer; speed is `10M` /
+`100M` and duplex `half` / `full`.
+
+`eth link` restarts auto-negotiation on the PHY, then polls the snapshot every
+100 ms for up to 5 s and prints the `link:` line as soon as it reads up.  If
+the link is still down after 5 s it prints the `link:` line and warns
+`eth: link not up after 5 s (cable? peer?)` (exit 0).  Ctrl+C ends the wait
+(exit 1).  The restart itself failing over MDIO is
+`eth: auto-negotiation restart failed` (exit 1).  The NetX driver follows the
+new link state from the `eth-link` thread on its own; `eth link` does not
+touch NetX.
+
+`net info` now starts at the address line (`ip:`), followed by `mjpeg:` when
+the MJPEG server is running, `telnet:`, and the counters below.
 
 ## Debugging
 

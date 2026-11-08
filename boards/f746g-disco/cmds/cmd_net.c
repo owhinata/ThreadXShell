@@ -4,38 +4,27 @@
  */
 /**
  * @file    cmd_net.c
- * @brief   `net` shell command: on-board Ethernet + NetX Duo IPv4
+ * @brief   `net` shell command: NetX Duo IPv4 over the on-board Ethernet
  * (owhinata/stm32f746g-disco#49 P1/P2).
  *
- *   net info               MAC / PHY id / link state + IP / mask / gateway
- *   net link               re-run auto-negotiation and report link state
+ *   net info               IP / mask / gateway, MJPEG / telnet state, counters
  *   net ping <a.b.c.d> [n]  ICMP echo n times (default 4) with RTT
  *   net ip <a.b.c.d/mask> [gw]  set a static address (stops DHCP)
  *   net dhcp               (re)acquire an address via DHCP
  *
- * The link half (info/link) talks to port/eth (eth_link.h); the IP half talks to
- * port/netxduo (nx_glue.h) -- the shell never includes nx_api.h directly.
+ * Everything here sits on NetX Duo and talks to port/netxduo (nx_glue.h) -- the
+ * shell never includes nx_api.h directly.  The link layer (MAC, PHY, link
+ * state, auto-negotiation) is the board's `eth` command (cmd_eth.c, issue #217).
  *
  * Clean-room design; no third-party code reused.
  */
 #include "cli.h"
-#include "eth_link.h"
 #include "nx_glue.h"
 #include "nx_mjpeg.h"
 #include "nx_shell.h"   /* telnet console output statistics (issue #6) */
 
 #include <stddef.h>   /* size_t / NULL */
 #include <stdint.h>
-
-static const char *speed_name(enum eth_speed s)
-{
-	return (s == ETH_LINK_SPEED_100M) ? "100M" : (s == ETH_LINK_SPEED_10M) ? "10M" : "?";
-}
-
-static const char *duplex_name(enum eth_duplex d)
-{
-	return (d == ETH_LINK_DUPLEX_FULL) ? "full" : (d == ETH_LINK_DUPLEX_HALF) ? "half" : "?";
-}
 
 static void print_octets(struct cli_instance *sh, const char *label, uint32_t a)
 {
@@ -44,35 +33,16 @@ static void print_octets(struct cli_instance *sh, const char *label, uint32_t a)
 	          (unsigned long)(a & 0xFF));
 }
 
-/* Guard: the link driver (P1) must be initialised. */
-static int net_ready(struct cli_instance *sh)
-{
-	if (!eth_is_initialized()) {
-		cli_error(sh, "net: not initialized\r\n");
-		return 0;
-	}
-	return 1;
-}
-
-/* Guard: the NetX IP stack (P2) must be up. */
+/* Guard: the NetX IP stack (P2) must be up.  main.c creates it only after
+   eth_init() succeeded, so this also says the link driver is initialised
+   (issue #217: the link driver's own guard moved to `eth`). */
 static int net_ip_ready(struct cli_instance *sh)
 {
-	if (!net_ready(sh))
-		return 0;
 	if (!nx_net_is_up()) {
 		cli_error(sh, "net: IP stack not up\r\n");
 		return 0;
 	}
 	return 1;
-}
-
-static void net_print_link(struct cli_instance *sh, const struct eth_link_info *li)
-{
-	if (li->up)
-		cli_print(sh, "link:  up (%s %s)\r\n",
-		          speed_name(li->speed), duplex_name(li->duplex));
-	else
-		cli_print(sh, "link:  down\r\n");
 }
 
 static void net_print_ip(struct cli_instance *sh, const struct nx_net_info *ni)
@@ -139,81 +109,36 @@ static void net_print_diag(struct cli_instance *sh)
 
 static int cmd_net_info(struct cli_instance *sh, int argc, char **argv)
 {
-	struct eth_link_info li;
+	struct nx_net_info ni;
+	struct nx_mjpeg_stats ms;
+	struct nx_shell_stats ts;
 
 	(void)argc;
 	(void)argv;
-	if (!net_ready(sh))
-		return 1;
-	if (eth_link_get(&li) != ETH_OK) {
-		cli_error(sh, "net: link query failed\r\n");
-		return 1;
-	}
-
-	cli_print(sh, "mac:   %02x:%02x:%02x:%02x:%02x:%02x\r\n",
-	          li.mac[0], li.mac[1], li.mac[2], li.mac[3], li.mac[4], li.mac[5]);
-	cli_print(sh, "phy:   addr %lu, id %04x:%04x (LAN8742)\r\n",
-	          (unsigned long)li.phy_addr, li.phy_id1, li.phy_id2);
-	net_print_link(sh, &li);
-
-	if (nx_net_is_up()) {
-		struct nx_net_info ni;
-		struct nx_mjpeg_stats ms;
-		struct nx_shell_stats ts;
-
-		if (nx_net_info_get(&ni) == NXG_OK)
-			net_print_ip(sh, &ni);
-		if (nx_mjpeg_stats_get(&ms))
-			cli_print(sh, "mjpeg: http://board:80 (%s, %lu frames)\r\n",
-			          ms.client ? "streaming" : "idle",
-			          (unsigned long)ms.sent_frames);
-		/* Telnet console output health (issue #6).  The refusal reasons are
-		 * reported apart because they mean different things: qdepth is the
-		 * designed back-pressure, win means the peer is not reading, and nobuf
-		 * says the shared packet pool was the constraint. */
-		if (nx_shell_stats_get(&ts))
-			cli_print(sh, "telnet: :23 (%s, %lu sessions), tx %lu seg / %lu B, "
-			              "ring peak %lu B, refused q%lu w%lu buf%lu err%lu, "
-			              "dropped %lu B\r\n",
-			          ts.connected ? "client attached" : "idle",
-			          (unsigned long)ts.sessions,
-			          (unsigned long)ts.tx_segs, (unsigned long)ts.tx_bytes,
-			          (unsigned long)ts.tx_hiwater, (unsigned long)ts.tx_qdepth,
-			          (unsigned long)ts.tx_win, (unsigned long)ts.tx_nobuf,
-			          (unsigned long)ts.tx_err, (unsigned long)ts.tx_dropped);
-		net_print_diag(sh);
-	}
-	return 0;
-}
-
-static int cmd_net_link(struct cli_instance *sh, int argc, char **argv)
-{
-	struct eth_link_info li;
-	int rc;
-
-	(void)argc;
-	(void)argv;
-	if (!net_ready(sh))
+	if (!net_ip_ready(sh))
 		return 1;
 
-	if (eth_link_renegotiate() != ETH_OK) {
-		cli_error(sh, "net: auto-negotiation restart failed\r\n");
-		return 1;
-	}
-	cli_print(sh, "net: auto-negotiating (up to 5 s, Ctrl+C to stop)...\r\n");
-
-	for (int i = 0; i < 50; i++) {
-		if (cli_sleep(sh, 100) != 0)
-			return 1;
-		if (eth_link_get(&li) == ETH_OK && li.up) {
-			net_print_link(sh, &li);
-			return 0;
-		}
-	}
-	rc = eth_link_get(&li);
-	if (rc == ETH_OK)
-		net_print_link(sh, &li);
-	cli_warn(sh, "net: link not up after 5 s (cable? peer?)\r\n");
+	if (nx_net_info_get(&ni) == NXG_OK)
+		net_print_ip(sh, &ni);
+	if (nx_mjpeg_stats_get(&ms))
+		cli_print(sh, "mjpeg: http://board:80 (%s, %lu frames)\r\n",
+		          ms.client ? "streaming" : "idle",
+		          (unsigned long)ms.sent_frames);
+	/* Telnet console output health (issue #6).  The refusal reasons are
+	 * reported apart because they mean different things: qdepth is the
+	 * designed back-pressure, win means the peer is not reading, and nobuf
+	 * says the shared packet pool was the constraint. */
+	if (nx_shell_stats_get(&ts))
+		cli_print(sh, "telnet: :23 (%s, %lu sessions), tx %lu seg / %lu B, "
+		              "ring peak %lu B, refused q%lu w%lu buf%lu err%lu, "
+		              "dropped %lu B\r\n",
+		          ts.connected ? "client attached" : "idle",
+		          (unsigned long)ts.sessions,
+		          (unsigned long)ts.tx_segs, (unsigned long)ts.tx_bytes,
+		          (unsigned long)ts.tx_hiwater, (unsigned long)ts.tx_qdepth,
+		          (unsigned long)ts.tx_win, (unsigned long)ts.tx_nobuf,
+		          (unsigned long)ts.tx_err, (unsigned long)ts.tx_dropped);
+	net_print_diag(sh);
 	return 0;
 }
 
@@ -366,7 +291,7 @@ static int cmd_net_mjpeg_stop(struct cli_instance *sh, int argc, char **argv)
 
 	(void)argc;
 	(void)argv;
-	if (!net_ready(sh))
+	if (!net_ip_ready(sh))
 		return 1;
 	rc = nx_mjpeg_stop();
 	if (rc == -1) {
@@ -399,7 +324,7 @@ static int cmd_net_mjpeg_stats(struct cli_instance *sh, int argc, char **argv)
 
 	(void)argc;
 	(void)argv;
-	if (!net_ready(sh))
+	if (!net_ip_ready(sh))
 		return 1;
 	if (!nx_mjpeg_stats_get(&st)) {
 		cli_print(sh, "mjpeg: not running\r\n");
@@ -458,9 +383,8 @@ CLI_SUBCMD_SET_CREATE(net_mjpeg_subcmds,
 	CLI_SUBCMD_SET_END);
 
 CLI_SUBCMD_SET_CREATE(net_subcmds,
-	CLI_CMD(info, NULL, "MAC / PHY id / link + IP / mask / gateway", cmd_net_info),
-	CLI_CMD(link, NULL, "restart auto-negotiation and report link state",
-	        cmd_net_link),
+	CLI_CMD(info, NULL, "IP / mask / gateway, telnet / MJPEG state, counters",
+	        cmd_net_info),
 	CLI_CMD_ARG_USAGE(ping, NULL, "ICMP echo <a.b.c.d> [count]",
 	                  "<a.b.c.d> [count]", cmd_net_ping, 2, 1),
 	CLI_CMD_ARG_USAGE(ip, NULL, "set static <a.b.c.d/mask> [gw]",
@@ -471,5 +395,5 @@ CLI_SUBCMD_SET_CREATE(net_subcmds,
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(net, net_subcmds,
-                 "on-board Ethernet (ETH MAC + LAN8742 RMII) + NetX Duo IPv4",
+                 "NetX Duo IPv4 over the on-board Ethernet (link: see `eth`)",
                  NULL, 1, 0);

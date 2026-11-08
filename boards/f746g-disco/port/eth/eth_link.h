@@ -76,7 +76,7 @@ struct eth_link_info {
 int eth_init(void);
 
 /** Nonzero once eth_init() succeeded.  This is the driver-initialised state, NOT
- *  the link state (use eth_link_get for that) -- `net info` stays useful with
+ *  the link state (use eth_link_get for that) -- `eth info` stays useful with
  *  the cable unplugged. */
 bool eth_is_initialized(void);
 
@@ -87,14 +87,14 @@ bool eth_is_initialized(void);
 int eth_link_get(struct eth_link_info *out);
 
 /**
- * Re-trigger PHY auto-negotiation (for `net link`).  Returns ETH_OK, ETH_ERR_STATE
+ * Re-trigger PHY auto-negotiation (for `eth link`).  Returns ETH_OK, ETH_ERR_STATE
  * (not initialised) or ETH_ERR_PHY (MDIO error).
  */
 int eth_link_renegotiate(void);
 
 /* ---- P2 (owhinata/stm32f746g-disco#75) hooks: the NetX ETH driver layers on top of this MAC/PHY ---
  * These keep eth_link.c free of any NetX/HAL-handle leakage to its other callers
- * (cmd_net.c only uses the link API above): the NetX driver (port/netxduo) gets
+ * (cmd_eth.c only uses the link API above): the NetX driver (port/netxduo) gets
  * the ETH handle as an opaque pointer, the MAC bytes, the shared HAL lock, and a
  * link-change callback -- dependency inversion (eth_link.c never includes NetX),
  * mirroring guix_register_app_builder(). */

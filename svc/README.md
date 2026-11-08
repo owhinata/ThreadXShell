@@ -927,8 +927,8 @@ HAL_ETH + LAN8742A PHY                              rtl_link / erpc -> RTL8720DN
 There are three kinds of edge and no others:
 
 1. **A board's command to its own link layer, directly**: f746g-disco's `eth`
-   (after #217; today these are `net link` and the `phy:` / link lines of
-   `net info`) and wio-lite-ai's `wifi` (as today).
+   (`cmds/cmd_eth.c`, done in #217: `net link` and the `mac:` / `phy:` /
+   `link:` lines of `net info` moved there) and wio-lite-ai's `wifi`.
 2. **`net` to NetX**: the command, the worker and the telnet listener use
    NetX's application API (`nx_ip_*`, `nx_dhcp_*`, `nx_icmp_ping()`,
    `nx_tcp_*`) and nothing below it.
@@ -1013,7 +1013,7 @@ not from each board being told.
 | N3 `net dhcp`'s wait | 10 s, then a warning and exit 0 | 30 s, then an error and exit 1 | 30 s, an error, exit 1 |
 | N4 how the address is printed | one line, `(dhcp)` / `(static)` | two lines, `ip:` and `gw:`, with STALE | two lines |
 | N6 the telnet console | resident from boot, nothing to operate | `net shell start` / `stop` / `status`, armed after a successful `net ip` / `net dhcp` and at boot when the KV store says so | resident on both, nothing to operate, its state in `net info` |
-| N7 where link operations live | `net link`, and the PHY line of `net info` | `wifi` | f746g-disco's move to `eth` too; `net` has no link operations |
+| N7 where link operations live | `eth` (done in #217; until then `net link` and the PHY line of `net info`) | `wifi` | `eth` and `wifi`; `net` has no link operations |
 | `net dhcp` while a lease is held | a renew is sent, the lease stays | stop, address to 0, acquire again | f746g-disco's |
 | The DHCP calls into NetX | the interface-scoped ones (`nx_dhcp_interface_*`) | the global ones, whose result is discarded | the interface-scoped ones |
 | `net ip` that fails part way | the previous address, gateway and DHCP state are put back | not put back | put back |
@@ -1044,7 +1044,7 @@ Today wio-lite-ai's `net info` also asks the module, over eRPC, whether it is
 associated and what its MAC is (the `link:` and `mac:` lines, inside one
 `rtl_link_begin()` session).  That is a link layer question asked from `net`,
 and `wifi status` already prints both, so #219 drops the two lines from
-`net info` -- the same move as f746g-disco's PHY line going to `eth`.
+`net info` -- the same move as f746g-disco's PHY line going to `eth` (#217).
 
 ### What the one implementation does (issues #219, #220, #221)
 
@@ -1121,9 +1121,9 @@ The NetX objects are created and placed by the board (it knows the memory map
 and the driver), and the NetX driver and the link layer stay the board's.
 f746g-disco's `mjpeg` is plugged in the way a board's own `camera`
 subcommands are; wio-lite-ai's `net echo` was removed by #216 rather than
-plugged in.  The link layer's commands stay outside `net`: f746g-disco gets
-`eth` (#217) for the PHY renegotiation and the link state, and wio-lite-ai
-keeps `wifi`.
+plugged in.  The link layer's commands stay outside `net`: f746g-disco has
+`eth` (`cmds/cmd_eth.c`, #217) for the PHY renegotiation and the link state,
+and wio-lite-ai has `wifi`.
 
 The shared files are audited for mutable storage like every other file the
 build compiles under `shell/cmds/` and `svc/` (`cmake/shared_storage_gate.cmake`,
@@ -1134,7 +1134,8 @@ line, as `cmd_camera.c` does.
 
 | Today (main `b04e8fb`) | What it holds today | After |
 |---|---|---|
-| f746g-disco `cmds/cmd_net.c` | `info ip dhcp ping link mjpeg`: grammar, ping totals, printing | #219: only `mjpeg` stays; #217: `link` and the PHY line go to `eth` |
+| f746g-disco `cmds/cmd_net.c` | `info ip dhcp ping mjpeg`: grammar, ping totals, printing (#217 moved `link` and the MAC / PHY / link lines of `net info` to `cmds/cmd_eth.c`) | #219: only `mjpeg` stays |
+| f746g-disco `cmds/cmd_eth.c` | `eth info` / `eth link` (#217): the link layer's command, over `port/eth/eth_link.h` only | stays the board's |
 | f746g-disco `port/netxduo/nx_glue.c` | the NetX objects and their placement, static / DHCP / ping, the counters, the link notice and the poll hook | #220: the address work and the hook go to the shared code; creation, placement and counters stay |
 | f746g-disco `port/netxduo/nx_shell.c` | the telnet console (resident) | #221: the shared listener; the storage stays |
 | f746g-disco `port/netxduo/nx_eth_driver.c`, `port/eth/eth_link.c` | the NetX driver; the MAC / PHY and the eth-link thread | the link layer, unchanged except the poll hook leaving (#220) |
@@ -1145,11 +1146,13 @@ line, as `cmd_camera.c` does.
 
 How each link layer works stays in the board README and is only pointed to
 from here: f746g-disco's
+[The Ethernet link layer](../boards/f746g-disco/README.md#the-ethernet-link-layer-the-eth-command-issue-217)
+(written in #217),
 [Consoles](../boards/f746g-disco/README.md#consoles) and
 [Network counters](../boards/f746g-disco/README.md#network-counters-net-info-and-net-mjpeg-stats-issue-202);
-wio-lite-ai's [Commands](../boards/wio-lite-ai/README.md#commands).  Neither
-README has a section on its link layer yet; until one is written the
-description is the comments at the top of the files above.
+wio-lite-ai's [Commands](../boards/wio-lite-ai/README.md#commands).
+wio-lite-ai's README has no section on its link layer yet; until one is
+written the description is the comments at the top of its files above.
 
 ## Why the lock and the threads are the board's
 

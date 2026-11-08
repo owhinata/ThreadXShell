@@ -14,6 +14,16 @@ driver, or a .cc by the C driver, is refused rather than guessed at). An explici
 C++ under the C pairing; any other -x value is refused. A C++
 global constructor lands in .init_array, a writable section, so the unchanged
 section rule in check_no_mutable_storage.py refuses it like any other storage.
+
+shell/cmds/ (#206): every source the build compiles under shell/cmds/ is audited,
+as under svc/, with no list of files. Whether a build must ship one is said by
+the file itself, in its first line: `/* shared-command: required */`, or
+`/* shared-command: optional BOARD_HAS_<X> */` where BOARD_HAS_<X> is a property
+every board.cmake sets to ON or OFF. A required file (or an optional one that is
+ON) must be compiled as an object the `shell` link edge of build.ninja takes
+directly: compiled only for a target that does not ship, or reaching the link
+only through an archive, is refused. An optional file that is OFF must not be
+compiled by any target at all.
 """
 import argparse
 import json
@@ -26,11 +36,18 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-# The shared commands outside svc/: in scope like svc/, and each must be compiled
-# by every board (a board that lost one would otherwise pass with less audited).
-# `camera` joined `nn` in issue #143.
-SHARED_COMMANDS = ("shell/cmds/cmd_nn.c", "shell/cmds/nn_cmd_core.c",
-                   "shell/cmds/cmd_camera.c", "shell/cmds/cmd_blob.c")
+sys.path.insert(0, str(HERE))
+import check_delivery_gate as ninja_graph  # noqa: E402  (one reading of build.ninja)
+
+# The audited trees. A source is in scope when its real path is under one; a
+# path spelled under one must also resolve under that same one (#206).
+SCOPES = ("svc", "shell/cmds")
+COMMANDS = "shell/cmds"
+# The first line of every source under shell/cmds/ (#206). The token is looked
+# for anywhere in the file, so a second mark is found wherever it is.
+MARK_TOKEN = "shared-command:"
+MARK_RE = re.compile(r"/\* shared-command: (required|optional (BOARD_HAS_[A-Z0-9_]+)) \*/")
+CAPABILITY_RE = re.compile(r"(BOARD_HAS_[A-Z0-9_]+)=(.*)")
 # Existing protocol staging buffers and last-run diagnostics; moving these out
 # would change ownership/reentrancy and is not part of the stateless nn contract.
 EXCEPTIONS = {"svc/ymodem.c": "existing s_block, s_rdata and s_diag (non-reentrant protocol)"}
@@ -87,12 +104,23 @@ def canonical(path, directory):
     return (p if p.is_absolute() else Path(directory) / p).resolve()
 
 
+def scope_of(path, root):
+    """The audited tree a path is under (no resolution here), or None."""
+    for scope in SCOPES:
+        if Path(path).is_relative_to(root / scope):
+            return scope
+    return None
+
+
 def policy_source(path, root):
     """Return the in-scope canonical source, without applying exceptions."""
-    path = Path(path).resolve()
-    if path in {root / n for n in SHARED_COMMANDS}:
-        return True
-    return path.is_relative_to(root / "svc")
+    return scope_of(Path(path).resolve(), root) is not None
+
+
+def lexical_ok(lexical, physical, root):
+    """A path spelled under an audited tree must resolve under that same tree."""
+    scope = scope_of(lexical, root)
+    return scope is None or scope_of(physical, root) == scope
 
 
 def inventory(directory, root):
@@ -119,10 +147,10 @@ def inventory(directory, root):
                 continue
             src = canonical(spelling, source_dir)
             # Both lexical and physical service paths must be classified. A
-            # symlink under svc/ may not silently exempt a file outside svc/.
+            # symlink under svc/ or shell/cmds/ may not silently exempt a file
+            # outside it (#206: nor move a command out of reach of its mark).
             lexical = Path(os.path.abspath(os.path.join(source_dir, spelling)))
-            if lexical.is_relative_to(root / "svc"):
-                need(policy_source(src, root), f"service symlink escapes scope: {spelling}")
+            need(lexical_ok(lexical, src, root), f"service symlink escapes scope: {spelling}")
             if not policy_source(src, root):
                 continue
             if src in excluded or src.suffix in HEADER_SUFFIXES:
@@ -189,9 +217,142 @@ def select(database, targets, wanted, root):
     need(not missing and not extra,
          "inventory/database coverage mismatch; missing=" + repr(sorted(map(str, missing)))
          + "; unexpected=" + repr(sorted(map(str, extra))))
-    for cmd in SHARED_COMMANDS:
-        need(any(src == root / cmd for _, src in seen), f"mandatory command missing: {cmd}")
     return selected
+
+
+def read_mark(path, root):
+    """The mark of one shell/cmds/ source: ("required", None) or ("optional", var)."""
+    name = path.relative_to(root).as_posix()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AuditError(f"cannot read the mark of {name}: {exc}") from exc
+    count = sum(MARK_TOKEN in line for line in lines)
+    need(count, f"no mark in {name}: its first line must be "
+         "/* shared-command: required */ or /* shared-command: optional BOARD_HAS_<X> */")
+    need(count == 1, f"{count} marks in {name}: exactly one is allowed")
+    match = MARK_RE.fullmatch(lines[0])
+    need(match, f"unreadable mark in {name}: its first line must be exactly "
+         "/* shared-command: required */ or /* shared-command: optional BOARD_HAS_<X> */")
+    return ("required", None) if match.group(1) == "required" else ("optional", match.group(2))
+
+
+def command_marks(root):
+    """Every source under shell/cmds/ on disk, with its mark.
+
+    The walk does not follow links; a link (to a file or a directory) that
+    resolves outside shell/cmds/ is refused, the same rule the inventory uses.
+    """
+    base = root / COMMANDS
+    need(base.is_dir(), f"missing {COMMANDS}/")
+    marks = {}
+    for directory, dirs, files in os.walk(base):
+        for name in dirs + files:
+            entry = Path(directory) / name
+            if entry.is_symlink():
+                need(scope_of(entry.resolve(), root) == COMMANDS,
+                     f"command symlink escapes scope: {entry.relative_to(root).as_posix()}")
+        for name in files:
+            entry = Path(directory) / name
+            if entry.suffix not in SOURCE_SUFFIXES:
+                continue
+            marks[entry.resolve()] = read_mark(entry, root)
+    return marks
+
+
+def capabilities(path):
+    """BOARD_HAS_<X> -> True/False, as board.cmake set them (written at configure)."""
+    values = {}
+    for line in Path(path).read_text().splitlines():
+        if not line:
+            continue
+        match = CAPABILITY_RE.fullmatch(line)
+        need(match, f"malformed capability line: {line!r}")
+        need(match.group(1) not in values, f"duplicate capability: {match.group(1)}")
+        need(match.group(2) in ("ON", "OFF"),
+             f"{match.group(1)} must be ON or OFF, not {match.group(2)!r}")
+        values[match.group(1)] = match.group(2) == "ON"
+    return values
+
+
+def shell_link(ninja_path, link_target):
+    """(objects the link takes directly, objects of the archives it takes).
+
+    Read with check_delivery_gate.py's parser. Only the inputs before `|` are
+    linked as written; an archive's members are listed separately so that a
+    command reaching the link only through one is named as such.
+    """
+    ninja_path = Path(ninja_path)
+    try:
+        top, edges = ninja_graph.parse(ninja_path)
+    except (OSError, ValueError) as exc:
+        raise AuditError(f"cannot read {ninja_path}: {exc}") from exc
+    incs = [i for i in top.get("__includes__", []) if not i.endswith("rules.ninja")]
+    need(not incs, f"{ninja_path} includes {incs}; only a single-config build.ninja is read")
+    bdir = ninja_path.parent.resolve()
+    workdir = top.get("cmake_ninja_workdir", str(bdir) + "/")
+
+    def norm(p):
+        p = (p.replace("${cmake_ninja_workdir}", workdir).replace("$ ", " ")
+             .replace("$:", ":").replace("$$", "$"))
+        return (bdir / p).resolve()
+
+    producer = {}
+    for e in edges:
+        for o in e.outs:
+            producer[norm(o)] = e
+    node = producer.get(norm(link_target))
+    need(node is not None, f"no edge in {ninja_path} produces '{link_target}'")
+    links = [node] if node.rule != "phony" else [
+        producer[norm(i)] for i in node.ins
+        if norm(i) in producer and producer[norm(i)].rule != "phony"]
+    need(len(links) == 1,
+         f"'{link_target}' resolves to {len(links)} link edge(s) in {ninja_path}, not one")
+    link = links[0]
+    direct = {norm(i) for i in link.explicit}
+    archived = set()
+    for i in link.data:
+        e = producer.get(norm(i))
+        if e is not None and "STATIC_LIBRARY" in e.rule:
+            archived |= {norm(j) for j in e.explicit}
+    return direct, archived
+
+
+def check_commands(selected, root, marks, caps, direct, archived):
+    """Every compiled shell/cmds/ source is marked, and each mark holds (#206)."""
+    compiled = {}
+    for (target, src), entry, argv in selected:
+        if scope_of(src, root) != COMMANDS:
+            continue
+        need(src in marks, f"compiled command has no mark on disk: {src}")
+        output = canonical(output_of(argv), entry["directory"])
+        compiled.setdefault(src, []).append((target, output))
+    records = []
+    for src, (kind, var) in sorted(marks.items()):
+        name = src.relative_to(root).as_posix()
+        compiles = compiled.get(src, [])
+        record = {"source": name, "mark": kind if var is None else f"{kind} {var}"}
+        records.append(record)
+        if kind == "optional":
+            need(var in caps, f"{name} is optional on {var}, which this board does not "
+                 "set (board.cmake must set it to ON or OFF)")
+            record["capability"] = "ON" if caps[var] else "OFF"
+            if not caps[var]:
+                need(not compiles, f"{name} is compiled although {var} is OFF: "
+                     + ", ".join(sorted({t for t, _ in compiles})))
+                record["shipped_by"] = []
+                continue
+        why = "required" if kind == "required" else f"optional and {var} is ON"
+        record["shipped_by"] = sorted(t for t, output in compiles if output in direct)
+        if record["shipped_by"]:
+            continue
+        need(not any(output in archived for _, output in compiles),
+             f"{name} ({why}) reaches the shell link only through an archive; "
+             "it must be an object the link takes directly")
+        need(not compiles, f"{name} ({why}) is compiled only for targets the shell link "
+             "does not take directly: " + ", ".join(sorted({t for t, _ in compiles})))
+        raise AuditError(f"{name} ({why}) is not compiled by this build")
+    return records
 
 
 def driver_language(argv0, source, cwd, cc, cxx=None):
@@ -288,6 +449,10 @@ def audit(args):
         need(cxx != cc, "the C and C++ compilers must be distinct drivers")
     targets, wanted = inventory(args.inventory, root)
     selected = select(args.database, targets, wanted, root)
+    marks = command_marks(root)
+    report["commands"] = check_commands(selected, root, marks, capabilities(args.capabilities),
+                                        *shell_link(args.ninja, args.link_target))
+    shipped = sum(bool(r["shipped_by"]) for r in report["commands"])
     with tempfile.TemporaryDirectory(prefix="shared-storage-") as scratch:
         for index, ((target, source), entry, argv) in enumerate(selected):
             relative = source.relative_to(root).as_posix()
@@ -317,13 +482,17 @@ def audit(args):
     report["status"] = "passed"
     if report_path:
         report_path.write_text(json.dumps(report, indent=2) + "\n")
+    print(f"shared_storage: commands: {len(marks)} marked under {COMMANDS}/, "
+          f"{shipped} shipped directly by the {args.link_target} link")
     print(f"shared_storage: OK ({len(selected)} compile contexts, coverage verified)")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("root", "database", "inventory", "cc", "objdump", "nm"):
+    for name in ("root", "database", "inventory", "cc", "objdump", "nm",
+                 "ninja", "capabilities"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--link-target", default="shell")
     # Optional: a build that never enabled C++ has no C++ driver, and then every
     # C++ compile command is refused as an unknown compiler.
     parser.add_argument("--cxx")

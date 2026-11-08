@@ -702,7 +702,11 @@ endif()
 # fs_cmd_core.c is board-independent (it talks FileX, not SDMMC) and so lives in the
 # shared tree; cmd_sd.c is this board's, and names the device through its own
 # cmds/fs_devices.h.
+# BOARD_HAS_FILEX is the property shell/cmds/fs_cmd_core.c is optional on (issue
+# #206): the shared storage audit wants that file shipped when ON and compiled by
+# nothing when OFF.  Spelled ON / OFF here whatever truth value BSP_ENABLE_SD has.
 if(BSP_ENABLE_SD)
+    set(BOARD_HAS_FILEX ON)
     set(FX_DIR "${CMAKE_SOURCE_DIR}/lib/filex")
     file(GLOB FX_CORE "${FX_DIR}/common/src/*.c")
     list(FILTER FX_CORE EXCLUDE REGEX "simulat")     # RAM-disk demo drivers
@@ -713,6 +717,8 @@ if(BSP_ENABLE_SD)
         "${CMAKE_SOURCE_DIR}/shell/cmds/fs_cmd_core.c"
         "${BOARD_DIR}/cmds/cmd_sd.c"
         ${FX_CORE})
+else()
+    set(BOARD_HAS_FILEX OFF)
 endif()
 
 # The FPC-40 RGB LCD over LTDC + DMA2D.  ON builds the display driver

@@ -60,13 +60,16 @@ def fail(msg):
 
 
 class Edge:
-    __slots__ = ("outs", "rule", "ins", "data", "vars", "line")
+    __slots__ = ("outs", "rule", "ins", "data", "explicit", "vars", "line")
 
-    def __init__(self, outs, rule, ins, data, line):
+    def __init__(self, outs, rule, ins, data, line, explicit=()):
         # ins: every input, order-only included (what ninja waits for).
         # data: explicit and implicit inputs only (what the edge reads).
+        # explicit: the inputs before `|`, which a rule sees as $in (what a
+        # link links); check_shared_storage_build.py reads these (#206).
         self.outs, self.rule, self.ins, self.data, self.vars, self.line = (
             outs, rule, ins, data, {}, line)
+        self.explicit = list(explicit)
 
 
 def split_paths(text):
@@ -134,16 +137,21 @@ def parse(path):
             if not rest:
                 raise ValueError(f"line {n}: no rule")
             rule, ins, data, order_only = rest[0], [], [], False
+            explicit, implicit = [], False
             for tok in rest[1:]:
                 if tok in ("||", "|@"):
                     order_only = True
                     continue
                 if tok == "|":
+                    implicit = True
                     continue
                 ins.append(tok)
                 if not order_only:
                     data.append(tok)
-            cur = Edge([o for o in outs if o != "|"], rule, ins, data, n)
+                    if not implicit:
+                        explicit.append(tok)
+            cur = Edge([o for o in outs if o != "|"], rule, ins, data, n,
+                       explicit)
             edges.append(cur)
         elif ln.startswith(("include ", "subninja ")):
             top.setdefault("__includes__", []).append(ln.split(None, 1)[1])

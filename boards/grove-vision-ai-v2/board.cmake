@@ -363,6 +363,9 @@ option(BSP_ENABLE_WFI "Enable ThreadX idle WFI power saving" ON)
 # Board-independent files come from the shared shell/ and svc/ trees; the ones
 # that reach for the SDK drivers or the HX6538 memory map live under this
 # board's own backend/, cmds/ and svc/.
+# The property shell/cmds/fs_cmd_core.c is optional on (issue #206): this board
+# has no FileX, so the shared storage audit wants that file compiled by nothing.
+set(BOARD_HAS_FILEX OFF)
 set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/core/cli_core.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_complete.c"

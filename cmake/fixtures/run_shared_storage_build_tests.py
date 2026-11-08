@@ -41,14 +41,25 @@ def write(root, file, text):
     path.write_text(text)
 
 
+REQUIRED = "/* shared-command: required */\n"
+# issue #206: the fixture's shell/cmds/ sources and their marks. fs_core.c is the
+# optional one, on BOARD_HAS_FS (the fixture's stand-in for BOARD_HAS_FILEX).
+COMMANDS = {
+    "shell/cmds/cmd_nn.c": REQUIRED + "int cmd_nn(void) { return 0; }\n",
+    "shell/cmds/nn_cmd_core.c": REQUIRED + "int nn_cmd_core(void) { return 0; }\n",
+    "shell/cmds/cmd_camera.c": REQUIRED + "int cmd_camera(void) { return 0; }\n",
+    "shell/cmds/cmd_blob.c": REQUIRED + "int cmd_blob(void) { return 0; }\n",
+    "shell/cmds/fs_core.c": "/* shared-command: optional BOARD_HAS_FS */\nint fs_core(void) { return 0; }\n",
+}
+
+
 def project(root, args):
     (root / "cmake").mkdir()
-    for name in ("shared_storage_gate.cmake", "check_shared_storage_build.py", "check_no_mutable_storage.py"):
+    for name in ("shared_storage_gate.cmake", "check_shared_storage_build.py", "check_no_mutable_storage.py",
+                 "check_delivery_gate.py"):
         shutil.copy2(CMAKE / name, root / "cmake" / name)
-    write(root, "shell/cmds/cmd_nn.c", "int cmd_nn(void) { return 0; }\n")
-    write(root, "shell/cmds/nn_cmd_core.c", "int nn_cmd_core(void) { return 0; }\n")
-    write(root, "shell/cmds/cmd_camera.c", "int cmd_camera(void) { return 0; }\n")
-    write(root, "shell/cmds/cmd_blob.c", "int cmd_blob(void) { return 0; }\n")
+    for name, text in COMMANDS.items():
+        write(root, name, text)
     write(root, "svc/pure.c", "int pure(void) { return 1; }\n")
     write(root, "svc/ymodem.c", "static volatile int state; int transfer(void) { return ++state; }\n")
     write(root, "svc/header_only.c", "#error not compiled\n")
@@ -62,12 +73,33 @@ add_library(services OBJECT svc/pure.c svc/ymodem.c svc/header_only.c
     "$<$<BOOL:1>:${CMAKE_CURRENT_SOURCE_DIR}/svc/conditional.c>")
 set_source_files_properties(svc/header_only.c PROPERTIES HEADER_FILE_ONLY TRUE)
 set_source_files_properties(svc/conditional.c PROPERTIES COMPILE_OPTIONS "-O3;-include;${CMAKE_CURRENT_SOURCE_DIR}/include dir/context.h")
-if(OMIT_CAMERA)
-    add_executable(shell shell/cmds/cmd_nn.c shell/cmds/nn_cmd_core.c shell/cmds/cmd_blob.c $<TARGET_OBJECTS:services>)
-elseif(OMIT_BLOB)
-    add_executable(shell shell/cmds/cmd_nn.c shell/cmds/nn_cmd_core.c shell/cmds/cmd_camera.c $<TARGET_OBJECTS:services>)
-else()
-    add_executable(shell shell/cmds/cmd_nn.c shell/cmds/nn_cmd_core.c shell/cmds/cmd_camera.c shell/cmds/cmd_blob.c $<TARGET_OBJECTS:services>)
+# issue #206: which shell/cmds/ sources the shell link takes, and how the others
+# are compiled. OMIT_CMD drops one; SIDE_CMD compiles it for a target the link
+# does not take; ARCHIVE_CMD puts it in a static library the link takes;
+# EXTRA_CMD adds one. FS_STATE is what BOARD_HAS_FS is set to (UNSET: nothing).
+set(CMDS shell/cmds/cmd_nn.c shell/cmds/nn_cmd_core.c shell/cmds/cmd_camera.c shell/cmds/cmd_blob.c)
+if(NOT DEFINED FS_STATE)
+    set(FS_STATE ON)
+endif()
+if(NOT DEFINED FS_COMPILED)
+    set(FS_COMPILED ON)
+endif()
+if(NOT FS_STATE STREQUAL "UNSET")
+    set(BOARD_HAS_FS "${FS_STATE}")
+endif()
+if(FS_COMPILED)
+    list(APPEND CMDS shell/cmds/fs_core.c)
+endif()
+foreach(_cmd IN ITEMS ${OMIT_CMD} ${SIDE_CMD} ${ARCHIVE_CMD})
+    list(REMOVE_ITEM CMDS "${_cmd}")
+endforeach()
+add_executable(shell ${CMDS} ${EXTRA_CMD} $<TARGET_OBJECTS:services>)
+if(SIDE_CMD)
+    add_library(side OBJECT "${SIDE_CMD}")
+endif()
+if(ARCHIVE_CMD)
+    add_library(cmdlib STATIC "${ARCHIVE_CMD}")
+    target_link_libraries(shell PRIVATE cmdlib)
 endif()
 target_link_options(shell PRIVATE -nostdlib -Wl,-e,cmd_nn)
 if(DISABLE_EXPORT)
@@ -201,6 +233,109 @@ namespace { struct Registrar { Registrar() { __asm__ volatile("" ::: "memory"); 
 """
 
 
+def contexts(text):
+    """The number of compile contexts a passing audit reported."""
+    found = re.findall(r"shared_storage: OK \((\d+) compile contexts, coverage verified\)", text)
+    assert len(found) == 1, text
+    return int(found[0])
+
+
+def commands(root, build, args, shell, bad):
+    """issue #206: shell/cmds/ is audited by directory, and each file's mark holds.
+
+    No list of files: a new marked file is audited without touching the script;
+    the mark is read from the file; a required one must be an object the shell
+    link takes directly; an optional one follows its BOARD_HAS_<X> both ways.
+    """
+    reset = ["-DOMIT_CMD=", "-DSIDE_CMD=", "-DARCHIVE_CMD=", "-DEXTRA_CMD=",
+             "-DFS_STATE=ON", "-DFS_COMPILED=ON"]
+    configure(root, build, args, *reset)
+    base = contexts(run(shell, contains="coverage verified"))
+    # 1. A new marked file is found and audited; storage in it is refused.
+    write(root, "shell/cmds/cmd_new.c", REQUIRED + "int cmd_new(void) { return 0; }\n")
+    configure(root, build, args, "-DEXTRA_CMD=shell/cmds/cmd_new.c")
+    assert contexts(run(shell, contains="coverage verified")) == base + 1
+    report = json.loads((build / "shared-storage/last-audit.json").read_text())
+    assert [e for e in report["entries"] if e["source"].endswith("/shell/cmds/cmd_new.c")
+            and "audit" in e], report["entries"]
+    print("ok (1) a new shell/cmds/ file is audited with no list to add it to")
+    write(root, "shell/cmds/cmd_new.c", REQUIRED + "int cmd_new(void) { return 0; }\n" + bad)
+    run(shell, False, "shell: shell/cmds/cmd_new.c owns mutable storage")
+    print("ok (1) storage in the new shell/cmds/ file is refused")
+    (root / "shell/cmds/cmd_new.c").unlink()
+    configure(root, build, args, "-DEXTRA_CMD=")
+    assert contexts(run(shell, contains="coverage verified")) == base
+    # The shared `camera` command (#143) is audited like any other.
+    write(root, "shell/cmds/cmd_camera.c", COMMANDS["shell/cmds/cmd_camera.c"] + bad)
+    run(shell, False, "shell: shell/cmds/cmd_camera.c owns mutable storage")
+    write(root, "shell/cmds/cmd_camera.c", COMMANDS["shell/cmds/cmd_camera.c"])
+    # 2. The mark: missing, two, unreadable.
+    body = "int cmd_blob(void) { return 0; }\n"
+    for label, text, message in (
+            ("missing", body, "no mark in shell/cmds/cmd_blob.c"),
+            ("two", REQUIRED + body + "/* shared-command: optional BOARD_HAS_FS */\n",
+             "2 marks in shell/cmds/cmd_blob.c"),
+            ("unreadable", "/* shared-command: requird */\n" + body,
+             "unreadable mark in shell/cmds/cmd_blob.c"),
+            ("not first", "/* x */\n" + REQUIRED + body, "unreadable mark in shell/cmds/cmd_blob.c")):
+        write(root, "shell/cmds/cmd_blob.c", text)
+        run(shell, False, message)
+        print("ok (2) mark", label, "refused")
+    write(root, "shell/cmds/cmd_blob.c", COMMANDS["shell/cmds/cmd_blob.c"])
+    run(shell, contains="coverage verified")
+    # 3. A required file must be an object the shell link takes directly.
+    for knob, message in (
+            ("-DOMIT_CMD=shell/cmds/cmd_camera.c",
+             "shell/cmds/cmd_camera.c (required) is not compiled by this build"),
+            ("-DSIDE_CMD=shell/cmds/cmd_camera.c",
+             "shell/cmds/cmd_camera.c (required) is compiled only for targets the shell link "
+             "does not take directly: side"),
+            ("-DARCHIVE_CMD=shell/cmds/cmd_camera.c",
+             "shell/cmds/cmd_camera.c (required) reaches the shell link only through an archive")):
+        configure(root, build, args, *reset, knob)
+        run(shell, False, message)
+        print("ok (3) required file", knob.split("=")[0][2:], "refused")
+    configure(root, build, args, *reset)
+    run(shell, contains="coverage verified")
+    # 4. An optional file follows its property, both ways.
+    for knobs, message in (
+            (("-DFS_COMPILED=OFF",), "shell/cmds/fs_core.c (optional and BOARD_HAS_FS is ON) "
+             "is not compiled by this build"),
+            (("-DFS_STATE=OFF",), "shell/cmds/fs_core.c is compiled although BOARD_HAS_FS is OFF: shell"),
+            (("-DFS_STATE=UNSET", "-DFS_COMPILED=OFF"),
+             "shell/cmds/fs_core.c is optional on BOARD_HAS_FS, which this board does not set"),
+            (("-DFS_STATE=1",), "BOARD_HAS_FS must be ON or OFF, not '1'")):
+        configure(root, build, args, *reset, *knobs)
+        run(shell, False, message)
+        print("ok (4) optional file with", " ".join(k[2:] for k in knobs), "refused")
+    configure(root, build, args, *reset, "-DFS_STATE=OFF", "-DFS_COMPILED=OFF")
+    assert contexts(run(shell, contains="coverage verified")) == base - 1
+    print("ok (4) optional file OFF and compiled by nothing passes")
+    configure(root, build, args, *reset)
+    run(shell, contains="coverage verified")
+    # 5. A link out of shell/cmds/: on disk (not compiled), and compiled.
+    write(root, "elsewhere/cmd_out.c", REQUIRED + "int cmd_out(void) { return 0; }\n")
+    (root / "shell/cmds/cmd_out.c").symlink_to(root / "elsewhere/cmd_out.c")
+    run(shell, False, "command symlink escapes scope: shell/cmds/cmd_out.c")
+    print("ok (5) a file link out of shell/cmds/ on disk refused")
+    configure(root, build, args, "-DEXTRA_CMD=shell/cmds/cmd_out.c")
+    run(shell, False, "service symlink escapes scope: shell/cmds/cmd_out.c")
+    print("ok (5) a compiled file link out of shell/cmds/ refused")
+    (root / "shell/cmds/cmd_out.c").unlink()
+    configure(root, build, args, "-DEXTRA_CMD=")
+    (root / "shell/cmds/sub").symlink_to(root / "elsewhere", target_is_directory=True)
+    run(shell, False, "command symlink escapes scope: shell/cmds/sub")
+    print("ok (5) a directory link out of shell/cmds/ refused")
+    (root / "shell/cmds/sub").unlink()
+    # Into the other audited tree is still out of shell/cmds/ (its mark would
+    # otherwise stop applying).
+    (root / "shell/cmds/to_svc.c").symlink_to(root / "svc/pure.c")
+    run(shell, False, "command symlink escapes scope: shell/cmds/to_svc.c")
+    (root / "shell/cmds/to_svc.c").unlink()
+    print("ok (5) a link from shell/cmds/ into svc/ refused")
+    run(shell, contains="coverage verified")
+
+
 def failure_sections(text):
     """The writable sections a FAIL listed, as names."""
     return [line.split()[0] for line in text.splitlines()
@@ -233,6 +368,8 @@ def cxx_services(root, build, args, shell):
     audit = [sys.executable, str(CMAKE / "check_shared_storage_build.py"), "--root", str(root),
              "--database", str(build / "compile_commands.json"),
              "--inventory", str(build / "shared-storage/inventory"),
+             "--ninja", str(build / "build.ninja"),
+             "--capabilities", str(build / "shared-storage/capabilities.txt"),
              "--cc", args.cc, "--objdump", args.objdump, "--nm", args.nm]
     # Without a configured C++ driver, a C++ compile command is an unknown driver.
     run(audit, False, "unsupported compiler/launcher (neither the configured C nor C++ compiler): " + args.cxx)
@@ -297,34 +434,15 @@ def main():
         write(root, "svc/pure.c", "int pure(void) { return 1; }\n")
         run(shell, contains="coverage verified")
         print("ok direct ARM/optimized source mutation, repeated failure, recovery")
-        # issue #143: the shared `camera` command is audited like `nn`, and a
-        # build that stops compiling it is refused rather than audited less.
-        write(root, "shell/cmds/cmd_camera.c", "int cmd_camera(void) { return 0; }\n" + bad)
-        run(shell, False, "owns mutable storage")
-        write(root, "shell/cmds/cmd_camera.c", "int cmd_camera(void) { return 0; }\n")
-        run(shell, contains="coverage verified")
-        configure(root, build, args, "-DOMIT_CAMERA=ON")
-        run(shell, False, "mandatory command missing: shell/cmds/cmd_camera.c")
-        configure(root, build, args, "-DOMIT_CAMERA=OFF")
-        run(shell, contains="coverage verified")
-        print("ok shared camera command audited, and required")
-        # issue #194: the shared `blob` command, the same way -- including on
-        # a board that registers nothing from it.
-        write(root, "shell/cmds/cmd_blob.c", "int cmd_blob(void) { return 0; }\n" + bad)
-        run(shell, False, "owns mutable storage")
-        write(root, "shell/cmds/cmd_blob.c", "int cmd_blob(void) { return 0; }\n")
-        run(shell, contains="coverage verified")
-        configure(root, build, args, "-DOMIT_BLOB=ON")
-        run(shell, False, "mandatory command missing: shell/cmds/cmd_blob.c")
-        configure(root, build, args, "-DOMIT_BLOB=OFF")
-        run(shell, contains="coverage verified")
-        print("ok shared blob command audited, and required")
+        commands(root, build, args, shell, bad)
         configure(root, Path(tmp) / "no-export", args, "-DDISABLE_EXPORT=ON", expected=False, contains="must export compile commands")
         configure(root, Path(tmp) / "unity", args, "-DENABLE_UNITY=ON", expected=False, contains="use unity builds")
         print("ok per-target export OFF and unity rejected")
         base = (build / "compile_commands.json").read_text()
         audit = [sys.executable, str(CMAKE / "check_shared_storage_build.py"), "--root", str(root),
                  "--database", str(build / "compile_commands.json"), "--inventory", str(build / "shared-storage/inventory"),
+                 "--ninja", str(build / "build.ninja"),
+                 "--capabilities", str(build / "shared-storage/capabilities.txt"),
                  "--cc", args.cc, "--cxx", args.cxx, "--objdump", args.objdump, "--nm", args.nm]
         entries = json.loads(base)
         mutations = [
@@ -363,6 +481,15 @@ def main():
             command[command.index(tool) + 1] = "/no/such/tool"
             run(command, False)
         print("ok missing compiler/objdump/nm fail closed")
+        # issue #206: the link graph and the board's properties are inputs too.
+        for flag, message in (("--ninja", "cannot read /no/such/file"),
+                              ("--capabilities", "/no/such/file")):
+            command = list(audit)
+            command[command.index(flag) + 1] = "/no/such/file"
+            run(command, False, "shared_storage: FAIL: ")
+            run(command, False, message)
+        run(audit + ["--link-target", "no_such_target"], False, "no edge in ")
+        print("ok missing build.ninja, capabilities and link target fail closed")
         # A path alias does not escape source selection. Conversely a lexical
         # service whose symlink points out of the shared tree is unsupported.
         write(root, "svc/real_alias.c", "int alias_fn(void) { return 0; }\n")

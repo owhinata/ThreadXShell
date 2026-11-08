@@ -306,6 +306,9 @@ list(FILTER TX_ASM EXCLUDE REGEX "tx_misra\\.S$")
 set(FX_DIR "${CMAKE_SOURCE_DIR}/lib/filex")
 file(GLOB FX_CORE "${FX_DIR}/common/src/*.c")
 list(FILTER FX_CORE EXCLUDE REGEX "simulat")            # RAM-disk demo drivers
+# The property shell/cmds/fs_cmd_core.c is optional on (issue #206): this board
+# always has FileX, so the shared storage audit wants that file shipped.
+set(BOARD_HAS_FILEX ON)
 
 # --- Eclipse ThreadX GUIX (display GUI framework) ---------------------------
 # Same pattern as ThreadX/FileX: GLOB the core, configure via port/guix/gx_user.h

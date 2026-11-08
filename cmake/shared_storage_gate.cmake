@@ -64,6 +64,18 @@ function(add_shared_storage_build_gate)
         message(FATAL_ERROR "shared storage audit: no compiled targets")
     endif()
     file(GENERATE OUTPUT "${_inventory}/index.txt" CONTENT "$<JOIN:${_index},\n>\n")
+    # issue #206: the properties a shell/cmds/ source can be optional on
+    # (`/* shared-command: optional BOARD_HAS_<X> */`). Every BOARD_HAS_<X> this
+    # scope sees is handed over as written; the audit wants each one a mark
+    # names to be ON or OFF, so a board that never set it fails there.
+    set(_capabilities "")
+    get_cmake_property(_variables VARIABLES)
+    foreach(_variable IN LISTS _variables)
+        if(_variable MATCHES "^BOARD_HAS_[A-Z0-9_]+$")
+            string(APPEND _capabilities "${_variable}=${${_variable}}\n")
+        endif()
+    endforeach()
+    file(WRITE "${CMAKE_BINARY_DIR}/shared-storage/capabilities.txt" "${_capabilities}")
     # A board that enabled C++ (#161) hands its C++ driver over so C++ services are
     # replayed with it. Without one, any C++ compile command is refused.
     set(_cxx_args "")
@@ -83,6 +95,8 @@ function(add_shared_storage_build_gate)
             --root "${CMAKE_SOURCE_DIR}"
             --database "${CMAKE_BINARY_DIR}/compile_commands.json"
             --inventory "${_inventory}"
+            --capabilities "${CMAKE_BINARY_DIR}/shared-storage/capabilities.txt"
+            --ninja "${CMAKE_BINARY_DIR}/build.ninja" --link-target shell
             --cc "${CMAKE_C_COMPILER}"
             ${_cxx_args}
             --objdump "${CMAKE_OBJDUMP}" --nm "${CMAKE_NM}"

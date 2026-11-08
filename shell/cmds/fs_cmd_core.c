@@ -1,3 +1,4 @@
+/* shared-command: optional BOARD_HAS_FILEX */
 /*
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Wio Lite AI ThreadX Shell Project

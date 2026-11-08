@@ -1097,13 +1097,16 @@ add_custom_target(grove_decoder_storage_fixtures
 add_dependencies(shell grove_decoder_storage_fixtures)
 
 # Exercise coverage/replay failure paths as well as the section checker. The
-# real-context mutations use this consumer's flags for the three shared TUs.
+# real-context mutations use this consumer's flags for the shared TUs.  The
+# host tests run the same runner and hold its negative-tests line against their
+# table (test/host_tests.sh); here it prints none (--no-verdict, issue #206).
 add_custom_target(grove_shared_storage_build_fixtures
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_SOURCE_DIR}/cmake/fixtures/run_shared_storage_build_tests.py"
             --cc "${CMAKE_C_COMPILER}" --cxx "${CMAKE_CXX_COMPILER}"
             --objdump "${CMAKE_OBJDUMP}"
             --nm "${CMAKE_NM}" --board-build "${CMAKE_BINARY_DIR}"
+            --no-verdict
     COMMENT "derived storage gate integration tests (cross compiler)"
     VERBATIM)
 add_dependencies(shell grove_shared_storage_build_fixtures)

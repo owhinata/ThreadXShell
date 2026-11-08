@@ -746,6 +746,27 @@ else
         --objdump "$gate_bin/arm-none-eabi-objdump"
 fi
 
+# issue #206 -- the shared storage audit's own negative tests
+# (cmake/fixtures/run_shared_storage_build_tests.py): a small real CMake project
+# for the coverage, mark, link, include and registration rules, plus copies of
+# shared TUs replayed with this tree's compile commands (--board-build).  The
+# firmware build runs it too but prints no verdict there; this is the run whose
+# line the shared table holds.  Needs the pinned toolchain AND the tree (its
+# compile_commands.json), the same two as above; otherwise a loud SKIP.
+if [ ! -f "$grove_build/build.ninja" ]; then
+    echo "run_shared_storage_build_tests: SKIPPED -- no configured" \
+         "grove-vision-ai-v2 build tree at $grove_build" >&2
+elif [ -z "$gate_cc" ] || [ ! -x "$gate_cc" ]; then
+    echo "run_shared_storage_build_tests: SKIPPED -- no arm-none-eabi" \
+         "toolchain under $repo/tools/" >&2
+else
+    gate_bin=$(dirname "$gate_cc")
+    python3 "$repo/cmake/fixtures/run_shared_storage_build_tests.py" \
+        --cc "$gate_cc" --cxx "$gate_bin/arm-none-eabi-g++" \
+        --objdump "$gate_bin/arm-none-eabi-objdump" \
+        --nm "$gate_bin/arm-none-eabi-nm" --board-build "$grove_build"
+fi
+
 # issue #143 -- the `camera` table this board builds: the shared command
 # (shell/cmds/cmd_camera.c) against this board's REAL svc/camera_svc_config.h,
 # over the shared stub adapter.  A board subcommand that reuses a shared name is

@@ -719,6 +719,7 @@ cmake/fixtures/run_plugin_gate_tests.py                          grove-vision-ai
 cmake/fixtures/run_veneer_cost_tests.py                          grove-vision-ai-v2 toolchain   302
 cmake/fixtures/run_veneer_gate_build_tests.py                    grove-vision-ai-v2 toolchain   385
 boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py    grove-vision-ai-v2 tree:grove-vision-ai-v2+toolchain  25
+cmake/fixtures/run_shared_storage_build_tests.py                 grove-vision-ai-v2 tree:grove-vision-ai-v2+toolchain  140
 cmake/fixtures/run_model_io_gate_tests.py                        grove-vision-ai-v2 target:grove-vision-ai-v2:verify_vela_model  486
 boards/wio-lite-ai/test/test_lease_entries.py                    wio-lite-ai        always      2
 boards/wio-lite-ai/cmake/fixtures/run_reservation_tests.py       wio-lite-ai        toolchain   10
@@ -734,7 +735,6 @@ EOF
 # [!] Being listed here does not let a file print the line (see the end).
 neg_excluded="$out/neg_excluded"
 cat > "$neg_excluded" <<'EOF'
-cmake/fixtures/run_shared_storage_build_tests.py  runs inside the grove-vision-ai-v2 firmware build (board.cmake), not in the host tests
 cmake/fixtures/model_io/schema_table_depth.py     a helper run_model_io_gate_tests.py runs and counts as part of its own case
 boards/f746g-disco/test/host_tests.sh             the board's dispatcher: it calls runners, it is not one
 boards/grove-vision-ai-v2/test/host_tests.sh      the board's dispatcher: it calls runners, it is not one

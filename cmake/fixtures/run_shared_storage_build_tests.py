@@ -27,11 +27,30 @@ gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 
 
+# issue #206 (the #205 rule) -- the last line this runner prints when it passes:
+# its path from the repository root and how many verdicts this run reached. A
+# verdict is one command whose exit status (and message, where given) was held
+# against what it must be, and one argv the replay parser had to refuse or
+# accept; the count goes up where it is reached, not from a list's length.
+decided = 0
+
+
+def verdict():
+    global decided
+    decided += 1
+
+
+def negative_tests_ok():
+    me = Path(__file__).resolve()
+    print("negative-tests: %s OK (%d cases)" % (me.relative_to(me.parents[2]).as_posix(), decided))
+
+
 def run(command, expected=True, contains=None, cwd=None):
     result = subprocess.run(command, cwd=cwd, capture_output=True, text=True)
     text = result.stdout + result.stderr
     if (result.returncode == 0) != expected or (contains and contains not in text):
         raise AssertionError(f"unexpected result {result.returncode}: {shlex.join(command)}\n{text}")
+    verdict()
     return text
 
 
@@ -465,6 +484,9 @@ def main():
     for name in ("cc", "cxx", "objdump", "nm"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--board-build")
+    parser.add_argument("--no-verdict", action="store_true",
+                        help="do not print the negative-tests line (the run inside the "
+                             "firmware build; the host tests hold the line against their table)")
     parser.add_argument("--require-tflm", action="store_true",
                         help="with --board-build: fail unless that build compiles "
                              "svc/nn/tflm/nn_tflm.cc (the C++ replay case)")
@@ -594,13 +616,13 @@ def main():
                 gate.replay_argv(base_argv + [flag], source, root, Path(args.cc), out)
                 raise AssertionError("accepted unsupported flag " + flag)
             except gate.AuditError:
-                pass
+                verdict()
         for compiler in ("ccache", "/no/such/compiler", args.cxx):
             try:
                 gate.replay_argv([compiler] + base_argv[1:], source, root, Path(args.cc), out)
                 raise AssertionError("accepted unsupported compiler")
             except gate.AuditError:
-                pass
+                verdict()
         # issue #161: each driver only with its own suffixes, also at parse level.
         cc_source = root / "svc/clean.cc"
         for driver, src, word in ((args.cxx, source, "C++"), (args.cc, cc_source, "C")):
@@ -609,9 +631,11 @@ def main():
                 gate.replay_argv(argv, src, root, Path(args.cc), out, Path(args.cxx))
                 raise AssertionError("accepted source/driver mismatch " + src.name)
             except gate.AuditError as exc:
+                verdict()
                 assert f"compiled by the {word} driver" in str(exc), exc
         argv = [args.cxx] + [str(cc_source) if a == str(source) else a for a in base_argv[1:]]
         assert gate.replay_argv(argv, cc_source, root, Path(args.cc), out, Path(args.cxx))[0] == args.cxx
+        verdict()
         # An explicit -x must name the driver's own language (#161 review): the
         # pairing above is not allowed to be overridden from inside the argv.
         def x_case(driver, src, extra):
@@ -628,14 +652,19 @@ def main():
                 x_case(driver, src, extra)
                 raise AssertionError("accepted " + " ".join(extra) + " for " + src.name)
             except gate.AuditError as exc:
+                verdict()
                 assert message in str(exc), exc
         assert x_case(args.cc, source, ["-x", "c"])[1:3] == ["-x", "c"]
+        verdict()
         assert x_case(args.cxx, cc_source, ["-x", "c++"])[1:3] == ["-x", "c++"]
+        verdict()
         print("ok -x must name the driver's language; joined -x<lang> is unsupported")
         print("ok quoted/paired/joined options and forbidden side effects/launchers")
     if args.board_build:
         replay_mutations(args)
     print("run_shared_storage_build_tests: all fixtures passed")
+    if not args.no_verdict:
+        negative_tests_ok()
     return 0
 
 

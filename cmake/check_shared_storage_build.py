@@ -315,6 +315,9 @@ def shell_link(ninja_path, link_target):
     def norm(p):
         p = (p.replace("${cmake_ninja_workdir}", workdir).replace("$ ", " ")
              .replace("$:", ":").replace("$$", "$"))
+        # CMake writes no other variable into a path; one left unexpanded would
+        # be a path this reading does not know, so it is refused (#206 review).
+        need("${" not in p, f"unexpanded variable in a build.ninja path: {p}")
         return (bdir / p).resolve()
 
     producer = {}
@@ -337,13 +340,22 @@ def shell_link(ninja_path, link_target):
             archived |= {norm(j) for j in e.explicit}
     # #206 review: which source each linked object is compiled from, read from
     # the graph itself (the first explicit input of a CMake compile edge), so
-    # the compile DB can be held to it. An object no compile edge produces (a
-    # prebuilt, a custom command) has none.
+    # the compile DB can be held to it. An object this build does not make (a
+    # prebuilt) has none. One it makes by any other rule (a custom command) is
+    # refused: nothing could replay it, so rules (a)(b)(c) would not see it.
     origin = {}
     for obj in direct | archived:
         e = producer.get(obj)
-        compiles = e is not None and "_COMPILER__" in e.rule and e.explicit
-        origin[obj] = norm(e.explicit[0]) if compiles else None
+        if e is None:
+            origin[obj] = None
+        elif "STATIC_LIBRARY" in e.rule:
+            continue           # an archive taken directly: its members are above
+        else:
+            need("_COMPILER__" in e.rule and e.explicit,
+                 f"the shell link takes {obj}, which build.ninja makes with rule "
+                 f"'{e.rule}', not a CMake compile rule; such an object cannot be "
+                 "replayed by this audit")
+            origin[obj] = norm(e.explicit[0])
     return direct, archived, origin
 
 

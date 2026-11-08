@@ -92,7 +92,11 @@ with the same argv rules as the storage audit (in parallel); one that cannot be
 replayed fails rather than being skipped. The set is taken from `build.ninja`,
 not from the compile DB: every such object a compile edge produces must have
 exactly one `compile_commands.json` entry with that output and that source, so
-a stale or cut DB cannot hide a translation unit from these rules.
+a stale or cut DB cannot hide a translation unit from these rules. An object
+the link takes that this build makes by anything other than a CMake compile rule
+(a custom command) is refused, since nothing could replay it; a path in
+`build.ninja` with a variable other than `cmake_ninja_workdir` left in it is
+refused too. Objects this build does not make (a prebuilt archive) are outside.
 
 - (a) Its dependencies (`gcc -M`, which also lists files found through
   `-isystem`) may not include a `.c`, `.cc`, `.cpp` or `.cxx` other than
@@ -119,10 +123,11 @@ not a defence against a hostile change; these are left to diff review:
 - a change of a mark from `required` to `optional`;
 - a copy of an optional shared command placed in `boards/<board>/cmds/` on a
   board where its property is `OFF`;
-- an object produced by a custom command rather than a compile in
-  `compile_commands.json` (nothing replays it);
 - the `svc/ymodem.c` exception covers the whole translation unit, so a new
   static added to it passes as well (#210 removes the exception itself).
+
+An object the link takes that a custom command makes, rather than a compile in
+`compile_commands.json`, is not among these: the audit refuses that form (above).
 
 ## Negative tests
 

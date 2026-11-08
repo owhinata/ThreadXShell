@@ -719,7 +719,7 @@ cmake/fixtures/run_plugin_gate_tests.py                          grove-vision-ai
 cmake/fixtures/run_veneer_cost_tests.py                          grove-vision-ai-v2 toolchain   302
 cmake/fixtures/run_veneer_gate_build_tests.py                    grove-vision-ai-v2 toolchain   385
 boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py    grove-vision-ai-v2 tree:grove-vision-ai-v2+toolchain  25
-cmake/fixtures/run_shared_storage_build_tests.py                 grove-vision-ai-v2 tree:grove-vision-ai-v2+toolchain  143
+cmake/fixtures/run_shared_storage_build_tests.py                 grove-vision-ai-v2 tree:grove-vision-ai-v2+toolchain  145
 cmake/fixtures/run_model_io_gate_tests.py                        grove-vision-ai-v2 target:grove-vision-ai-v2:verify_vela_model  486
 boards/wio-lite-ai/test/test_lease_entries.py                    wio-lite-ai        always      2
 boards/wio-lite-ai/cmake/fixtures/run_reservation_tests.py       wio-lite-ai        toolchain   10

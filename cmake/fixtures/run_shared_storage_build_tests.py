@@ -121,6 +121,14 @@ add_executable(shell ${CMDS} ${EXTRA_CMD} $<TARGET_OBJECTS:services>)
 if(SIDE_CMD)
     add_library(side OBJECT "${SIDE_CMD}")
 endif()
+# issue #206 review: an object the link takes that a custom command makes.
+if(CUSTOM_OBJ)
+    add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/custom.o"
+        COMMAND "${CMAKE_C_COMPILER}" -mcpu=cortex-m7 -mthumb -c
+                "${CMAKE_CURRENT_SOURCE_DIR}/${CUSTOM_OBJ}" -o "${CMAKE_CURRENT_BINARY_DIR}/custom.o"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${CUSTOM_OBJ}" VERBATIM)
+    target_sources(shell PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/custom.o")
+endif()
 if(ODD_OPTION_SRC)
     set_source_files_properties("${ODD_OPTION_SRC}" PROPERTIES COMPILE_OPTIONS "-fno-ident")
 endif()
@@ -435,6 +443,10 @@ def rules(root, tmp, args):
     first_build("c-duplicate", ["boards/fix/cmds/dup.c"], False,
                 "rule (c): root command registered more than once: camera in "
                 "boards/fix/cmds/dup.c and shell/cmds/cmd_camera.c")
+    # An object made by a custom command cannot be replayed: refused, not skipped.
+    write(root, "boards/fix/src/custom.c", REGISTER_MACRO + 'REGISTER("hidden", hidden);\n')
+    first_build("custom-object", [], False, "custom.o, which build.ninja makes with rule "
+                "'CUSTOM_COMMAND', not a CMake compile rule", "-DCUSTOM_OBJ=boards/fix/src/custom.c")
     # An argv the replay does not understand is refused, not skipped.
     first_build("unreplayable", ["shell/core/core.c"], False,
                 "cannot replay shell/core/core.c for the include and registration rules: "

@@ -52,6 +52,24 @@ struct nx_mjpeg_stats {
 	uint32_t drop_oversized; /**< dropped: frame larger than the copy buffer        */
 	uint32_t send_err;       /**< TCP send failures (window/disconnect)             */
 	uint32_t pool_fail;      /**< packet pool allocation failures                   */
+	/* issue #202: send_err split by nx_tcp_socket_send()'s answer */
+	uint32_t send_window;    /**< NX_WINDOW_OVERFLOW (peer window stayed closed)    */
+	uint32_t send_queue;     /**< NX_TX_QUEUE_DEPTH (8 unacked packets stayed out)  */
+	uint32_t send_notconn;   /**< NX_NOT_CONNECTED                                 */
+	uint32_t send_nopkt;     /**< NX_NO_PACKET                                     */
+	uint32_t send_other;     /**< any other code                                   */
+	uint32_t send_last;      /**< the last failing code (NetX status)              */
+	uint32_t fail_pkts;      /**< packets the connection had sent at that failure  */
+	uint32_t fail_bytes;     /**< bytes the connection had sent at that failure    */
+	uint32_t fail_frames;    /**< frames the connection had sent at that failure   */
+	uint32_t relisten_fail;  /**< nx_tcp_server_socket_relisten() failures         */
+	uint32_t relisten_pending; /**< of those, NX_CONNECTION_PENDING                */
+	uint32_t relisten_last;  /**< the last failing relisten code                   */
+	uint32_t disconnect_fail;/**< nx_tcp_socket_disconnect() failures              */
+	uint32_t unaccept_fail;  /**< nx_tcp_server_socket_unaccept() failures         */
+	uint32_t conn_frames;    /**< the current / last connection: frames sent       */
+	uint32_t conn_pkts;      /**< ... packets nx_tcp_socket_send() took            */
+	uint32_t conn_bytes;     /**< ... bytes in them                                */
 };
 
 /**

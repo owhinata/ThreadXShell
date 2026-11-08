@@ -173,6 +173,50 @@ static void net_print_ip(struct cli_instance *sh, const struct nx_net_info *ni)
 	}
 }
 
+/* Driver, TCP and packet-pool counters since boot (issue #202).  Printed as
+   read; the three groups are not one snapshot. */
+static void net_print_diag(struct cli_instance *sh)
+{
+	struct nx_net_diag d;
+
+	if (nx_net_diag_get(&d) != NXG_OK)
+		return;
+	cli_print(sh, "eth rx: ok %lu, drop %lu, no-buf %lu\r\n",
+	          (unsigned long)d.rx_ok, (unsigned long)d.rx_drop,
+	          (unsigned long)d.rx_no_buf);
+	cli_print(sh, "eth tx: ok %lu, drop %lu (mac-down %lu, coalesce %lu, "
+	              "hal %lu)\r\n",
+	          (unsigned long)d.tx_ok, (unsigned long)d.tx_drop,
+	          (unsigned long)d.tx_drop_mac_down,
+	          (unsigned long)d.tx_drop_coalesce, (unsigned long)d.tx_drop_hal);
+	cli_print(sh, "eth hal: last refusal err 0x%08lx, dma 0x%08lx, "
+	              "state 0x%02lx\r\n",
+	          (unsigned long)d.hal_err_last, (unsigned long)d.hal_dma_err_last,
+	          (unsigned long)d.hal_state_last);
+	cli_print(sh, "eth dma: errors %lu, last 0x%08lx\r\n",
+	          (unsigned long)d.dma_err, (unsigned long)d.dma_err_last);
+	if (d.tcp_valid) {
+		cli_print(sh, "tcp:    sent %lu pkts / %lu B, rcvd %lu pkts / %lu B, "
+		              "retransmit %lu\r\n",
+		          (unsigned long)d.tcp_pkts_sent, (unsigned long)d.tcp_bytes_sent,
+		          (unsigned long)d.tcp_pkts_rcvd, (unsigned long)d.tcp_bytes_rcvd,
+		          (unsigned long)d.tcp_retransmits);
+		cli_print(sh, "tcp:    invalid %lu, rx dropped %lu, checksum %lu; "
+		              "conns %lu, disconns %lu, dropped %lu\r\n",
+		          (unsigned long)d.tcp_invalid, (unsigned long)d.tcp_rx_dropped,
+		          (unsigned long)d.tcp_checksum_err,
+		          (unsigned long)d.tcp_conns, (unsigned long)d.tcp_disconns,
+		          (unsigned long)d.tcp_conns_dropped);
+	}
+	if (d.pool_valid)
+		cli_print(sh, "pool:   free %lu of %lu, empty %lu (waited %lu), "
+		              "bad release %lu\r\n",
+		          (unsigned long)d.pool_free, (unsigned long)d.pool_total,
+		          (unsigned long)d.pool_empty_req,
+		          (unsigned long)d.pool_empty_susp,
+		          (unsigned long)d.pool_invalid_rel);
+}
+
 static int cmd_net_info(struct cli_instance *sh, int argc, char **argv)
 {
 	struct eth_link_info li;
@@ -217,6 +261,7 @@ static int cmd_net_info(struct cli_instance *sh, int argc, char **argv)
 			          (unsigned long)ts.tx_hiwater, (unsigned long)ts.tx_qdepth,
 			          (unsigned long)ts.tx_win, (unsigned long)ts.tx_nobuf,
 			          (unsigned long)ts.tx_err, (unsigned long)ts.tx_dropped);
+		net_print_diag(sh);
 	}
 	return 0;
 }
@@ -448,6 +493,26 @@ static int cmd_net_mjpeg_stats(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)st.drop_busy, (unsigned long)st.drop_oversized);
 	cli_print(sh, "errors:    send %lu, pool %lu\r\n",
 	          (unsigned long)st.send_err, (unsigned long)st.pool_fail);
+	/* issue #202: the send failures by NetX's answer, what the connection had
+	   sent when the last one hit, and the re-accept that follows. */
+	cli_print(sh, "send fail: window %lu, queue %lu, notconn %lu, nopkt %lu, "
+	              "other %lu, last 0x%02lx\r\n",
+	          (unsigned long)st.send_window, (unsigned long)st.send_queue,
+	          (unsigned long)st.send_notconn, (unsigned long)st.send_nopkt,
+	          (unsigned long)st.send_other, (unsigned long)st.send_last);
+	cli_print(sh, "at fail:   %lu frames, %lu pkts, %lu bytes on that "
+	              "connection\r\n",
+	          (unsigned long)st.fail_frames, (unsigned long)st.fail_pkts,
+	          (unsigned long)st.fail_bytes);
+	cli_print(sh, "this conn: %lu frames, %lu pkts, %lu bytes\r\n",
+	          (unsigned long)st.conn_frames, (unsigned long)st.conn_pkts,
+	          (unsigned long)st.conn_bytes);
+	cli_print(sh, "relisten:  failed %lu (pending %lu), last 0x%02lx\r\n",
+	          (unsigned long)st.relisten_fail,
+	          (unsigned long)st.relisten_pending,
+	          (unsigned long)st.relisten_last);
+	cli_print(sh, "teardown:  disconnect failed %lu, unaccept failed %lu\r\n",
+	          (unsigned long)st.disconnect_fail, (unsigned long)st.unaccept_fail);
 	return 0;
 }
 

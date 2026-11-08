@@ -2117,6 +2117,82 @@ Nothing on a per-frame or per-flip path touches a pixel-clock-domain register;
 keep it that way (no `HAL_LTDC_SetAddress*`, `HAL_LTDC_SetPitch*`,
 `HAL_LTDC_SetWindow*`, `HAL_LTDC_ConfigLayer*` or CPSR / CDSR reads there).
 
+### Network counters: `net info` and `net mjpeg stats` (issue #202)
+
+`net mjpeg` (`port/netxduo/nx_mjpeg.c`) gives up on a client when one
+`nx_tcp_socket_send()` has not gone through within 1 s, and closes the
+connection.  These counters tell where the packets went; they observe only and
+change nothing in the TCP settings, the waits or the teardown.
+
+`net info`, once the IP stack is up, adds these lines below `telnet:`.  They
+count from boot and are never reset; the driver, TCP and pool groups are read one
+after another, not as one snapshot.
+
+```
+eth rx: ok <n>, drop <n>, no-buf <n>
+eth tx: ok <n>, drop <n> (mac-down <n>, coalesce <n>, hal <n>)
+eth hal: last refusal err 0x<8 hex>, dma 0x<8 hex>, state 0x<2 hex>
+eth dma: errors <n>, last 0x<8 hex>
+tcp:    sent <n> pkts / <n> B, rcvd <n> pkts / <n> B, retransmit <n>
+tcp:    invalid <n>, rx dropped <n>, checksum <n>; conns <n>, disconns <n>, dropped <n>
+pool:   free <n> of <n>, empty <n> (waited <n>), bad release <n>
+```
+
+- **`eth tx` `drop`** is every frame the driver (`port/netxduo/nx_eth_driver.c`)
+  released without handing it to the MAC, split by reason: the MAC was not
+  running (`mac-down`), a packet chain longer than the 1600-byte coalesce buffer
+  (`coalesce`), and `HAL_ETH_Transmit_IT()` refusing it (`hal`, for instance the
+  TX descriptor ring full).  `ok` counts frames the DMA finished.
+- **`eth hal`** is the ETH handle as the last `hal` refusal left it:
+  `ErrorCode` (sticky, OR'ed by the HAL: 0x02 busy, 0x01 parameter), its
+  `DMAErrorCode`, and `gState` (0x40 started, 0x10 ready).  All zero until a
+  refusal.
+- **`eth dma`** counts `HAL_ETH_ErrorCallback()` calls, with the last DMA error
+  the HAL latched (`HAL_ETH_GetDMAError()`, DMASR bits).
+- **`tcp`** is `nx_tcp_info_get()`: every TCP socket together (telnet included).
+- **`pool`** is the shared packet pool (`nx_packet_pool_info_get()`): free
+  packets now, allocations that found it empty, and how many of those waited.
+
+`net mjpeg stats` adds these below `errors:` (the session counters are reset
+when the sink attaches to the camera, as the existing ones are):
+
+```
+send fail: window <n>, queue <n>, notconn <n>, nopkt <n>, other <n>, last 0x<2 hex>
+at fail:   <n> frames, <n> pkts, <n> bytes on that connection
+this conn: <n> frames, <n> pkts, <n> bytes
+relisten:  failed <n> (pending <n>), last 0x<2 hex>
+teardown:  disconnect failed <n>, unaccept failed <n>
+```
+
+- **`send fail`** splits `errors: send` by what `nx_tcp_socket_send()` answered:
+  `window` NX_WINDOW_OVERFLOW (0x39, the peer's window stayed closed), `queue`
+  NX_TX_QUEUE_DEPTH (0x49, the 8 unacknowledged packets the socket allows stayed
+  out), `notconn` NX_NOT_CONNECTED (0x38), `nopkt` NX_NO_PACKET (0x01), and
+  anything else.  `last` is the last failing code.
+- **`at fail`** is what the connection had sent when the last send failed;
+  **`this conn`** is the current connection, or the last one when no client is
+  attached.  Packets and bytes are those `nx_tcp_socket_send()` accepted,
+  multipart boundaries and the HTTP header included.
+- **`relisten`** counts `nx_tcp_server_socket_relisten()` failures after a
+  client left; `pending` is how many of them were NX_CONNECTION_PENDING (0x48: a
+  connection request was already queued and is now under way -- NetX documents
+  it as a successful status, but this code still handles it as a failure).
+  Each one is followed, as before, by a full socket re-create (`relisten
+  failed`, `stopped`, `listening` in `dmesg`).
+
+`dmesg` lines from `mjpeg`:
+
+- `client disconnected (<n> frames)` -- the frames sent on that connection (until
+  issue #202 the session total);
+- `send failed (0x<code>) after <n> pkts / <n> B, <n> frames`, then `socket:
+  state <n>, txq <n>, txwin <n>, rxwin <n>, sent <n>, rexmit <n>`
+  (`nx_tcp_socket_info_get()` at that moment: the TCP state, 5 established; the
+  packets queued unacknowledged; the peer's advertised window; the receive
+  window; and the packets sent and retransmitted on this connection, which NetX
+  zeroes at accept);
+- `disconnect failed (0x<code>)`, `unaccept failed (0x<code>)`, `relisten failed
+  (0x<code>)`.
+
 ## Debugging
 
 SWD is available through the same ST-Link.  Use the system `gdb-multiarch` --

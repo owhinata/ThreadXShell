@@ -53,6 +53,37 @@ struct nx_net_info {
 int  nx_net_info_get(struct nx_net_info *out);
 
 /**
+ * Counters for `net info` (issue #202): the Ethernet driver's, NetX's TCP-wide
+ * ones (nx_tcp_info_get) and the shared packet pool's.  None of them is reset
+ * after boot, and the three groups are read one after another, not as one
+ * snapshot.  The driver fields mirror struct nx_eth_stats (nx_eth_driver.h).
+ */
+struct nx_net_diag {
+	/* Ethernet driver */
+	uint32_t rx_ok, rx_drop, rx_no_buf;
+	uint32_t tx_ok, tx_drop;                 /* tx_drop = the next three        */
+	uint32_t tx_drop_mac_down;               /* MAC not running                 */
+	uint32_t tx_drop_coalesce;               /* chain too long to coalesce      */
+	uint32_t tx_drop_hal;                    /* HAL_ETH_Transmit_IT() refused   */
+	uint32_t hal_err_last;                   /* heth ErrorCode at that refusal  */
+	uint32_t hal_dma_err_last;               /* heth DMAErrorCode at it         */
+	uint32_t hal_state_last;                 /* heth gState at it               */
+	uint32_t dma_err, dma_err_last;          /* ErrorCallback count / DMA error */
+	/* NetX TCP (all sockets) */
+	uint32_t tcp_pkts_sent, tcp_bytes_sent;
+	uint32_t tcp_pkts_rcvd, tcp_bytes_rcvd;
+	uint32_t tcp_invalid, tcp_rx_dropped, tcp_checksum_err;
+	uint32_t tcp_conns, tcp_disconns, tcp_conns_dropped;
+	uint32_t tcp_retransmits;
+	bool     tcp_valid;                      /* nx_tcp_info_get() succeeded     */
+	/* the shared packet pool */
+	uint32_t pool_total, pool_free, pool_empty_req, pool_empty_susp;
+	uint32_t pool_invalid_rel;
+	bool     pool_valid;                     /* nx_packet_pool_info_get() ok    */
+};
+int  nx_net_diag_get(struct nx_net_diag *out);
+
+/**
  * Switch to a static address (stops DHCP).  Transactional: on failure the previous
  * address, gateway and DHCP state are restored and NXG_ERR is returned.
  */

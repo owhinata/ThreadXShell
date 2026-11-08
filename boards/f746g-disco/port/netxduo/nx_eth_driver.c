@@ -153,8 +153,8 @@ void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *heth)
 
 void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *heth)
 {
-	(void)heth;
 	g.st.dma_err++;
+	g.st.dma_err_last = (ULONG)HAL_ETH_GetDMAError(heth);   /* issue #202 */
 }
 
 void ETH_IRQHandler(void)
@@ -228,6 +228,7 @@ static void eth_tx(NX_IP_DRIVER *req)
 
 	if (!g.mac_running) {            /* link down / not started -> drop          */
 		g.st.tx_drop++;
+		g.st.tx_drop_mac_down++;
 		_nx_packet_transmit_release(pkt);
 		return;
 	}
@@ -263,6 +264,7 @@ static void eth_tx(NX_IP_DRIVER *req)
 		uint8_t *d = tx_coalesce;
 		if (pkt->nx_packet_length > sizeof tx_coalesce) {
 			g.st.tx_drop++;
+			g.st.tx_drop_coalesce++;
 			/* owhinata/stm32f746g-disco#79: restore before release */
 			eth_tx_unprepend(pkt);
 			_nx_packet_transmit_release(pkt);
@@ -312,10 +314,20 @@ static void eth_tx(NX_IP_DRIVER *req)
 
 	eth_lock_acquire();
 	st = HAL_ETH_Transmit_IT(g.heth, &cfg);
+	if (st != HAL_OK) {
+		/* What the HAL said (issue #202), read under the lock that serialises
+		   the handle.  ErrorCode is OR'ed and never cleared by the HAL, and a
+		   refusal outside STARTED sets no bit at all, so the state is kept
+		   beside it. */
+		g.st.hal_err_last     = (ULONG)g.heth->ErrorCode;
+		g.st.hal_dma_err_last = (ULONG)g.heth->DMAErrorCode;
+		g.st.hal_state_last   = (ULONG)g.heth->gState;
+	}
 	eth_lock_release();
 
 	if (st != HAL_OK) {
 		g.st.tx_drop++;
+		g.st.tx_drop_hal++;
 		/* owhinata/stm32f746g-disco#79: restore before release */
 		eth_tx_unprepend(pkt);
 		/* TxFree won't run on a failed send */

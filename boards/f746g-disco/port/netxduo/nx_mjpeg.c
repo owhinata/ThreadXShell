@@ -103,7 +103,35 @@ static struct {
 	uint32_t drop_oversized;
 	uint32_t send_err;
 	uint32_t pool_fail;
+	/* issue #202: what nx_tcp_socket_send() answered when it failed (send_err
+	   is their sum), and the last code. */
+	uint32_t send_window;            /* NX_WINDOW_OVERFLOW                       */
+	uint32_t send_queue;             /* NX_TX_QUEUE_DEPTH                        */
+	uint32_t send_notconn;           /* NX_NOT_CONNECTED                         */
+	uint32_t send_nopkt;             /* NX_NO_PACKET                             */
+	uint32_t send_other;             /* anything else                            */
+	uint32_t send_last;              /* the last failing code                    */
+	/* What the connection had sent when that send failed (issue #202). */
+	uint32_t fail_pkts;
+	uint32_t fail_bytes;
+	uint32_t fail_frames;
+	/* The re-accept after a client (issue #202).  relisten_fail counts every
+	   failure, relisten_pending the NX_CONNECTION_PENDING ones among them. */
+	uint32_t relisten_fail;
+	uint32_t relisten_pending;
+	uint32_t relisten_last;
+	uint32_t disconnect_fail;
+	uint32_t unaccept_fail;
 } mstats;
+
+/* The connection being served (issue #202).  Reset at every accept and written
+   only by the server thread; outside mstats so that eth_open()'s reset, which
+   runs on another thread, does not race them.  conn_pkts / conn_bytes count the
+   packets nx_tcp_socket_send() took (HTTP header and part boundaries
+   included). */
+static volatile uint32_t conn_frames;
+static volatile uint32_t conn_pkts;
+static volatile uint32_t conn_bytes;
 
 /* ---- the camera frame-pipeline sink (synchronous copy) -------------------- */
 
@@ -199,12 +227,51 @@ static void eth_close(void *ctx)
 
 /* ---- TCP send helpers (HTTP-thread context) ------------------------------- */
 
+/* Count and log a failed nx_tcp_socket_send() (issue #202).  Only what is
+   seen: the code, what this connection had sent so far, and the socket's own
+   view at that moment (state, queued packets, the peer's window). */
+static void mjpeg_send_failed(UINT sr)
+{
+	ULONG state = 0, txq = 0, txwin = 0, rxwin = 0, rexmit = 0, sent = 0;
+
+	mstats.send_err++;
+	if (sr == NX_WINDOW_OVERFLOW)
+		mstats.send_window++;
+	else if (sr == NX_TX_QUEUE_DEPTH)
+		mstats.send_queue++;
+	else if (sr == NX_NOT_CONNECTED)
+		mstats.send_notconn++;
+	else if (sr == NX_NO_PACKET)
+		mstats.send_nopkt++;
+	else
+		mstats.send_other++;
+	mstats.send_last   = (uint32_t)sr;
+	mstats.fail_pkts   = conn_pkts;
+	mstats.fail_bytes  = conn_bytes;
+	mstats.fail_frames = conn_frames;
+
+	LOG_WRN("send failed (0x%02x) after %lu pkts / %lu B, %lu frames",
+	        (unsigned)sr, (unsigned long)conn_pkts, (unsigned long)conn_bytes,
+	        (unsigned long)conn_frames);
+	/* NetX zeroes the socket's packet counters at accept, so sent / rexmit
+	   are this connection's. */
+	if (nx_tcp_socket_info_get(&sock, &sent, NX_NULL, NX_NULL, NX_NULL,
+	                           &rexmit, NX_NULL, NX_NULL, &state, &txq,
+	                           &txwin, &rxwin) == NX_SUCCESS)
+		LOG_WRN("socket: state %lu, txq %lu, txwin %lu, rxwin %lu, "
+		        "sent %lu, rexmit %lu", (unsigned long)state,
+		        (unsigned long)txq, (unsigned long)txwin,
+		        (unsigned long)rxwin, (unsigned long)sent,
+		        (unsigned long)rexmit);
+}
+
 /* Send @p len bytes in MSS-sized packets (NetX fragments a >MSS payload itself,
    double-spending the pool -- so we chunk).  Returns 0, or -1 on pool/send fail. */
 static int mjpeg_send(const uint8_t *data, ULONG len)
 {
 	NX_PACKET_POOL *pool = (NX_PACKET_POOL *)nx_net_pool();
 	ULONG mss = 0, off = 0;
+	UINT sr;
 
 	if (pool == NULL)
 		return -1;
@@ -235,11 +302,14 @@ static int mjpeg_send(const uint8_t *data, ULONG len)
 			mstats.pool_fail++;
 			return -1;
 		}
-		if (nx_tcp_socket_send(&sock, pkt, MJPEG_SEND_TICKS) != NX_SUCCESS) {
+		sr = nx_tcp_socket_send(&sock, pkt, MJPEG_SEND_TICKS);
+		if (sr != NX_SUCCESS) {
 			nx_packet_release(pkt);
-			mstats.send_err++;
+			mjpeg_send_failed(sr);
 			return -1;
 		}
+		conn_pkts++;
+		conn_bytes += n;
 		off += n;
 	}
 	return 0;
@@ -265,6 +335,7 @@ static int mjpeg_send_frame(void)
 		return -1;
 	mstats.sent_frames++;
 	mstats.sent_bytes += n;
+	conn_frames++;
 	return 0;
 }
 
@@ -402,19 +473,39 @@ static void mjpeg_entry(ULONG arg)
 		while (mjpeg_run) {
 			/* Accept + serve while the base is delivering (producer_dead=0). */
 			while (mjpeg_run && !producer_dead) {
+				UINT r;
+
 				if (nx_tcp_server_socket_accept(&sock, MJPEG_ACCEPT_TICKS)
 				    != NX_SUCCESS)
 					continue;      /* timeout -> re-accept (re-checks run)    */
 				mstats.conns++;
+				conn_frames = 0;
+				conn_pkts   = 0;
+				conn_bytes  = 0;
 				LOG_INF("client connected");
 				mjpeg_serve();
+				/* issue #202: this connection's frames, not the total. */
 				LOG_INF("client disconnected (%lu frames)",
-				        (unsigned long)mstats.sent_frames);
-				nx_tcp_socket_disconnect(&sock, NX_IP_PERIODIC_RATE);
-				nx_tcp_server_socket_unaccept(&sock);
-				if (nx_tcp_server_socket_relisten(ip, NX_MJPEG_PORT, &sock)
-				    != NX_SUCCESS) {
-					LOG_ERR("relisten failed");
+				        (unsigned long)conn_frames);
+				r = nx_tcp_socket_disconnect(&sock, NX_IP_PERIODIC_RATE);
+				if (r != NX_SUCCESS) {
+					mstats.disconnect_fail++;
+					LOG_WRN("disconnect failed (0x%02x)", (unsigned)r);
+				}
+				r = nx_tcp_server_socket_unaccept(&sock);
+				if (r != NX_SUCCESS) {
+					mstats.unaccept_fail++;
+					LOG_WRN("unaccept failed (0x%02x)", (unsigned)r);
+				}
+				r = nx_tcp_server_socket_relisten(ip, NX_MJPEG_PORT, &sock);
+				if (r != NX_SUCCESS) {
+					/* Counted and named (issue #202); the handling is
+					   unchanged, NX_CONNECTION_PENDING included. */
+					mstats.relisten_fail++;
+					if (r == NX_CONNECTION_PENDING)
+						mstats.relisten_pending++;
+					mstats.relisten_last = (uint32_t)r;
+					LOG_ERR("relisten failed (0x%02x)", (unsigned)r);
 					break;     /* -> re-setup the socket (below)         */
 				}
 			}
@@ -667,6 +758,23 @@ bool nx_mjpeg_stats_get(struct nx_mjpeg_stats *out)
 		out->drop_oversized = mstats.drop_oversized;
 		out->send_err       = mstats.send_err;
 		out->pool_fail      = mstats.pool_fail;
+		out->send_window      = mstats.send_window;
+		out->send_queue       = mstats.send_queue;
+		out->send_notconn     = mstats.send_notconn;
+		out->send_nopkt       = mstats.send_nopkt;
+		out->send_other       = mstats.send_other;
+		out->send_last        = mstats.send_last;
+		out->fail_pkts        = mstats.fail_pkts;
+		out->fail_bytes       = mstats.fail_bytes;
+		out->fail_frames      = mstats.fail_frames;
+		out->relisten_fail    = mstats.relisten_fail;
+		out->relisten_pending = mstats.relisten_pending;
+		out->relisten_last    = mstats.relisten_last;
+		out->disconnect_fail  = mstats.disconnect_fail;
+		out->unaccept_fail    = mstats.unaccept_fail;
+		out->conn_frames      = conn_frames;
+		out->conn_pkts        = conn_pkts;
+		out->conn_bytes       = conn_bytes;
 	}
 	return mjpeg_run != 0;
 }

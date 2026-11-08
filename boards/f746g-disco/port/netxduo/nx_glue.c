@@ -23,6 +23,8 @@
 #define LOG_TAG "net"
 #include "log.h"
 
+#include <string.h>           /* memset (nx_net_diag_get)                         */
+
 /* Pool: one Ethernet frame (1514) + the driver's 2-byte RX align pad + headroom,
    ~38 packets.  In non-cacheable SDRAM (zero-copy: payloads go straight to the
    ETH DMA). */
@@ -317,6 +319,62 @@ int nx_net_info_get(struct nx_net_info *out)
 	out->ip_valid = (ip != 0);
 	out->dhcp_mode = dhcp_created && !static_mode;
 	nxg_unlock();
+	return NXG_OK;
+}
+
+/* Counters for `net info` (issue #202).  Only reads: nx_tcp_info_get() and
+   nx_packet_pool_info_get() take the IP / pool protection themselves, and the
+   driver's counters are copied without a lock (nx_eth_driver_get_stats()). */
+int nx_net_diag_get(struct nx_net_diag *out)
+{
+	struct nx_eth_stats es;
+	ULONG ps = 0, pbs = 0, prs = 0, pbr = 0, pinv = 0, prd = 0, pck = 0;
+	ULONG pc = 0, pd = 0, pcd = 0, prt = 0;
+	ULONG tot = 0, fr = 0, er = 0, es_ = 0, ir = 0;
+
+	if (!nx_up)
+		return NXG_ERR_STATE;
+	memset(out, 0, sizeof *out);
+
+	nx_eth_driver_get_stats(&es);
+	out->rx_ok            = (uint32_t)es.rx_ok;
+	out->rx_drop          = (uint32_t)es.rx_drop;
+	out->rx_no_buf        = (uint32_t)es.rx_no_buf;
+	out->tx_ok            = (uint32_t)es.tx_ok;
+	out->tx_drop          = (uint32_t)es.tx_drop;
+	out->tx_drop_mac_down = (uint32_t)es.tx_drop_mac_down;
+	out->tx_drop_coalesce = (uint32_t)es.tx_drop_coalesce;
+	out->tx_drop_hal      = (uint32_t)es.tx_drop_hal;
+	out->hal_err_last     = (uint32_t)es.hal_err_last;
+	out->hal_dma_err_last = (uint32_t)es.hal_dma_err_last;
+	out->hal_state_last   = (uint32_t)es.hal_state_last;
+	out->dma_err          = (uint32_t)es.dma_err;
+	out->dma_err_last     = (uint32_t)es.dma_err_last;
+
+	if (nx_tcp_info_get(&eth_ip, &ps, &pbs, &prs, &pbr, &pinv, &prd, &pck,
+	                    &pc, &pd, &pcd, &prt) == NX_SUCCESS) {
+		out->tcp_valid         = true;
+		out->tcp_pkts_sent     = (uint32_t)ps;
+		out->tcp_bytes_sent    = (uint32_t)pbs;
+		out->tcp_pkts_rcvd     = (uint32_t)prs;
+		out->tcp_bytes_rcvd    = (uint32_t)pbr;
+		out->tcp_invalid       = (uint32_t)pinv;
+		out->tcp_rx_dropped    = (uint32_t)prd;
+		out->tcp_checksum_err  = (uint32_t)pck;
+		out->tcp_conns         = (uint32_t)pc;
+		out->tcp_disconns      = (uint32_t)pd;
+		out->tcp_conns_dropped = (uint32_t)pcd;
+		out->tcp_retransmits   = (uint32_t)prt;
+	}
+	if (nx_packet_pool_info_get(&eth_pool, &tot, &fr, &er, &es_, &ir)
+	    == NX_SUCCESS) {
+		out->pool_valid       = true;
+		out->pool_total       = (uint32_t)tot;
+		out->pool_free        = (uint32_t)fr;
+		out->pool_empty_req   = (uint32_t)er;
+		out->pool_empty_susp  = (uint32_t)es_;
+		out->pool_invalid_rel = (uint32_t)ir;
+	}
 	return NXG_OK;
 }
 

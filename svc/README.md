@@ -700,10 +700,10 @@ What the contract fixes, on every board:
 - **The capture reports its warm-up** (frames let go, or ms) on the caller's
   stack; the command prints `warm-up  : ...`, 0 included.
 - **[!] The shared command owns no mutable storage**: line buffers, results and
-  frame cursors are on the caller's stack.  The storage audit's
-  `SHARED_COMMANDS` (`cmake/check_shared_storage_build.py`) lists
-  `shell/cmds/cmd_camera.c` next to `cmd_nn.c` and `nn_cmd_core.c`, so every
-  board's build audits it and fails without it.
+  frame cursors are on the caller's stack.  The storage audit covers every
+  source the build compiles under `shell/cmds/` (issue #206), and
+  `cmd_camera.c` is marked `required` in its first line, so every board's build
+  audits it and fails without it (see `cmake/README.md`).
 
 ## One line per shared nn / plugin / camera file
 
@@ -907,8 +907,8 @@ whose callers pass no context -- one the board defines under a name the shared
 file declares `extern` (`nn_model_board_state`; the tflm backend's
 `nn_tflm_board_state`; the Ethos-U cache protocol's `npu_cache_board_state`). This is enforced per
 board by `cmake/check_no_mutable_storage.py` through the build-derived audit in
-`cmake/shared_storage_gate.cmake` (see `cmake/README.md`; `svc/ymodem.c` is the
-one exception).
+`cmake/shared_storage_gate.cmake`, which also covers everything compiled under
+`shell/cmds/` (see `cmake/README.md`; `svc/ymodem.c` is the one exception).
 
 ## Where the per-board files are described
 

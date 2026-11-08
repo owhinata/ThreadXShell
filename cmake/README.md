@@ -2,13 +2,11 @@
 
 `shared_storage_check` runs on every shipping `shell` build (#117), including
 when the ELF is already current. It covers every compiled translation unit in
-the repository's `svc/` tree and the shared commands outside it,
-`SHARED_COMMANDS` in `check_shared_storage_build.py`:
-`shell/cmds/{cmd_nn,nn_cmd_core,cmd_camera,cmd_blob}.c` (`cmd_camera.c` since
-#143, `cmd_blob.c` since #194; a board whose store is not built, wio-lite-ai
-without KV, still compiles `cmd_blob.c` and registers nothing).
-Each of those must also be compiled by the board -- a build that stops
-compiling one is refused ("mandatory command missing"), not audited less. The exact
+the repository's `svc/` and `shell/cmds/` trees (#206; before that, a list of
+four `shell/cmds/` files). There is no list of files: a source is in scope when
+its real path is under one of the two trees, and a path written under one must
+resolve under that same tree -- a symlink out of it is refused, both in the
+build's inventory and in a walk of `shell/cmds/` on disk. The exact
 `svc/ymodem.c` path is the sole existing exception: it owns non-reentrant send
 and receive staging buffers and last-run diagnostics. This is not a stateless
 rule for the entire shell; instances and job pools intentionally own state.
@@ -52,16 +50,88 @@ there is no cached success. Direct object/probe targets are outside the shipping
 invocation guarantee. Plugin custom commands remain a separate artifact graph,
 with actual-object storage checks and ownership validation in `add_plugin.cmake`.
 
+## Which `shell/cmds/` files a build must ship: the file's mark
+
+Every source under `shell/cmds/` says so in its first line, exactly one of:
+
+```
+/* shared-command: required */
+/* shared-command: optional BOARD_HAS_<X> */
+```
+
+No mark, a second `shared-command:` anywhere in the file, a first line that is
+not exactly one of these, or an unreadable file fails the audit.
+`BOARD_HAS_<X>` names a property (what the board has, never which board it is);
+today the only optional file is `fs_cmd_core.c`, on `BOARD_HAS_FILEX`. Every
+board's `board.cmake` must set each such variable to `ON` or `OFF`
+(f746g-disco ON, wio-lite-ai from `BSP_ENABLE_SD`, grove-vision-ai-v2 OFF);
+`shared_storage_gate.cmake` writes every `BOARD_HAS_*` it sees to
+`shared-storage/capabilities.txt`, and a variable a mark names that is unset or
+not exactly `ON`/`OFF` fails.
+
+- A `required` file, or an `optional` one whose property is `ON`, must be
+  compiled as an object the `shell` link takes directly: one of the inputs
+  before `|` in that link's `build.ninja` statement, read with
+  `check_delivery_gate.py`'s parser (an `OBJECT` library's objects are such
+  inputs). Compiled only for a target the link does not take, or reaching the
+  link only through a static library, fails -- even though an archive member
+  can end up linked.
+- An `optional` file whose property is `OFF` must be compiled by no target at
+  all.
+
+A board that stops compiling a shared command is therefore refused, not audited
+less, and the only way to leave one out is its property, checked both ways.
+
+## Included sources, stray and duplicate registrations (#206)
+
+Three more rules look at every translation unit the `shell` link takes (its
+direct objects and the members of the static libraries it takes) whose source
+is this repository's own: not under `lib/`, `boards/<board>/lib/` or
+`boards/<board>/sdk/`, and not generated in the build tree. Each is replayed
+with the same argv rules as the storage audit (in parallel); one that cannot be
+replayed fails rather than being skipped.
+
+- (a) Its dependencies (`gcc -M`, which also lists files found through
+  `-isystem`) may not include a `.c`, `.cc`, `.cpp` or `.cxx` other than
+  itself. A board file that `#include`s a shared command would otherwise ship
+  that command's code outside the audit.
+- (b) Only translation units under `shell/cmds/` and `boards/<board>/cmds/` may
+  own a section whose name starts with `.shell_root_cmds`, and there it must be
+  `.shell_root_cmds.<root name>`, as `CLI_CMD_REGISTER` writes it. The bare
+  `.shell_root_cmds` (which the f746 and Grove linker scripts also keep) is
+  refused wherever it is.
+- (c) The root names collected from those section names are unique across the
+  link; a duplicate names both files. The shell would otherwise run whichever
+  comes first in name order and the other would never be reached.
+
+The audit prints how many translation units it checked, how many register and
+how many distinct root names it found (on 2026-11-08: f746g-disco null backend
+113 / 25 / 30, wio-lite-ai 140 / 23 / 28, grove-vision-ai-v2 140 / 20 / 25).
+
+**Documented limits.** Like the rest of this audit it is a build-integrity check,
+not a defence against a hostile change; these are left to diff review:
+
+- a registration written by hand without `CLI_CMD_REGISTER`, whose section's
+  root name differs from the record's `.name` (rule (c) reads section names);
+- a change of a mark from `required` to `optional`;
+- a copy of an optional shared command placed in `boards/<board>/cmds/` on a
+  board where its property is `OFF`;
+- an object produced by a custom command rather than a compile in
+  `compile_commands.json` (nothing replays it).
+
+## Negative tests
+
 `fixtures/run_shared_storage_build_tests.py --cc <arm-gcc> --cxx <arm-g++>
 --objdump <arm-objdump> --nm <arm-nm>` builds a temporary real CMake project and
 tests coverage omissions, target export/unity, source additions/removal,
 differing target contexts, direct ARM-only/optimized storage, failure
-persistence, and C++ services (a clean `.cc` passes; a static object, a global
+persistence, C++ services (a clean `.cc` passes; a static object, a global
 constructor, an unknown or unconfigured driver, a suffix/driver mismatch and a
-contradicting `-x` fail). Optional `--board-build
+contradicting `-x` fail), the `shell/cmds/` marks and link rules, and rules
+(a) to (c), each refused on the first build of a clean tree. Optional `--board-build
 <configured-consumer-build>` mutates temporary copies of the three shared
-regression sources using the selected Grove or Wio consumer's actual compile
-context. When that consumer compiles the shared TFLM backend
+regression sources and of `shell/cmds/cmd_builtin.c` using the selected Grove or
+Wio consumer's actual compile context. When that consumer compiles the shared TFLM backend
 (`svc/nn/tflm/nn_tflm.cc`, Wio Lite AI or STM32F746G-DISCO with the `tflm`
 backend), a copy of it with one injected `static` is replayed through the C++
 driver in that real context and must be refused, and the unmodified file must
@@ -71,9 +141,26 @@ it). It never edits firmware sources or
 writes firmware. The existing `run_storage_gate_tests.py` independently tests
 section/COMMON detection, including TLS, anonymous assembly and broken tools.
 Grove runs both fixture suites on every `shell` build, including the integration
-suite's real consumer mutations. The generic section-checker fixtures are not
-duplicated in Wio builds; Grove's cross-compiler invocation and the host runner
-already exercise them, while Wio still audits its own compiled services.
+suite's real consumer mutations; there the integration suite is called with
+`--no-verdict`, so it prints no `negative-tests:` line. The run whose line counts
+is Grove's `test/host_tests.sh`, when both its build tree and the pinned
+toolchain are present; `shell/test/run_host_tests.sh` holds that line against
+its negative-test table (row `tree:grove-vision-ai-v2+toolchain`). The generic
+section-checker fixtures are not duplicated in Wio builds; Grove's
+cross-compiler invocation and the host runner already exercise them, while Wio
+still audits its own compiled services. By hand:
+
+```
+python3 cmake/fixtures/run_shared_storage_build_tests.py \
+    --cc tools/<toolchain>/bin/arm-none-eabi-gcc --cxx .../arm-none-eabi-g++ \
+    --objdump .../arm-none-eabi-objdump --nm .../arm-none-eabi-nm \
+    --board-build build/grove-vision-ai-v2
+```
+
+It ends a passing run with `negative-tests: cmake/fixtures/run_shared_storage_build_tests.py
+OK (N cases)`, N being the commands and argv checks it held to their expected
+result; `--no-verdict` leaves that line out. A commit that adds or removes a
+case changes the table's row with it.
 
 # Plugin veneer cost gate
 

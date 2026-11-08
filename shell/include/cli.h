@@ -110,8 +110,9 @@ struct cli_cmd {
  * Note: `name` must be a valid C identifier, so names with dashes (e.g.
  * "foo-bar") cannot be registered this way today.  Every standard-tier command
  * (version/uptime/reboot/thread/devmem/help/clear/history/backends) is a valid
- * identifier.  Duplicate root names are not detected: command lookup takes the
- * first match in SORT_BY_NAME order, so avoid registering the same root twice.
+ * identifier.  A root name registered twice is refused by the build's storage
+ * audit (issue #206, cmake/README.md): command lookup would take the first
+ * match in SORT_BY_NAME order and the other would be silently unreachable.
  */
 /* Parameters are underscore-prefixed so a `name`/`help`/... parameter does not
  * collide with the identically named designated-initializer field below (the

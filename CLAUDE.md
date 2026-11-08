@@ -52,10 +52,10 @@ src cmds svc cmake test README。wio のみ boot も）。
 
 `shell/cmds/cmd_nn.c` + 契約 `svc/nn/nn_svc.h` + `nn_svc_*.c`、`cmd_camera.c` + `svc/camera/camera_svc.h` + `camera_svc_*.c`、`cmd_blob.c` + `svc/blob/blob_svc.h` + `src/blob.c`・`src/blob_writer.c`・`cmds/cmd_blob_board.c`（下は nn の規則）。
 
-- **共有 TU（nn・camera・blob とも）は可変記憶域を 1 バイトも持たない**（状態はアダプタ、バッファは持ち主が配置属性つきで注入）。
+- **共有 TU（`svc/` と `shell/cmds/` でコンパイルされる物は全部で nn・camera・blob に限らない）は可変記憶域を 1 バイトも持たない**（状態はアダプタ、バッファは持ち主が配置属性つきで注入）。
   強制は `cmake/check_no_mutable_storage.py` の**ボードごとの監査コンパイル**（ホストの答えは別物）。
-- **ファーム監査は列挙せずビルドから導出する**（`cmake/shared_storage_gate.cmake`。例外は
-  `svc/ymodem.c` のみ）。**導出・両方向照合・失敗伝播を弱めない。**
+- **ファーム監査は列挙せずビルドから導出する**（`cmake/shared_storage_gate.cmake`。必須かはファイル先頭の印、例外は `svc/ymodem.c` のみ。
+  include した `.c`・許可外の登録・root 名の重複も拒む。#206）。**導出・両方向照合・失敗伝播を弱めない。**
 - **capability マクロは「性質」で「ボード名」ではない**。バックエンド依存は `CONFIG_NN_BACKEND` に従う。
 - **status と claim disposition は別フィールドで `retryable` と `terminal` を畳まない**（**判断できない
   ボードは `terminal` に fail-closed**）。disposition は**呼び出し側の解放権限**である。

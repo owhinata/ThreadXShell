@@ -5174,7 +5174,11 @@ on every shipping `shell` build. Building `seam_probe` alone does not invoke thi
 gate; that image is an inspection link. Every `shell` build also runs both the
 section-checker and derived-gate integration fixtures with the cross compiler,
 including mutations compiled with this board's actual service flags. The
-plugin's actual-object audit remains independent. See the
+plugin's actual-object audit remains independent. Since issue #206 it covers
+every `shell/cmds/` file (`BOARD_HAS_FILEX` is OFF here, so `fs_cmd_core.c` is
+compiled by nothing) and the include, registration and duplicate-name rules;
+the host tests run the integration fixtures too and hold their count against
+the negative-test table (the firmware build's run passes `--no-verdict`). See the
 [shared storage gate contract](../../cmake/README.md).
 
 What remained of this board's half was the `npu_tensor` -> `tensor_desc`

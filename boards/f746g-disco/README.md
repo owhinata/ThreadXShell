@@ -1626,8 +1626,10 @@ The shared decoder (`svc/nn/blazeface.c`) still owns NO storage, and
 `cmake/check_no_mutable_storage.py` still refuses a static added to it: it is
 audited as the blazeface plugin's `AUDIT_SHARED` source with the plugin's
 compile command.  Since issue #117, firmware coverage is derived across the
-actual `svc_obj` and `shell` producers (`cmd_nn.c`, `nn_cmd_core.c`); each
-audit replays its producer's compile command. See the
+actual `svc_obj` and `shell` producers; since issue #206 that is every
+`shell/cmds/` file too, `fs_cmd_core.c` included (`BOARD_HAS_FILEX` is ON here),
+plus the include, registration and duplicate-name rules over this board's own
+TUs. Each audit replays its producer's compile command. See the
 [shared storage gate contract](../../cmake/README.md).
 
 ## Commands

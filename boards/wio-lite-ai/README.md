@@ -230,7 +230,9 @@ build, including `plugin_exec.c`, `plugin_paint_budget.c` and `rect_geom.c` when
 the backend enables them. A null-backend build audits only its actual sources;
 it does not create firmware decoder/plugin objects. See the
 [shared storage gate contract](../../cmake/README.md) for scope, the existing
-YMODEM exception, command replay, and negative tests.
+YMODEM exception, command replay, and negative tests. Since issue #206 the scope
+is every `shell/cmds/` file as well; `fs_cmd_core.c` follows `BOARD_HAS_FILEX`,
+which this board sets from `BSP_ENABLE_SD` (OFF: compiled by nothing).
 
 ## Console
 

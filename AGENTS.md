@@ -60,11 +60,11 @@
 
 `cmd_nn.c` / `cmd_camera.c` / `cmd_blob.c` が唯一の実装、契約は `svc/nn/nn_svc.h` / `svc/camera/camera_svc.h` / `svc/blob/blob_svc.h`、ボード側は `nn_svc_*.c` / `camera_svc_*.c` / `src/blob.c`・`src/blob_writer.c`・`cmds/cmd_blob_board.c`。**緩めた時点で BLOCKING。**
 
-- **共有 TU（`cmd_nn.c` / `nn_cmd_core.c` / `cmd_camera.c` / `cmd_blob.c`）は可変記憶域を持たない**（状態はアダプタだけ）。強制は
+- **共有 TU（`svc/` と `shell/cmds/` でコンパイルされる物は全部。nn・camera・blob に限らない）は可変記憶域を持たない**（状態はアダプタだけ）。強制は
   `cmake/check_no_mutable_storage.py` を**ボードごとの監査コンパイル**で当てること — **ホストの結果は
   当てにならない**（host ではコマンド表が `.data.rel.ro` に落ちて偽陽性になる）。
-- **ファーム監査は列挙せずビルドから導出する**（`cmake/shared_storage_gate.cmake`。対象は実際に
-  コンパイルする `svc/` の TU と上記の共有コマンドで、唯一の既存例外は `svc/ymodem.c`）。評価済み CMake
+- **ファーム監査は列挙せずビルドから導出する**（`cmake/shared_storage_gate.cmake`。対象は実際にコンパイルする `svc/` と `shell/cmds/` の
+  TU 全部、必須かはファイル先頭の印、唯一の既存例外は `svc/ymodem.c`。include した `.c`・許可外の登録・root 名の重複も拒む）。評価済み CMake
   target/source と compile DB を両方向照合し実引数で監査コンパイルする。**導出・照合・失敗伝播を
   弱めない。** plugin の実オブジェクト監査は別に維持する。詳細は `cmake/README.md`。
 - **capability マクロは性質であってボード名ではない**（バックエンド依存は `CONFIG_NN_BACKEND` に従う）。

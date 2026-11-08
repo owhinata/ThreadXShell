@@ -62,9 +62,12 @@ Every source under `shell/cmds/` says so in its first line, exactly one of:
 No mark, a second `shared-command:` anywhere in the file, a first line that is
 not exactly one of these, or an unreadable file fails the audit.
 `BOARD_HAS_<X>` names a property (what the board has, never which board it is);
-today the only optional file is `fs_cmd_core.c`, on `BOARD_HAS_FILEX`. Every
-board's `board.cmake` must set each such variable to `ON` or `OFF`
-(f746g-disco ON, wio-lite-ai from `BSP_ENABLE_SD`, grove-vision-ai-v2 OFF);
+today the optional files are `fs_cmd_core.c`, on `BOARD_HAS_FILEX`
+(f746g-disco ON, wio-lite-ai from `BSP_ENABLE_SD`, grove-vision-ai-v2 OFF), and
+`cmd_net.c`, on `BOARD_HAS_NETX` (issue #219: f746g-disco and wio-lite-ai ON;
+grove-vision-ai-v2 has no network and declares OFF, so the file must be
+compiled by nothing there). Every board's `board.cmake` must set each such
+variable to `ON` or `OFF`;
 `shared_storage_gate.cmake` writes every `BOARD_HAS_*` it sees to
 `shared-storage/capabilities.txt`, and a variable a mark names that is unset or
 not exactly `ON`/`OFF` fails.
@@ -112,8 +115,8 @@ refused too. Objects this build does not make (a prebuilt archive) are outside.
   comes first in name order and the other would never be reached.
 
 The audit prints how many translation units it checked, how many register and
-how many distinct root names it found (on 2026-11-08: f746g-disco null backend
-113 / 25 / 30, wio-lite-ai 140 / 23 / 28, grove-vision-ai-v2 140 / 20 / 25).
+how many distinct root names it found (on 2026-11-08 after issue #219: f746g-disco null
+backend 116 / 26 / 31, wio-lite-ai 141 / 23 / 28, grove-vision-ai-v2 140 / 20 / 25).
 
 **Documented limits.** Like the rest of this audit it is a build-integrity check,
 not a defence against a hostile change; these are left to diff review:

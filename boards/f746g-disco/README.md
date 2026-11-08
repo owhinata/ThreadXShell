@@ -2185,8 +2185,9 @@ with a 5 s connect timeout gives up.
 
 These counters tell where the packets of `net mjpeg` went.  They observe only.
 
-`net info` prints these lines below `telnet:` (it refuses while the IP stack
-is not up, issue #217).  They
+`net info` prints these lines below `telnet:` (see
+[The `net` command](#the-net-command-shared-with-wio-lite-ai-issue-219) for
+the lines above them).  They
 count from boot and are never reset; the driver, TCP and pool groups are read one
 after another, not as one snapshot.
 
@@ -2305,8 +2306,10 @@ console, `net mjpeg`, the counters).  This is the same split as wio-lite-ai's
 
 `eth_init()` runs at boot only when the SDRAM is up (the DMA descriptors live
 in `.sdram.eth`).  If it did not run or failed, both subcommands refuse with
-`eth: not initialized`; the NetX stack is then not created either, so `net`
-refuses with `net: IP stack not up`.
+`eth: not initialized`; the NetX stack is then not created either, so
+`net ip`, `net dhcp`, `net ping` and `net mjpeg` refuse with
+`net: IP stack not up`, and `net info` answers `ip:    none (IP stack not up)`
+(see [The `net` command](#the-net-command-shared-with-wio-lite-ai-issue-219)).
 
 `eth info` prints the identity and the link as the `eth-link` thread last read
 it (so it can lag a real change by up to one poll):
@@ -2330,8 +2333,76 @@ the link is still down after 5 s it prints the `link:` line and warns
 new link state from the `eth-link` thread on its own; `eth link` does not
 touch NetX.
 
-`net info` now starts at the address line (`ip:`), followed by `mjpeg:` when
-the MJPEG server is running, `telnet:`, and the counters below.
+### The `net` command: shared with wio-lite-ai (issue #219)
+
+`net info`, `net ip`, `net dhcp` and `net ping` are the one shared command
+(`shell/cmds/cmd_net.c`); what they mean on both boards, and the contract under
+them, are in
+[`svc/README.md`](../../svc/README.md#the-net-command-and-the-telnet-console-are-one-implementation-issue-212).
+This board's side:
+
+| File | What it holds |
+|---|---|
+| `port/netxduo/net_svc_f746.c` | The adapter: `nx_glue.h`'s results read as the contract's (`NXG_ERR_STATE` is "IP stack not up"), and the lines of `net info` after the address, written through the contract's writer |
+| `svc/net_svc_config.h` | The properties: the `help` line, no STALE mark (`NET_SVC_HAS_LEASE_STALE 0`), and `mjpeg` as the board's own subcommand |
+| `cmds/cmd_net_board.c` | `net mjpeg start` / `stop` / `stats` only; it registers no root (until issue #219 `cmds/cmd_net.c` was the whole command) |
+
+`net info` prints the address as two lines, then `mjpeg:` while the MJPEG
+server runs, `telnet:`, and the [counters](#network-counters-net-info-and-net-mjpeg-stats-issue-202):
+
+```
+sh> net info
+ip:    192.168.11.29/24
+gw:    192.168.11.1 (dhcp)
+telnet: :23 (idle, 0 sessions), tx ...
+eth rx: ok ..., drop ..., no-buf ...
+...
+pool:   free ... of ..., empty ... (waited ...), bad release ...
+```
+
+`gw:` reads `none (dhcp|static)` with no gateway, and with no address the two
+lines are one, `ip:    none (dhcp, no lease)` or `ip:    none (unset)`.  With no
+IP stack (`eth_init()` failed at boot) `net info` answers
+`ip:    none (IP stack not up)` and exits 0; issue #217 had it refuse.
+
+`net dhcp` waits up to 30 s for a lease and then prints the address (until
+issue #219: 10 s, then a warning and exit 0; now `net: no DHCP lease after
+30 s` and exit 1).  With a lease already held it sends a renew and keeps the
+address meanwhile:
+
+```
+sh> net dhcp
+net: acquiring an address via DHCP (up to 30 s, Ctrl+C to stop)...
+ip:    192.168.11.29/24
+gw:    192.168.11.1 (dhcp)
+sh> net dhcp
+net: renewing the existing lease (kept meanwhile)...
+ip:    192.168.11.29/24
+gw:    192.168.11.1 (dhcp)
+```
+
+`net ip <a.b.c.d/mask> [gw]` prints `net: static address set` and then the
+two lines.  `net ping <a.b.c.d> [count]` takes a count of 1..100 (until issue
+#219 a bad count silently became 4), and exits 1 when nothing answered:
+
+```
+sh> net ping 192.168.11.1 0
+net: bad count '0' (1..100)
+sh> net ping 192.168.11.1
+PING 192.168.11.1, 4 probes:
+  reply 1: 1 ms
+  ...
+4/4 received, rtt min/avg/max 0/0/1 ms
+sh> net ping <an address nobody answers> 2
+PING <that address>, 2 probes:
+  probe 1: timeout
+  probe 2: timeout
+0/2 received
+```
+
+This board's glue never answers "busy" (the IP stack is created once at boot
+and never taken down), and a `net ip` that NetX refuses part way puts the
+previous address, gateway and DHCP state back.
 
 ## Debugging
 

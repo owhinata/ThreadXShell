@@ -1969,6 +1969,64 @@ both.  The boot-time
 KV shell (`src/kv_boot.c`) is an instance too, but it is never started as a
 console -- its output goes to `dmesg` -- so it is not listed.
 
+### `net`: the command shared with f746g-disco (issue #219)
+
+`net info`, `net ip`, `net dhcp` and `net ping` are the one shared command
+(`shell/cmds/cmd_net.c`); what they mean on both boards, and the contract under
+them, are in
+[`svc/README.md`](../../svc/README.md#the-net-command-and-the-telnet-console-are-one-implementation-issue-212).
+This board's side:
+
+| File | What it holds |
+|---|---|
+| `src/net_svc_wio.c` | The adapter: the host stack's state checked before any glue call (coming up or going down is the only "busy", which the command waits out for up to 20 s; off is "no host stack"; FAILED says to run `wifi reset`), the association checked before each probe, and `nx_net.h`'s results read as the contract's |
+| `src/nx_net.c` | The host stack; its section of `net info` is `nx_net_write_status()`, which samples every value first and then writes one line at a time through the contract's writer (until issue #219 `nx_net_print_status()`, printing straight to the console) |
+| `svc/net_svc_config.h` | The properties: the `help` line, the STALE mark (`NET_SVC_HAS_LEASE_STALE 1`), and `shell` as the board's own subcommand |
+| `cmds/cmd_net_board.c` | `net shell start` / `stop` / `status` only, and it registers no root (until issue #219 `cmds/cmd_net.c` was the whole command); it goes when issue #221 makes the telnet console resident |
+
+`net info` prints the address as two lines, then the host-stack section:
+
+```
+wio> net info
+ip:    192.168.11.15/24
+gw:    192.168.11.1 (dhcp)
+  host stack: up
+  mac: ...
+...
+  mod data tx: ...
+```
+
+`gw:` is followed by ``<-- STALE (link went down; run `net dhcp`)`` when the
+link went down under the address.  Until issue #219 `net info` began with a
+`link:` and a `mac:` line asked of the module over eRPC; those went, and
+`wifi status` prints both (`wifi: connected`, `  mac  ...`).  `net info` now
+answers with the RTL8720 powered off or its link held by another command.  The
+`  mac:` line of the host-stack section stays: it is the MAC NetX was given,
+read without eRPC.  After `wifi off`:
+
+```
+wio> net info
+ip:    none (no host stack -- `wifi connect` brings it up)
+  host stack: off -- the RTL8720 link was taken away (wifi on/off/reset)
+```
+
+The telnet console's statistics are still `net shell status`, not a line of
+`net info`; issue #221 moves them.
+
+`net dhcp` prints `net: acquiring an address via DHCP (up to 30 s, Ctrl+C to
+stop)...` (until issue #219 `requesting DHCP lease (up to ~30s ...)`), then
+the two lines, or `net: no DHCP lease after 30 s` and exit 1.  Until issue
+#220 a `net dhcp` while a lease is held stops the client and acquires again
+rather than renewing in place, and `ip:    none (dhcp, no lease)` can show
+even when DHCP was never started.  A successful `net ip` or `net dhcp` still
+arms the telnet console (`net_shell_autoarm()`), until issue #221.
+
+`net ping` now prints a `PING <a.b.c.d>, <n> probes:` heading and ends with
+`<ok>/<sent> received, rtt min/avg/max <min>/<avg>/<max> ms` (until issue #219
+no heading, and `net: <ok>/<sent> received, rtt min/avg/max = ...`).  With the
+link down it prints only
+``net: the link is down (not associated) -- `wifi connect` first``, as before.  Ctrl+C between probes now ends the run.
+
 ## Flashing and recovery
 
 Normal flow is the DFU one at the top of this file.  If the app is bad, the

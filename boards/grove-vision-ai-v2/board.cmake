@@ -366,6 +366,7 @@ option(BSP_ENABLE_WFI "Enable ThreadX idle WFI power saving" ON)
 # The property shell/cmds/fs_cmd_core.c is optional on (issue #206): this board
 # has no FileX, so the shared storage audit wants that file compiled by nothing.
 set(BOARD_HAS_FILEX OFF)
+set(BOARD_HAS_NETX OFF)   # no network: shell/cmds/cmd_net.c is compiled by nothing (#219)
 set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/core/cli_core.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_complete.c"

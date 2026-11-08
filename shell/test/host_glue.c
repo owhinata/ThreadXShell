@@ -127,11 +127,17 @@ int cli_tx_send_blocking(struct cli_instance *sh, const uint8_t *data, size_t le
  * if the "delay" elapsed -- enough to exercise both cli_cancel_poll seams. */
 static cli_test_tx_wait_fn g_sleep_fn;
 static void               *g_sleep_arg;
+static unsigned            g_sleep_ticks;   /* the sleep the hook is called from */
 
 void cli_test_set_sleep_hook(cli_test_tx_wait_fn fn, void *arg)
 {
 	g_sleep_fn  = fn;
 	g_sleep_arg = arg;
+}
+
+unsigned cli_test_sleep_ticks(void)
+{
+	return g_sleep_ticks;
 }
 
 int cli_sleep(struct cli_instance *sh, unsigned ticks)
@@ -140,8 +146,11 @@ int cli_sleep(struct cli_instance *sh, unsigned ticks)
 		return 0;
 	if (cli_cancel_poll(sh))            /* a 0x03 already buffered in the ring */
 		return 1;
-	if (g_sleep_fn)                     /* test may inject a 0x03 (async wake) */
+	if (g_sleep_fn) {                   /* test may inject a 0x03 (async wake) */
+		g_sleep_ticks = ticks;
 		g_sleep_fn(sh, g_sleep_arg);
+		g_sleep_ticks = 0;
+	}
 	if (cli_cancel_poll(sh))
 		return 1;
 	return 0;                           /* delay elapsed */

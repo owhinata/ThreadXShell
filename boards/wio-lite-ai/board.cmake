@@ -455,6 +455,10 @@ set(APP_TINYUSB_SOURCES
 # board's own backend/, cmds/ and svc/.  The ORDER below is the donor's, unchanged:
 # it is the linker's input order, and the appends further down depend on being
 # appended after the option() that gates them.
+# The property shell/cmds/cmd_net.c is optional on (issue #219): this board always
+# has NetX Duo (the host stack, src/nx_net.c), so the shared storage audit wants
+# that file shipped.
+set(BOARD_HAS_NETX ON)
 set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/core/cli_core.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_complete.c"
@@ -486,7 +490,8 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_membench.c"
     "${BOARD_DIR}/cmds/cmd_wifi.c"
     "${BOARD_DIR}/cmds/cmd_wifi_flash.c"
-    "${BOARD_DIR}/cmds/cmd_net.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_net.c"    # the one shared command (#219)
+    "${BOARD_DIR}/cmds/cmd_net_board.c"           # ...and this board's `net shell`
     "${BOARD_DIR}/cmds/cmd_wifi_link.c"
     "${BOARD_DIR}/cmds/cmd_xfer.c"
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
@@ -1054,6 +1059,7 @@ add_executable(shell
     "${BOARD_DIR}/src/net_shell.c"
     "${BOARD_DIR}/src/nx_link_driver.c"
     "${BOARD_DIR}/src/nx_net.c"
+    "${BOARD_DIR}/src/net_svc_wio.c"     # the shared `net` command's adapter (#219)
     "${BOARD_DIR}/port/threadx/tx_glue.c"
     "${BOARD_DIR}/src/system_stm32h7xx.c"
     "${CMSIS_DEV}/Source/Templates/gcc/startup_stm32h725xx.s"
@@ -1098,6 +1104,7 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/svc/plugin"
     "${CMAKE_SOURCE_DIR}/svc/camera"
     "${CMAKE_SOURCE_DIR}/svc/blob"
+    "${CMAKE_SOURCE_DIR}/svc/net"
     "${BOARD_DIR}/svc"                           # log.h / timebase.h: the board's
                                                  # services, which the shared
                                                  # cmd_dmesg.c / cmd_sleep.c consume

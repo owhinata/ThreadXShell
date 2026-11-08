@@ -1201,6 +1201,31 @@ for shape in FULL RXLEVEL NOSTORE NORECV; do
     "$out/test_blob_cmd_$shape"
 done
 
+# issue #219 -- the shared `net` command (shell/cmds/cmd_net.c) through the
+# REAL dispatcher over a stub adapter that is also the clock (net_svc_stub.c),
+# once per shape a board may declare (net_cfg/net_svc_config.h).  Nothing gates
+# what a command prints, and the exit value does not reach the console, so both
+# are pinned here: the bad counts and the default of 4 (N1), exit 1 with no
+# reply (N2), the 30 s DHCP wait (N3), the two address lines and STALE only
+# under its property (N4), BUSY called again within one deadline a slow adapter
+# does not stretch, Ctrl+C in each wait, and the board's lines through the
+# writer.  The DUP shape registers a board `info` on top of the shared one: the
+# check the real boards' tables pass (boards/<board>/test/host_tests.sh) must
+# see that.  TX_TIMER_TICKS_PER_SECOND is passed because the shim does not
+# define it (the command asserts 1 ms ticks).
+for shape in STALE BARE DUP; do
+    gcc $CFLAGS -DCLI_USE_COLOR=0 -DNET_TEST_SHAPE_$shape -DTX_TIMER_TICKS_PER_SECOND=1000 \
+        $glue_inc -I "$here/shim" -I "$here/net_cfg" \
+        -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" -I "$svc/net" \
+        "$here/test_net_cmd.c" "$here/net_svc_stub.c" \
+        "$here/../cmds/cmd_net.c" \
+        "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
+        "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
+        $glue \
+        $LDFLAGS -o "$out/test_net_cmd_$shape"
+    "$out/test_net_cmd_$shape"
+done
+
 # issue #99 -- the shared stream lifecycle (svc/nn/nn_stream_life.c).
 #
 # A `--frames` waiter and a second console racing over one stream: the waiter

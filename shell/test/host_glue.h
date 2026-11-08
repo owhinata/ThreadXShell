@@ -49,4 +49,11 @@ void cli_test_set_tx_wait_hook(cli_test_tx_wait_fn fn, void *arg);
  */
 void cli_test_set_sleep_hook(cli_test_tx_wait_fn fn, void *arg);
 
+/**
+ * The @p ticks of the cli_sleep() that is calling the sleep hook right now (0
+ * outside one), so a hook can advance a test's clock by what the command asked
+ * to sleep (issue #219: the shared `net` command measures its waits in ticks).
+ */
+unsigned cli_test_sleep_ticks(void);
+
 #endif /* HOST_GLUE_H */

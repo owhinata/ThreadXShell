@@ -255,6 +255,28 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 \
     $LDFLAGS -o "$out/test_camera_table"
 "$out/test_camera_table"
 
+# issue #219 -- the `net` table this board builds: the shared command
+# (shell/cmds/cmd_net.c) against this board's REAL svc/net_svc_config.h, over
+# the shared stub adapter.  A board subcommand that reuses a shared name is
+# silently unreachable (the parser takes the first match), and only the built
+# table shows it; shell/test/test_net_cmd.c proves the check sees a duplicate.
+# The run also pins this board's NET_SVC_HAS_LEASE_STALE and that the gw line
+# follows it.
+st="$HOST_TEST_SHELL_TEST"
+gcc $CFLAGS -DCLI_USE_COLOR=0 -DTX_TIMER_TICKS_PER_SECOND=1000 \
+    -I "$st" -I "$HOST_TEST_BACKEND" -I "$st/shim" \
+    -I "$board/svc" -I "$HOST_TEST_INC" -I "$HOST_TEST_CORE" \
+    -I "$st/../cmds" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/net" \
+    "$here/test_net_table.c" "$st/net_svc_stub.c" \
+    "$st/../cmds/cmd_net.c" \
+    "$HOST_TEST_CORE/cli_session.c" "$HOST_TEST_CORE/cli_edit.c" \
+    "$HOST_TEST_CORE/cli_history.c" "$HOST_TEST_CORE/cli_printf.c" \
+    "$HOST_TEST_SVC/fmt.c" "$HOST_TEST_CORE/cli_parse.c" \
+    "$HOST_TEST_CORE/cli_complete.c" \
+    "$HOST_TEST_BACKEND/cli_backend_dummy.c" "$st/host_glue.c" \
+    $LDFLAGS -o "$out/test_net_table"
+"$out/test_net_table"
+
 # issue #159 (#78 Step 4b) -- the painter's loops (port/plugin/plugin_paint.c):
 # row-major CPU stores into the camera view buffer.  Built with
 # PLUGIN_PAINT_COUNT_STORES so every store is counted where it happens; the

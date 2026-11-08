@@ -9,8 +9,12 @@
  * test cli_session.c on the host we still need `struct cli_instance` -- which
  * embeds ThreadX objects by value -- to be a complete type.  This shim provides
  * just the type names as small dummy structs and the base typedefs; it is found
- * ahead of the real tx_api.h via the test include path.  No ThreadX functions
- * are declared, because the host-tested code never calls any.
+ * ahead of the real tx_api.h via the test include path.  One ThreadX function
+ * is declared: tx_time_get(), which the shared `net` command reads its waits
+ * from (shell/cmds/cmd_net.c, issue #219); the test that links that command
+ * defines it as its own clock (net_svc_stub.c).  TX_TIMER_TICKS_PER_SECOND is
+ * deliberately NOT defined here: that test passes it, so the command's
+ * _Static_assert still has to find the board's value.
  */
 #ifndef TX_API_H
 #define TX_API_H
@@ -29,5 +33,7 @@ typedef struct { void *opaque; } TX_EVENT_FLAGS_GROUP;
 typedef struct { void *opaque; } TX_MUTEX;
 
 #define TX_SUCCESS ((UINT)0)
+
+ULONG tx_time_get(void);
 
 #endif /* TX_API_H */

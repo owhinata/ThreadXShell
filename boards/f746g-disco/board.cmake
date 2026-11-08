@@ -148,6 +148,7 @@ target_include_directories(bsp_iface INTERFACE
     "${CMAKE_SOURCE_DIR}/svc/plugin"
     "${CMAKE_SOURCE_DIR}/svc/camera"   # frame.h
     "${CMAKE_SOURCE_DIR}/svc/blob"
+    "${CMAKE_SOURCE_DIR}/svc/net"
     "${BOARD_DIR}/svc"          # this board's services: log.h / timebase.h
     "${GEN_DIR}"
     "${HAL_DIR}/Inc"
@@ -309,6 +310,9 @@ list(FILTER FX_CORE EXCLUDE REGEX "simulat")            # RAM-disk demo drivers
 # The property shell/cmds/fs_cmd_core.c is optional on (issue #206): this board
 # always has FileX, so the shared storage audit wants that file shipped.
 set(BOARD_HAS_FILEX ON)
+# The property shell/cmds/cmd_net.c is optional on (issue #219): this board
+# always has NetX Duo, so the shared storage audit wants that file shipped.
+set(BOARD_HAS_NETX ON)
 
 # --- Eclipse ThreadX GUIX (display GUI framework) ---------------------------
 # Same pattern as ThreadX/FileX: GLOB the core, configure via port/guix/gx_user.h
@@ -556,7 +560,8 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_xfer.c"
     "${BOARD_DIR}/cmds/cmd_sdram.c"
     "${BOARD_DIR}/cmds/cmd_eth.c"
-    "${BOARD_DIR}/cmds/cmd_net.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_net.c"    # the one shared command (#219)
+    "${BOARD_DIR}/cmds/cmd_net_board.c"           # ...and this board's `net mjpeg`
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_stream_life.c"
@@ -597,6 +602,7 @@ add_executable(shell
     "${BOARD_DIR}/port/eth/eth_phy.c"
     "${BOARD_DIR}/port/netxduo/nx_eth_driver.c"
     "${BOARD_DIR}/port/netxduo/nx_glue.c"
+    "${BOARD_DIR}/port/netxduo/net_svc_f746.c"   # the shared `net` command's adapter (#219)
     "${BOARD_DIR}/port/netxduo/nx_shell.c"
     "${BOARD_DIR}/port/netxduo/nx_mjpeg.c"
     "${NX_DIR}/addons/dhcp/nxd_dhcp_client.c"
@@ -655,6 +661,7 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/svc/plugin"
     "${CMAKE_SOURCE_DIR}/svc/camera"
     "${CMAKE_SOURCE_DIR}/svc/blob"
+    "${CMAKE_SOURCE_DIR}/svc/net"
     "${BOARD_DIR}/svc")            # this board's svc: log.h / timebase.h
 target_compile_definitions(shell PRIVATE TX_INCLUDE_USER_DEFINE_FILE
     FX_INCLUDE_USER_DEFINE_FILE           # port/filex/fx_user.h

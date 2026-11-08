@@ -77,6 +77,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "net_svc.h"   /* net_svc_write_fn */
+
 struct cli_instance;
 
 /*
@@ -224,8 +226,13 @@ void nx_net_modstats_get(struct nx_net_modstats *out);
 void *nx_net_ip(void);
 void *nx_net_pool(void);
 
-/* Print the host-stack section of `net info` / the result of arming the interface. */
-void nx_net_print_status(struct cli_instance *sh);
+/*
+ * Write the host-stack section of `net info` / the result of arming the interface, one
+ * whole line per call of @p write (svc/net/net_svc.h, issue #219).  Every value is
+ * sampled first and no lock is held while writing; a failed write ends it.  Returns 0,
+ * or -1 after the write that failed (the lines before it stay written).
+ */
+int nx_net_write_status(net_svc_write_fn write, void *ctx);
 
 /*
  * Refuse a command that would reconfigure the module underneath the interface.

@@ -8,6 +8,7 @@
  */
 #include "nx_net.h"
 
+#include <stdarg.h>
 #include <string.h>
 
 #include "tx_api.h"
@@ -18,6 +19,7 @@
 #include "cli.h"
 #include "cli_instance.h"
 #include "erpc.h"
+#include "fmt.h"
 #include "link_data.h"
 #define LOG_TAG "nx"
 #include "log.h"
@@ -1335,60 +1337,125 @@ const char *nx_net_state_name(enum nx_net_state s)
 	}
 }
 
-void nx_net_print_status(struct cli_instance *sh)
-{
-	struct nx_link_stats st;
+/* Everything nx_net_write_status() prints, sampled before the first line is
+ * written (issue #219): the writer may block on a slow console, and a line
+ * computed from values read while earlier lines were going out could disagree
+ * with them. */
+struct nxn_status_sample {
+	enum nx_net_state      state;
+	const char            *why;
+	uint8_t                mac[6];
+	bool                   link_up;
+	bool                   radio_up;
+	bool                   lease_stale;
+	uint32_t               assoc_yes, assoc_no, assoc_noanswer;
+	struct nx_link_stats   st;
+	ULONG                  pool_avail, pool_total, pool_empty;
 	struct nx_net_modstats ms;
-	ULONG avail = 0, total = 0, empty = 0, waits = 0, invalid = 0;
+};
 
-	cli_print(sh, "  host stack: %s%s%s\r\n", nx_net_state_name(nxn_state),
-	          (nxn_why && nxn_why[0]) ? " -- " : "", (nxn_why) ? nxn_why : "");
-	if (nxn_state == NX_NET_OFF)
-		return;
+/* The longest line is `nx rx`: about 80 characters of text and seven 32-bit
+ * counters. */
+#define NXN_STATUS_LINE_MAX 192u
+
+/* Format one whole line and write it.  0, or the writer's failure. */
+static int nxn_status_line(net_svc_write_fn write, void *ctx, const char *fmt, ...)
+{
+	char line[NXN_STATUS_LINE_MAX];
+	va_list ap;
+	int n;
+
+	va_start(ap, fmt);
+	n = fmt_vsnformat(line, sizeof line, fmt, ap);
+	va_end(ap);
+	return (write(ctx, line, (size_t)n) < 0) ? -1 : 0;
+}
+
+int nx_net_write_status(net_svc_write_fn write, void *ctx)
+{
+	struct nxn_status_sample s;
+	ULONG waits = 0, invalid = 0;
+
+	/* ---- sample: no lock is held past this block, and nothing is written in it */
+	s.state = nxn_state;
+	s.why = nxn_why;
+	if (s.state != NX_NET_OFF) {
+		memcpy(s.mac, nxn_mac, sizeof s.mac);
+		s.link_up = nx_link_driver_link_up();
+		s.radio_up = (nxn_radio_up != 0u);
+		s.lease_stale = nxn_lease_stale;
+		s.assoc_yes = nxn_assoc_yes;
+		s.assoc_no = nxn_assoc_no;
+		s.assoc_noanswer = nxn_assoc_noanswer;
+		nx_link_driver_get_stats(&s.st);
+		s.pool_avail = s.pool_total = s.pool_empty = 0;
+		nx_packet_pool_info_get(&nxn_pool, &s.pool_total, &s.pool_avail,
+		                        &s.pool_empty, &waits, &invalid);
+		/* Accumulated across bridge re-arms -- each one zeroes the module's own copy. */
+		nx_net_modstats_get(&s.ms);
+	}
+
+	/* ---- write, from the sample only */
+	if (nxn_status_line(write, ctx, "  host stack: %s%s%s\r\n",
+	                    nx_net_state_name(s.state),
+	                    (s.why && s.why[0]) ? " -- " : "", (s.why) ? s.why : "") != 0)
+		return -1;
+	if (s.state == NX_NET_OFF)
+		return 0;
 
 	/* `link` is the ASSOCIATION (owhinata/wio-lite-ai#30 B2a), which is what decides whether a frame
 	 * can reach the air.  `driver` is rltk_wlan_running() -- the WiFi driver being
 	 * started -- which stays up across an AP going away, so it is reported separately
 	 * rather than being allowed to masquerade as the link state. */
-	cli_print(sh, "  mac: %02x:%02x:%02x:%02x:%02x:%02x, link %s, driver %s%s\r\n",
-	          nxn_mac[0], nxn_mac[1], nxn_mac[2], nxn_mac[3], nxn_mac[4], nxn_mac[5],
-	          nx_link_driver_link_up() ? "up" : "DOWN",
-	          nxn_radio_up ? "started" : "stopped",
-	          nxn_lease_stale ? "  <-- lease may be stale, run `net dhcp`" : "");
+	if (nxn_status_line(write, ctx,
+	                    "  mac: %02x:%02x:%02x:%02x:%02x:%02x, link %s, driver %s%s\r\n",
+	                    s.mac[0], s.mac[1], s.mac[2], s.mac[3], s.mac[4], s.mac[5],
+	                    s.link_up ? "up" : "DOWN",
+	                    s.radio_up ? "started" : "stopped",
+	                    s.lease_stale ? "  <-- lease may be stale, run `net dhcp`" : "") != 0)
+		return -1;
 
-	cli_print(sh, "  assoc polls: %lu associated, %lu not, %lu no answer\r\n",
-	          (unsigned long)nxn_assoc_yes, (unsigned long)nxn_assoc_no,
-	          (unsigned long)nxn_assoc_noanswer);
+	if (nxn_status_line(write, ctx,
+	                    "  assoc polls: %lu associated, %lu not, %lu no answer\r\n",
+	                    (unsigned long)s.assoc_yes, (unsigned long)s.assoc_no,
+	                    (unsigned long)s.assoc_noanswer) != 0)
+		return -1;
 
-	nx_link_driver_get_stats(&st);
-	cli_print(sh, "  nx rx: %lu frames, %lu B, no-buf %lu, oversize %lu, undersize %lu, "
-	          "unknown %lu, down %lu\r\n",
-	          (unsigned long)st.rx_frames, (unsigned long)st.rx_bytes,
-	          (unsigned long)st.rx_no_buf, (unsigned long)st.rx_oversize,
-	          (unsigned long)st.rx_undersize, (unsigned long)st.rx_unknown_type,
-	          (unsigned long)st.rx_link_down);
-	cli_print(sh, "  nx tx: %lu frames, %lu B, no-buf %lu, oversize %lu, coalesced %lu, "
-	          "down %lu\r\n",
-	          (unsigned long)st.tx_frames, (unsigned long)st.tx_bytes,
-	          (unsigned long)st.tx_no_buf, (unsigned long)st.tx_oversize,
-	          (unsigned long)st.tx_coalesced, (unsigned long)st.tx_link_down);
+	if (nxn_status_line(write, ctx,
+	                    "  nx rx: %lu frames, %lu B, no-buf %lu, oversize %lu, "
+	                    "undersize %lu, unknown %lu, down %lu\r\n",
+	                    (unsigned long)s.st.rx_frames, (unsigned long)s.st.rx_bytes,
+	                    (unsigned long)s.st.rx_no_buf, (unsigned long)s.st.rx_oversize,
+	                    (unsigned long)s.st.rx_undersize,
+	                    (unsigned long)s.st.rx_unknown_type,
+	                    (unsigned long)s.st.rx_link_down) != 0)
+		return -1;
+	if (nxn_status_line(write, ctx,
+	                    "  nx tx: %lu frames, %lu B, no-buf %lu, oversize %lu, "
+	                    "coalesced %lu, down %lu\r\n",
+	                    (unsigned long)s.st.tx_frames, (unsigned long)s.st.tx_bytes,
+	                    (unsigned long)s.st.tx_no_buf, (unsigned long)s.st.tx_oversize,
+	                    (unsigned long)s.st.tx_coalesced,
+	                    (unsigned long)s.st.tx_link_down) != 0)
+		return -1;
 
-	nx_packet_pool_info_get(&nxn_pool, &total, &avail, &empty, &waits, &invalid);
-	cli_print(sh, "  nx pool: %lu/%lu free, %lu empty requests\r\n",
-	          (unsigned long)avail, (unsigned long)total, (unsigned long)empty);
+	if (nxn_status_line(write, ctx, "  nx pool: %lu/%lu free, %lu empty requests\r\n",
+	                    (unsigned long)s.pool_avail, (unsigned long)s.pool_total,
+	                    (unsigned long)s.pool_empty) != 0)
+		return -1;
 
-	/* Accumulated across bridge re-arms -- each one zeroes the module's own copy. */
-	nx_net_modstats_get(&ms);
-	cli_print(sh, "  mod data rx: %lu frames, %lu B, drops %lu, crc %lu, oversize %lu, "
-	          "gaps %lu%s\r\n",
-	          (unsigned long)ms.rx_frames, (unsigned long)ms.rx_bytes,
-	          (unsigned long)ms.rx_drops, (unsigned long)ms.rx_crc,
-	          (unsigned long)ms.rx_oversize, (unsigned long)ms.rx_gaps,
-	          (ms.rx_drops || ms.rx_crc || ms.rx_oversize || ms.rx_gaps)
-	                  ? "  <-- LOSS" : "  (clean)");
-	cli_print(sh, "  mod data tx: %lu frames, %lu B, drops %lu\r\n",
-	          (unsigned long)ms.tx_frames, (unsigned long)ms.tx_bytes,
-	          (unsigned long)ms.tx_drops);
+	if (nxn_status_line(write, ctx,
+	                    "  mod data rx: %lu frames, %lu B, drops %lu, crc %lu, "
+	                    "oversize %lu, gaps %lu%s\r\n",
+	                    (unsigned long)s.ms.rx_frames, (unsigned long)s.ms.rx_bytes,
+	                    (unsigned long)s.ms.rx_drops, (unsigned long)s.ms.rx_crc,
+	                    (unsigned long)s.ms.rx_oversize, (unsigned long)s.ms.rx_gaps,
+	                    (s.ms.rx_drops || s.ms.rx_crc || s.ms.rx_oversize ||
+	                     s.ms.rx_gaps) ? "  <-- LOSS" : "  (clean)") != 0)
+		return -1;
+	return nxn_status_line(write, ctx, "  mod data tx: %lu frames, %lu B, drops %lu\r\n",
+	                       (unsigned long)s.ms.tx_frames, (unsigned long)s.ms.tx_bytes,
+	                       (unsigned long)s.ms.tx_drops);
 }
 
 int nx_net_guard(struct cli_instance *sh, const char *what)

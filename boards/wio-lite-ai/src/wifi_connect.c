@@ -24,6 +24,7 @@
 #include "nx_net.h"      /* the host stack owns the module while it is up (#23 U3) */
 #include "stm32h7xx_hal.h"   /* HAL_GetTick: the retry budget in issue #40 */
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -85,6 +86,17 @@ int wifi_hold_bridge(struct cli_instance *sh, const char *what)
 #define WIFI_ARM_POLL_MS   100u
 #define WIFI_ARM_WAIT_MS   20000u
 
+/* The host-stack section goes out through a writer since issue #219
+ * (nx_net_write_status()); on this console, one cli_write() per line. */
+static int wifi_status_write(void *ctx, const char *s, size_t len)
+{
+	if (ctx == NULL || (s == NULL && len != 0u))
+		return -1;
+	if (len == 0u)
+		return 0;
+	return (cli_write((struct cli_instance *)ctx, s, len) < 0) ? -1 : (int)len;
+}
+
 static int wifi_arm_bridge(struct cli_instance *sh)
 {
 	const char *why = "";
@@ -113,7 +125,7 @@ static int wifi_arm_bridge(struct cli_instance *sh)
 		waited += WIFI_ARM_POLL_MS;
 	}
 	if (!nx_net_is_up()) {
-		nx_net_print_status(sh);
+		(void)nx_net_write_status(wifi_status_write, sh);
 		return 1;
 	}
 	cli_print(sh, "  host stack up -- run `net dhcp` for an address\r\n");

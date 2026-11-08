@@ -38,18 +38,21 @@
  * ---- the console REQUIRES the host stack ---------------------------------------
  *
  * `net shell start` is refused unless nx_net_is_up(), because the socket lives on that
- * interface.  Conversely nx_net_down() cannot simply drop the interface out from under a
- * live socket: app/link_data.h's detach ordering says that once the DATA channel's
- * consumer is detached, the link service thread resumes flushing "stale" bytes -- which
- * are the middle of a frame if anything can still transmit.  So the interface's teardown
- * calls net_shell_stop_sync() FIRST and refuses to proceed if it cannot be proved.
+ * interface.  Conversely, when the interface goes away the console has to go with it.
+ * What keeps its TCP (a FIN, a retransmit) off the DATA channel during that teardown is
+ * NOT this file: since issue #218 nx_net.c's nxn_stop() closes the driver's gate first
+ * (nx_link_driver_set_link(0), which also fences the DATA channel's send generation), so
+ * nothing NetX transmits after that point can be queued on the channel -- from this
+ * console or from anything else.  The teardown then only ASKS the console to stop
+ * (net_shell_stop_request()) and does not wait for it; the console also stops on its own
+ * once it sees !nx_net_is_up().
  *
  * ---- one invariant this file owes the rest of the firmware ----------------------
  *
  * The server thread takes NEITHER the rtl_link coarse mutex NOR nx_net.c's nxn_addr_lock.
- * It touches only NetX.  That is what lets nx_net.c call net_shell_stop_sync() while
- * holding the coarse mutex without creating a lock-order cycle.  Do not add a link call
- * to this thread.
+ * It touches only NetX.  That is what lets nx_net.c's owner thread drive the stop entries
+ * below whether or not it holds the coarse mutex, without creating a lock-order cycle.
+ * Do not add a link call to this thread.
  *
  * No clock/RCC/register work of its own (clock-safe).  Layering:
  * HAL/CMSIS/ThreadX <- NetX <- nx_net/link_data <- shell <- here.
@@ -102,31 +105,41 @@ void net_shell_autoarm(void);
  * armed, or the host stack is not up) with the reason in *@why.
  * net_shell_stop() also disables auto-arm, so a later `net dhcp` does not silently bring
  * the console back.  It is the ONLY thing that clears that latch: stopping because the
- * INTERFACE is going away (net_shell_stop_sync(), below) must leave it set, or one
- * `net down` kills telnet until an explicit `net shell start`.
+ * INTERFACE is going away (net_shell_stop_request() / net_shell_stop_sync(), below) must
+ * leave it set, or one `net down` kills telnet until an explicit `net shell start`.
  */
 int  net_shell_start(uint16_t port, const char **why);
 void net_shell_stop(void);
 
 /*
- * Stop, and PROVE the console can no longer queue TCP output.
+ * "The interface is going away" -- ask the console to stop and return at once (issue
+ * #218).  Leaves the auto-arm latch set, so the next `net dhcp` brings telnet back.  It
+ * proves nothing and needs to prove nothing: the caller (nxn_stop()) has already closed
+ * the driver's gate, so whatever the console's unwind transmits (its FIN / RST) is dropped
+ * there and never reaches the DATA channel.  A no-op when the service is not armed.  Never
+ * blocks; safe with the coarse mutex held.
+ */
+void net_shell_stop_request(void);
+
+/*
+ * Stop, and PROVE the console can no longer queue TCP output.  Since issue #218 the only
+ * caller is nxn_arm(), which uses it to refuse bringing the interface up over a socket left
+ * from an earlier session (issue #221 removes it); the teardown no longer waits on it.
  *
  * Returns 0 when that is proved -- which means specifically that
  * nx_tcp_socket_delete() returned NX_SUCCESS, so the socket is unbound, CLOSED and off the
  * IP instance's list, and no thread is inside the write path.  Returns -1 when it could
  * not be proved within @timeout_ms; the caller must then treat the console as still
- * capable of transmitting (app/nx_net.c takes its FAILED path and names `wifi reset`).
+ * capable of transmitting (app/nx_net.c's nxn_arm() refuses to bring the interface up).
  *
- * "Delete was attempted" is NOT the contract.  A socket left bound would keep NetX able to
- * hand this driver a frame, which is exactly what the DATA channel's detach ordering
- * forbids.
+ * "Delete was attempted" is NOT the contract.  A socket left bound would be carried into
+ * the next session, able to hand the driver a frame once its gate is open again.
  *
  * Safe to call while holding the rtl_link coarse mutex: the server thread takes no link
  * lock of any kind (see the header comment).  It is a no-op returning 0 when already OFF.
  *
  * [!] It blocks the caller for up to @timeout_ms -- typically a few ms, since the server
- * is woken by an event rather than polled.  nx_net.c calls it with the coarse mutex held,
- * so another console's `wifi` / `net` / `link` command can be delayed by that much.
+ * is woken by an event rather than polled.
  */
 int net_shell_stop_sync(uint32_t timeout_ms);
 

@@ -922,8 +922,9 @@ static void nsh_entry(ULONG arg)
 			/* The auto-arm latch is NOT touched here.  Whether the console
 			 * should come back on its own depends on WHY it is stopping, which
 			 * only the requester knows: net_shell_stop() (the operator said so)
-			 * clears it before asking, net_shell_stop_sync() (the interface is
-			 * going away) leaves it alone.  Deciding it here as well made
+			 * clears it before asking, net_shell_stop_request() and
+			 * net_shell_stop_sync() (the interface is going away) leave it
+			 * alone.  Deciding it here as well made
 			 * `net down` disable telnet for good -- one policy, one place. */
 			if (g_state != NET_SHELL_OFF)
 				nsh_do_stop("requested");
@@ -1080,6 +1081,16 @@ void net_shell_stop(void)
 		return;
 	g_autoarm  = 0u;      /* an explicit stop must not be undone by the next `net dhcp` */
 	nsh_request_stop();
+}
+
+void net_shell_stop_request(void)
+{
+	/* Nothing to ask for when the service is not armed.  A socket left over from a
+	 * refused delete is also OFF, and the server thread could do nothing more with it:
+	 * the next nxn_arm() finds it through net_shell_stop_sync() and refuses. */
+	if (!g_ready || g_state == NET_SHELL_OFF)
+		return;
+	nsh_request_stop();   /* NOT net_shell_stop(): the auto-arm latch stays set */
 }
 
 int net_shell_stop_sync(uint32_t timeout_ms)

@@ -50,9 +50,26 @@
  * do prove no callback was installed, but branching on them buys one CTRL exchange and
  * costs a claim that stops being true the next time the firmware changes.
  *
- * If the teardown cannot prove silence, the state becomes FAILED: force-quiesce (which
- * app/link_data.h names as one of the teardowns that take the module down with them, so
- * detaching after it is safe), then say `wifi reset`.
+ * Silence has two sides, and the teardown (nxn_stop()) proves them differently:
+ *
+ *   - THIS side, by the driver's gate (issue #218).  Its first step is
+ *     nx_link_driver_set_link(0), which closes the gate and fences the DATA channel's send
+ *     generation in one masked step.  After it there is no path by which a NetX transmit
+ *     -- from the IP thread, DHCP, the telnet console, or a CLI `net ping`, preempted or
+ *     not -- is queued on the DATA channel; frames queued before it are drained by the
+ *     settle, and only the owner thread reopens the gate, never while STOPPING.  So no
+ *     producer has to be stopped, or proved stopped, first: the telnet console is only
+ *     asked to stop (net_shell_stop_request()), and it cannot make the teardown FAIL.
+ *   - The MODULE's side, by DATA_CFG(off) being acknowledged and the settle then finding
+ *     both sides idle (erpc_data_quiescent() on ours, which after the gate is a stable
+ *     fact rather than a snapshot; the module's queue and pool counters on its own).
+ *
+ * If the teardown cannot prove silence -- the link could not be claimed, DATA_CFG(off) was
+ * never acknowledged, or the settle did not see both sides idle -- the state becomes
+ * FAILED: force-quiesce (which app/link_data.h names as one of the teardowns that take the
+ * module down with them, so detaching after it is safe), then say `wifi reset`.  The
+ * claim failure is the one exception that cannot even force-quiesce, and leaves the tap
+ * to the module's watchdog.
  */
 #ifndef APP_NX_NET_H
 #define APP_NX_NET_H

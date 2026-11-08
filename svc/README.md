@@ -948,12 +948,15 @@ child issues remove them:
   application API is `nx_dhcp_stop()` (in `nxn_dhcp_halt()`, on a stop and on
   a revoked link).  #220 moves that stop to the worker's reaction to a link
   down, and #222 then moves the thread into the link layer (a move only).
-- wio-lite-ai: the same thread calls the telnet console's
-  `net_shell_stop_sync()` before it takes the bridge down, and goes FAILED if
-  the console cannot be shut.  #218 closes the driver's gate
-  (`nx_link_driver_set_link(0)`) first, so the console's TCP can no longer
-  reach the DATA channel and its stop no longer has to be proved; #221 then
-  removes the call.
+- wio-lite-ai: the same thread used to stop the telnet console
+  synchronously (`net_shell_stop_sync()`) before it took the bridge down, and
+  went FAILED if the console could not be shut.  Since #218 it closes the
+  driver's gate (`nx_link_driver_set_link(0)`) first and only asks the console
+  to stop, without waiting.  The gate holds for every sender, not just the
+  console: the DATA channel keeps a send generation that the gate's closing
+  moves, and a frame decided before that move is refused when it is queued,
+  however long its sender was preempted.  The remaining call, in the bring-up
+  (`nxn_arm()`), is removed by #221.
 
 ### The four rules of the layering (issue #212)
 

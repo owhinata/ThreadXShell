@@ -60,9 +60,10 @@
  * link is occupied, like `wifi on/off/reset`.
  *
  * The order matters and each step earns its place:
- *   1. ask the interface to unwind PROPERLY (the DATA consumer detaches and the telnet
- *      console releases its socket under their own contracts -- yanking the link instead
- *      would leave NetX holding a socket on an interface that no longer receives);
+ *   1. ask the interface to unwind PROPERLY (it closes its driver's gate, asks the telnet
+ *      console to stop, and detaches the DATA consumer only once the channel is proved
+ *      quiet -- yanking the link instead would leave NetX holding a socket on an
+ *      interface that no longer receives);
  *   2. claim with allow_busy, because after step 1 nothing should hold it and if
  *      something still does, this is the command that must win;
  *   3. re-check the state UNDER the claim: nx_net_down() only posts a request and does
@@ -94,8 +95,14 @@ static int flash_claim(struct cli_instance *sh)
 			waited += FLASH_STOP_POLL_MS;
 		}
 		if (nx_net_state() != NX_NET_OFF) {
-			cli_error(sh, "wifi: the host stack would not go down -- "
-			          "`net shell stop` then retry, or `wifi reset`\r\n");
+			/* Since issue #218 the telnet console cannot hold the teardown up, so
+			 * stopping it is no longer advice: what is left is the link staying busy
+			 * or the module not going quiet.  Both end in FAILED, which only
+			 * `wifi reset` clears; the wait for the link (20 s) can outlast this
+			 * one, so the state may still read "stopping". */
+			cli_error(sh, "wifi: the host stack would not go down (%s) -- "
+			          "`wifi reset`, then retry\r\n",
+			          nx_net_state_name(nx_net_state()));
 			return -1;
 		}
 	}

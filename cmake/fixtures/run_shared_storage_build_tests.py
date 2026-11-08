@@ -42,12 +42,17 @@ def write(root, file, text):
 
 
 REQUIRED = "/* shared-command: required */\n"
+# What CLI_CMD_REGISTER leaves in an object: a used constant in a section named
+# after the root command (the fixture has no cli.h).
+REGISTER_MACRO = ('#define REGISTER(name, id) __attribute__((used, section(".shell_root_cmds." name)))'
+                  " static const int reg_##id = 1\n")
 # issue #206: the fixture's shell/cmds/ sources and their marks. fs_core.c is the
 # optional one, on BOARD_HAS_FS (the fixture's stand-in for BOARD_HAS_FILEX).
 COMMANDS = {
     "shell/cmds/cmd_nn.c": REQUIRED + "int cmd_nn(void) { return 0; }\n",
     "shell/cmds/nn_cmd_core.c": REQUIRED + "int nn_cmd_core(void) { return 0; }\n",
-    "shell/cmds/cmd_camera.c": REQUIRED + "int cmd_camera(void) { return 0; }\n",
+    "shell/cmds/cmd_camera.c": REQUIRED + REGISTER_MACRO + "int cmd_camera(void) { return 0; }\n"
+                               + 'REGISTER("camera", camera);\n',
     "shell/cmds/cmd_blob.c": REQUIRED + "int cmd_blob(void) { return 0; }\n",
     "shell/cmds/fs_core.c": "/* shared-command: optional BOARD_HAS_FS */\nint fs_core(void) { return 0; }\n",
 }
@@ -97,6 +102,9 @@ add_executable(shell ${CMDS} ${EXTRA_CMD} $<TARGET_OBJECTS:services>)
 if(SIDE_CMD)
     add_library(side OBJECT "${SIDE_CMD}")
 endif()
+if(ODD_OPTION_SRC)
+    set_source_files_properties("${ODD_OPTION_SRC}" PROPERTIES COMPILE_OPTIONS "-fno-ident")
+endif()
 if(ARCHIVE_CMD)
     add_library(cmdlib STATIC "${ARCHIVE_CMD}")
     target_link_libraries(shell PRIVATE cmdlib)
@@ -142,10 +150,12 @@ def configure(root, build, args, *extra, expected=True, contains=None):
 def replay_mutations(args):
     database = json.loads((Path(args.board_build) / "compile_commands.json").read_text())
     root = CMAKE.parent.resolve()
-    names = ("rect_geom.c", "plugin/plugin_exec.c", "plugin/plugin_paint_budget.c")
-    guards = ("defined(__arm__)", "defined(__OPTIMIZE__)", "__INCLUDE_LEVEL__ == 0")
+    # issue #206: shell/cmds/ is audited as svc/ is; a shared command's copy too.
+    names = ("svc/rect_geom.c", "svc/plugin/plugin_exec.c", "svc/plugin/plugin_paint_budget.c",
+             "shell/cmds/cmd_builtin.c")
+    guards = ("defined(__arm__)", "defined(__OPTIMIZE__)", "__INCLUDE_LEVEL__ == 0", "defined(__arm__)")
     for name, guard in zip(names, guards):
-        source = root / "svc" / name
+        source = root / name
         entries = [e for e in database if Path(e["file"]).resolve() == source]
         assert entries, "board does not compile " + name
         for entry in entries:
@@ -336,6 +346,61 @@ def commands(root, build, args, shell, bad):
     run(shell, contains="coverage verified")
 
 
+def rules(root, tmp, args):
+    """issue #206: rules (a)(b)(c), each refused on the first build of a clean tree."""
+    def first_build(label, sources, expected, message, *extra):
+        build = tmp / ("rules-" + label)
+        configure(root, build, args, "-DEXTRA_CMD=" + ";".join(sources), *extra)
+        text = run(["cmake", "--build", str(build), "--target", "shell"], expected, message)
+        print("ok rule", label, "refused on the first build" if not expected else "passes")
+        return text
+
+    write(root, "shell/core/core.c", "int core(void) { return 0; }\n")
+    write(root, "boards/fix/cmds/board_cmd.c", REGISTER_MACRO + 'REGISTER("boardcmd", boardcmd);\n')
+    text = first_build("baseline", ["shell/core/core.c", "boards/fix/cmds/board_cmd.c"], True,
+                       "coverage verified")
+    assert re.search(r"shared_storage: rules: \d+ own TUs in the shell link checked for included "
+                     r"sources, 2 register 2 distinct root commands", text), text
+    # (a) a board TU that includes a shared command ships it outside the audit.
+    write(root, "boards/fix/src/inc.c", '#include "../../../shell/cmds/cmd_blob.c"\n')
+    first_build("a-include", ["boards/fix/src/inc.c"], False,
+                "rule (a): boards/fix/src/inc.c includes a source file: "
+                + str((root / "shell/cmds/cmd_blob.c").resolve()))
+    # ... also when the directory is a system include path (-M, not -MM).
+    write(root, "boards/fix/src/inc_sys.c", "#include <cmd_blob.c>\n")
+    first_build("a-include-isystem", ["boards/fix/src/inc_sys.c"], False,
+                "rule (a): boards/fix/src/inc_sys.c includes a source file",
+                "-DCMAKE_C_FLAGS=-mcpu=cortex-m7 -mthumb -O2 -isystem " + str(root / "shell/cmds"))
+    # (b) registration outside shell/cmds/ and boards/<board>/cmds/.
+    for label, path in (("b-core", "shell/core/reg.c"), ("b-board-src", "boards/fix/src/reg.c")):
+        write(root, path, REGISTER_MACRO + 'REGISTER("stray", stray);\n')
+        first_build(label, [path], False,
+                    f"rule (b): {path} registers root commands (.shell_root_cmds.stray) outside")
+    # ... also from an archive the link takes (its members ship as well).
+    build = tmp / "rules-b-archive"
+    configure(root, build, args, "-DARCHIVE_CMD=boards/fix/src/reg.c")
+    run(["cmake", "--build", str(build), "--target", "shell"], False,
+        "rule (b): boards/fix/src/reg.c registers root commands (.shell_root_cmds.stray) outside")
+    print("ok rule b-archive refused on the first build")
+    bare = '__attribute__((used, section(".shell_root_cmds"))) static const int reg_bare = 1;\n'
+    for label, path in (("b-bare-cmds", "boards/fix/cmds/bare.c"), ("b-bare-core", "shell/core/bare.c")):
+        write(root, path, bare)
+        first_build(label, [path], False, f"rule (b): {path} owns the bare .shell_root_cmds section")
+    write(root, "boards/fix/cmds/odd.c",
+          '__attribute__((used, section(".shell_root_cmdsx"))) static const int reg_odd = 1;\n')
+    first_build("b-unnamed", ["boards/fix/cmds/odd.c"], False,
+                "rule (b): boards/fix/cmds/odd.c owns .shell_root_cmdsx, which names no root command")
+    # (c) the same root name twice: a board copy of a shared command.
+    write(root, "boards/fix/cmds/dup.c", REGISTER_MACRO + 'REGISTER("camera", dup);\n')
+    first_build("c-duplicate", ["boards/fix/cmds/dup.c"], False,
+                "rule (c): root command registered more than once: camera in "
+                "boards/fix/cmds/dup.c and shell/cmds/cmd_camera.c")
+    # An argv the replay does not understand is refused, not skipped.
+    first_build("unreplayable", ["shell/core/core.c"], False,
+                "cannot replay shell/core/core.c for the include and registration rules: "
+                "unsupported compile option: -fno-ident", "-DODD_OPTION_SRC=shell/core/core.c")
+
+
 def failure_sections(text):
     """The writable sections a FAIL listed, as names."""
     return [line.split()[0] for line in text.splitlines()
@@ -435,6 +500,7 @@ def main():
         run(shell, contains="coverage verified")
         print("ok direct ARM/optimized source mutation, repeated failure, recovery")
         commands(root, build, args, shell, bad)
+        rules(root, Path(tmp), args)
         configure(root, Path(tmp) / "no-export", args, "-DDISABLE_EXPORT=ON", expected=False, contains="must export compile commands")
         configure(root, Path(tmp) / "unity", args, "-DENABLE_UNITY=ON", expected=False, contains="use unity builds")
         print("ok per-target export OFF and unity rejected")

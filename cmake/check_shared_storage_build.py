@@ -24,8 +24,22 @@ ON) must be compiled as an object the `shell` link edge of build.ninja takes
 directly: compiled only for a target that does not ship, or reaching the link
 only through an archive, is refused. An optional file that is OFF must not be
 compiled by any target at all.
+
+Three more rules (#206) close the ways around that. They look at every TU the
+shell link takes (directly or from an archive) whose source is this
+repository's own: not under lib/, boards/<board>/lib/ or boards/<board>/sdk/,
+and not generated in the build tree. Each is replayed with the same argv rules
+as the storage audit (an argv that cannot be replayed fails).
+  (a) its dependencies (-M) may not include a .c/.cc/.cpp/.cxx other than
+      itself: a board TU that #includes a shared command would ship that
+      command outside the audit.
+  (b) only TUs under shell/cmds/ and boards/<board>/cmds/ may own a section
+      whose name starts with .shell_root_cmds, and none may own the bare
+      .shell_root_cmds (CLI_CMD_REGISTER always names the root command).
+  (c) the root names collected from those sections are unique across the link.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -48,6 +62,9 @@ COMMANDS = "shell/cmds"
 MARK_TOKEN = "shared-command:"
 MARK_RE = re.compile(r"/\* shared-command: (required|optional (BOARD_HAS_[A-Z0-9_]+)) \*/")
 CAPABILITY_RE = re.compile(r"(BOARD_HAS_[A-Z0-9_]+)=(.*)")
+# Rules (a)(b)(c) (#206).
+REGISTRATION = ".shell_root_cmds"
+INCLUDED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx"}
 # Existing protocol staging buffers and last-run diagnostics; moving these out
 # would change ownership/reentrancy and is not part of the stateless nn contract.
 EXCEPTIONS = {"svc/ymodem.c": "existing s_block, s_rdata and s_diag (non-reentrant protocol)"}
@@ -318,6 +335,99 @@ def shell_link(ninja_path, link_target):
     return direct, archived
 
 
+def own_source(src, root, build):
+    """A source of this repository that rules (a)(b)(c) look at."""
+    if not src.is_relative_to(root) or src.is_relative_to(build):
+        return False
+    parts = src.relative_to(root).parts
+    if parts[0] == "lib":
+        return False
+    return not (len(parts) > 2 and parts[0] == "boards" and parts[2] in ("lib", "sdk"))
+
+
+def may_register(src, root):
+    """Rule (b): the places a root command may be registered from."""
+    parts = src.relative_to(root).parts
+    return (parts[:2] == ("shell", "cmds") and len(parts) > 2) or (
+        len(parts) > 3 and parts[0] == "boards" and parts[2] == "cmds")
+
+
+def linked_units(database, root, build, objects):
+    """Every compile of an own source whose object the shell link takes."""
+    units = []
+    for entry in json.loads(Path(database).read_text()):
+        cwd = Path(entry["directory"])
+        src = canonical(entry["file"], cwd)
+        if not own_source(src, root, build):
+            continue
+        argv = entry_argv(entry)
+        if canonical(output_of(argv), cwd) in objects:
+            units.append((src, entry, argv))
+    need(units, "no own source reaches the shell link")
+    return units
+
+
+def make_deps(text):
+    """The prerequisites of a `gcc -M` rule, unescaped, without its target."""
+    tokens = re.findall(r"(?:\\.|[^\s\\])+", text.replace("\\\n", " "))
+    for i, token in enumerate(tokens):
+        if token.endswith(":"):
+            return [t.replace("\\ ", " ").replace("$$", "$") for t in tokens[i + 1:]]
+    raise AuditError("malformed -M output: " + text[:200])
+
+
+def section_names(objdump_text):
+    return re.findall(r"^\s*\d+\s+(\S+)\s", objdump_text, re.M)
+
+
+def check_units(units, root, cc, cxx, objdump, scratch):
+    """Rules (a)(b)(c) over the linked own sources (#206)."""
+    jobs = []
+    for index, (src, entry, argv) in enumerate(units):
+        name = src.relative_to(root).as_posix()
+        obj = Path(scratch) / f"rule-{index}.o"
+        try:
+            command = replay_argv(argv, src, entry["directory"], cc, obj, cxx)
+        except AuditError as exc:
+            raise AuditError(f"cannot replay {name} for the include and registration "
+                             f"rules: {exc}") from exc
+        jobs.append((src, name, entry["directory"], command, obj))
+
+    def one(job):
+        src, name, cwd, command, obj = job
+        # [!] -M, not -MM: a header (or .c) found through -isystem is listed too.
+        deps = make_deps(run(command[:-2] + ["-M"], cwd))
+        run(command, cwd)
+        return deps, section_names(run([objdump, "-h", "-w", str(obj)], cwd))
+
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+        results = list(pool.map(one, jobs))
+    roots, registering = {}, 0
+    for (src, name, cwd, _, _), (deps, sections) in zip(jobs, results):
+        included = sorted({canonical(d, cwd) for d in deps
+                           if Path(d).suffix in INCLUDED_SOURCE_SUFFIXES} - {src})
+        need(not included, f"rule (a): {name} includes a source file: "
+             + ", ".join(str(p) for p in included))
+        registrations = [n for n in sections if n.startswith(REGISTRATION)]
+        need(REGISTRATION not in registrations,
+             f"rule (b): {name} owns the bare {REGISTRATION} section; a root command is "
+             "registered only through CLI_CMD_REGISTER, which names it")
+        if not registrations:
+            continue
+        need(may_register(src, root),
+             f"rule (b): {name} registers root commands ({', '.join(registrations)}) "
+             "outside shell/cmds/ and boards/<board>/cmds/")
+        registering += 1
+        for section in registrations:
+            match = re.fullmatch(re.escape(REGISTRATION) + r"\.(.+)", section)
+            need(match, f"rule (b): {name} owns {section}, which names no root command")
+            roots.setdefault(match.group(1), []).append(name)
+    twice = {r: f for r, f in roots.items() if len(f) > 1}
+    need(not twice, "rule (c): root command registered more than once: " + "; ".join(
+        f"{r} in {' and '.join(sorted(f))}" for r, f in sorted(twice.items())))
+    return {"units": len(units), "registering": registering, "roots": len(roots)}
+
+
 def check_commands(selected, root, marks, caps, direct, archived):
     """Every compiled shell/cmds/ source is marked, and each mark holds (#206)."""
     compiled = {}
@@ -450,10 +560,18 @@ def audit(args):
     targets, wanted = inventory(args.inventory, root)
     selected = select(args.database, targets, wanted, root)
     marks = command_marks(root)
+    direct, archived = shell_link(args.ninja, args.link_target)
     report["commands"] = check_commands(selected, root, marks, capabilities(args.capabilities),
-                                        *shell_link(args.ninja, args.link_target))
+                                        direct, archived)
     shipped = sum(bool(r["shipped_by"]) for r in report["commands"])
+    build = Path(args.ninja).parent.resolve()
     with tempfile.TemporaryDirectory(prefix="shared-storage-") as scratch:
+        rules = check_units(linked_units(args.database, root, build, direct | archived),
+                            root, cc, cxx, args.objdump, scratch)
+        report["rules"] = rules
+        print(f"shared_storage: rules: {rules['units']} own TUs in the {args.link_target} link "
+              f"checked for included sources, {rules['registering']} register "
+              f"{rules['roots']} distinct root commands")
         for index, ((target, source), entry, argv) in enumerate(selected):
             relative = source.relative_to(root).as_posix()
             if relative in EXCEPTIONS:

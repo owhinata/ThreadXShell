@@ -2204,7 +2204,10 @@ Locks, in order: `rtl_link`'s coarse mutex, then `erpc.c`'s internal mutex
 (the `erpc` thread takes only the second).  The session gives the MAC to NetX,
 which takes `nx_ip_protection`, only after it has released the coarse mutex.
 The DATA channel takes no mutex, only short interrupt-masked regions, so a
-sender that holds `nx_ip_protection` can queue a frame.
+sender that holds `nx_ip_protection` can queue a frame.  Its one consumer is
+attached only by a holder of the coarse mutex (`wifi link dbench`, the
+session arming the bridge), and detached by a holder of it or by `nx-net`
+before it sets the bridge's state to OFF; the rule is in `src/link_data.h` (issue #224).
 
 Measured at `e8e3146` (the move, issue #222; nothing it does or prints
 changed):
@@ -2214,6 +2217,15 @@ changed):
 | `nx-net` | priority 13, stack 3,072 B in DTCM (`nxn_stack`, required by `cmake/check_dtcm_residency.py`), high-water **788 B** (`thread`), as before |
 | Internal flash free (app partition) | **14,476 B** (14,452 B before; the code is 24 B smaller) |
 | DTCM free (`_smsp_stack - _dtcm_used_end`) | **1,848 B**, unchanged (the same objects in the same place) |
+
+Measured for issue #224 (the hand-over of the DATA channel: a detach in one
+masked section, `wifi link dbench` detaching before it releases the link,
+and the bridge's refusal no longer guessing who holds the channel):
+
+| What | Value |
+|---|---|
+| Internal flash free (app partition) | **14,516 B** (14,476 B before; the code is 40 B smaller, the detach alone 0 B) |
+| DTCM free (`_smsp_stack - _dtcm_used_end`) | **1,848 B**, unchanged |
 
 ## Flashing and recovery
 

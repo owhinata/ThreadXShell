@@ -258,7 +258,6 @@ static int cmd_net_ip(struct cli_instance *sh, int argc, char **argv)
 	if (w == NET_WAIT_EXPIRED || r.status != NET_SVC_OK)
 		return net_fail(sh, &r, "NetX refused the static address");
 	cli_print(sh, "net: static address set\r\n");
-	net_svc_addressed();
 	net_show_addr(sh);
 	return 0;
 }
@@ -291,7 +290,6 @@ static int cmd_net_dhcp(struct cli_instance *sh, int argc, char **argv)
 	for (;;) {
 		net_svc_addr_get(&a, &r);
 		if (r.status == NET_SVC_OK && a.ip_valid) {
-			net_svc_addressed();
 			net_print_addr(sh, &r, &a);
 			return 0;
 		}

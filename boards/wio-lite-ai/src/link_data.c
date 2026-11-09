@@ -11,7 +11,7 @@
  * this file only hands it frames to write and takes frames it has read.
  *
  * LOCKING.  All shared state (both pools, both queues, the counters) is guarded by a
- * short interrupt-masked region -- the same idiom app/net_shell.c uses for its transmit
+ * short interrupt-masked region -- the same idiom shell/cmds/net_tty.c uses for its transmit
  * ring.  A mutex would be wrong here for two reasons: link_data_send() must be callable
  * from a context that already holds a network stack's lock without inverting anything
  * (U3), and it must never block.  Every region below is a handful of instructions with

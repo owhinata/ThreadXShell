@@ -17,10 +17,15 @@
  * WHAT IT DOES, and what each step is allowed to assume:
  *
  *   kv_init()                  open the store (may format a blank partition)
+ *   net.shell.port     the telnet console's port     : 23 (issue #221)
  *   wifi.enable      ? power the radio               : leave it off
  *   wifi.autoconnect ? associate with wifi.ssid      : leave it to the operator
  *   net.mode           dhcp / static / manual
- *   net.shell.autoarm? arm the telnet console        : leave it off
+ *
+ * The telnet console is resident from boot (issue #221) and is not armed from here any
+ * more: `net.shell.autoarm` is not read, whatever it holds.  It only waits for its port,
+ * which this thread hands over ONCE, first -- the configured one, or 23 when the key is
+ * missing, unreadable or not a port, or when the store does not open.
  *
  * EVERY STEP IS INDEPENDENT AND FAIL-SOFT.  A missing key means "do not do this",
  * never "guess"; a step that fails is logged and the next one still runs; and none
@@ -59,7 +64,7 @@
 #include "cli_backend_log.h"
 #include "net_core.h"   /* the shared address / DHCP operations (issue #220) */
 #include "nx_net.h"
-#include "net_shell.h"
+#include "net_tty.h"      /* the telnet console's port (issue #221) */
 #include "rtl8720.h"
 #include "wifi_auto.h"
 #include "wifi_connect.h"
@@ -308,21 +313,20 @@ static void cfg_net(void)
 		LOG_WRN("net.mode=%s is not one of dhcp/static/manual", mode);
 		return;
 	}
+}
 
-	/* An address exists: this is where the telnet console belongs, matching what
-	 * `net dhcp` does on the interactive path. */
-	if (cfg_bool("net.shell.autoarm", 0)) {
-		uint32_t port = cfg_u32("net.shell.port", NET_SHELL_PORT_DEFAULT);
-		const char *why = "";
+/* The telnet console's port, from the open store: the configured one, or the default
+ * when it is missing, unreadable or not a port.  Called once, first. */
+static void cfg_tty_port(void)
+{
+	uint32_t port = cfg_u32("net.shell.port", NET_TTY_PORT_DEFAULT);
 
-		if (port == 0u || port > 0xFFFFu) {
-			LOG_WRN("net.shell.port=%lu is not a port", (unsigned long)port);
-		} else if (net_shell_start((uint16_t)port, &why) != 0) {
-			LOG_WRN("telnet console not armed: %s", why);
-		} else {
-			LOG_INF("telnet console arming");
-		}
+	if (port == 0u || port > 0xFFFFu) {
+		LOG_WRN("net.shell.port=%lu is not a port -- telnet stays on %u",
+		        (unsigned long)port, (unsigned)NET_TTY_PORT_DEFAULT);
+		port = NET_TTY_PORT_DEFAULT;
 	}
+	net_tty_port_set((uint16_t)port);
 }
 
 /* ------------------------------------------------------------------ *
@@ -334,9 +338,12 @@ static void kv_boot_entry(ULONG arg)
 
 	if (kv_init() != KV_OK) {
 		LOG_WRN("configuration store unavailable: %s", kv_state_str());
+		net_tty_port_set((uint16_t)NET_TTY_PORT_DEFAULT);
 		return;   /* nothing to apply; every command still works by hand */
 	}
 
+	/* Before the association, so telnet listens as soon as an address comes. */
+	cfg_tty_port();
 	cfg_wifi();
 	cfg_net();
 

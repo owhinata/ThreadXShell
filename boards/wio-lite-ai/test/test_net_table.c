@@ -4,14 +4,14 @@
  *
  * Host test: the `net` subcommand table this board actually builds -- the
  * shared command (shell/cmds/cmd_net.c) against this board's REAL
- * svc/net_svc_config.h, over the stub adapter (shell/test/net_svc_stub.c) and
- * a stub table for the board's own subcommand (issue #219).
+ * svc/net_svc_config.h, over the stub adapter (shell/test/net_svc_stub.c)
+ * (issue #219).  This board has no subcommand of its own since issue #221
+ * (the telnet console's `net shell` went with it).
  *
  *  - [!] NO NAME TWICE: NET_SVC_BOARD_SUBCMDS is appended to the shared
  *    entries and the parser takes the first match, so a board name that
  *    reuses a shared one would be silently unreachable.
- *  - the shared info / ip / dhcp / ping come first and the board's `shell`
- *    after them, reaching its own table through the dispatcher.
+ *  - the shared info / ip / dhcp / ping and nothing else: no `shell`.
  *  - the gw line carries the STALE mark (every board since issue #220).
  */
 #include <stdio.h>
@@ -24,24 +24,6 @@
 #include "net_svc_config.h"
 #include "net_svc_stub.h"
 #include "net_table_check.h"
-
-static int board_calls;
-static const char *board_last;
-
-static int stub_board(struct cli_instance *sh, int argc, char **argv)
-{
-	(void)sh;
-	(void)argc;
-	board_calls++;
-	board_last = argv[0];
-	return 0;
-}
-
-/* The board's table, as NET_SVC_BOARD_DECLS names it. */
-const struct cli_cmd net_board_shell_subcmds[] = {
-	CLI_CMD(status, NULL, "stub leaf", stub_board),
-	CLI_SUBCMD_SET_END,
-};
 
 CLI_BACKEND_DUMMY_DEFINE(tr0);
 static struct cli_instance sh0;
@@ -60,8 +42,6 @@ static void run(const char *line)
 	cli_test_set_tx_wait_hook(NULL, NULL);
 	cli_test_set_sleep_hook(net_stub_sleep_hook, NULL);
 	net_stub_set_transport(&tr0);
-	board_calls = 0;
-	board_last = NULL;
 	cli_dummy_inject(&tr0, line, strlen(line));
 	cli_test_pump(&sh0);
 }
@@ -86,15 +66,16 @@ int main(void)
 	if (t == NULL)
 		return 1;
 	expect("no subcommand name appears twice", net_table_dups(t) == 0);
-	expect("info ip dhcp ping, then the board's shell, then the end",
+	expect("info ip dhcp ping, then the end (no `shell`)",
 	       net_table_index(t, "info") == 0 && net_table_index(t, "ip") == 1 &&
 	       net_table_index(t, "dhcp") == 2 && net_table_index(t, "ping") == 3 &&
-	       net_table_index(t, "shell") == 4 && t[5].name == NULL);
+	       net_table_index(t, "shell") < 0 && t[4].name == NULL);
 
 	net_stub_reset();
 	run("net shell status\r");
-	expect("`net shell status` reaches the board", board_calls == 1 &&
-	       strcmp(board_last, "status") == 0);
+	expect("`net shell status` is not a command any more",
+	       strstr(cli_dummy_output_str(&tr0), "shell") != NULL &&
+	       strstr(cli_dummy_output_str(&tr0), "unknown") != NULL);
 
 	net_stub_reset();
 	net_stub.address.lease_stale = true;

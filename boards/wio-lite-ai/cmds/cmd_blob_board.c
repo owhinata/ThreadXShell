@@ -16,7 +16,7 @@
 #include "blob_cmd_board.h"
 #include "blob_err.h"
 #include "cmd_xfer.h"
-#include "net_shell.h"     /* refuse a raw transfer on the telnet console */
+#include "net_tty.h"       /* refuse a raw transfer on the telnet console */
 
 int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink)
 {
@@ -26,7 +26,7 @@ int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink)
 /* YMODEM needs the raw USB CDC console; the telnet one says why it refuses. */
 int blob_board_raw_console(struct cli_instance *sh)
 {
-	return net_shell_guard(sh, "ymodem") ? -1 : 0;
+	return net_tty_guard(sh, "ymodem") ? -1 : 0;
 }
 
 /* Any console, foreground or background: the busy flag is what orders an

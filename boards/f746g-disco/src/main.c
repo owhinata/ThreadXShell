@@ -46,7 +46,7 @@
 #include "touch.h"
 #include "eth_link.h"
 #include "nx_glue.h"
-#include "nx_shell.h"
+#include "net_tty.h"
 #include "guix_camera_ui.h"
 #include "cam_sink.h"
 #include "nn_camera.h"
@@ -65,11 +65,13 @@ void tx_glue_profile_enable(void);
 CLI_BACKEND_UART_DEFINE(vcp_tr, &huart1);
 CLI_INSTANCE_DEFINE(vcp_sh, &vcp_tr, "sh> ");
 
-/* Network shell over TCP (owhinata/stm32f746g-disco#49 P4): one telnet session
-   bound to the NetX
- * TCP server transport (port/netxduo/nx_shell.c).  The instance thread runs at
- * boot (idle until a client connects); nx_shell_init() arms the socket later. */
-CLI_INSTANCE_DEFINE(net_sh, &nx_shell_transport, "net> ");
+/* The telnet console (owhinata/stm32f746g-disco#49 P4; one implementation
+ * since issue #221, shell/cmds/net_tty.c): one session at a time on :23, bound
+ * to this instance.  The instance thread runs at boot (idle until a client
+ * connects); the listener is created with the IP stack below and listens from
+ * boot, whether or not there is an address or a link. */
+NET_TTY_TRANSPORT_DEFINE(net_tr);
+CLI_INSTANCE_DEFINE(net_sh, &net_tr, "net> ");
 
 /* Every instance started at boot.  The array + compile-time gate is kept as the
  * §4.2 requirement: the live instance count must not exceed the build's
@@ -279,12 +281,15 @@ void tx_application_define(void *first_unused_memory)
 			 * creates ThreadX objects here -- DHCP negotiates later on the IP
 			 * thread.  On failure the link still works; `net` IP/ping report it. */
 			printf("net: NetX Duo init failed (IP disabled)\r\n");
-		} else if (nx_shell_init() != 0) {
-			/* TCP network shell (owhinata/stm32f746g-disco#49 P4): listen :23 + server
-      thread. The
-			 * net_sh instance thread already started above; on failure the telnet
-			 * shell is disabled, everything else keeps running. */
-			printf("net: shell server init failed (telnet disabled)\r\n");
+		} else if (net_tty_init() != 0) {
+			/* The telnet console's listener (issue #221): object creation
+			 * only.  The net_sh instance thread already started above; on
+			 * failure telnet is disabled, everything else keeps running, and
+			 * `net info` says so. */
+			printf("net: telnet console init failed (telnet disabled)\r\n");
+		} else {
+			/* This board's port is fixed: hand it over once, now. */
+			net_tty_port_set((uint16_t)NET_TTY_PORT_DEFAULT);
 		}
 	} else {
 		printf("eth: skipped (SDRAM down)\r\n");

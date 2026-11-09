@@ -21,24 +21,21 @@
 #include "blob_err.h"
 #include "cli_backend_uart.h"  /* the VCP's RX ring high-water */
 #include "cmd_xfer.h"
-#include "nx_shell.h"          /* nx_shell_transport: the telnet console */
+#include "net_tty.h"           /* net_tty_guard(): the telnet console (#221) */
 
 int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink)
 {
 	return xfer_recv_sink_locked(sh, sink);
 }
 
-/* YMODEM needs the raw VCP.  The telnet console is told why it is refused, in
- * wio-lite-ai's words (its net_shell_guard()).  A background job's worker has
- * the foreground's transport, and the shared command refuses it before this
- * matters (op_console_ready). */
+/* YMODEM needs the raw VCP.  The telnet console is told why it is refused
+ * (the shared question and words, shell/cmds/net_tty.c; the other ymodem
+ * paths are issue #197).  A background job's worker has the foreground's
+ * transport, and the shared command refuses it before this matters
+ * (op_console_ready). */
 int blob_board_raw_console(struct cli_instance *sh)
 {
-	if (sh->tr != &nx_shell_transport)
-		return 0;
-	cli_error(sh, "ymodem: refused on the telnet console -- it would destroy "
-	              "this session. Run it from the VCP console.\r\n");
-	return -1;
+	return net_tty_guard(sh, "ymodem") ? -1 : 0;
 }
 
 /* Any console, foreground or background: the busy flag is what orders an

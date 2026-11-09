@@ -209,8 +209,7 @@ static int link_ctrl_ready_ex(struct cli_instance *sh, int allow_busy, int allow
 		return 0;
 	if (rtl_link_uart_refs() != 1u) {
 		cli_error(sh, "link: something else is holding the eRPC link\r\n");
-		cli_print(sh, "  LINK-CTRL is only sent on a quiescent link -- stop the telnet "
-		          "console first (`net shell stop`)\r\n");
+		cli_print(sh, "  LINK-CTRL is only sent on a quiescent link\r\n");
 		return 1;
 	}
 	if (!erpc_link_quiescent()) {

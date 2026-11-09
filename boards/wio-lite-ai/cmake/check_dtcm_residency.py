@@ -75,13 +75,13 @@ REQUIRED_DTCM = (
     "nxn_stack",                    # NetX Duo owner thread
     "nxn_ip_stack",                 # NetX Duo IP thread
     "net_worker_stack",             # shared net link worker (shell/cmds/net_core.c, #220)
-    "g_stack",                      # net_shell listener
+    "net_tty_stack",                # telnet console listener (shell/cmds/net_tty.c, #221)
     "erpc_svc_stack",               # eRPC link service
     "iwdg_stack",                   # watchdog petter
     "_tx_timer_thread_stack_area",  # ThreadX timer thread (upstream; linker pattern)
     "rtl_ring",                     # RTL8720 UART RX ring, ~75 k interrupts/s
     "rtl_tx_ring",                  # RTL8720 UART TX ring
-    "nsh_tx_buf",                   # telnet console TX ring (owhinata/wio-lite-ai#48)
+    "net_tty_tx_buf",               # telnet console TX ring (owhinata/wio-lite-ai#48, #221)
 )
 
 # Must stay in AXI-SRAM: a bus master writes or reads these directly.

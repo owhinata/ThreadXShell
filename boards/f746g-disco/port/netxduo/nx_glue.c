@@ -19,6 +19,7 @@
 #include "nx_glue.h"
 #include "nx_eth_driver.h"
 #include "net_core.h"         /* the shared address / DHCP / ping (issue #220) */
+#include "net_tty.h"          /* the shared telnet console (issue #221) */
 
 #define LOG_TAG "net"
 #include "log.h"
@@ -89,6 +90,50 @@ const struct net_core_facts net_core_board_facts = {
 	.why_down    = "IP stack not up",
 	.worker_stack      = net_worker_stack,
 	.worker_stack_size = sizeof net_worker_stack,
+};
+
+/*
+ * The shared telnet console's state and facts (shell/cmds/net_tty.h, issue
+ * #221).  CPU-only, so regular SRAM like the other control blocks: the rings,
+ * the per-packet extraction buffer and the listener's stack.
+ *
+ * The listener's stack: it runs the whole transmit path (packet allocate /
+ * append / nx_tcp_socket_send -> IP -> nx_eth_driver), and the per-packet
+ * receive work is the IP thread's.  2560 B as before #221, with a measured
+ * peak of 448 B on this board; re-measure with `thread` after a change to
+ * the drain.
+ *
+ * The transmit queue depth (8) bounds what this console can hold of
+ * eth_pool; 2 s / 10 retries / shift 1 put the first retransmit at 2 s,
+ * which the console's no-progress deadline must exceed (below).
+ */
+#define NXG_TTY_RX_RING   512u
+#define NXG_TTY_EXTRACT   1500u
+#define NXG_TTY_TX_RING   4096u
+#define NXG_TTY_STACK     2560u
+#define NXG_TTY_TX_QUEUE  8u
+#define NXG_TTY_RTO       (2u * NX_IP_PERIODIC_RATE)
+_Static_assert(NET_TTY_TX_DEADLINE > NXG_TTY_RTO,
+               "the telnet deadline must cover the first retransmit");
+
+static uint8_t net_tty_rx_buf[NXG_TTY_RX_RING];
+static uint8_t net_tty_extract[NXG_TTY_EXTRACT];
+static uint8_t net_tty_tx_buf[NXG_TTY_TX_RING];
+static UCHAR   net_tty_stack[NXG_TTY_STACK] __attribute__((aligned(8)));
+
+struct net_tty_state net_tty_board_state;
+const struct net_tty_facts net_tty_board_facts = {
+	.ip             = &eth_ip,
+	.pool           = &eth_pool,
+	.rx_buf         = net_tty_rx_buf,  .rx_size      = sizeof net_tty_rx_buf,
+	.extract_buf    = net_tty_extract, .extract_size = sizeof net_tty_extract,
+	.tx_buf         = net_tty_tx_buf,  .tx_size      = sizeof net_tty_tx_buf,
+	.stack          = net_tty_stack,   .stack_size   = sizeof net_tty_stack,
+	.tx_queue_depth = NXG_TTY_TX_QUEUE,
+	.rto_ticks      = NXG_TTY_RTO,
+	.rto_retries    = 10u,
+	.rto_shift      = 1u,
+	.other_console  = "VCP",
 };
 
 extern VOID nx_eth_driver(NX_IP_DRIVER *driver_req_ptr);

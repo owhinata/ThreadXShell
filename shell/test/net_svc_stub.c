@@ -145,8 +145,3 @@ int net_svc_board_lines(net_svc_write_fn write, void *ctx)
 	}
 	return 0;
 }
-
-void net_svc_addressed(void)
-{
-	net_stub.addressed++;
-}

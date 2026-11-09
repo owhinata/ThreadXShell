@@ -27,7 +27,7 @@
 #include "mlperf_th.h"
 #include "nn.h"
 #include "psram.h"
-#include "net_shell.h"       /* net_shell_guard(): this needs the real serial port */
+#include "net_tty.h"         /* net_tty_guard(): this needs the real serial port */
 #include "stm32h7xx_hal.h"   /* SystemCoreClock: the clock the DWT summary counts in */
 
 #include <stdint.h>
@@ -129,7 +129,7 @@ static int cmd_mlperf(struct cli_instance *sh, int argc, char **argv)
 	 * escapes bytes, delivers them in ~250 ms polls and rides an eRPC link whose
 	 * round trip dwarfs the protocol's own patience.
 	 */
-	if (net_shell_guard(sh, "mlperf"))
+	if (net_tty_guard(sh, "mlperf"))
 		return 1;
 
 	if (nn_model_open(&m) != 0) {

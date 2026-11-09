@@ -54,7 +54,12 @@
  *  - the KV "source DHCP": not refused with the link down, starts nothing by
  *    itself, wakes the worker -- which starts the client if the up was
  *    already handled, or on the up;
- *  - the worker thread waits for its flag and runs one pass per wake.
+ *  - the worker thread waits for its flag and runs one pass per wake;
+ *  - the fall count (issue #221): every down notice adds one, inside the
+ *    notification's masked section, before the worker runs; an up adds
+ *    nothing; a pass that handled a fall calls the telnet console's
+ *    net_tty_link_fell() once, after the address lock is released, and a
+ *    pass without a fall does not call it.
  */
 #include <setjmp.h>
 #include <stdbool.h>
@@ -119,6 +124,10 @@ struct fake {
 	VOID *stack; ULONG stack_size; UINT prio, preempt, autostart; ULONG slice;
 	VOID (*notify)(NX_IP *, UINT, UINT);
 	NX_IP *notify_ip;
+	/* the fall count at the open / close of the last masked section, and
+	 * the telnet console's wake (net_tty_link_fell()) */
+	ULONG falls_at_disable, falls_at_restore;
+	int tty_wakes, tty_wakes_locked, tty_wakes_masked;
 	/* run inside a DHCP stop / start, after the worker's copy */
 	void (*during_stop)(void), (*during_start)(void);
 	/* what was called, in order, and whether the lock was held */
@@ -242,13 +251,25 @@ UINT tx_shim_disable(void)
 {
 	fk.irq_depth++;
 	fk.irq_sections++;
+	fk.falls_at_disable = net_core_board_state.link_falls;
 	return 0u;
 }
 
 void tx_shim_restore(UINT saved)
 {
 	(void)saved;
+	fk.falls_at_restore = net_core_board_state.link_falls;
 	fk.irq_depth--;
+}
+
+/* The telnet console's entry the worker calls (shell/cmds/net_tty.c). */
+void net_tty_link_fell(void)
+{
+	fk.tty_wakes++;
+	if (fk.held)
+		fk.tty_wakes_locked++;
+	if (fk.irq_depth != 0)
+		fk.tty_wakes_masked++;
 }
 
 UINT nx_ip_interface_address_get(NX_IP *ip, UINT i, ULONG *a, ULONG *m)
@@ -1314,6 +1335,43 @@ static void check_thread(void)
 	fk.held = 0;                       /* left the loop between passes */
 }
 
+/* ---- the fall count and the telnet console's wake (issue #221) ------------- */
+
+static void check_fall_count(void)
+{
+	fresh(true);
+	expect("falls: an up counts nothing", S->link_falls == 0u);
+	clear_calls();
+	link(false);
+	expect("falls: a down counts one, inside the notification's masked section",
+	       S->link_falls == 1u && fk.irq_sections == 1 &&
+	       fk.falls_at_disable == 0u && fk.falls_at_restore == 1u);
+	expect("falls: ... before the worker ran (the count is the notice's)",
+	       fk.tty_wakes == 0 && S->link_fell == 1);
+	link(true);
+	link(false);
+	expect("falls: a second down counts again, the up between nothing",
+	       S->link_falls == 2u);
+	react();
+	expect("falls: the worker does not count", S->link_falls == 2u);
+	expect("falls: a pass that handled a fall wakes the telnet console once, "
+	       "with the address lock released and interrupts on",
+	       fk.tty_wakes == 1 && fk.tty_wakes_locked == 0 &&
+	       fk.tty_wakes_masked == 0 && !fk.held);
+	link(true);
+	react();
+	expect("falls: a pass without a fall does not wake it", fk.tty_wakes == 1);
+
+	/* A fall under a running client whose stop fails still wakes it. */
+	fresh(true);
+	bound(IP_A, GW_A);
+	fk.fail_stop = 0x22u;
+	link(false);
+	react();
+	expect("falls: a fall whose DHCP stop failed still wakes the console",
+	       fk.tty_wakes == 1 && fk.tty_wakes_locked == 0);
+}
+
 int main(void)
 {
 	printf("test_net_core:\n");
@@ -1331,6 +1389,7 @@ int main(void)
 	check_failures();
 	check_kv();
 	check_thread();
+	check_fall_count();
 	if (failures != 0) {
 		printf("test_net_core: %d failure(s)\n", failures);
 		return 1;

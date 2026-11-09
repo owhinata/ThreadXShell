@@ -26,6 +26,7 @@
 #include <stdint.h>
 
 #include "cli_config.h"       /* CLI_INSTANCE_PRIORITY */
+#include "net_tty.h"          /* net_tty_link_fell() (issue #221) */
 
 /* The worker reacts to the link while a console sits in a command: it must
  * run ahead of every console (ThreadX: lower number, higher priority). */
@@ -190,8 +191,9 @@ static void net_core_fail_note(uint8_t op, UINT status, uint8_t link_up)
  *  - NetX's own interface flag, on the thread NetX itself would write it
  *    from: upstream's deferred link-status processing never assigns it, and
  *    route lookup reads it outside the IP mutex;
- *  - the level and, on a down, the fall mark -- together, in one masked
- *    section, which is what the worker's copy pairs with;
+ *  - the level and, on a down, the fall mark and the fall count --
+ *    together, in one masked section, which is what the worker's copy pairs
+ *    with and what the telnet console compares (issue #221);
  *  - the wake, after the section (an event-flag set never blocks; the worker
  *    is below the IP thread, so it does not run until this returns).
  */
@@ -205,8 +207,10 @@ static VOID net_core_link_notify(NX_IP *ip, UINT iface, UINT up)
 		return;
 	TX_DISABLE
 	s->link_up = (up != 0u) ? 1u : 0u;
-	if (up == 0u)
+	if (up == 0u) {
 		s->link_fell = 1u;
+		s->link_falls++;
+	}
 	TX_RESTORE
 	(void)tx_event_flags_set(&s->wake, NET_CORE_EVT_WAKE, TX_OR);
 }
@@ -264,6 +268,10 @@ void net_core_link_react(void)
 	if (acted && !failed)
 		net_core_fail_clear();
 	net_core_unlock();
+	/* Outside the lock, and only for a fall: the telnet listener compares
+	 * the count, this only wakes it (issue #221). */
+	if (fell)
+		net_tty_link_fell();
 }
 
 /* The worker: wait, react, forever.  Every wake gets a full pass; an extra
@@ -298,6 +306,7 @@ int net_core_init(bool dhcp_created)
 	s->dhcp_created = dhcp_created ? 1u : 0u;
 	s->link_up = 0u;
 	s->link_fell = 0u;
+	s->link_falls = 0u;
 	/* A board that boots on DHCP but could not create the client has no
 	   source until someone sets a static address. */
 	s->source = f->boot_source;

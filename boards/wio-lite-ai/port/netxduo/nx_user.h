@@ -53,10 +53,20 @@
 /*
  * Enables nx_tcp_socket_queue_depth_notify_set.  Nothing in U3 creates a TCP socket, but
  * this define changes NX_TCP_SOCKET, and U4's telnet backend needs the notification to
- * resume output after back-pressure instead of timing out (the f746 nx_shell.c does
+ * resume output after back-pressure instead of timing out (shell/cmds/net_tty.c does
  * exactly this).  Defining it now means U4 adds a socket rather than an ABI change.
  */
 #define NX_ENABLE_TCP_QUEUE_DEPTH_UPDATE_NOTIFY
+
+/*
+ * Enables nx_tcp_socket_establish_notify (issue #221).  Without it nx_api.h defines
+ * NX_DISABLE_EXTENDED_NOTIFY_SUPPORT and the call answers NX_NOT_SUPPORTED.  The shared
+ * telnet console (shell/cmds/net_tty.c) takes the link's fall count in that callback and
+ * publishes no connection without it, so it stopped listening at boot.  (The old
+ * src/net_shell.c registered it with the answer thrown away, so it never ran.)  This
+ * changes NX_TCP_SOCKET; net_tty.c refuses to build if it is missing.
+ */
+#define NX_ENABLE_EXTENDED_NOTIFY_SUPPORT
 
 /*
  * DHCP client thread stack.  nxd_dhcp_client.h declares nx_dhcp_thread_stack[] as a

@@ -49,7 +49,6 @@ struct net_stub {
 	/* what was called */
 	int calls_static, calls_dhcp, calls_ping, calls_addr, calls_lines;
 	int applied_static, applied_dhcp;   /* calls that got past BUSY       */
-	int addressed;
 	int sleeps;
 	int runaway;
 	uint32_t last_ip, last_mask, last_gw;

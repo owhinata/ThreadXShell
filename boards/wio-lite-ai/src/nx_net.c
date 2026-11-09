@@ -24,7 +24,7 @@
 #define LOG_TAG "nx"
 #include "log.h"
 #include "net_core.h"         /* the shared address / DHCP / ping (issue #220) */
-#include "net_shell.h"
+#include "net_tty.h"          /* the shared telnet console (issue #221) */
 #include "nx_link_driver.h"
 #include "rtl_link.h"
 #include "rtl8720.h"
@@ -116,14 +116,6 @@ _Static_assert(NXN_IP_PRIORITY < NET_CORE_WORKER_PRIORITY,
 #define NXN_CLAIM_MS       RTL_LINK_CLAIM_WAIT_MS
 #define NXN_ARM_CLAIM_MS   20000u     /* how long ARM waits for the coarse mutex      */
 
-/*
- * How long nxn_arm() waits for the telnet console to prove it has released its socket
- * (owhinata/wio-lite-ai#23 U4-2).  Typically ~250 ms -- one poll of the console server's connect
- * wait -- so this is the "something is wrong" bound, not the expected cost.  Since issue #218
- * the teardown (nxn_stop()) no longer waits for the console at all.
- */
-#define NXN_SHELL_STOP_MS  3000u
-
 #define NXN_OFF_RETRIES    3
 #define NXN_SETTLE_TRIES   50         /* x 20 ms = 1 s, as link_data_settle()         */
 #define NXN_REFRESH_FAILS  2          /* consecutive CFG failures before STOP         */
@@ -187,8 +179,8 @@ static bool nxn_dhcp_created;
  *
  * LOCK ORDER: the address lock is NEVER taken while the rtl_link coarse mutex is
  * held.  It is taken only by threads that hold no other lock: the CLI entry points
- * (which take no link at all), the shared link worker, the telnet listener
- * (net_shell.c, reading the address) and the KV boot thread (kv_boot.c); the owner
+ * (which take no link at all), the shared link worker and the KV boot thread
+ * (kv_boot.c); the telnet console (shell/cmds/net_tty.c) never takes it; the owner
  * thread here never takes it.  Below it sit the NetX DHCP mutex and nx_ip_protection, which is the
  * same direction everything else in this file goes.
  *
@@ -205,6 +197,49 @@ const struct net_core_facts net_core_board_facts = {
 	.why_down    = "the host stack did not initialise",
 	.worker_stack      = net_worker_stack,
 	.worker_stack_size = sizeof net_worker_stack,
+};
+
+/*
+ * The shared telnet console's state and facts (shell/cmds/net_tty.h, issue #221).
+ *
+ * The listener's stack and the transmit ring are DTCM (CPU-only: the listener copies
+ * out of the ring into an NX_PACKET, and the pool is DTCM too), each a STANDALONE
+ * symbol because cmake/check_dtcm_residency.py matches by name -- keep `net_tty_stack`
+ * and `net_tty_tx_buf` in its REQUIRED_DTCM.  The receive ring, the per-packet
+ * extraction buffer and the state stay plain .bss (AXI-SRAM), as they were.
+ *
+ * The listener's stack: the whole transmit path runs on it (nx_tcp_socket_send ->
+ * IP -> app/nx_link_driver.c -> link_data_send).  2560 B as before #221, with a
+ * measured peak of 492-612 B; if DTCM gets tight this is a safe 1 KB to give back.
+ *
+ * Transmit queue depth and retransmit: the DATA channel's budget (nx_net.h), and the
+ * first retransmit at NXN_TCP_RTO_MS, which the console's deadline must exceed.
+ */
+#define NXN_TTY_RX_RING    512u
+#define NXN_TTY_EXTRACT    1500u
+#define NXN_TTY_TX_RING    4096u
+#define NXN_TTY_STACK      2560u
+_Static_assert(NET_TTY_TX_DEADLINE > NXN_TCP_RTO_MS,
+               "the telnet deadline must cover the first retransmit");
+
+static uint8_t net_tty_rx_buf[NXN_TTY_RX_RING];
+static uint8_t net_tty_extract[NXN_TTY_EXTRACT];
+static uint8_t net_tty_tx_buf[NXN_TTY_TX_RING] DTCM_BSS;
+static UCHAR   net_tty_stack[NXN_TTY_STACK] DTCM_BSS __attribute__((aligned(8)));
+
+struct net_tty_state net_tty_board_state;
+const struct net_tty_facts net_tty_board_facts = {
+	.ip             = &nxn_ip,
+	.pool           = &nxn_pool,
+	.rx_buf         = net_tty_rx_buf,  .rx_size      = sizeof net_tty_rx_buf,
+	.extract_buf    = net_tty_extract, .extract_size = sizeof net_tty_extract,
+	.tx_buf         = net_tty_tx_buf,  .tx_size      = sizeof net_tty_tx_buf,
+	.stack          = net_tty_stack,   .stack_size   = sizeof net_tty_stack,
+	.tx_queue_depth = NXN_TCP_TX_DEPTH,
+	.rto_ticks      = NXN_TCP_RTO_MS,
+	.rto_retries    = NXN_TCP_RTO_RETRIES,
+	.rto_shift      = NXN_TCP_RTO_SHIFT,
+	.other_console  = "USB CDC",
 };
 
 /* Owner thread. */
@@ -423,16 +458,15 @@ static void nxn_stop(const char *why)
 	 * STOPPING.  So nxn_settle()'s host-side reading is a stable fact rather than a
 	 * snapshot; its module-side reading rests on DATA_CFG(off) exactly as before.
 	 *
-	 * That is why the telnet console is only ASKED to stop, after the gate, and not
-	 * waited for: its socket may still exist and NetX may still hand the driver its
-	 * FIN or a retransmit, but none of it reaches the channel.  (Until #218 the
-	 * console was stopped synchronously FIRST and an unprovable stop went FAILED; that
-	 * proved silence for one producer only, and left the window open for the others.)
-	 * It also stops on its own once it sees !nx_net_is_up(); a socket somehow still
-	 * there at the next `net up` is refused by nxn_arm().
+	 * That is why the telnet console is not stopped here at all: since issue #221 it
+	 * is resident and keeps listening, and its session (if any) is ended by its own
+	 * listener once the shared link worker, woken by the down notice of set_link(0),
+	 * passes the fall on.  Its FIN or a
+	 * retransmit may still reach the driver, but none of it reaches the channel.
+	 * (Until #218 the console was stopped synchronously FIRST and an unprovable stop
+	 * went FAILED; that proved silence for one producer only.)
 	 */
 	nx_link_driver_set_link(0);
-	net_shell_stop_request();
 	/* The DHCP client is stopped by the shared link worker, which the down notice
 	 * of set_link(0) wakes (issue #220).  It may run after the module is told
 	 * DATA_CFG(off) below; a DHCP frame it would send meanwhile is refused at the
@@ -493,19 +527,11 @@ static void nxn_arm(void)
 	nxn_refresh_fails = 0;
 
 	/*
-	 * The console cannot be up here -- it refuses to start unless the host stack is,
-	 * and this runs from OFF -- but assert it by DOING it rather than by believing it.
-	 * A stale socket from a previous session would otherwise be carried into this one.
-	 * Since issue #218 the teardown only ASKS the console to stop (its silence comes
-	 * from the driver's gate), so a `net up` straight after a `net down` can find it
-	 * still unwinding -- typically its 1 s FIN wait, which nobody answers now -- and
-	 * this is where that is waited for.  It is a no-op returning 0 when already
-	 * stopped.  Issue #221 removes it.
+	 * No wait for the telnet console (issue #221): it is resident and its listening
+	 * socket stays across sessions of the interface.  A session it still has from
+	 * before the fall is ended by the link worker's notice, and what it transmits
+	 * while the gate is shut is dropped there.
 	 */
-	if (net_shell_stop_sync(NXN_SHELL_STOP_MS) != 0) {
-		nxn_why = "the telnet console would not release its socket";
-		goto refuse;
-	}
 	if (!rtl8720_powered()) {
 		nxn_why = "the RTL8720 is powered off";
 		goto refuse;
@@ -1058,7 +1084,7 @@ int nx_net_up(const char **why)
 	/*
 	 * Publish ARMING on THIS thread, before the owner is signalled: nx_net_guard() has
 	 * to be closed from the moment the command is typed, not from whenever the owner
-	 * next runs.  Same lost-wakeup ordering as net_shell_start().
+	 * next runs: the state first, then the wake-up.
 	 */
 	nxn_why = "";
 	nxn_state = NX_NET_ARMING;

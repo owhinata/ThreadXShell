@@ -21,7 +21,7 @@
 #include "rtl_link.h"
 #include "wifi_auto.h"   /* issue #32: the host's own re-association policy */
 #include "net_core.h"   /* net_core_source_is_dhcp() (issue #220) */
-#include "net_shell.h"
+#include "net_tty.h"
 #include "nx_net.h"      /* the host stack owns the module while it is up (#23 U3) */
 #include "stm32h7xx_hal.h"   /* HAL_GetTick: the retry budget in issue #40 */
 
@@ -231,7 +231,7 @@ int wifi_connect_run(struct cli_instance *sh, const char *ssid, const char *pass
 
 	/* Not from the telnet console: dropping the association takes the very session
 	 * running this command away.  Run it from USB CDC. */
-	if (net_shell_guard(sh, "wifi connect"))
+	if (net_tty_guard(sh, "wifi connect"))
 		return 1;
 	/*
 	 * Disarm before claiming (owhinata/wio-lite-ai#32).  An operator typing `wifi connect` during

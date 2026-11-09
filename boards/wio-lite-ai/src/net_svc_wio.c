@@ -26,7 +26,7 @@
 
 #include "fmt.h"
 #include "net_core.h"
-#include "net_shell.h"        /* net_shell_autoarm() */
+#include "net_tty.h"          /* the telnet console's lines (issue #221) */
 #include "nx_net.h"
 
 /* The board's reasons, as the per-board command printed them. */
@@ -94,16 +94,10 @@ void net_svc_ping(uint32_t ip, unsigned timeout_ms, unsigned *rtt_ms,
 		net_core_ping(ip, timeout_ms, rtt_ms, res);
 }
 
-/* The host stack has an address: this is where the telnet console belongs
- * since U4-2, and where it is armed from (issue #221 makes it resident). */
-void net_svc_addressed(void)
-{
-	net_shell_autoarm();
-}
-
-/* The host-stack section: why it is (not) up, then its counters.  Written in
- * every state, even OFF: its first line carries WHY it is off.  Then the shared
- * link worker's last failure, only while one is recorded: the shared side cannot
+/* The telnet console's lines first (the shared ones, issue #221), then the
+ * host-stack section: why it is (not) up, then its counters.  Written in every
+ * state, even OFF: its first line carries WHY it is off.  Then the shared link
+ * worker's last failure, only while one is recorded: the shared side cannot
  * write this board's log (issue #220). */
 static int net_wio_line(net_svc_write_fn write, void *ctx, const char *fmt, ...)
 {
@@ -121,6 +115,8 @@ int net_svc_board_lines(net_svc_write_fn write, void *ctx)
 {
 	struct net_core_failure lf;
 
+	if (net_tty_write_lines(write, ctx) != 0)
+		return -1;
 	if (nx_net_write_status(write, ctx) < 0)
 		return -1;
 	if (!net_core_last_failure(&lf))

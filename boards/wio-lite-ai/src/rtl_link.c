@@ -297,8 +297,7 @@ int rtl_link_hw_claim(struct cli_instance *sh, bool allow_busy)
 		rtl_link_unclaim();
 		cli_console_release(sh);
 		cli_error(sh, "wifi: the eRPC link is in use -- stop it first "
-		          "(this command needs the UART to itself; `net shell stop` if the "
-		          "telnet console is armed)\r\n");
+		          "(this command needs the UART to itself)\r\n");
 		return 1;
 	}
 	return 0;

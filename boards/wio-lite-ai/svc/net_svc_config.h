@@ -16,7 +16,7 @@
 #define NET_SVC_CONFIG_H
 
 /** The `net` line of the top-level `help`. */
-#define NET_SVC_HELP "IPv4 (L3) over the onboard RTL8720 (info / ip / dhcp / ping / shell)"
+#define NET_SVC_HELP "IPv4 (L3) over the onboard RTL8720 (info / ip / dhcp / ping)"
 
 /*
  * The board's own subcommands, appended to the shared `net` table: a run of
@@ -28,14 +28,12 @@
  * [!] A NAME HERE THAT IS ALSO A SHARED SUBCOMMAND IS SILENTLY SHADOWED; the
  * board's host test builds the table and refuses a duplicate.
  *
- * `shell`: the telnet console's controls (owhinata/wio-lite-ai#23 U4-2).
- * Issue #221 makes the console resident and removes them.
+ * None: the telnet console's `net shell start / stop / status` went with issue
+ * #221 (the console is resident from boot and its state is a line of `net
+ * info`).  Both stay defined, empty, so the shared command's table still
+ * expands them.
  */
-#define NET_SVC_BOARD_DECLS                                                    \
-	extern const struct cli_cmd net_board_shell_subcmds[];
-
-#define NET_SVC_BOARD_SUBCMDS                                                  \
-	CLI_CMD_ARG(shell, net_board_shell_subcmds,                            \
-	            "telnet shell console (start [port] / stop / status)", NULL, 1, 0),
+#define NET_SVC_BOARD_DECLS
+#define NET_SVC_BOARD_SUBCMDS
 
 #endif /* NET_SVC_CONFIG_H */

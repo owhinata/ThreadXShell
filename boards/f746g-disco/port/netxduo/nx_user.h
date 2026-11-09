@@ -54,6 +54,16 @@
  * instead of timing out.  Without this the API returns NX_NOT_SUPPORTED. */
 #define NX_ENABLE_TCP_QUEUE_DEPTH_UPDATE_NOTIFY
 
+/*
+ * Enables nx_tcp_socket_establish_notify (issue #221).  Without it nx_api.h defines
+ * NX_DISABLE_EXTENDED_NOTIFY_SUPPORT and the call answers NX_NOT_SUPPORTED.  The shared
+ * telnet console (shell/cmds/net_tty.c) takes the link's fall count in that callback and
+ * publishes no connection without it, so it stopped listening at boot.  (The old
+ * src/net_shell.c registered it with the answer thrown away, so it never ran.)  This
+ * changes NX_TCP_SOCKET; net_tty.c refuses to build if it is missing.
+ */
+#define NX_ENABLE_EXTENDED_NOTIFY_SUPPORT
+
 /* Enable per-interface hardware offload capability (owhinata/stm32f746g-disco#98).
    Lets the ETH
  * driver report the STM32 MAC's TX checksum insertion (IPv4 header + TCP), so

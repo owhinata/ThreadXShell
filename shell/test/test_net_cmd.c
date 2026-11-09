@@ -334,8 +334,8 @@ static void check_ip(void)
 	expect("set: the arguments reach the adapter",
 	       net_stub.last_ip == 0x0A000005u && net_stub.last_mask == 0xFFFFFF00u &&
 	       net_stub.last_gw == 0x0A000001u);
-	expect("set: the sentence, the notice, then the two lines, exit 0",
-	       rc == 0 && net_stub.addressed == 1 &&
+	expect("set: the sentence, then the two lines, exit 0",
+	       rc == 0 &&
 	       before("net: static address set\r\n", "ip:    192.168.1.10/24\r\n") &&
 	       has("gw:    192.168.1.1 (static)\r\n"));
 	reset();
@@ -345,9 +345,9 @@ static void check_ip(void)
 	reset();
 	SEQ(net_stub.set_static, NET_SVC_REFUSED);
 	rc = run("net ip 10.0.0.5/24\r");
-	expect("REFUSED: `NetX refused the static address`, no notice",
+	expect("REFUSED: `NetX refused the static address`, no address lines",
 	       rc == 1 && has("net: NetX refused the static address\r\n") &&
-	       net_stub.addressed == 0 && !has("ip:"));
+	       !has("ip:"));
 	reset();
 	SEQ(net_stub.set_static, NET_SVC_DOWN);
 	rc = run("net ip 10.0.0.5/24\r");
@@ -369,8 +369,7 @@ static void check_ip(void)
 	net_stub.ctrl_c_at_sleep = 2;
 	rc = run("net ip 10.0.0.5/24\r");
 	expect("Ctrl+C in the BUSY wait: no call after it, nothing applied",
-	       rc == CLI_DISPATCH_CANCELLED && net_stub.calls_static == 2 && net_stub.applied_static == 0 &&
-	       net_stub.addressed == 0);
+	       rc == CLI_DISPATCH_CANCELLED && net_stub.calls_static == 2 && net_stub.applied_static == 0);
 }
 
 /* ---- net dhcp ------------------------------------------------------------------------ */
@@ -388,8 +387,8 @@ static void check_dhcp(void)
 	net_stub.addr_valid_late = 1;
 	net_stub.addr_valid_at = net_stub.now + 5000u;
 	rc = run("net dhcp\r");
-	expect("a lease on the way: the sentence, the notice, two lines, exit 0",
-	       rc == 0 && net_stub.addressed == 1 &&
+	expect("a lease on the way: the sentence, two lines, exit 0",
+	       rc == 0 &&
 	       before("net: acquiring an address via DHCP (up to 30 s, Ctrl+C to stop)...\r\n",
 	              "ip:    192.168.1.10/24\r\n") &&
 	       has("gw:    192.168.1.1 (dhcp)\r\n"));
@@ -401,9 +400,9 @@ static void check_dhcp(void)
 		ULONG t0 = net_stub.now;
 
 		rc = run("net dhcp\r");
-		expect("no lease: `no DHCP lease after 30 s`, exit 1, no notice (N3)",
+		expect("no lease: `no DHCP lease after 30 s`, exit 1 (N3)",
 		       rc == 1 && has("net: no DHCP lease after 30 s\r\n") &&
-		       net_stub.addressed == 0 && net_stub.now - t0 == 30000u);
+		       net_stub.now - t0 == 30000u);
 	}
 	reset();
 	net_stub.addr_valid_late = 1;
@@ -445,8 +444,8 @@ static void check_dhcp(void)
 	net_stub.addr_valid_at = net_stub.now + 3600000u;
 	net_stub.ctrl_c_at_sleep = 3;
 	rc = run("net dhcp\r");
-	expect("Ctrl+C in the lease wait: cancelled, no notice, started once",
-	       rc == CLI_DISPATCH_CANCELLED && net_stub.addressed == 0 && net_stub.calls_dhcp == 1 &&
+	expect("Ctrl+C in the lease wait: cancelled, started once",
+	       rc == CLI_DISPATCH_CANCELLED && net_stub.calls_dhcp == 1 &&
 	       net_stub.calls_addr == 3);
 	reset();
 	SEQ(net_stub.addr, NET_SVC_DOWN);

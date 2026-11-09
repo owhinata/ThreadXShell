@@ -311,7 +311,7 @@ void cli_uart_rx_high_clear(struct cli_instance *sh)
 
 /*
  * printf from a thread whose console is NOT this backend: the telnet instance
- * (port/netxduo/nx_shell.c), or a background job launched from it -- cli_job.c
+ * (shell/cmds/net_tty.c), or a background job launched from it -- cli_job.c
  * aliases a worker's tr to the foreground's.  Its bytes must not land on the VCP
  * ring.  Send them through the core's staged output path on that instance's own
  * transport, so printf follows the terminal that ran the command exactly like

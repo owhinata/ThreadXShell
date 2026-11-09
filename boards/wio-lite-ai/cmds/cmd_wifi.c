@@ -53,7 +53,7 @@
 #include "rtl_link.h"
 #include "wifi_auto.h" /* issue #32: the host's own re-association policy */
 #include "wifi_connect.h" /* the association sequence, shared with boot (#37) */
-#include "net_shell.h"
+#include "net_tty.h"
 #include "nx_net.h"    /* the host stack owns the module while it is up (issue #23 U3) */
 #include "stm32h7xx_hal.h"   /* #5 inc 6: HAL_GetTick (1 ms SysTick, fed via tx_glue.c)
                               * for the scan-wait deadline -- read-only, no HAL init. */
@@ -168,7 +168,7 @@ static int wifi_power_claim(struct cli_instance *sh, const char *what)
 {
 	/* Not on the telnet console: cutting CHIP_EN takes the WiFi link -- and therefore the
 	 * very session running this command -- away.  Run it from the USB CDC console. */
-	if (net_shell_guard(sh, what))
+	if (net_tty_guard(sh, what))
 		return 1;
 	/*
 	 * BEFORE the claim, not after (owhinata/wio-lite-ai#32).  An automatic re-association holds the
@@ -565,7 +565,7 @@ static int cmd_wifi_disconnect(struct cli_instance *sh, int argc, char **argv)
 	(void)argc; (void)argv;
 	/* Dropping the association is a link-down event, not a teardown: the bridge stays
 	 * (owhinata/wio-lite-ai#30 B2b treats an operator disconnect exactly like the AP going away). */
-	if (net_shell_guard(sh, "wifi disconnect"))
+	if (net_tty_guard(sh, "wifi disconnect"))
 		return 1;
 	/*
 	 * Disarm BEFORE the claim (owhinata/wio-lite-ai#32).  An operator disconnect has to win: leaving

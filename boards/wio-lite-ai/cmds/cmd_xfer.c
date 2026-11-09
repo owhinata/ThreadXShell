@@ -20,7 +20,7 @@
  */
 #include "cli.h"
 #include "cmd_xfer.h"
-#include "net_shell.h"   /* refuse a raw transfer on the telnet console */
+#include "net_tty.h"     /* refuse a raw transfer on the telnet console */
 #include "log.h"          /* transfer post-mortem into the dmesg ring -- see below */
 
 #include <string.h>
@@ -145,7 +145,7 @@ int xfer_send_source_locked(struct cli_instance *sh, const struct ym_source *src
 	 * stall.  Checked here rather than in each caller so every YMODEM user (`xfer`,
 	 * `wifi flash imgload` / `flash backup`) is covered by one rule.
 	 */
-	if (net_shell_guard(sh, "ymodem"))
+	if (net_tty_guard(sh, "ymodem"))
 		return 1;
 
 	cli_rx_flush(sh);                  /* drop type-ahead / the command newline */
@@ -215,7 +215,7 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
 	 * stall.  Checked here rather than in each caller so every YMODEM user (`xfer`,
 	 * `wifi flash imgload` / `flash backup`) is covered by one rule.
 	 */
-	if (net_shell_guard(sh, "ymodem"))
+	if (net_tty_guard(sh, "ymodem"))
 		return 1;
 
 	cli_rx_flush(sh);                  /* drop type-ahead / the command newline */

@@ -25,7 +25,7 @@
 #include "rtl8720.h"    /* onboard RTL8720DN CHIP_EN hold-off (issue #17) */
 #include "erpc.h"       /* eRPC link service thread (issue #21 increment 8) */
 #include "rtl_link.h"   /* coarse RTL8720 link mutex + UART refcount (same) */
-#include "net_shell.h"  /* telnet shell console over WiFi (issue #21 increment 9) */
+#include "net_tty.h"    /* the shared telnet console (issue #221) */
 #include "nx_net.h"     /* NetX Duo over the RTL8720 L2 bridge (issue #23 U3) */
 #include "app.h"
 #if BSP_PSRAM_INIT_IN_APP
@@ -64,10 +64,12 @@ CLI_INSTANCE_DEFINE(cdc_sh, &cdc_tr, "wio> ");
 
 /* --- second console: telnet over the RTL8720DN (owhinata/wio-lite-ai#21) --------------- */
 /* Statically defined and started at boot like the CDC one (cli_init is one-shot, so an
- * instance cannot be created per client): app/net_shell.c drops its output until a client
- * is actually connected, and posts CLI_EVT_CONN on accept so each client gets a fresh
- * session.  The listening socket itself is armed later, when an IP address comes up. */
-CLI_INSTANCE_DEFINE(net_sh, &net_shell_transport, "wio-net> ");
+ * instance cannot be created per client): the shared console (shell/cmds/net_tty.c,
+ * issue #221) drops its output until a client is actually connected, and posts
+ * CLI_EVT_CONN on accept so each client gets a fresh session.  It listens from boot,
+ * on the port the KV thread hands over (below). */
+NET_TTY_TRANSPORT_DEFINE(net_tr);
+CLI_INSTANCE_DEFINE(net_sh, &net_tr, "wio-net> ");
 
 /* --- LED (PC13, red): driven off ---------------------------------------- */
 /* The bring-up heartbeat blink was removed on request; the LED is now held off
@@ -121,7 +123,7 @@ void tx_application_define(void *first_unused_memory)
    * the rest still run. */
   if (cli_init(&cdc_sh) == 0)
     cli_start(&cdc_sh);
-  if (cli_init(&net_sh) == 0)   /* telnet console; idle until net_shell arms a socket */
+  if (cli_init(&net_sh) == 0)   /* telnet console; idle until a client connects */
     cli_start(&net_sh);
   cli_job_pool_init();          /* background-job worker pool (`cmd &`) */
 
@@ -139,6 +141,10 @@ void tx_application_define(void *first_unused_memory)
    * Register-only GPIO; safe here (pre-scheduler), like led_init_off(). */
   rtl8720_init();
 
+  /* Whether the KV thread will hand the telnet console its port (issue #221).  Every
+   * other path hands over the default, once, below -- the listener waits for it. */
+  int tty_port_from_kv = 0;
+
 #if BSP_ENABLE_KV
   /* External NOR mutex (owhinata/wio-lite-ai#37).  Pure ThreadX object creation, like the two
    * calls below it: the controller and the device itself were already brought up
@@ -150,8 +156,9 @@ void tx_application_define(void *first_unused_memory)
   /* Configuration thread.  Creation only -- opening the store is the FIRST thing
    * that thread does, not something that happens here, because a first boot on a
    * blank partition formats it and an erase waits by sleeping.  Fail-soft: without
-   * the thread the store simply never opens and `kv` says so. */
-  (void) kv_boot_init();
+   * the thread the store simply never opens and `kv` says so -- and the telnet
+   * console gets the default port below instead of `net.shell.port`. */
+  tty_port_from_kv = (kv_boot_init() == 0);
 #endif
 
   /* RTL8720DN link ownership (owhinata/wio-lite-ai#21 increment 8): the coarse mutex that serialises
@@ -226,17 +233,18 @@ void tx_application_define(void *first_unused_memory)
   (void) plugin_lease_init();
 #endif
 
-  /* Telnet console service (owhinata/wio-lite-ai#21 increment 9): owns the module's listening/session
-   * sockets and feeds the net_sh instance above.  Object creation only -- the thread parks
-   * on its event flags until an IP address comes up (`wifi connect` / `net dhcp` arm it, or
-   * `net shell start` does explicitly).  Fail-soft like the two above. */
-  (void) net_shell_init();
-
   /* The host's own IP stack (owhinata/wio-lite-ai#23 U3): NetX Duo plus the thread that owns a bridge
    * session.  Object creation only -- the IP instance comes up with address 0.0.0.0 and
    * the link DOWN, and nothing touches the RTL8720 until `wifi connect`.  Fail-soft: without
-   * it `net` keeps working through the module's lwIP exactly as before. */
-  (void) nx_net_init();
+   * it `net` keeps working through the module's lwIP exactly as before.
+   *
+   * Then the telnet console (shell/cmds/net_tty.c, issue #221), resident from boot on that
+   * stack: object creation only, after the NetX objects and the shared net core exist.
+   * Its listener opens the socket once it has a port: from the KV thread when it runs
+   * (`net.shell.port`, right after the store opens), otherwise the default, now.
+   * Fail-soft: without it there is no telnet, and `net info` says so. */
+  if (nx_net_init() == NXN_OK && net_tty_init() == 0 && !tty_port_from_kv)
+    net_tty_port_set((uint16_t)NET_TTY_PORT_DEFAULT);
 
 #if BSP_ENABLE_IWDG
   /* IWDG petter thread (priority 5), then arm the watchdog (owhinata/wio-lite-ai#12: arm here, not

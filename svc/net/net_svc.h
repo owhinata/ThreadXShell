@@ -137,14 +137,6 @@ void net_svc_ping(uint32_t ip, unsigned timeout_ms, unsigned *rtt_ms,
  *  @return 0, or the negative result of the write that failed. */
 int net_svc_board_lines(net_svc_write_fn write, void *ctx);
 
-/**
- * The operator's `net ip` or `net dhcp` has just given the interface an
- * address.  wio-lite-ai arms its telnet console here; f746g-disco does
- * nothing.  [!] TEMPORARY: issue #221 makes the console resident on both
- * boards and removes this call.
- */
-void net_svc_addressed(void);
-
 #ifdef __cplusplus
 }
 #endif

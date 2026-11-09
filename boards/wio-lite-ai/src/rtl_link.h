@@ -134,8 +134,9 @@ void rtl_link_forget_module(void);
  * Re-open the eRPC UART at @baud, KEEPING the reference count and both generation
  * counters (an open that is really the same session continuing at a different rate).
  *
- * That is only safe with no RESIDENT reference holder: app/net_shell.c detects that its
- * reference was revoked by comparing rtl_link_uart_gen(), and holding the generation
+ * That is only safe with no RESIDENT reference holder: the host stack's owner thread
+ * (src/nx_net.c) detects that its reference was revoked by comparing
+ * rtl_link_uart_gen(), and holding the generation
  * still here would hide a close/open from it.  `wifi link baud` enforces
  * rtl_link_uart_refs() == 1 for exactly this reason -- it is a precondition of the
  * design, not a convenience.  Caller must hold the coarse mutex.  Returns 0, or -1 with
@@ -199,8 +200,8 @@ bool rtl_link_rate_supported(uint32_t baud);
  *
  * rtl_link_quiesce_gen() advances ONLY in rtl_link_force_quiesce(), i.e. only on the three
  * recovery commands, all of which drive CHIP_EN.  It is the "the module was power-cycled"
- * ticket a caller can wait for after leaking module-side state (see app/net_shell.c's dirty
- * latch); an ordinary ref/unref does not move it.
+ * ticket a caller can wait for after leaking module-side state (see src/nx_net.c's FAILED
+ * latch, nxn_failed_at); an ordinary ref/unref does not move it.
  */
 uint32_t rtl_link_uart_gen(void);
 void     rtl_link_uart_unref_gen(uint32_t gen);

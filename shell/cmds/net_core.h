@@ -26,8 +26,8 @@
  * client's mutex (taken by NetX inside nx_dhcp_*) -> nx_ip_protection -> the
  * driver's.  net_core.c takes only the address lock, and never while it holds
  * anything else.  Only threads that hold no other lock take it: the
- * commands, the link worker, and on wio-lite-ai the telnet listener and the
- * KV boot thread.
+ * commands, the link worker, and on wio-lite-ai the KV boot thread.  The
+ * telnet console (net_tty.c) never takes it.
  * Nothing that runs with a NetX mutex held takes it: the link notification
  * (the IP thread, nx_ip_protection held) only masks interrupts and sets an
  * event flag.
@@ -42,7 +42,10 @@
  * client (the address stays) and marks a DHCP address stale; the link up with
  * DHCP the source and the client not running reinitialises, drops the
  * address and starts it.  The event flag only wakes; what happened is in the
- * pair, and a notice after the copy wakes the worker again.  Commands read
+ * pair, and a notice after the copy wakes the worker again.  After a pass
+ * that handled a fall, with the address lock released, the worker calls
+ * net_tty_link_fell(), which only wakes the telnet listener; the listener
+ * decides from link_falls (issue #221).  Commands read
  * the level in the same kind of section and never touch the mark: handling a
  * fall is the worker's alone (issue #220).
  */
@@ -103,7 +106,7 @@ struct net_core_failure {
  *
  * Under the address lock: source, dhcp_running, lease_stale, last_fail.
  * Under a ThreadX interrupt-masked section (TX_DISABLE / TX_RESTORE),
- * everywhere: link_up and link_fell, as one pair.  Written once by
+ * everywhere: link_up and link_fell, as one pair, and link_falls.  Written once by
  * net_core_init() before the scheduler starts: ready, dhcp_created.  The
  * ThreadX objects are created by net_core_init().
  */
@@ -124,6 +127,12 @@ struct net_core_state {
 	/** A down was notified since the worker last copied the pair.  Set by the
 	 *  notification only, cleared by the worker only. */
 	volatile uint8_t link_fell;
+	/** Every down notified since init, counted by the notification in the
+	 *  section that sets the mark.  The telnet console (net_tty.c) takes it
+	 *  when a connection is established and compares it later: a session
+	 *  older than the last fall ends (issue #221).  Never cleared; only the
+	 *  notification writes it, everyone else reads it masked. */
+	volatile ULONG link_falls;
 	/** enum net_core_source. */
 	uint8_t source;
 	/** The client is started as far as this file knows: set only after a

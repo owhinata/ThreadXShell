@@ -562,6 +562,7 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_eth.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_net.c"    # the one shared command (#219)
     "${CMAKE_SOURCE_DIR}/shell/cmds/net_core.c"   # ...its one NetX implementation (#220)
+    "${CMAKE_SOURCE_DIR}/shell/cmds/net_tty.c"    # ...and the one telnet console (#221)
     "${BOARD_DIR}/cmds/cmd_net_board.c"           # ...and this board's `net mjpeg`
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
@@ -604,7 +605,6 @@ add_executable(shell
     "${BOARD_DIR}/port/netxduo/nx_eth_driver.c"
     "${BOARD_DIR}/port/netxduo/nx_glue.c"
     "${BOARD_DIR}/port/netxduo/net_svc_f746.c"   # the shared `net` command's adapter (#219)
-    "${BOARD_DIR}/port/netxduo/nx_shell.c"
     "${BOARD_DIR}/port/netxduo/nx_mjpeg.c"
     "${NX_DIR}/addons/dhcp/nxd_dhcp_client.c"
     "${BOARD_DIR}/port/guix/guix_display.c"

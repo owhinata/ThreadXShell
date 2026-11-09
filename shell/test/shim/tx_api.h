@@ -16,11 +16,12 @@
  * deliberately NOT defined here: that test passes it, so the command's
  * _Static_assert still has to find the board's value.
  *
- * The shared NetX operations (shell/cmds/net_core.c, issue #220) also take a
- * mutex, mask interrupts, create and wait on an event-flags group and create
- * their link worker thread: those calls and the TX_DISABLE / TX_RESTORE
- * section are declared below as calls into the test (test_net_core.c defines
- * them and records what was held when), and nothing else uses them.
+ * The shared NetX operations (shell/cmds/net_core.c, issue #220) and the
+ * telnet console (shell/cmds/net_tty.c, issue #221) also take a mutex, mask
+ * interrupts, create and wait on an event-flags group and create a thread:
+ * those calls and the TX_DISABLE / TX_RESTORE section are declared below as
+ * calls into the test (test_net_core.c and test_net_tty.c define them and
+ * record what was held when), and nothing else uses them.
  */
 #ifndef TX_API_H
 #define TX_API_H
@@ -39,6 +40,8 @@ typedef struct { void *opaque; } TX_EVENT_FLAGS_GROUP;
 typedef struct { void *opaque; } TX_MUTEX;
 
 #define TX_SUCCESS ((UINT)0)
+#define TX_NO_EVENTS ((UINT)0x07)
+#define TX_NO_WAIT      ((ULONG)0)
 #define TX_WAIT_FOREVER ((ULONG)0xFFFFFFFFUL)
 #define TX_INHERIT      ((UINT)1)
 #define TX_OR           ((UINT)0)

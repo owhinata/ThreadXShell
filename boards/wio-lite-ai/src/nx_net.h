@@ -57,8 +57,9 @@
  *     -- from the IP thread, DHCP, the telnet console, or a CLI `net ping`, preempted or
  *     not -- is queued on the DATA channel; frames queued before it are drained by the
  *     settle, and only the owner thread reopens the gate, never while STOPPING.  So no
- *     producer has to be stopped, or proved stopped, first: the telnet console is only
- *     asked to stop (net_shell_stop_request()), and it cannot make the teardown FAIL.
+ *     producer has to be stopped, or proved stopped, first: the telnet console is
+ *     resident and is not stopped at all (issue #221), and it cannot make the teardown
+ *     FAIL.
  *   - The MODULE's side, by DATA_CFG(off) being acknowledged and the settle then finding
  *     both sides idle (erpc_data_quiescent() on ours, which after the gate is a stable
  *     fact rather than a snapshot; the module's queue and pool counters on its own).
@@ -195,7 +196,8 @@ void nx_net_mac_get(uint8_t mac[6]);
 void nx_net_modstats_get(struct nx_net_modstats *out);
 
 /*
- * The NetX objects, for the things that put a socket on this interface (app/net_shell.c).
+ * The NetX objects, for the things that put a socket on this interface.  (The telnet
+ * console names them in its facts instead, in nx_net.c, issue #221.)
  * Typed as void * so that a caller which only needs to pass them along does not have to
  * include nx_api.h; cast to NX_IP * / NX_PACKET_POOL *.
  *

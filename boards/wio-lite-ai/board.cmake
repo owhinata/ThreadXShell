@@ -492,7 +492,7 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_wifi_flash.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_net.c"    # the one shared command (#219)
     "${CMAKE_SOURCE_DIR}/shell/cmds/net_core.c"   # ...its one NetX implementation (#220)
-    "${BOARD_DIR}/cmds/cmd_net_board.c"           # ...and this board's `net shell`
+    "${CMAKE_SOURCE_DIR}/shell/cmds/net_tty.c"    # ...and the one telnet console (#221)
     "${BOARD_DIR}/cmds/cmd_wifi_link.c"
     "${BOARD_DIR}/cmds/cmd_xfer.c"
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
@@ -1057,7 +1057,6 @@ add_executable(shell
     "${BOARD_DIR}/src/wifi_auto.c"
     "${BOARD_DIR}/src/wifi_connect.c"
     "${BOARD_DIR}/src/rtl_link.c"
-    "${BOARD_DIR}/src/net_shell.c"
     "${BOARD_DIR}/src/nx_link_driver.c"
     "${BOARD_DIR}/src/nx_net.c"
     "${BOARD_DIR}/src/net_svc_wio.c"     # the shared `net` command's adapter (#219)

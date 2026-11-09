@@ -17,8 +17,8 @@
 
 #include "cli.h"
 
-/* The two nested tables (CLI_SUBCMD_SET_END-terminated) the wifi table points at, the
- * same way `net shell` nests its own.  Each subtree's handlers are static to its TU --
+/* The two nested tables (CLI_SUBCMD_SET_END-terminated) the wifi table points at.
+ * Each subtree's handlers are static to its TU --
  * the table pointer is the whole seam.
  *   cmd_wifi_flash.c: `wifi flash <sub>`, the owhinata/wio-lite-ai#19 download-mode
  * flasher cmd_wifi_link.c:  `wifi link <sub>`,  the owhinata/wio-lite-ai#23 link

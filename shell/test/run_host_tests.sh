@@ -1239,11 +1239,30 @@ done
 # no NetX call, no lock), one worker pass's reactions and folding, a notice
 # after the worker's copy, a bounce before `net dhcp`, the last-failure record,
 # the KV source's wake and init failing on any of its objects.
+# Since issue #221 the notification also counts the falls, and a pass that
+# handled one wakes the telnet console (faked here) with the lock released.
 gcc $CFLAGS -I "$here/shim" -I "$here/nx_shim" -I "$here/../cmds" -I "$svc/net" \
-    -I "$here/../include" \
+    -I "$here/../include" -I "$backend" \
     "$here/test_net_core.c" "$here/../cmds/net_core.c" \
     $LDFLAGS -o "$out/test_net_core"
 "$out/test_net_core"
+
+# issue #221 -- the one telnet console (shell/cmds/net_tty.c) as it is compiled
+# for the boards, over a fake NetX TCP server socket that keeps NetX's states
+# and its trap (a cut handshake leaves the socket listening but still bound,
+# and accepting it again leaks a packet), fake event flags and masked sections,
+# and a CLI that records its notifications.  None of it can be typed at a
+# console: one accept per connection (unaccept + relisten first, a failure
+# stops the listener), the publish against the order of the establishment, a
+# peer's close and a link fall, the fall count compared before every wait, the
+# three ends (gate, ring, the 0x03 ahead of a full receive ring, back to
+# listening), nothing crossing into the next session, IAC both ways, the
+# refusals by reason, the telnet question and the `net info` lines.
+gcc $CFLAGS -DCLI_USE_COLOR=0 -I "$here/shim" -I "$here/nx_shim" -I "$here/../cmds" \
+    -I "$inc" -I "$core" -I "$backend" -I "$svc" -I "$svc/net" \
+    "$here/test_net_tty.c" "$here/../cmds/net_tty.c" "$svc/fmt.c" \
+    $LDFLAGS -o "$out/test_net_tty"
+"$out/test_net_tty"
 
 # issue #99 -- the shared stream lifecycle (svc/nn/nn_stream_life.c).
 #

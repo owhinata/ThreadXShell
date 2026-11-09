@@ -25,7 +25,7 @@
 #include "net_core.h"
 #include "nx_glue.h"
 #include "nx_mjpeg.h"
-#include "nx_shell.h"   /* telnet console output statistics (issue #6) */
+#include "net_tty.h"    /* the telnet console's lines (issue #221) */
 
 /* The one reason this board gives: main.c creates the IP stack only after
    eth_init() succeeded, so its absence says the link driver did not start. */
@@ -68,11 +68,6 @@ void net_svc_ping(uint32_t ip, unsigned timeout_ms, unsigned *rtt_ms,
 		net_core_ping(ip, timeout_ms, rtt_ms, res);
 }
 
-/* Nothing to arm: the telnet console is resident on this board. */
-void net_svc_addressed(void)
-{
-}
-
 /* ---- the board's lines of `net info` -------------------------------------- */
 
 /* Everything the lines print, sampled before the first one is written. */
@@ -80,14 +75,12 @@ struct net_f746_sample {
 	bool                  mjpeg_on;
 	bool                  mjpeg_client;
 	uint32_t              mjpeg_frames;
-	bool                  telnet_on;
-	struct nx_shell_stats ts;
 	bool                  diag_on;
 	struct nx_net_diag    d;
 };
 
-/* The longest line is the telnet one: about 105 characters of text and nine
-   32-bit counters. */
+/* Room for the longest line (the telnet lines are the shared side's since
+   issue #221, which has its own buffer). */
 #define NET_F746_LINE_MAX 256u
 
 /* Format one whole line and write it.  0, or the writer's failure. */
@@ -118,10 +111,10 @@ net_f746_sample_mjpeg(struct net_f746_sample *s)
 }
 
 /*
- * The shared link worker's last failure (when there is one), the MJPEG state
- * (while it runs), the telnet console's output health and the
- * driver / TCP / packet-pool counters since boot (issue #202), in that order and
- * in today's words.  The getters each take what lock they need and are done
+ * The telnet console's lines (the shared ones, issue #221), the shared link
+ * worker's last failure (when there is one), the MJPEG state (while it runs)
+ * and the driver / TCP / packet-pool counters since boot (issue #202), in that
+ * order.  The getters each take what lock they need and are done
  * before anything is written; the groups are read one after another, not as one
  * snapshot.
  */
@@ -132,8 +125,12 @@ int net_svc_board_lines(net_svc_write_fn write, void *ctx)
 	struct net_core_failure lf;
 	bool fail_on;
 
+	/* First, and written before the board's values are sampled: the shared
+	 * function samples its own in one section. */
+	if (net_tty_write_lines(write, ctx) != 0)
+		return -1;
+
 	net_f746_sample_mjpeg(&s);
-	s.telnet_on = nx_shell_stats_get(&s.ts);
 	s.diag_on = (nx_net_diag_get(&s.d) == NXG_OK);
 	fail_on = net_core_last_failure(&lf);
 
@@ -149,22 +146,6 @@ int net_svc_board_lines(net_svc_write_fn write, void *ctx)
 	    net_f746_line(write, ctx, "mjpeg: http://board:80 (%s, %lu frames)\r\n",
 	                  s.mjpeg_client ? "streaming" : "idle",
 	                  (unsigned long)s.mjpeg_frames) != 0)
-		return -1;
-	/* The refusal reasons are reported apart because they mean different
-	 * things: qdepth is the designed back-pressure, win means the peer is not
-	 * reading, and nobuf says the shared packet pool was the constraint. */
-	if (s.telnet_on &&
-	    net_f746_line(write, ctx,
-	                  "telnet: :23 (%s, %lu sessions), tx %lu seg / %lu B, "
-	                  "ring peak %lu B, refused q%lu w%lu buf%lu err%lu, "
-	                  "dropped %lu B\r\n",
-	                  s.ts.connected ? "client attached" : "idle",
-	                  (unsigned long)s.ts.sessions,
-	                  (unsigned long)s.ts.tx_segs, (unsigned long)s.ts.tx_bytes,
-	                  (unsigned long)s.ts.tx_hiwater, (unsigned long)s.ts.tx_qdepth,
-	                  (unsigned long)s.ts.tx_win, (unsigned long)s.ts.tx_nobuf,
-	                  (unsigned long)s.ts.tx_err,
-	                  (unsigned long)s.ts.tx_dropped) != 0)
 		return -1;
 	if (!s.diag_on)
 		return 0;

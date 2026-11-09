@@ -137,7 +137,7 @@ struct cli_transport {
 	 * It lives on the TRANSPORT rather than the instance because it is a property
 	 * of the backend: the number has to exceed however long that backend can
 	 * legitimately take to free space.  For a ring drained by a local thread that
-	 * is microseconds; for the telnet console (app/net_shell.c) recovery can mean
+	 * is microseconds; for the telnet console (shell/cmds/net_tty.c) recovery can mean
 	 * a TCP retransmit, so a deadline shorter than the RTO turns one lost segment
 	 * into a truncated report -- owhinata/wio-lite-ai#48.  A background job inherits it for free,
 	 * because cli_job.c aliases the worker's tr to the foreground's.

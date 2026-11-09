@@ -1979,12 +1979,13 @@ This board's side:
 
 | File | What it holds |
 |---|---|
-| `src/net_svc_wio.c` | The adapter: the host stack's state checked before any glue call (coming up or going down is the only "busy", which the command waits out for up to 20 s; off is "no host stack"; FAILED says to run `wifi reset`), the association checked before each probe, and `nx_net.h`'s results read as the contract's |
-| `src/nx_net.c` | The host stack; its section of `net info` is `nx_net_write_status()`, which samples every value first and then writes one line at a time through the contract's writer (until issue #219 `nx_net_print_status()`, printing straight to the console) |
-| `svc/net_svc_config.h` | The properties: the `help` line, the STALE mark (`NET_SVC_HAS_LEASE_STALE 1`), and `shell` as the board's own subcommand |
+| `src/net_svc_wio.c` | The adapter: the host stack's state checked before the shared operation in `shell/cmds/net_core.c` (coming up or going down is the only "busy", which the command waits out for up to 20 s; off is "no host stack"; FAILED says to run `wifi reset`), then the operation itself (issue #220; the shared side says LINK with the association down, before each probe of `net ping` too) |
+| `src/nx_net.c` | The host stack: the NetX objects, the shared operations' state and facts (`net_core_board_state`, `net_core_board_facts`) with the link worker's stack, and the bridge session's resident thread.  Its section of `net info` is `nx_net_write_status()`, which samples every value first and then writes one line at a time through the contract's writer (until issue #219 `nx_net_print_status()`, printing straight to the console).  Until issue #220 it also held the address, DHCP and ping code, and the resident thread stopped the DHCP client itself |
+| `svc/net_svc_config.h` | The properties: the `help` line and `shell` as the board's own subcommand |
 | `cmds/cmd_net_board.c` | `net shell start` / `stop` / `status` only, and it registers no root (until issue #219 `cmds/cmd_net.c` was the whole command); it goes when issue #221 makes the telnet console resident |
 
-`net info` prints the address as two lines, then the host-stack section:
+`net info` prints the address as two lines, then the host-stack section, then
+the link worker's last failure while one is recorded (below):
 
 ```
 wio> net info
@@ -1996,8 +1997,12 @@ gw:    192.168.11.1 (dhcp)
   mod data tx: ...
 ```
 
-`gw:` is followed by ``<-- STALE (link went down; run `net dhcp`)`` when the
-link went down under the address.  Until issue #219 `net info` began with a
+`gw:` is followed by `<-- STALE (link went down; DHCP restarts when it
+returns)` when the link went down under a DHCP address (until issue #220
+``run `net dhcp` ``, and a static address was marked too).  With no address
+and nothing having made DHCP the source the line is `ip:    none (unset)`
+(until issue #220 `none (dhcp, no lease)`, even when DHCP was never started).
+Until issue #219 `net info` began with a
 `link:` and a `mac:` line asked of the module over eRPC; those went, and
 `wifi status` prints both (`wifi: connected`, `  mac  ...`).  `net info` now
 answers with the RTL8720 powered off or its link held by another command.  The
@@ -2015,17 +2020,81 @@ The telnet console's statistics are still `net shell status`, not a line of
 
 `net dhcp` prints `net: acquiring an address via DHCP (up to 30 s, Ctrl+C to
 stop)...` (until issue #219 `requesting DHCP lease (up to ~30s ...)`), then
-the two lines, or `net: no DHCP lease after 30 s` and exit 1.  Until issue
-#220 a `net dhcp` while a lease is held stops the client and acquires again
-rather than renewing in place, and `ip:    none (dhcp, no lease)` can show
-even when DHCP was never started.  A successful `net ip` or `net dhcp` still
-arms the telnet console (`net_shell_autoarm()`), until issue #221.
+the two lines, or `net: no DHCP lease after 30 s` and exit 1.  Since issue
+#220 a `net dhcp` while a lease is held renews it in place
+(`net: renewing the existing lease (kept meanwhile)...`, the address stays)
+unless the lease is stale, which is acquired again; until then it stopped the
+client and acquired again every time.  With the association down it is
+refused with the link sentence and changes nothing.  A successful `net ip`
+or `net dhcp` still arms the telnet console (`net_shell_autoarm()`), until
+issue #221.
 
 `net ping` now prints a `PING <a.b.c.d>, <n> probes:` heading and ends with
 `<ok>/<sent> received, rtt min/avg/max <min>/<avg>/<max> ms` (until issue #219
 no heading, and `net: <ok>/<sent> received, rtt min/avg/max = ...`).  With the
 link down it prints only
 ``net: the link is down (not associated) -- `wifi connect` first``, as before.  Ctrl+C between probes now ends the run.
+
+### WiFi down, WiFi up: the shared link worker (issue #220)
+
+The reaction to the link is the shared one
+([`svc/README.md`](../../svc/README.md#the-link-notice-and-the-worker-issue-220)).
+Every path of the bridge session's resident thread that takes the link away
+-- an association lost for `NXN_LINK_DOWN_SAMPLES` refreshes in a row, `wifi
+on` / `off` / `reset`, the `wifi flash` stop -- closes the driver's gate with
+`nx_link_driver_set_link(0)`, which raises NetX's link event; the notice
+records it on the IP thread and the `net-link` worker stops the DHCP client.
+Until issue #220 the resident thread stopped the client itself on a stop or a
+revoked link, and a lost association only marked the lease stale.
+
+- **`wifi disconnect`** (or the AP going away): about 11 s later the resident
+  thread declares the link down (`link down (not associated)` in `dmesg`), the
+  worker stops DHCP, the address stays and `gw:` carries STALE.  `net ping`
+  and `net dhcp` are refused with
+  ``net: the link is down (not associated) -- `wifi connect` first``.
+- **`wifi connect`**: with the host stack already up it prints
+  `DHCP takes the address again once it does` when DHCP is the source, and
+  on the re-association the worker reinitialises the client, drops the
+  address and starts it: the address comes back without `net dhcp` and STALE
+  clears.  When the host stack had to come up, it prints
+  ``host stack up -- DHCP takes an address (`net info`)`` instead (or
+  ``run `net dhcp` for an address`` when nothing has made DHCP the source).
+- **A static address** sees no STALE and no DHCP start across either.
+- **`net dhcp` waiting for a lease across a `wifi disconnect`** ends
+  consistently: nothing is stuck, `net info` reads
+  `ip:    none (dhcp, no lease)`, and the next `wifi connect` acquires again on
+  its own.
+- **The KV store's `net.mode=dhcp`** at boot (`src/kv_boot.c`) only makes DHCP
+  the source and wakes the worker (`net_core_dhcp_source()`), which starts the
+  client once the link is recorded up; it no longer races the link record
+  right after the bridge comes up.  The lease wait and the telnet auto-arm
+  after it are as before; `static` sets the address through the shared
+  operation, and `manual` does nothing.
+- **A failed step** of the worker (a stop, reinitialise or start NetX
+  refused) is not retried.  The shared file cannot write this board's log, so
+  it is the last line of `net info` until a later pass or a `net dhcp` /
+  `net ip` succeeds: `dhcp: the link worker's <stop|reinitialise|start> failed
+  (0x<nn>) with the link <up|down>`.
+- **`wifi flash info`** (whose stop takes the link away the same way) does
+  not end FAILED.
+
+Known, issue #221 (the telnet console, not changed here):
+
+- When the worker brings the address back by itself, the telnet console is
+  not re-armed: only the `net dhcp` / `net ip` commands arm it
+  (`net_svc_addressed()`).
+- An established telnet session is not closed on the board's side when the
+  link falls, and its send queue keeps filling.
+- The listening address `net shell status` shows is the one it was armed
+  with, and stays old after `net ip` changes the address.
+
+Measured at `e4581d0`:
+
+| What | Value |
+|---|---|
+| `net-link` worker | priority 15 (above the consoles, 16; below the IP thread, 11, and the DHCP thread, 13; `nx_net.c` asserts at build time that the IP thread outranks it); stack 1,024 B in DTCM (`net_worker_stack`, required by `cmake/check_dtcm_residency.py`), high-water **228 B** (`thread`) |
+| Internal flash free (app partition) | **11,324 B** (12,476 B before issue #220, 11,948 B after its first step) |
+| DTCM free (`_smsp_stack - _dtcm_used_end`) | **1,848 B** (2,872 B before; the worker's stack) |
 
 ## Flashing and recovery
 

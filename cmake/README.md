@@ -64,9 +64,9 @@ not exactly one of these, or an unreadable file fails the audit.
 `BOARD_HAS_<X>` names a property (what the board has, never which board it is);
 today the optional files are `fs_cmd_core.c`, on `BOARD_HAS_FILEX`
 (f746g-disco ON, wio-lite-ai from `BSP_ENABLE_SD`, grove-vision-ai-v2 OFF), and
-`cmd_net.c`, on `BOARD_HAS_NETX` (issue #219: f746g-disco and wio-lite-ai ON;
-grove-vision-ai-v2 has no network and declares OFF, so the file must be
-compiled by nothing there). Every board's `board.cmake` must set each such
+`cmd_net.c` and `net_core.c`, on `BOARD_HAS_NETX` (issues #219 and #220:
+f746g-disco and wio-lite-ai ON; grove-vision-ai-v2 has no network and declares
+OFF, so the files must be compiled by nothing there). Every board's `board.cmake` must set each such
 variable to `ON` or `OFF`;
 `shared_storage_gate.cmake` writes every `BOARD_HAS_*` it sees to
 `shared-storage/capabilities.txt`, and a variable a mark names that is unset or

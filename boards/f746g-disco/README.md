@@ -2299,9 +2299,9 @@ console, `net mjpeg`, the counters).  This is the same split as wio-lite-ai's
 
 | File | What it holds |
 |---|---|
-| `port/eth/eth_link.c` | Bring-up (RMII pins, `HAL_ETH_Init`, the PHY reset and auto-negotiation), the link snapshot and the `eth-link` thread that polls the PHY every 200 ms and logs link transitions to `dmesg` |
+| `port/eth/eth_link.c` | Bring-up (RMII pins, `HAL_ETH_Init`, the PHY reset and auto-negotiation), the link snapshot and the `eth-link` thread that polls the PHY every 200 ms, logs link transitions to `dmesg` and hands each poll to the NetX driver |
 | `port/eth/eth_phy.c` | The LAN8742A over MDIO: discovery, reset, auto-negotiation, link read |
-| `port/netxduo/nx_eth_driver.c` | The NetX driver on top of the MAC (frames, link events to NetX) |
+| `port/netxduo/nx_eth_driver.c` | The NetX driver on top of the MAC (frames, link events to NetX).  On a link change it only reports it to NetX; what `net` does about it is the shared worker's (below) |
 | `cmds/cmd_eth.c` | The `eth` command; it includes only `eth_link.h` |
 
 `eth_init()` runs at boot only when the SDRAM is up (the DMA descriptors live
@@ -2343,12 +2343,14 @@ This board's side:
 
 | File | What it holds |
 |---|---|
-| `port/netxduo/net_svc_f746.c` | The adapter: `nx_glue.h`'s results read as the contract's (`NXG_ERR_STATE` is "IP stack not up"), and the lines of `net info` after the address, written through the contract's writer |
-| `svc/net_svc_config.h` | The properties: the `help` line, no STALE mark (`NET_SVC_HAS_LEASE_STALE 0`), and `mjpeg` as the board's own subcommand |
+| `port/netxduo/net_svc_f746.c` | The adapter: "is the IP stack up" (if not, "IP stack not up"), then the shared operation in `shell/cmds/net_core.c` (issue #220); and the lines of `net info` after the address, written through the contract's writer |
+| `port/netxduo/nx_glue.c` | The NetX objects and their placement, the counters, and the shared operations' state and facts (`net_core_board_state`, `net_core_board_facts`) with the link worker's 1 KB stack; until issue #220 also the address, DHCP and ping code and the eth-link poll hook |
+| `svc/net_svc_config.h` | The properties: the `help` line and `mjpeg` as the board's own subcommand |
 | `cmds/cmd_net_board.c` | `net mjpeg start` / `stop` / `stats` only; it registers no root (until issue #219 `cmds/cmd_net.c` was the whole command) |
 
-`net info` prints the address as two lines, then `mjpeg:` while the MJPEG
-server runs, `telnet:`, and the [counters](#network-counters-net-info-and-net-mjpeg-stats-issue-202):
+`net info` prints the address as two lines, then the link worker's last
+failure while one is recorded (below), `mjpeg:` while the MJPEG server runs,
+`telnet:`, and the [counters](#network-counters-net-info-and-net-mjpeg-stats-issue-202):
 
 ```
 sh> net info
@@ -2361,14 +2363,18 @@ pool:   free ... of ..., empty ... (waited ...), bad release ...
 ```
 
 `gw:` reads `none (dhcp|static)` with no gateway, and with no address the two
-lines are one, `ip:    none (dhcp, no lease)` or `ip:    none (unset)`.  With no
+lines are one, `ip:    none (dhcp, no lease)` (DHCP is the boot source) or
+`ip:    none (unset)` (only when the DHCP client could not be created at
+boot).  Since issue #220 `gw:` is followed by
+`<-- STALE (link went down; DHCP restarts when it returns)` while the cable
+is out under a DHCP address (below).  With no
 IP stack (`eth_init()` failed at boot) `net info` answers
 `ip:    none (IP stack not up)` and exits 0; issue #217 had it refuse.
 
 `net dhcp` waits up to 30 s for a lease and then prints the address (until
 issue #219: 10 s, then a warning and exit 0; now `net: no DHCP lease after
 30 s` and exit 1).  With a lease already held it sends a renew and keeps the
-address meanwhile:
+address meanwhile (a stale lease is acquired again instead, issue #220):
 
 ```
 sh> net dhcp
@@ -2403,6 +2409,45 @@ PING <that address>, 2 probes:
 This board's glue never answers "busy" (the IP stack is created once at boot
 and never taken down), and a `net ip` that NetX refuses part way puts the
 previous address, gateway and DHCP state back.
+
+### Cable out, cable in: the shared link worker (issue #220)
+
+The reaction to the link is the shared one
+([`svc/README.md`](../../svc/README.md#the-link-notice-and-the-worker-issue-220)):
+the `eth-link` thread reports a change to NetX and nothing else, NetX's
+link-status notice records it on the IP thread, and the `net-link` worker
+reacts.  Until issue #220 the `eth-link` thread ended each PHY poll in a hook
+of the address code that started DHCP on a pending link up, and a cable pull
+did not stop the client.
+
+- **Cable out.**  Once the `eth-link` thread's next poll (every 200 ms) sees
+  it, the worker stops the DHCP client; the address stays and `gw:` carries the STALE note.  `net ping` and
+  `net dhcp` are refused with
+  ``net: the Ethernet link is down (no cable? see `eth`)`` and change nothing.
+  `net ip` still sets a static address (which clears STALE).
+- **Cable in.**  When DHCP is the source, the worker reinitialises the client,
+  drops the address and starts it: the address disappears once and comes back
+  with the lease a few seconds later, and STALE clears; no `net dhcp` is
+  needed.  [!] An established telnet session does not survive this (the
+  address goes away under it); until issue #221 nothing closes it on the
+  board's side when the link falls.  With a static address nothing starts.
+- **Boot.**  DHCP is the boot source, fixed (the KV store that could choose it
+  is issue #214), so the first link up starts the client.
+- **A failed step** of the worker (a stop, reinitialise or start NetX
+  refused) is not retried and is not written to `dmesg` (the shared file
+  cannot write the board's log; until issue #220 the hook logged
+  `dhcp start failed`).  It is the first line after `gw:` in `net info` until
+  a later pass or a `net dhcp` / `net ip` succeeds:
+
+  ```
+  dhcp: the link worker's start failed (0x<nn>) with the link up
+  ```
+
+| `net-link` worker (measured at `e4581d0`) | |
+|---|---|
+| Priority | 15: above the consoles (16), below the IP thread (12) and the DHCP thread (13); `nx_glue.c` asserts at build time that the IP thread outranks it |
+| Stack | 1,024 B in internal SRAM, high-water **272 B** (`thread`) after a cable pull and re-acquire |
+| Code | text +584 B over step 1 of issue #220 (`cae1b4e`) |
 
 ## Debugging
 

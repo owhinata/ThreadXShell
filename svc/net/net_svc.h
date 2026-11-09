@@ -93,8 +93,8 @@ struct net_svc_addr {
 	bool     ip_valid;     /**< a non-zero address is assigned               */
 	bool     dhcp_mode;    /**< the DHCP client owns the address (vs static) */
 	/** The link went down while this DHCP address was live and nothing
-	 *  renewed it -- set where the board's link layer records the link going
-	 *  down (issue #220); `net ip` and `net dhcp` clear it. */
+	 *  renewed it -- set by the shared link worker (shell/cmds/net_core.c,
+	 *  issue #220); `net ip`, `net dhcp` and a re-acquisition clear it. */
 	bool     lease_stale;
 	uint32_t ip, mask, gw; /**< gw 0 is "no gateway", not an address          */
 };

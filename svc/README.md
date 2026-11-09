@@ -16,7 +16,7 @@ The files are grouped by the feature they serve (issue #153):
 | `svc/plugin/` | The plugin container's ABI, loader, executor and the checks around them (`plugin_*`, below). |
 | `svc/camera/` | The camera frame pipeline (`frame`, `frame_pipeline`), the camera stream's holder table, sink steps and stream generations (`cam_holders`, `cam_step`, `cam_gen`, below) and the `camera` command's contract (`camera_svc`, below). |
 | `svc/blob/` | The asset store's board-independent parts (issue #192): the header format and a transfer's decisions (`blob_state`), the slot table's rules and lookups (`blob_map`), the `blob write` coordinator (`blob_write`), and since issue #194 the one set of store results (`blob_err.h`) and the store contract of the shared `blob` command (`blob_svc.h`); see [The asset store's shared parts](#the-asset-stores-shared-parts-issue-192). No file here is named `blob.h` (every board has a `src/blob.h` of its own). |
-| `svc/net/` | The contract of the shared `net` command, `net_svc.h` (issue #219; f746g-disco and wio-lite-ai, grove-vision-ai-v2 has no network). A header only: the command is `shell/cmds/cmd_net.c` and each board's adapter is the board's; see [The `net` command and the telnet console are one implementation](#the-net-command-and-the-telnet-console-are-one-implementation-issue-212). |
+| `svc/net/` | The contract of the shared `net` command, `net_svc.h` (issue #219; f746g-disco and wio-lite-ai, grove-vision-ai-v2 has no network). A header only: the command is `shell/cmds/cmd_net.c`, the one implementation under it is `shell/cmds/net_core.c` (issue #220, it needs NetX and ThreadX so it cannot live here), and each board's adapter is the board's; see [The `net` command and the telnet console are one implementation](#the-net-command-and-the-telnet-console-are-one-implementation-issue-212). |
 
 Every one of the six directories is on the
 include path wherever `svc/` is, so a source names a header by its file name
@@ -767,6 +767,7 @@ relative to `svc/`.
 | `camera/camera_svc_adapter.h` | Static-inline helpers every camera adapter uses to fill a result and write a line. |
 | `camera/cam_gen.h` | Stream generations: has THE stream a stop named ended (pure, shared by f746g-disco and wio-lite-ai). |
 | `net/net_svc.h` | The contract the shared `net` command (`shell/cmds/cmd_net.c`) speaks; implemented by each board's adapter (issue #219; f746g-disco and wio-lite-ai). |
+| `../shell/cmds/net_core` | Under `shell/cmds/`, not `svc/` (it calls NetX and ThreadX): the one implementation of the address read, the static address, DHCP and ping over NetX Duo, and of the reaction to the link -- the notice on the IP thread and the `net-link` worker (issue #220).  It owns no storage: the board defines `net_core_board_state` and `net_core_board_facts`, declared in `net_core.h`.  The adapters call it; first line `optional BOARD_HAS_NETX`. |
 
 ## The asset store's shared parts (issue #192)
 
@@ -896,12 +897,14 @@ section).
 **This section describes the target shape of issue #212, not all of it is
 built.**  Issue #215 wrote it first, before any of the code; each child issue
 (#216 to #222) updates the paragraphs it changes, and #222 rewrites it into the
-shape that was built.  "Today" below means main after #219 (`609877b`), read
-from the files; "after #NNN" is the plan.  Only f746g-disco and wio-lite-ai
-have a network (grove-vision-ai-v2 has none).  Since #219 the two share one
-`net` command (`shell/cmds/cmd_net.c` over `svc/net/net_svc.h`), but each still
-has its own address / DHCP / ping code and its own telnet console, the same
-design written twice and drifting apart in the details listed below.
+shape that was built.  "Today" below means main after #220, read from the
+files; "after #NNN" is the plan.  Only f746g-disco and wio-lite-ai have a
+network (grove-vision-ai-v2 has none).  Since #219 the two share one `net`
+command (`shell/cmds/cmd_net.c` over `svc/net/net_svc.h`), and since #220 one
+implementation of the address, DHCP and ping work and of the reaction to the
+link (`shell/cmds/net_core.c` / `.h`, with one worker thread).  Each still has
+its own telnet console until #221, the same design written twice and drifting
+apart in the details listed below.
 
 The line is drawn at NetX Duo.  Above it is one implementation for both
 boards; below it is the board.  Everything that makes Ethernet differ from
@@ -910,9 +913,10 @@ WiFi stays below NetX.
 ```
 eth (f746g-disco)   net: shell/cmds/cmd_net.c, one definition   wifi (wio-lite-ai)
    |                   |                             |                  |
-   |              net's worker               the telnet listener        |
+   |       shell/cmds/net_core.c (#220):     the telnet listener        |
    |         address / DHCP / ping,         resident from boot          |
-   |         reacts to link notices                  |                  |
+   |       the worker (net-link) reacts      (#221; each board's        |
+   |        to NetX's link notice             own until then)           |
    |                   |                             |                  |
    |                   +---------- NetX Duo ---------+                  |
    |          IP / ARP / ICMP / DHCP client / TCP (lib/, both boards)   |
@@ -937,18 +941,21 @@ There are three kinds of edge and no others:
    hands frames and `NX_LINK_*` requests to the driver function it was created
    with; the driver hands received frames and link up / down events back.
 
-[!] **No edge goes up from a link layer.**  Today there are three, and the
-child issues remove them:
+[!] **No edge goes up from a link layer.**  When #215 wrote this there were
+three; #218 and #220 removed them except one call, which #221 removes:
 
-- f746g-disco: the eth-link thread ends each PHY poll by calling a hook the
-  address code registered (`nx_eth_set_poll_hook()`, `nxg_poll_hook()` in
-  `port/netxduo/nx_glue.c`), which takes the address lock and starts the DHCP
-  client.  #220 replaces it with the worker.
-- wio-lite-ai: the resident thread of the bridge session lives in
-  `src/nx_net.c`, beside the address code, and its one call into NetX's
-  application API is `nx_dhcp_stop()` (in `nxn_dhcp_halt()`, on a stop and on
-  a revoked link).  #220 moves that stop to the worker's reaction to a link
-  down, and #222 then moves the thread into the link layer (a move only).
+- f746g-disco: the eth-link thread ended each PHY poll by calling a hook the
+  address code had registered, which took the address lock and started the
+  DHCP client.  #220 removed the hook: the eth-link thread now only reports a
+  change to NetX (`_nx_ip_driver_link_status_event()`) and kicks its deferred
+  processing, and the shared worker reacts.
+- wio-lite-ai: the resident thread of the bridge session (still in
+  `src/nx_net.c`, beside the board's NetX objects) used to call
+  `nx_dhcp_stop()` on a stop and on a revoked link.  #220 removed both calls:
+  each of those paths already closes the driver's gate with
+  `nx_link_driver_set_link(0)`, which raises the link event, and the worker
+  stops the client.  The thread no longer takes the address lock.  #222 then
+  moves it into the link layer (a move only).
 - wio-lite-ai: the same thread used to stop the telnet console
   synchronously (`net_shell_stop_sync()`) before it took the bridge down, and
   went FAILED if the console could not be shut.  Since #218 it closes the
@@ -965,17 +972,17 @@ child issues remove them:
   layer is the NetX driver, f746g-disco's PHY-polling eth-link thread and
   wio-lite-ai's resident thread of the bridge session; the entries are the
   frame handoff and `_nx_ip_driver_link_status_event()`.  It calls neither
-  the application API (`nx_dhcp_*`, `nx_ip_address_*`) nor `net`.  Today
-  wio-lite-ai's resident thread calls `nx_dhcp_stop()` in one place, and that
-  line goes.
+  the application API (`nx_dhcp_*`, `nx_ip_address_*`) nor `net` (true on
+  both boards since #220).
 - [!] **`net` learns that the link went up or down from NetX's notice, and its
   own worker reacts.**  NetX calls the notice (registered with
-  `nx_ip_link_status_change_notify_set()`) on its IP thread with
-  `nx_ip_protection` held, so the notice only records; touching DHCP there is
-  the deadlock `port/netxduo/nx_glue.c` documents (the DHCP thread holds its
-  mutex and waits for `nx_ip_protection`).  The worker reacts under the
-  address lock: a link up starts DHCP, a link down stops it and marks the
-  lease stale.
+  `nx_ip_link_status_change_notify_set()` by `net_core_init()`) on its IP
+  thread with `nx_ip_protection` held, so the notice only records; touching
+  DHCP there is a deadlock (issue #13: the DHCP thread holds its mutex and
+  waits for `nx_ip_protection`).  The worker reacts under the address lock: a
+  link up starts DHCP when DHCP is the source, a link down stops it and marks
+  a DHCP address stale.  See [The link notice and the
+  worker](#the-link-notice-and-the-worker-issue-220).
 - [!] **The telnet console is resident from boot on both boards, with no start
   or stop** (like sshd).  It listens with no address, the listen survives a
   link down, and only an established connection is closed then.  Its state is
@@ -1009,32 +1016,32 @@ not.
 One row per meaning that differed when #215 wrote this.  The last column is
 what both boards do once the shared parts exist; it follows from there being
 one implementation, not from each board being told.  N1 to N4 are the
-command's own and are done (#219: the two "today" columns agree); the rows
-below them wait for the shared address work (#220) and the shared telnet
-listener (#221).
+command's own and are done (#219); the address, DHCP and link rows are done by
+the shared address work (#220).  Where the two "today" columns agree, the row
+is done; N6 waits for the shared telnet listener (#221).
 
 | Meaning | f746g-disco today | wio-lite-ai today | After #212 |
 |---|---|---|---|
 | N1 `net ping` with a bad count | refused (`bad count`, 1..100), nothing sent (#219; before: silently 4 probes) | refused (`bad count`, 1..100), nothing sent | refused |
 | N2 `net ping` with no reply at all | exit 1 (#219; before: exit 0) | exit 1 | exit 1 |
 | N3 `net dhcp`'s wait | 30 s, then an error and exit 1 (#219; before: 10 s, a warning, exit 0) | 30 s, then an error and exit 1 | 30 s, an error, exit 1 |
-| N4 how the address is printed | two lines, `ip:` and `gw:` (#219; before: one line) | two lines, `ip:` and `gw:`, with STALE | two lines |
+| N4 how the address is printed | two lines, `ip:` and `gw:` (#219; before: one line), STALE after `gw:` since #220 | two lines, `ip:` and `gw:`, with STALE | two lines |
+| No address and nothing has made DHCP the source | DHCP is the boot source, so `ip:    none (dhcp, no lease)` until a lease; `none (unset)` only when the DHCP client could not be created at boot | `ip:    none (unset)` (#220; before: `none (dhcp, no lease)` even when DHCP was never started) | `none (unset)` |
 | `net info` with no IP stack | answers: `ip: none (<the board's reason>)`, then what the board's lines can still say, exit 0 (#219; #217 refused it) | answers the same way | answers |
 | N6 the telnet console | resident from boot, nothing to operate | `net shell start` / `stop` / `status`, armed after a successful `net ip` / `net dhcp` and at boot when the KV store says so | resident on both, nothing to operate, its state in `net info` |
 | N7 where link operations live | `eth` (done in #217; until then `net link` and the PHY line of `net info`) | `wifi` | `eth` and `wifi`; `net` has no link operations |
-| `net dhcp` while a lease is held | a renew is sent, the lease stays | stop, address to 0, acquire again | f746g-disco's |
-| The DHCP calls into NetX | the interface-scoped ones (`nx_dhcp_interface_*`) | the global ones, whose result is discarded | the interface-scoped ones |
-| `net ip` that fails part way | the previous address, gateway and DHCP state are put back | not put back | put back |
-| The address after the link went down (lease stale) | nothing marked | STALE | STALE on both |
-| DHCP again when the link comes back | yes, from the eth-link thread | no (the lock order) | yes on both, from the worker |
+| `net dhcp` while a lease is held | a renew is sent, the lease stays; a stale lease is acquired again (#220) | the same (#220; before: stop, address to 0, acquire again) | f746g-disco's |
+| `net dhcp` with the link down | refused, `net: <the board's link sentence>`, nothing changes (#220; before: the client was started anyway) | refused the same way | refused |
+| `net ping` with the link down | refused with the link sentence (#220; before: whatever NetX answered) | refused with the link sentence | refused |
+| The DHCP calls into NetX | the interface-scoped ones (`nx_dhcp_interface_*`) | the same (#220; before: the global ones, whose result is discarded) | the interface-scoped ones |
+| `net ip` that fails part way | the previous address, gateway and DHCP state are put back | the same (#220; before: not put back) | put back |
+| The address after the link went down (lease stale) | STALE (#220; before: nothing marked) | STALE | STALE on both |
+| DHCP again when the link comes back | yes, from the shared worker (#220; before: from the eth-link thread) | yes, from the shared worker (#220; before: no, the lock order) | yes on both, from the worker |
+| DHCP across a link down | stopped by the worker, the address stays and is marked STALE (#220; before: the client kept running through a cable pull) | the same (#220; before: stopped only when the link was taken away by `wifi on` / `off` / `reset`, an association lost only marked STALE) | stopped on both |
 
-Today's details behind the last two rows: f746g-disco's link notice marks a
-start pending on every link up and the eth-link thread starts the client only
-if nothing has started it; a link down does not stop the client, so through a
-cable pull the client that was running keeps running.  wio-lite-ai's notice
-only writes the interface's link flag; an association lost for
-`NXN_LINK_DOWN_SAMPLES` refreshes in a row marks the lease stale and leaves the
-client alone, and a link taken away by `wifi on` / `off` / `reset` stops it.
+How the last rows work is
+[The link notice and the worker](#the-link-notice-and-the-worker-issue-220)
+below.
 
 What may differ by board is declared as a property in the board's
 `boards/<board>/svc/net_svc_config.h` (issue #219), and the shared command
@@ -1046,7 +1053,6 @@ outside `net` and are not declared there.
 | Property (`svc/net_svc_config.h`) | f746g-disco | wio-lite-ai |
 |---|---|---|
 | `NET_SVC_HELP` (the `net` line of `help`) | NetX Duo over the on-board Ethernet, pointing at `eth` | IPv4 over the RTL8720 |
-| `NET_SVC_HAS_LEASE_STALE` (the STALE note after `gw:`) | 0 | 1 (#220 gives both boards the mark and removes the property) |
 | `NET_SVC_BOARD_DECLS` / `NET_SVC_BOARD_SUBCMDS` (`net`'s own subcommands above NetX, appended to the shared table) | `mjpeg` | `shell` (the telnet console's controls, until #221; `net echo` was removed by #216) |
 
 Two more things differ and are not properties, because they are the board's
@@ -1054,7 +1060,7 @@ data rather than a switch:
 
 | Not a property | f746g-disco | wio-lite-ai |
 |---|---|---|
-| The lines of `net info` after the address: the board writes them through the contract's writer (`net_svc_board_lines()`), sampling every value before the first line and stopping at the first failed write | the MJPEG state while it runs, the telnet console's line, the Ethernet driver's, TCP's (`nx_tcp_info_get()`) and the packet pool's counters | the host-stack section: its state and why, then the module's DATA counters accumulated across bridge re-arms and the link driver's |
+| The lines of `net info` after the address: the board writes them through the contract's writer (`net_svc_board_lines()`), sampling every value before the first line and stopping at the first failed write | the worker's last failure while one is recorded (#220), the MJPEG state while it runs, the telnet console's line, the Ethernet driver's, TCP's (`nx_tcp_info_get()`) and the packet pool's counters | the host-stack section: its state and why, then the module's DATA counters accumulated across bridge re-arms and the link driver's, then the worker's last failure while one is recorded (#220) |
 | Where the NetX objects are placed | the packet pool in `.sdram.eth` (SDRAM, non-cacheable through the MPU), the control blocks in internal SRAM | the packet pool, the IP thread's stack and the console's TX ring in DTCM (only the CPU touches a frame) |
 
 Until #219 wio-lite-ai's `net info` also asked the module, over eRPC, whether it
@@ -1068,12 +1074,20 @@ read without eRPC.)
 
 ### What the one implementation does (issues #219, #220, #221)
 
-The command (`shell/cmds/cmd_net.c`, done in #219) holds the grammar, the
-usage, the refusals, the waits, the ping loop and its totals, and every line
-`net` prints; the address, DHCP and ping work and the worker (#220) and the
-telnet listener (#221) will be under `shell/` as well, on the precedent of
-FileX's `shell/cmds/fs_cmd_core.c`.  Until then each board's adapter behind
-`svc/net/net_svc.h` calls its own glue.  The adapter takes no
+The `net` layer is four parts since #220:
+
+| Part | What it holds |
+|---|---|
+| `shell/cmds/cmd_net.c` (#219) | The command: the grammar, the usage, the refusals, the waits, the ping loop and its totals, and every line `net` prints |
+| `svc/net/net_svc.h` (#219) | The contract the command speaks, freestanding (no HAL, no board header, no `tx_api.h`): the results, the address, the writer, the calls |
+| each board's adapter (`net_svc_f746.c`, `net_svc_wio.c`) | Its own state checked (is the IP stack there, is it changing -- the only source of BUSY), then the shared operation called; and the board's lines of `net info` |
+| `shell/cmds/net_core.c` / `.h` (#220) | The one implementation over NetX Duo: the address read, the static address, DHCP, ping, the link notice and the worker |
+
+`net_core.c` uses NetX's and ThreadX's APIs, which `svc/` cannot include, so
+it lives under `shell/cmds/` on the precedent of FileX's
+`shell/cmds/fs_cmd_core.c`; the NetX types stay in `net_core.h`, and
+`net_svc.h` stays freestanding.  The telnet listener (#221) will be under
+`shell/` as well; until then each board has its own.  The adapter takes no
 `struct cli_instance`: printing, waiting and Ctrl+C are the command's.
 
 What the command and the contract fix since #219, on both boards:
@@ -1085,17 +1099,22 @@ What the command and the contract fix since #219, on both boards:
   down), REFUSED (NetX said no), TIMEOUT (a probe got no reply) -- and each
   calls for something different, so the command words them apart.  A glue
   value the adapter does not know is read as REFUSED (every failure exits 1).
-  REFUSED may leave part of the change made: wio-lite-ai does not put a static
-  address or a DHCP start back until #220, so no line says "restored".
+  REFUSED may leave part of the change made: a refused `net ip` puts the
+  address, the gateway and the source back, but a refused `net dhcp` puts
+  nothing back (below), so no line says "restored".
 - **The reason is the board's sentence**, carried in the result as a pointer to
   a string literal (no copy, no storage): `net: <reason>` for a failed
   operation, `ip:    none (<reason>)` in `net info`.
 - **The address comes from one call** (address, mask, gateway, DHCP or static,
-  and on wio-lite-ai the stale mark), so the `ip:` and `gw:` lines are never
-  two separate questions.  The contract promises one call, not one moment:
-  f746g-disco reads the fields under one lock, wio-lite-ai reads the address
-  outside its address lock and the DHCP state inside it, so the two can be
-  from different moments (left to #220, where the glue becomes one).
+  and the stale mark), so the `ip:` and `gw:` lines are never two separate
+  questions.  [!] **The contract promises one call, not one moment**: since
+  #220 both boards read every field in one hold of the address lock
+  (`net_core_addr_get()`), but the DHCP client's own mutex is not taken.  When
+  a lease arrives, the DHCP thread writes the address and the gateway in two
+  separate NetX calls under that mutex, so for a few microseconds a reader can
+  pair the new address with the old gateway.  Closing that would mean taking
+  NetX's internal member `nx_dhcp_mutex`, which no public call exposes; the
+  contract keeps "one call" instead (decided in #220).
 - **The board's lines of `net info` go through a writer**: one whole line per
   write, every value sampled first with every lock released, and a failed
   write ends the section (the lines already written stay).
@@ -1131,40 +1150,60 @@ What the command and the contract fix since #219, on both boards:
   nothing.  #221 makes the console resident on both boards and removes the
   call.
 
-The bullets below are what #220 and #221 build.
+What the one implementation in `shell/cmds/net_core.c` does, on both boards
+since #220:
 
-- **A static address is a transaction.**  `net ip <a.b.c.d/mask> [gw]` stops
-  DHCP, sets the address, then the gateway (0 clears it: NetX refuses 0.0.0.0
-  as a gateway, which both boards handle today); a failure puts back the
-  previous address, gateway and DHCP state.  This is f746g-disco's
-  `nx_net_set_static()` today; wio-lite-ai's has no rollback and instead
-  refuses a gateway off the new subnet before it touches anything.
-- **`net dhcp` has three cases**, f746g-disco's `nx_net_dhcp_renew()` today:
-  not started -- drop the address, then start; bound -- force a renew and keep
-  the lease (the address never disappears); started but not bound -- stop,
-  drop the address, reinitialise, start.  The address is dropped before a
-  start so that "the interface has an address" means "a lease arrived" (both
-  boards today).  The wait after it is the command's (above).
-- **Every DHCP call names the interface** (`nx_dhcp_interface_start()`,
-  `_stop()`, `_reinitialize()`, `_force_renew()`).  The global versions loop
-  over the records, discard each interface's status and return success, so
-  their result cannot be checked, and for a renew "nothing was bound" would
-  read as "renew sent".
-- **The worker** is one thread, its stack the board's.  The link notice
-  records the new state and wakes it; the worker takes the address lock and
-  starts DHCP on a link up (unless the address is static or the client is
-  already running), and on a link down stops DHCP, marks the lease stale and
-  closes the telnet console's established connection.  `net ip` and
-  `net dhcp` clear the stale mark (as wio-lite-ai's do today).
+- **A static address is a transaction.**  `net ip <a.b.c.d/mask> [gw]`
+  refuses a gateway off the new subnet before it touches anything; otherwise
+  it stops DHCP, sets the address, then the gateway (0 clears it: NetX refuses
+  0.0.0.0 as a gateway).  A failure puts back the previous address, gateway
+  and source, and the DHCP client when it was running: reinitialised and
+  started again from scratch (the lease itself is not restored), or left
+  "DHCP, not running" when that fails, which a later `net dhcp` or link up
+  recovers.  A failure while putting things back is not reported.  It is
+  allowed with the link down.
+- **`net dhcp` is refused with the link down** (LINK, in the board's words,
+  nothing changes) and **without a DHCP client** (REFUSED: the board's
+  `nx_dhcp_create()` failed at boot).  Otherwise one of three: not running --
+  drop the address, then start (OK); a lease held and not stale -- force a
+  renew and keep the lease, the address never disappears (RENEWED); running
+  without a lease, or with a stale one -- stop, drop the address, start again
+  (OK).  [!] **A stale lease is never renewed**: NetX's force renew talks only
+  to the old server and returns success at once, so a "renewed" stale lease
+  would keep an address nobody confirms until its rebind time.  The address is
+  dropped before a start so that "the interface has an address" means "a lease
+  arrived".  The source becomes DHCP and the stale mark clears once the
+  address is dropped.  [!] **A refused `net dhcp` puts nothing back**: a step
+  that failed part way can leave the address dropped and the client stopped.
+  The wait after it is the command's (above).
+- **Every start is preceded by a reinitialise** (NetX documents that a stopped
+  client must be reinitialised before it starts again), and **every DHCP call
+  names the interface** (`nx_dhcp_interface_start()`, `_stop()`,
+  `_reinitialize()`, `_force_renew()`).  The global versions loop over the
+  records, discard each interface's status and return success, so their
+  result cannot be checked, and for a renew "nothing was bound" would read as
+  "renew sent".
+- **A step is recorded only when NetX performed it.**  A stop is recorded only
+  when NetX stopped the client or answered that it was not started; a failed
+  step leaves the state where the steps that succeeded put it.
+- **`net ping`** is LINK with the link down; otherwise one `nx_icmp_ping()`.
+  It takes no lock, so a probe's wait of up to a second never holds up the
+  worker.
+- **`net ip` and `net dhcp` clear the stale mark** and the worker's last
+  failure when they succeed.
 - [!] **The lock order is the address lock, then NetX's locks** (the DHCP
-  mutex, then `nx_ip_protection`, then the driver's own).  Nothing takes the
-  address lock while it holds a NetX lock or the board's link lock
-  (f746g-disco's `eth_lock`, wio-lite-ai's rtl_link coarse mutex), so a
-  `net dhcp` and a link going down are ordered by the address lock, and the
-  loser of that race is refused because the link is not up.  Today f746g-disco
-  documents its order as `nxg_lock -> nx_dhcp_mutex -> nx_ip_protection ->
-  eth_lock`, and wio-lite-ai never takes `nxn_addr_lock` under the coarse
-  mutex.
+  client's mutex, taken by NetX inside `nx_dhcp_*`, then `nx_ip_protection`,
+  then the driver's own).  `net_core.c` takes only the address lock, and never
+  while it holds anything else.  Only threads that hold no other lock take it:
+  the commands, the worker, and on wio-lite-ai the telnet listener and the KV
+  boot thread.  Nothing that runs with a NetX mutex or the board's link lock
+  held takes it (f746g-disco's `eth_lock`, wio-lite-ai's rtl_link coarse
+  mutex; the link notice runs with `nx_ip_protection` held and takes no lock
+  at all), so a `net dhcp` and a link going down are ordered by the address
+  lock.
+
+What #221 builds:
+
 - **The telnet listener** has an RX ring the IP thread fills and the console's
   thread empties, and a TX ring the console's writers fill and the listener's
   own thread drains to the socket (512 B and 4,096 B on both boards today).
@@ -1179,16 +1218,91 @@ The bullets below are what #220 and #221 build.
   and #221 keeps that.  The back-pressure and binary mode of #197 are not
   part of #212.
 
+### The link notice and the worker (issue #220)
+
+The reaction to the link is one pair in `shell/cmds/net_core.c`, the same on
+both boards; neither board registers a link-status callback of its own.
+
+- **The notice** (`nx_ip_link_status_change_notify_set()`, registered by
+  `net_core_init()`) runs on the IP thread with `nx_ip_protection` held, for
+  every change the driver reports, including an up that repeats (f746g-disco
+  reports speed and duplex changes that way).  It writes NetX's own interface
+  link flag (NetX's deferred processing does not), then records the level and,
+  on a down, a "the link fell" mark -- the two together, in one ThreadX
+  interrupt-masked section (`TX_DISABLE` / `TX_RESTORE`) -- and after the
+  section sets the worker's event flag.  [!] **It calls no NetX function,
+  takes no lock and never waits**, so the IP thread never heads for the DHCP
+  client's mutex (the cycle of issue #13 has no second half).
+- **The hand-over.**  The level and the fall mark are one pair, read and
+  written only inside such a masked section.  The event flag only wakes; what
+  happened is in the pair.  The worker copies the pair and clears the mark in
+  one section; a notice after the copy leaves a new mark and a new wake, so the
+  next pass picks it up, and an extra wake is a pass with nothing to do.  The
+  commands read the level the same way and never touch the mark: handling a
+  fall is the worker's alone.
+- **The worker** (`net-link`, one ThreadX thread, its stack the board's)
+  reacts under the address lock from the source and the client's state of
+  that moment, so a `net ip` that got in first leaves nothing to start.  A fall
+  stops a running client (the address stays) and marks a DHCP address stale;
+  the link up with DHCP the source and the client not running reinitialises,
+  drops the address and starts it.  Its priority is 15: above the consoles
+  (16, asserted in `net_core.c`), below both IP threads (f746g-disco 12,
+  wio-lite-ai 11, asserted in each board's glue) and the DHCP thread (13), so
+  the notice never hands it the CPU while the IP thread holds its mutex.
+- **Folding.**  Up, down, up within one pass stops and restarts the client;
+  down, up, down only stops it; a repeated up does nothing.  NetX itself keeps
+  one "changed" mark and asks the driver for the level when it processes it,
+  so a fall shorter than the IP thread's latency is not seen at all, as for
+  everything above NetX (accepted in #220).
+- **A command after a bounce.**  If a fall and a rise both happen before the
+  worker runs and a `net dhcp` starts a client in between, the worker's pass
+  stops that client for the pending fall and, the link being up, starts it
+  again: the end state is "up, DHCP running" and the operator's wait goes on,
+  having lost one acquisition.  The commands do not take the fall over, which
+  would leave a client running across the outage.
+- **A failed step is not retried.**  The state stays where the steps that
+  succeeded put it, and recovery waits for the next notice or the operator's
+  `net dhcp` / `net ip`.  The failure is kept in the board's state as the last
+  failure (which step, NetX's answer, the link level the pass saw), and since
+  the shared file cannot write a board's log, the board prints it as one line
+  of `net info` while one is recorded:
+  `dhcp: the link worker's <stop|reinitialise|start> failed (0x<nn>) with the
+  link <up|down>`.  A later pass whose steps all succeed, or a successful
+  `net dhcp` / `net ip`, clears it.
+- **Start-up.**  `net_core_init()` runs from `tx_application_define()` right
+  after the board created its NetX objects, before the scheduler and so
+  before the first notice.  It creates the address lock, the event flags and
+  the worker, registers the notice, and sets the ready mark last, only when
+  all of that succeeded; until then every operation is DOWN in the board's
+  words.  It only creates objects: it never waits and does not depend on
+  `HAL_GetTick`.  The boot source is the board's fact: DHCP on f746g-disco
+  (fixed; it has no KV store until #214), none on wio-lite-ai until its KV
+  boot says otherwise.  wio-lite-ai's KV `net.mode=dhcp` calls `net_core_dhcp_source()`,
+  which only makes DHCP the source and wakes the worker; unlike `net dhcp` it
+  is not refused with the link down, because right after the bridge comes up
+  the recorded level may not have caught up yet and the order must not rest
+  on thread priorities.
+- **Not yet**: the worker does not close the telnet console's established
+  connection on a fall, and the telnet listener is not re-armed when the
+  worker brings the address back; both are #221's.
+
 ### The board's side of the contract (issues #219 to #221)
 
-What the board hands the shared code is storage and facts, never behaviour:
+What the board hands the shared code is storage and facts, never behaviour.
+`net_core.c` reaches the board's two objects by fixed name, declared `extern`
+in `net_core.h` and resolved at link time -- the same shape as
+`svc/nn/nn_dispatch_state.h` -- because a pointer the shared file remembered
+would be mutable storage in it, and NetX's link-status callback takes no
+context argument to carry one.  The board defines the state without an
+initializer and calls `net_core_init()` with its `nx_dhcp_create()` result:
+
 
 | The board provides | Today |
 |---|---|
 | The `NX_IP`, the `NX_PACKET_POOL` and its memory, the IP thread's stack, the ARP cache | f746g-disco `port/netxduo/nx_glue.c`; wio-lite-ai `src/nx_net.c` |
 | The `NX_DHCP` | the same files |
-| The address state (DHCP started, static) and the address lock | the same files (`nxg_lock`, `nxn_addr_lock`) |
-| The worker's thread and stack (new in #220; about 1 KB in DTCM on wio-lite-ai) | -- (f746g-disco borrows the eth-link thread, wio-lite-ai has no reaction) |
+| `net_core.c`'s mutable state, `struct net_core_state net_core_board_state` (#220): the address lock, the worker's thread and event flags, the ready mark, whether the DHCP client was created, the recorded link level and fall mark, the source, whether the client runs, the stale mark and the worker's last failure | the same files, in plain `.bss` (CPU-only) |
+| `net_core.c`'s constant facts, `const struct net_core_facts net_core_board_facts` (#220): the `NX_IP`, the `NX_DHCP`, the interface, the boot source, the board's sentences for LINK and for DOWN before init, and the worker's stack | the same files; the worker's stack is 1 KB on both, in DTCM on wio-lite-ai (`net_worker_stack`, a name `cmake/check_dtcm_residency.py` requires) |
 | The telnet console's RX and TX rings, its socket, its thread and stack | f746g-disco `port/netxduo/nx_shell.c`; wio-lite-ai `src/net_shell.c` (the TX ring is `nsh_tx_buf` in DTCM, a name `cmake/check_dtcm_residency.py` requires) |
 | The adapter behind `svc/net/net_svc.h` (#219) | f746g-disco `port/netxduo/net_svc_f746.c`; wio-lite-ai `src/net_svc_wio.c` |
 | The properties (#219) | `svc/net_svc_config.h` on each board |
@@ -1205,29 +1319,30 @@ for the PHY renegotiation and the link state, and wio-lite-ai has `wifi`.
 
 The shared files are audited for mutable storage like every other file the
 build compiles under `shell/cmds/` and `svc/` (`cmake/shared_storage_gate.cmake`,
-issue #206).  `cmd_net.c` carries `optional BOARD_HAS_NETX` in its first line,
-not `required` as `cmd_camera.c` does, because grove-vision-ai-v2 has no
-network: f746g-disco and wio-lite-ai set `BOARD_HAS_NETX ON` (their builds must
-ship the file), grove-vision-ai-v2 sets it `OFF` (its build must compile it
-nowhere); see `cmake/README.md`.  The `net` root is registered by the shared
+issue #206).  `cmd_net.c` and `net_core.c` carry `optional BOARD_HAS_NETX` in
+their first line, not `required` as `cmd_camera.c` does, because
+grove-vision-ai-v2 has no network: f746g-disco and wio-lite-ai set
+`BOARD_HAS_NETX ON` (their builds must ship the files), grove-vision-ai-v2
+sets it `OFF` (its build must compile them nowhere); see `cmake/README.md`.  The `net` root is registered by the shared
 file only.
 
 ### Where the network files are, and how they move
 
-| Today (after #219) | What it holds today | After |
+| Today (after #220) | What it holds today | After |
 |---|---|---|
-| `shell/cmds/cmd_net.c` | `net` itself (#219): `info ip dhcp ping`, the grammar, the refusals, the waits, the ping totals and every line, the board's subcommands appended | stays; #220 / #221 add the address work, the worker and the telnet listener under `shell/` |
-| `svc/net/net_svc.h` | the contract (#219): the results, the address, the writer, the calls | grows with #220 / #221 |
-| f746g-disco `svc/net_svc_config.h`, wio-lite-ai `svc/net_svc_config.h` | the properties (#219) | `NET_SVC_HAS_LEASE_STALE` goes in #220 |
+| `shell/cmds/cmd_net.c` | `net` itself (#219): `info ip dhcp ping`, the grammar, the refusals, the waits, the ping totals and every line, the board's subcommands appended | stays; #221 adds the telnet listener under `shell/` |
+| `shell/cmds/net_core.c`, `shell/cmds/net_core.h` | the one implementation over NetX (#220): the address read, the static address, DHCP, ping, the link notice and the worker; the board's state and facts declared by name | stays |
+| `svc/net/net_svc.h` | the contract (#219): the results, the address, the writer, the calls | grows with #221 |
+| f746g-disco `svc/net_svc_config.h`, wio-lite-ai `svc/net_svc_config.h` | the properties (#219; the STALE property went in #220, both boards print the mark) | stays |
 | f746g-disco `cmds/cmd_net_board.c` | `net mjpeg` only (until #219 `cmds/cmd_net.c`, the whole command; #217 moved `link` and the MAC / PHY / link lines of `net info` to `cmds/cmd_eth.c`) | stays the board's |
-| f746g-disco `port/netxduo/net_svc_f746.c` | the adapter (#219): `nx_glue.h`'s results read as the contract's, and the board's lines of `net info` | thins as the address work moves (#220) |
+| f746g-disco `port/netxduo/net_svc_f746.c` | the adapter: "is the IP stack up", then the shared operation (#220); the board's lines of `net info`, the worker's last failure first | stays |
 | f746g-disco `cmds/cmd_eth.c` | `eth info` / `eth link` (#217): the link layer's command, over `port/eth/eth_link.h` only | stays the board's |
-| f746g-disco `port/netxduo/nx_glue.c` | the NetX objects and their placement, static / DHCP / ping, the counters, the link notice and the poll hook | #220: the address work and the hook go to the shared code; creation, placement and counters stay |
+| f746g-disco `port/netxduo/nx_glue.c` | the NetX objects and their placement, the counters, and `net_core.c`'s state and facts with the worker's stack (#220: the address work and the link notice went to the shared code, the poll hook was removed) | stays |
 | f746g-disco `port/netxduo/nx_shell.c` | the telnet console (resident) | #221: the shared listener; the storage stays |
-| f746g-disco `port/netxduo/nx_eth_driver.c`, `port/eth/eth_link.c` | the NetX driver; the MAC / PHY and the eth-link thread | the link layer, unchanged except the poll hook leaving (#220) |
+| f746g-disco `port/netxduo/nx_eth_driver.c`, `port/eth/eth_link.c` | the NetX driver; the MAC / PHY and the eth-link thread, which only reports a link change to NetX (the poll hook went in #220) | the link layer |
 | wio-lite-ai `cmds/cmd_net_board.c` | `net shell` only (until #219 `cmds/cmd_net.c`, the whole command; `echo` was removed by #216) | #221: goes with `shell` |
-| wio-lite-ai `src/net_svc_wio.c` | the adapter (#219): the host stack's state checked before any glue call (the only source of BUSY), the link check before each probe, `nx_net.h`'s results read as the contract's | thins as the address work moves (#220) |
-| wio-lite-ai `src/nx_net.c` | the NetX objects, static / DHCP / ping, the host-stack section of `net info` (`nx_net_write_status()`, through the writer since #219), and the bridge session's resident thread (re-arm, states, failure rule, WiFi reconnect) | #220: the address work goes to the shared code; #222: the resident thread moves to the link layer, leaving creation and injection |
+| wio-lite-ai `src/net_svc_wio.c` | the adapter: the host stack's state checked before the shared operation (the only source of BUSY); the board's lines of `net info`, the worker's last failure last | stays |
+| wio-lite-ai `src/nx_net.c` | the NetX objects, `net_core.c`'s state and facts with the worker's stack (#220: static / DHCP / ping and the DHCP stop went to the shared code), the host-stack section of `net info` (`nx_net_write_status()`), and the bridge session's resident thread (re-arm, states, failure rule, WiFi reconnect) | #222: the resident thread moves to the link layer, leaving creation and injection |
 | wio-lite-ai `src/net_shell.c` | the telnet console (`start` / `stop` / `status`, auto-arm) | #221: the shared listener, resident; the storage stays |
 | wio-lite-ai `src/nx_link_driver.c`, `src/link_data.c`, `src/rtl_link.c` | the NetX driver; the DATA channel and the RTL8720DN link | the link layer |
 
@@ -1258,7 +1373,9 @@ The shared translation units also hold no mutable storage of their own: state
 lives in a board-owned struct that the board passes in, or -- for `nn/nn.c`,
 whose callers pass no context -- one the board defines under a name the shared
 file declares `extern` (`nn_model_board_state`; the tflm backend's
-`nn_tflm_board_state`; the Ethos-U cache protocol's `npu_cache_board_state`). This is enforced per
+`nn_tflm_board_state`; the Ethos-U cache protocol's `npu_cache_board_state`;
+`shell/cmds/net_core.c`'s `net_core_board_state`, whose NetX callback passes no
+context either). This is enforced per
 board by `cmake/check_no_mutable_storage.py` through the build-derived audit in
 `cmake/shared_storage_gate.cmake`, which also covers everything compiled under
 `shell/cmds/` (see `cmake/README.md`; `svc/ymodem.c` is the one exception).

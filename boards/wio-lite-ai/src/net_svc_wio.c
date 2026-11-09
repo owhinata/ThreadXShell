@@ -42,23 +42,23 @@ static const char net_wio_failed[] =
 static int net_wio_ready(struct net_svc_result *res)
 {
 	res->why = NULL;
-	switch (nx_net_state()) {
-	case NX_NET_UP:
+	switch (link_bridge_state()) {
+	case LINK_BRIDGE_UP:
 		res->status = NET_SVC_OK;
 		return 1;
-	case NX_NET_ARMING:
+	case LINK_BRIDGE_ARMING:
 		res->status = NET_SVC_BUSY;
 		res->why = net_wio_arming;
 		return 0;
-	case NX_NET_STOPPING:
+	case LINK_BRIDGE_STOPPING:
 		res->status = NET_SVC_BUSY;
 		res->why = net_wio_stopping;
 		return 0;
-	case NX_NET_FAILED:
+	case LINK_BRIDGE_FAILED:
 		res->status = NET_SVC_FAILED;
 		res->why = net_wio_failed;
 		return 0;
-	default:                       /* NX_NET_OFF, or a state this file does not know */
+	default:                  /* LINK_BRIDGE_OFF, or a state this file does not know */
 		res->status = NET_SVC_DOWN;
 		res->why = net_wio_down;
 		return 0;

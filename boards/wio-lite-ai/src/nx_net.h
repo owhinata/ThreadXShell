@@ -25,7 +25,10 @@
  * and a session that zeroed its own evidence every 8 s could not answer it.
  *
  * While the tap is in, the module's own lwIP receives nothing, so anything that runs on
- * that lwIP is refused while the host stack is up -- see nx_net_guard().
+ * that lwIP cannot run while the host stack is up.  A command that would reconfigure
+ * the module underneath the interface asks link_bridge_state() first: the link
+ * diagnostics refuse unless it is off (cmd_wifi_link.c), and `wifi flash` takes the host
+ * stack down first (cmd_wifi_flash.c).
  * owhinata/wio-lite-ai#23 U4 moved the two things that wanted a TCP connection off it
  * entirely: `net echo` and the telnet console opened NetX sockets on THIS interface, and
  * therefore REQUIRED the host stack rather than being refused by it.  `net echo` was a
@@ -79,8 +82,6 @@
 
 #include "net_svc.h"   /* net_svc_write_fn */
 
-struct cli_instance;
-
 /*
  * ---- the transmit budget (owhinata/wio-lite-ai#23 U4) -----------------------------------
  *
@@ -106,10 +107,11 @@ struct cli_instance;
  * claimed to survive a hostile ICMP flood or arbitrary IP fragmentation; those are
  * legitimate Ethernet drops.
  *
- * The _Static_assert that ties these to LINK_DATA_TX_BUFS lives in app/nx_link_driver.c,
- * the translation unit that owns the transmit path and already includes the NetX headers
- * for NX_ARP_MAX_QUEUE_DEPTH -- putting it in app/link_data.h would make the DATA channel
- * depend on NetX headers.
+ * The _Static_assert that ties these to LINK_DATA_TX_BUFS lives in app/nx_net.c, next to
+ * the telnet console's facts that configure the socket with NXN_TCP_TX_DEPTH (issue
+ * #222; until then it was in app/nx_link_driver.c, which made the link layer include this
+ * header).  Putting it in app/link_data.h would make the DATA channel depend on NetX
+ * headers.
  */
 #define NXN_TCP_TX_DEPTH      4u   /* nx_tcp_socket_transmit_configure max_queue_depth  */
 #define NXN_TCP_SOCKETS_MAX   1u   /* the telnet console is the only TCP socket         */
@@ -136,17 +138,17 @@ struct cli_instance;
 #define NXN_OK          0
 #define NXN_ERR        (-2)      /* a ThreadX / NetX create failed                 */
 
-enum nx_net_state {
-	NX_NET_OFF = 0,          /* the module's own lwIP owns the network          */
-	NX_NET_ARMING,           /* bringing the bridge in                          */
-	NX_NET_UP,               /* the host stack owns the network                 */
-	NX_NET_STOPPING,
-	NX_NET_FAILED            /* teardown could not prove silence -- `wifi reset` */
+enum link_bridge_state {
+	LINK_BRIDGE_OFF = 0,     /* the module's own lwIP owns the network          */
+	LINK_BRIDGE_ARMING,      /* bringing the bridge in                          */
+	LINK_BRIDGE_UP,          /* the host stack owns the network                 */
+	LINK_BRIDGE_STOPPING,
+	LINK_BRIDGE_FAILED       /* teardown could not prove silence -- `wifi reset` */
 };
 
 /* Module-side counters accumulated across bridge re-arms (each re-arm zeroes the
  * module's own), in the order LINK_DATA_STATS reports them. */
-struct nx_net_modstats {
+struct link_bridge_modstats {
 	uint32_t rx_frames, rx_bytes, rx_drops, rx_crc, rx_oversize, rx_gaps;
 	uint32_t tx_frames, tx_bytes, tx_drops;
 };
@@ -155,23 +157,24 @@ struct nx_net_modstats {
  * Create every ThreadX/NetX object and the owner thread.  Object creation only -- no
  * blocking and no HAL_GetTick dependency -- so it is safe from tx_application_define()
  * (owhinata/wio-lite-ai#12).  The IP instance exists from boot with address 0.0.0.0, no MAC
- * and the link down; nothing touches the RTL8720 until nx_net_up().
+ * and the link down; nothing touches the RTL8720 until link_bridge_up().
  */
 int  nx_net_init(void);
 
 /* Is the host stack the one that owns the network right now? */
-bool nx_net_is_up(void);
-enum nx_net_state nx_net_state(void);
+bool link_bridge_is_up(void);
+enum link_bridge_state link_bridge_state(void);
 
 /* "off" / "arming" / "up" / "stopping" / "FAILED" -- so a refusal can name the state it
  * was refused in rather than just saying no. */
-const char *nx_net_state_name(enum nx_net_state s);
+const char *link_bridge_state_name(enum link_bridge_state s);
 
-/* Ask the owner thread to bring the interface up / take it down.  nx_net_up() returns 0
- * once the request is accepted (state becomes ARMING before it returns, so guards close
- * immediately); *why explains a refusal.  Poll nx_net_state() for the outcome. */
-int  nx_net_up(const char **why);
-void nx_net_down(void);
+/* Ask the owner thread to bring the interface up / take it down.  link_bridge_up()
+ * returns 0 once the request is accepted (state becomes ARMING before it returns, so
+ * guards close immediately); *why explains a refusal.  Poll link_bridge_state() for the
+ * outcome. */
+int  link_bridge_up(const char **why);
+void link_bridge_down(void);
 
 /*
  * "The link has been taken away and CHIP_EN is about to move" -- the epilogue of
@@ -179,37 +182,21 @@ void nx_net_down(void);
  *
  * The owner detects a revoked link by itself (the uart generation moved), but only when
  * it next wakes, which is up to NXN_REFRESH_MS later.  This hands it the news now and
- * waits, briefly, for it to leave NX_NET_UP -- so the very next command does not find a
- * stale UP and try to renew a bridge on a module that has just been power-cycled.
+ * waits, briefly, for it to leave LINK_BRIDGE_UP -- so the very next command does not
+ * find a stale UP and try to renew a bridge on a module that has just been power-cycled.
  *
- * NOT nx_net_down(): that is the graceful stop, which needs the coarse mutex and speaks
- * eRPC to the module, neither of which a recovery command can afford.  See the body.
+ * NOT link_bridge_down(): that is the graceful stop, which needs the coarse mutex and
+ * speaks eRPC to the module, neither of which a recovery command can afford.  See the
+ * body.
  *
  * Call AFTER rtl_link_force_quiesce() and BEFORE moving CHIP_EN.  Returns 0 once the
  * interface is no longer up (already-down counts), -1 if it has not stood down in time --
  * which the caller reports and then carries on with, rather than refusing.
  */
-int  nx_net_link_taken(void);
+int  link_bridge_link_taken(void);
 
-/* The MAC the interface transmits with (the module's), valid once up. */
-void nx_net_mac_get(uint8_t mac[6]);
-void nx_net_modstats_get(struct nx_net_modstats *out);
-
-/*
- * The NetX objects, for the things that put a socket on this interface.  (The telnet
- * console names them in its facts instead, in nx_net.c, issue #221.)
- * Typed as void * so that a caller which only needs to pass them along does not have to
- * include nx_api.h; cast to NX_IP * / NX_PACKET_POOL *.
- *
- * NULL until nx_net_init() has succeeded.  Both are valid from then on regardless of the
- * session state -- the IP instance exists from boot with address 0.0.0.0 and the link
- * down -- so a caller still has to ask nx_net_is_up() before expecting traffic to move.
- *
- * (The f746 nx_glue.h has the same pair.  U3 deliberately did not port them because
- * nothing on this board created a socket yet; U4 does.)
- */
-void *nx_net_ip(void);
-void *nx_net_pool(void);
+/* The module-side counters, as one consistent copy (`net info`). */
+void link_bridge_modstats_get(struct link_bridge_modstats *out);
 
 /*
  * Write the host-stack section of `net info` / the result of arming the interface, one
@@ -220,26 +207,10 @@ void *nx_net_pool(void);
 int nx_net_write_status(net_svc_write_fn write, void *ctx);
 
 /*
- * Refuse a command that would reconfigure the module underneath the interface.
- * Returns 0 when it may proceed, non-zero after printing why.
- *
- * It refuses in EVERY state except OFF, not just UP.  ARM releases the coarse mutex
- * before it declares itself up, and rtl_link_uart_gen() does not advance for ordinary
- * eRPC flows (only a 0->1 open and a force-quiesce), so the owner's generation watch
- * cannot see a `wifi connect` land in that window.  nx_net_up() therefore publishes
- * ARMING on the caller's thread, before the owner is even signalled.
- *
- * `wifi on` / `off` / `reset` must NOT use this: they are the recovery path, they
- * force-quiesce, and the generation watch turns the interface down cleanly afterwards.
- * Refusing them would take away the only way out of FAILED.
- */
-int nx_net_guard(struct cli_instance *sh, const char *what);
-
-/*
  * Keep the module's bridge alive across a long eRPC flow (owhinata/wio-lite-ai#30 B2b).
  * Caller must hold the rtl_link coarse mutex.  Returns 0 (nothing to hold, or held) / -1
  * (the module did not answer -- do NOT start the flow).  See the definition for why.
  */
-int nx_net_hold_extend(void);
+int link_bridge_hold_extend(void);
 
 #endif /* APP_NX_NET_H */

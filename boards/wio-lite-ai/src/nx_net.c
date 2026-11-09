@@ -16,8 +16,6 @@
 #include "nx_api.h"
 #include "nxd_dhcp_client.h"
 
-#include "cli.h"
-#include "cli_instance.h"
 #include "erpc.h"
 #include "fmt.h"
 #include "link_data.h"
@@ -88,11 +86,11 @@ _Static_assert(NXN_IP_PRIORITY < NET_CORE_WORKER_PRIORITY,
  */
 #define NXN_HOLD_MS        30000u
 /* The module's ceiling (fw/rtl8720 WIO_ETH_HOLD_MAX_MS).  Used only by
- * nx_net_hold_extend() to cover a long eRPC flow that cannot refresh. */
+ * link_bridge_hold_extend() to cover a long eRPC flow that cannot refresh. */
 #define NXN_HOLD_MAX_MS    60000u
 #define NXN_REFRESH_MS     8000u
 /*
- * How long nx_net_link_taken() waits for the owner to act on a revoked link
+ * How long link_bridge_link_taken() waits for the owner to act on a revoked link
  * (owhinata/wio-lite-ai#41).  The owner only has to reach the generation check at the top of
  * its UP branch and run nxn_link_revoked(), which issues no eRPC, takes no link and no
  * lock (the DHCP stop is the shared link worker's since issue #220) -- so this is a
@@ -222,6 +220,20 @@ const struct net_core_facts net_core_board_facts = {
 #define NXN_TTY_STACK      2560u
 _Static_assert(NET_TTY_TX_DEADLINE > NXN_TCP_RTO_MS,
                "the telnet deadline must cover the first retransmit");
+/*
+ * The transmit budget (nx_net.h): every frame NetX hands the driver lands in the DATA
+ * channel's transmit pool, so the pool must hold the most it can be handed at once.
+ * Checked HERE, where the socket's queue depth is configured (the facts below), and not
+ * in a diagnostic command: until owhinata/wio-lite-ai#27 it lived in nx_echo.c, where
+ * deleting the command would have silently taken the production sizing guarantee with
+ * it, and until issue #222 in app/nx_link_driver.c.  If a future socket or a deeper
+ * queue breaks it, the build stops rather than the console stalling on a TCP
+ * retransmit timer.
+ */
+_Static_assert(NXN_TCP_SOCKETS_MAX * NXN_TCP_TX_DEPTH + NX_ARP_MAX_QUEUE_DEPTH +
+                       NXN_TX_SPARE <= LINK_DATA_TX_BUFS,
+               "LINK_DATA_TX_BUFS is too shallow for the NetX transmit budget "
+               "(see the transmit budget note in app/nx_net.h)");
 
 static uint8_t net_tty_rx_buf[NXN_TTY_RX_RING];
 static uint8_t net_tty_extract[NXN_TTY_EXTRACT];
@@ -250,10 +262,11 @@ static UCHAR                 nxn_stack[NXN_OWNER_STACK] DTCM_BSS __attribute__((
 
 /*
  * State is written by the owner thread and, for the ARMING/STOPPING transitions, by the
- * requesting CLI thread -- deliberately, so that nx_net_guard() closes the moment the
- * command is typed rather than when the owner gets around to it.
+ * requesting CLI thread -- deliberately, so that a command that checks the state (the
+ * link diagnostics refuse unless it is OFF) sees the change the moment the command is
+ * typed rather than when the owner gets around to it.
  */
-static volatile enum nx_net_state nxn_state = NX_NET_OFF;
+static volatile enum link_bridge_state nxn_state = LINK_BRIDGE_OFF;
 static volatile uint8_t  nxn_req_stop;
 
 /* Owner-thread-private. */
@@ -269,7 +282,7 @@ static uint8_t  nxn_link_down_run;
  * the first is the network's fault. */
 static uint32_t nxn_assoc_yes, nxn_assoc_no, nxn_assoc_noanswer;
 static uint8_t  nxn_reply[ERPC_CTRL_MAX];
-static struct nx_net_modstats nxn_mod;
+static struct link_bridge_modstats nxn_mod;
 
 /* Why the interface last went down or refused, for `net info`. */
 static const char *nxn_why = "";
@@ -344,7 +357,7 @@ static void nxn_mod_accumulate(const uint32_t st[NXN_DSTAT_WORDS])
 {
 	/*
 	 * Interrupts masked for the whole update, and likewise for the read in
-	 * nx_net_modstats_get(), so a reader can never catch the ledger half-folded.
+	 * link_bridge_modstats_get(), so a reader can never catch the ledger half-folded.
 	 * Individual aligned words could not tear on this core anyway -- what this buys is
 	 * that the NINE of them are consistent WITH EACH OTHER, which is the only reason
 	 * anyone reads them: "frames vs drops" is a ratio, and a snapshot spliced from two
@@ -428,7 +441,7 @@ static void nxn_enter_failed(const char *why)
 	nxn_uart_gen = 0u;
 	nxn_failed_at = rtl_link_quiesce_gen();
 	nxn_why = why;
-	nxn_state = NX_NET_FAILED;
+	nxn_state = LINK_BRIDGE_FAILED;
 	LOG_ERR("%s -- the host stack could not be shut down cleanly; run `wifi reset`",
 	        why);
 }
@@ -442,7 +455,7 @@ static void nxn_stop(const char *why)
 	int claimed = 0;
 	int tries;
 
-	nxn_state = NX_NET_STOPPING;
+	nxn_state = LINK_BRIDGE_STOPPING;
 	nxn_refresh_fails = 0;
 
 	/*
@@ -479,7 +492,7 @@ static void nxn_stop(const char *why)
 		 * force-quiesce safely, so say so and leave the tap to the watchdog. */
 		nxn_why = "the link stayed busy";
 		nxn_failed_at = rtl_link_quiesce_gen();
-		nxn_state = NX_NET_FAILED;
+		nxn_state = LINK_BRIDGE_FAILED;
 		LOG_ERR("could not take the link to shut down; run `wifi reset`");
 		return;
 	}
@@ -503,7 +516,7 @@ static void nxn_stop(const char *why)
 	rtl_link_uart_unref_gen(nxn_uart_gen);
 	nxn_uart_gen = 0u;
 	nxn_why = why;
-	nxn_state = NX_NET_OFF;
+	nxn_state = LINK_BRIDGE_OFF;
 	LOG_INF("host stack down (%s)", why);
 
 out:
@@ -673,7 +686,7 @@ static void nxn_arm(void)
 	nx_link_driver_set_link(1);
 
 	nxn_why = "";
-	nxn_state = NX_NET_UP;
+	nxn_state = LINK_BRIDGE_UP;
 	/* A stop that arrived while the bridge was going in is honoured by the next pass of
 	 * the owner loop, now that the state it has to unwind is fully established -- that
 	 * is the whole point of only letting nxn_stop() end an armed session. */
@@ -699,7 +712,7 @@ unref:
 refuse:
 	if (claimed)
 		rtl_link_unclaim();
-	nxn_state = NX_NET_OFF;
+	nxn_state = LINK_BRIDGE_OFF;
 	LOG_WRN("cannot bring the host stack up -- %s", nxn_why);
 }
 
@@ -908,7 +921,7 @@ static void nxn_link_revoked(void)
 	rtl_link_uart_unref_gen(nxn_uart_gen);
 	nxn_uart_gen = 0u;
 	nxn_why = "the RTL8720 link was taken away (wifi on/off/reset)";
-	nxn_state = NX_NET_OFF;
+	nxn_state = LINK_BRIDGE_OFF;
 	LOG_WRN("%s", nxn_why);
 }
 
@@ -927,9 +940,9 @@ static void nxn_entry(ULONG arg)
 		 * checks it at its own safe points, and whatever it does not catch is acted
 		 * on by the next pass through here.
 		 */
-		if (nxn_req_stop && (nxn_state == NX_NET_UP || nxn_state == NX_NET_OFF ||
-		                     nxn_state == NX_NET_FAILED)) {
-			int was_up = (nxn_state == NX_NET_UP);
+		if (nxn_req_stop && (nxn_state == LINK_BRIDGE_UP || nxn_state == LINK_BRIDGE_OFF ||
+		                     nxn_state == LINK_BRIDGE_FAILED)) {
+			int was_up = (nxn_state == LINK_BRIDGE_UP);
 
 			nxn_req_stop = 0u;
 			if (was_up)
@@ -937,11 +950,11 @@ static void nxn_entry(ULONG arg)
 		}
 
 		switch (nxn_state) {
-		case NX_NET_ARMING:
+		case LINK_BRIDGE_ARMING:
 			nxn_arm();
 			break;
 
-		case NX_NET_UP:
+		case LINK_BRIDGE_UP:
 			/*
 			 * A moved generation means wifi on/off/reset force-quiesced the link
 			 * and revoked our reference.  Check it before the refresh: there is
@@ -952,12 +965,12 @@ static void nxn_entry(ULONG arg)
 				break;
 			}
 			nxn_refresh();
-			if (nxn_state == NX_NET_UP)
+			if (nxn_state == LINK_BRIDGE_UP)
 				(void)tx_event_flags_get(&nxn_evt, NXN_EVT_CMD, TX_OR_CLEAR,
 				                         &flags, NXN_REFRESH_MS);
 			break;
 
-		case NX_NET_FAILED:
+		case LINK_BRIDGE_FAILED:
 			/*
 			 * FAILED still holds things -- possibly the DATA consumer and a UART
 			 * reference -- because it could not prove they were safe to give
@@ -970,7 +983,7 @@ static void nxn_entry(ULONG arg)
 				rtl_link_uart_unref_gen(nxn_uart_gen);
 				nxn_uart_gen = 0u;
 				nxn_why = "recovered by a module power cycle";
-				nxn_state = NX_NET_OFF;
+				nxn_state = LINK_BRIDGE_OFF;
 				LOG_INF("%s", nxn_why);
 				break;
 			}
@@ -1050,24 +1063,24 @@ int nx_net_init(void)
 
 /* ---- control API -------------------------------------------------------------- */
 
-bool nx_net_is_up(void)
+bool link_bridge_is_up(void)
 {
-	return nxn_state == NX_NET_UP;
+	return nxn_state == LINK_BRIDGE_UP;
 }
 
-enum nx_net_state nx_net_state(void)
+enum link_bridge_state link_bridge_state(void)
 {
 	return nxn_state;
 }
 
-int nx_net_up(const char **why)
+int link_bridge_up(const char **why)
 {
 	if (!nxn_ready) {
 		if (why)
 			*why = "the host stack did not initialise";
 		return -1;
 	}
-	if (nxn_state == NX_NET_FAILED) {
+	if (nxn_state == LINK_BRIDGE_FAILED) {
 		/* The owner thread clears this within half a second of a `wifi reset`; it
 		 * has to do the clearing, because it is the one holding what must be given
 		 * back.  Until then, say what fixes it. */
@@ -1076,24 +1089,24 @@ int nx_net_up(const char **why)
 			       "`wifi reset`";
 		return -1;
 	}
-	if (nxn_state != NX_NET_OFF) {
+	if (nxn_state != LINK_BRIDGE_OFF) {
 		if (why)
 			*why = "the host stack is already up or in transition";
 		return -1;
 	}
 
 	/*
-	 * Publish ARMING on THIS thread, before the owner is signalled: nx_net_guard() has
-	 * to be closed from the moment the command is typed, not from whenever the owner
-	 * next runs: the state first, then the wake-up.
+	 * Publish ARMING on THIS thread, before the owner is signalled: a command that
+	 * refuses unless the state is OFF has to see it from the moment this one is typed,
+	 * not from whenever the owner next runs: the state first, then the wake-up.
 	 */
 	nxn_why = "";
-	nxn_state = NX_NET_ARMING;
+	nxn_state = LINK_BRIDGE_ARMING;
 	tx_event_flags_set(&nxn_evt, NXN_EVT_CMD, TX_OR);
 	return 0;
 }
 
-void nx_net_down(void)
+void link_bridge_down(void)
 {
 	if (!nxn_ready)
 		return;
@@ -1109,11 +1122,11 @@ void nx_net_down(void)
  * rtl_link_force_quiesce() advances that generation.  What it does not have is a
  * wake-up -- it is asleep in the NXN_REFRESH_MS wait at the bottom of the same branch,
  * so the revocation landed up to eight seconds late and `wifi connect` meanwhile saw a
- * stale NX_NET_UP: wifi_hold_bridge() asked a module that had just been power-cycled to
+ * stale LINK_BRIDGE_UP: wifi_hold_bridge() asked a module that had just been power-cycled to
  * renew the bridge, and refused when it did not answer.  That is the whole of
  * owhinata/wio-lite-ai#41 -- the time between the two, not a missing path.
  *
- * NOT nx_net_down(), deliberately.  That posts nxn_req_stop and runs the graceful
+ * NOT link_bridge_down(), deliberately.  That posts nxn_req_stop and runs the graceful
  * nxn_stop(), which takes the coarse mutex for up to NXN_ARM_CLAIM_MS and talks eRPC to
  * the module (DATA_CFG(off), then a settle it must PROVE) -- against a module that is
  * about to lose power, and in front of the three commands whose whole job is to work
@@ -1125,7 +1138,7 @@ void nx_net_down(void)
  * back (see nx_net.h) -- it only pokes and waits.  Best effort: on timeout the caller
  * says so and carries on, because refusing a recovery command is never the answer.
  */
-int nx_net_link_taken(void)
+int link_bridge_link_taken(void)
 {
 	uint32_t waited = 0u;
 
@@ -1139,19 +1152,14 @@ int nx_net_link_taken(void)
 	 * first poll already sees OFF -- but a busy-wait would turn a future priority change
 	 * into a hang, and this loop is not on any hot path.
 	 */
-	while (nxn_state == NX_NET_UP && waited < NXN_TAKEN_WAIT_MS) {
+	while (nxn_state == LINK_BRIDGE_UP && waited < NXN_TAKEN_WAIT_MS) {
 		tx_thread_sleep(NXN_TAKEN_POLL_MS);
 		waited += NXN_TAKEN_POLL_MS;
 	}
-	return (nxn_state == NX_NET_UP) ? -1 : 0;
+	return (nxn_state == LINK_BRIDGE_UP) ? -1 : 0;
 }
 
-void nx_net_mac_get(uint8_t mac[6])
-{
-	memcpy(mac, nxn_mac, 6);
-}
-
-void nx_net_modstats_get(struct nx_net_modstats *out)
+void link_bridge_modstats_get(struct link_bridge_modstats *out)
 {
 	/* Paired with nxn_mod_accumulate(): a consistent snapshot, not nine independent
 	 * reads (`net info` quotes drops as a fraction of frames). */
@@ -1162,31 +1170,15 @@ void nx_net_modstats_get(struct nx_net_modstats *out)
 	__set_PRIMASK(pm);
 }
 
-/*
- * The NetX objects, for whoever puts a socket on this interface.  Handing them out only
- * once nxn_ready is set is the whole safety argument: before that the control blocks are
- * uninitialised memory, and nx_tcp_socket_create() would happily scribble on an IP
- * instance that does not exist yet.
- */
-void *nx_net_ip(void)
-{
-	return nxn_ready ? (void *)&nxn_ip : NULL;
-}
+/* ---- reporting ----------------------------------------------------------------- */
 
-void *nx_net_pool(void)
-{
-	return nxn_ready ? (void *)&nxn_pool : NULL;
-}
-
-/* ---- reporting / guard --------------------------------------------------------- */
-
-const char *nx_net_state_name(enum nx_net_state s)
+const char *link_bridge_state_name(enum link_bridge_state s)
 {
 	switch (s) {
-	case NX_NET_OFF:      return "off";
-	case NX_NET_ARMING:   return "arming";
-	case NX_NET_UP:       return "up";
-	case NX_NET_STOPPING: return "stopping";
+	case LINK_BRIDGE_OFF:      return "off";
+	case LINK_BRIDGE_ARMING:   return "arming";
+	case LINK_BRIDGE_UP:       return "up";
+	case LINK_BRIDGE_STOPPING: return "stopping";
 	default:              return "FAILED";
 	}
 }
@@ -1196,15 +1188,15 @@ const char *nx_net_state_name(enum nx_net_state s)
  * computed from values read while earlier lines were going out could disagree
  * with them. */
 struct nxn_status_sample {
-	enum nx_net_state      state;
-	const char            *why;
-	uint8_t                mac[6];
-	bool                   link_up;
-	bool                   radio_up;
-	uint32_t               assoc_yes, assoc_no, assoc_noanswer;
-	struct nx_link_stats   st;
-	ULONG                  pool_avail, pool_total, pool_empty;
-	struct nx_net_modstats ms;
+	enum link_bridge_state      state;
+	const char                 *why;
+	uint8_t                     mac[6];
+	bool                        link_up;
+	bool                        radio_up;
+	uint32_t                    assoc_yes, assoc_no, assoc_noanswer;
+	struct nx_link_stats        st;
+	ULONG                       pool_avail, pool_total, pool_empty;
+	struct link_bridge_modstats ms;
 };
 
 /* The longest line is `nx rx`: about 80 characters of text and seven 32-bit
@@ -1232,7 +1224,7 @@ int nx_net_write_status(net_svc_write_fn write, void *ctx)
 	/* ---- sample: no lock is held past this block, and nothing is written in it */
 	s.state = nxn_state;
 	s.why = nxn_why;
-	if (s.state != NX_NET_OFF) {
+	if (s.state != LINK_BRIDGE_OFF) {
 		memcpy(s.mac, nxn_mac, sizeof s.mac);
 		s.link_up = nx_link_driver_link_up();
 		s.radio_up = (nxn_radio_up != 0u);
@@ -1244,15 +1236,15 @@ int nx_net_write_status(net_svc_write_fn write, void *ctx)
 		nx_packet_pool_info_get(&nxn_pool, &s.pool_total, &s.pool_avail,
 		                        &s.pool_empty, &waits, &invalid);
 		/* Accumulated across bridge re-arms -- each one zeroes the module's own copy. */
-		nx_net_modstats_get(&s.ms);
+		link_bridge_modstats_get(&s.ms);
 	}
 
 	/* ---- write, from the sample only */
 	if (nxn_status_line(write, ctx, "  host stack: %s%s%s\r\n",
-	                    nx_net_state_name(s.state),
+	                    link_bridge_state_name(s.state),
 	                    (s.why && s.why[0]) ? " -- " : "", (s.why) ? s.why : "") != 0)
 		return -1;
-	if (s.state == NX_NET_OFF)
+	if (s.state == LINK_BRIDGE_OFF)
 		return 0;
 
 	/* `link` is the ASSOCIATION (owhinata/wio-lite-ai#30 B2a), which is what decides whether a frame
@@ -1309,20 +1301,6 @@ int nx_net_write_status(net_svc_write_fn write, void *ctx)
 	                       (unsigned long)s.ms.tx_drops);
 }
 
-int nx_net_guard(struct cli_instance *sh, const char *what)
-{
-	if (nxn_state == NX_NET_OFF)
-		return 0;
-
-	if (nxn_state == NX_NET_FAILED)
-		cli_error(sh, "%s: refused -- the host stack could not be shut down "
-		          "cleanly; run `wifi reset`\r\n", what);
-	else
-		cli_error(sh, "%s: refused -- the host stack owns the module's network "
-		          "(state %s)\r\n", what, nx_net_state_name(nxn_state));
-	return 1;
-}
-
 /*
  * Hold the module's bridge watchdog open across a long eRPC flow (owhinata/wio-lite-ai#30 B2b).
  *
@@ -1341,9 +1319,9 @@ int nx_net_guard(struct cli_instance *sh, const char *what)
  * acknowledged, -1 when the module did not answer -- and a caller that gets -1 MUST NOT
  * start the long flow, because the alternative is losing the bridge in the middle of it.
  */
-int nx_net_hold_extend(void)
+int link_bridge_hold_extend(void)
 {
-	if (nxn_state != NX_NET_UP)
+	if (nxn_state != LINK_BRIDGE_UP)
 		return 0;
 	return (nxn_data_cfg(ERPC_DATA_MODE_BRIDGE, NXN_HOLD_MAX_MS) == 0) ? 0 : -1;
 }

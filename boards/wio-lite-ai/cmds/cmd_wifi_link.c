@@ -172,20 +172,21 @@ static int link_ctrl_ready_ex(struct cli_instance *sh, int allow_busy, int allow
 	/*
 	 * THE BRIDGE HAS TO BE DOWN, for everything except the read-only `info`.
 	 *
-	 * Until owhinata/wio-lite-ai#30 B2c this was nx_net_guard() -- refuse whenever the host stack
-	 * was up -- and the reason given was ownership.  The real reason is narrower and it is
-	 * about TIME and about the DATA channel: a bench holds the coarse mutex for seconds
-	 * at a stretch, and the interface owner needs that mutex every NXN_REFRESH_MS or the
-	 * module drops the tap; `dbench` additionally wants the DATA channel, which has
-	 * exactly one consumer and it is the NetX driver.  Neither applies to `info`.
+	 * Until owhinata/wio-lite-ai#30 B2c this was nx_net_guard() (unused since, and removed
+	 * by issue #222) -- refuse whenever the host stack was up -- and the reason given was
+	 * ownership.  The real reason is narrower and it is about TIME and about the DATA
+	 * channel: a bench holds the coarse mutex for seconds at a stretch, and the interface
+	 * owner needs that mutex every NXN_REFRESH_MS or the module drops the tap; `dbench`
+	 * additionally wants the DATA channel, which has exactly one consumer and it is the
+	 * NetX driver.  Neither applies to `info`.
 	 *
 	 * Since the bridge is armed by `wifi connect` (B2b), the window for the diagnostics
 	 * is "this power-on, before associating" -- which is a state, not a mode, and the way
 	 * back to it is the module's own reset.
 	 */
-	if (!allow_bridged && nx_net_state() != NX_NET_OFF) {
+	if (!allow_bridged && link_bridge_state() != LINK_BRIDGE_OFF) {
 		cli_error(sh, "link: refused -- the L2 bridge is up (state %s)\r\n",
-		          nx_net_state_name(nx_net_state()));
+		          link_bridge_state_name(link_bridge_state()));
 		cli_print(sh, "  the link diagnostics need it down: `wifi reset`, then "
 		          "`wifi ver` and run this before `wifi connect`\r\n");
 		return 1;

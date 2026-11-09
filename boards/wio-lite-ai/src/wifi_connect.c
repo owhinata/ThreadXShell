@@ -56,12 +56,12 @@ uint8_t wifi_fw_gen_of(const char *ver)
 /*
  * Coordinate a long eRPC flow with the L2 bridge (owhinata/wio-lite-ai#30 B2b).
  *
- * These flows used to be REFUSED while the host stack was up (`nx_net_guard`), which is
- * why recovering from an AP outage meant tearing the whole interface down.  Two things
- * made the refusal obsolete: owhinata/wio-lite-ai#30 B1 stopped `wifi connect` touching the
- * module's lwIP address and DHCP client, and the SDK shows the tap survives the off->on(STA)
- * cycle (`netif_add()` runs only inside LwIP_Init(); wifi_on/off only move netif
- * up/down flags, never netif->input).
+ * These flows used to be REFUSED while the host stack was up (`nx_net_guard`, removed by
+ * issue #222), which is why recovering from an AP outage meant tearing the whole
+ * interface down.  Two things made the refusal obsolete: owhinata/wio-lite-ai#30 B1
+ * stopped `wifi connect` touching the module's lwIP address and DHCP client, and the SDK
+ * shows the tap survives the off->on(STA) cycle (`netif_add()` runs only inside
+ * LwIP_Init(); wifi_on/off only move netif up/down flags, never netif->input).
  *
  * What DOES still conflict is time: the owner refreshes the module's bridge watchdog by
  * taking the coarse mutex, and these flows hold it far longer than the hold.  So instead
@@ -72,7 +72,7 @@ uint8_t wifi_fw_gen_of(const char *ver)
  */
 int wifi_hold_bridge(struct cli_instance *sh, const char *what)
 {
-	if (nx_net_hold_extend() == 0)
+	if (link_bridge_hold_extend() == 0)
 		return 0;
 	cli_error(sh, "%s: refused -- the module did not renew the L2 bridge, and starting "
 	          "now would drop it mid-flow; retry, then `wifi reset`\r\n", what);
@@ -103,7 +103,7 @@ static int wifi_arm_bridge(struct cli_instance *sh)
 	const char *why = "";
 	unsigned waited = 0u;
 
-	if (nx_net_state() != NX_NET_OFF) {
+	if (link_bridge_state() != LINK_BRIDGE_OFF) {
 		/* Already bridged: re-associating did not disturb the tap (it survives the
 		 * off->on(STA) cycle), so there is nothing to do.  The link flag follows on
 		 * the owner's next association poll, within NXN_REFRESH_MS. */
@@ -112,12 +112,12 @@ static int wifi_arm_bridge(struct cli_instance *sh)
 			cli_print(sh, "  DHCP takes the address again once it does\r\n");
 		return 0;
 	}
-	if (nx_net_up(&why) != 0) {
+	if (link_bridge_up(&why) != 0) {
 		cli_error(sh, "  the host stack did not come up -- %s\r\n", why);
 		return 1;
 	}
 	cli_print(sh, "  bringing the host stack up...\r\n");
-	while (nx_net_state() == NX_NET_ARMING && waited < WIFI_ARM_WAIT_MS) {
+	while (link_bridge_state() == LINK_BRIDGE_ARMING && waited < WIFI_ARM_WAIT_MS) {
 		/* Ctrl+C stops WAITING, not the owner: a half-installed bridge must be
 		 * unwound by the owner, never by a second thread (app/nx_net.h). */
 		if (cli_cancel_requested(sh)) {
@@ -127,7 +127,7 @@ static int wifi_arm_bridge(struct cli_instance *sh)
 		cli_sleep(sh, WIFI_ARM_POLL_MS);
 		waited += WIFI_ARM_POLL_MS;
 	}
-	if (!nx_net_is_up()) {
+	if (!link_bridge_is_up()) {
 		(void)nx_net_write_status(wifi_status_write, sh);
 		return 1;
 	}

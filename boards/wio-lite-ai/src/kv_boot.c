@@ -266,7 +266,7 @@ static void cfg_net(void)
 	if (strcmp(mode, "manual") == 0)
 		return;
 
-	if (!nx_net_is_up()) {
+	if (!link_bridge_is_up()) {
 		/* Not a failure of this step: without an association there is no host
 		 * stack to address, and saying so is more useful than a DHCP timeout. */
 		LOG_WRN("net.mode=%s ignored -- the host stack is not up", mode);

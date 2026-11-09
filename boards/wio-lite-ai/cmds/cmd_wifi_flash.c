@@ -66,7 +66,7 @@
  *      interface that no longer receives);
  *   2. claim with allow_busy, because after step 1 nothing should hold it and if
  *      something still does, this is the command that must win;
- *   3. re-check the state UNDER the claim: nx_net_down() only posts a request and does
+ *   3. re-check the state UNDER the claim: link_bridge_down() only posts a request and does
  *      not hold the coarse mutex while it unwinds, so between step 1 finishing and step 2
  *      succeeding another console could have started `wifi connect` and armed it again.
  */
@@ -79,22 +79,22 @@ static int flash_claim(struct cli_instance *sh)
 
 	/*
 	 * First line, before the teardown below (owhinata/wio-lite-ai#32): an automatic re-association
-	 * can be holding the coarse mutex for up to 22 s, and nx_net_down()'s unwind needs that
+	 * can be holding the coarse mutex for up to 22 s, and link_bridge_down()'s unwind needs that
 	 * same mutex -- so disarming here is what stops step 1 from waiting out an attempt.
 	 * The credentials go with it, which is right: this session rewrites the module.
 	 */
 	wifi_auto_disarm("flash session");
 
-	if (nx_net_state() != NX_NET_OFF) {
+	if (link_bridge_state() != LINK_BRIDGE_OFF) {
 		cli_print(sh, "wifi: taking the host stack down first (flashing needs the "
 		          "link)...\r\n");
-		nx_net_down();
-		while (nx_net_state() != NX_NET_OFF && waited < FLASH_STOP_WAIT_MS) {
+		link_bridge_down();
+		while (link_bridge_state() != LINK_BRIDGE_OFF && waited < FLASH_STOP_WAIT_MS) {
 			if (cli_sleep(sh, FLASH_STOP_POLL_MS))
 				return -1;                  /* Ctrl+C */
 			waited += FLASH_STOP_POLL_MS;
 		}
-		if (nx_net_state() != NX_NET_OFF) {
+		if (link_bridge_state() != LINK_BRIDGE_OFF) {
 			/* Since issue #218 the telnet console cannot hold the teardown up, so
 			 * stopping it is no longer advice: what is left is the link staying busy
 			 * or the module not going quiet.  Both end in FAILED, which only
@@ -102,13 +102,13 @@ static int flash_claim(struct cli_instance *sh)
 			 * one, so the state may still read "stopping". */
 			cli_error(sh, "wifi: the host stack would not go down (%s) -- "
 			          "`wifi reset`, then retry\r\n",
-			          nx_net_state_name(nx_net_state()));
+			          link_bridge_state_name(link_bridge_state()));
 			return -1;
 		}
 	}
 	if (rtl_link_hw_claim(sh, true) != 0)
 		return -1;
-	if (nx_net_state() != NX_NET_OFF) {
+	if (link_bridge_state() != LINK_BRIDGE_OFF) {
 		rtl_link_hw_release(sh);
 		cli_error(sh, "wifi: the host stack came back up just now -- retry\r\n");
 		return -1;

@@ -190,7 +190,7 @@ static int wifi_power_claim(struct cli_instance *sh, const char *what)
  * drift apart".  Dropping the second half is invisible in testing: the owner notices the
  * revoked generation on its own, just up to NXN_REFRESH_MS (8 s) later, so the interface
  * does stand down -- eventually.  Everything typed inside that window meanwhile finds a
- * stale NX_NET_UP, and `wifi connect` refuses because it cannot renew the L2 bridge on a
+ * stale LINK_BRIDGE_UP, and `wifi connect` refuses because it cannot renew the L2 bridge on a
  * module that was power-cycled a second ago.  That was owhinata/wio-lite-ai#41, hit about half the time.
  *
  * All three commands here need it, not just off/reset: what strands the host stack is the
@@ -200,7 +200,7 @@ static int wifi_power_claim(struct cli_instance *sh, const char *what)
 static void wifi_power_take_link(struct cli_instance *sh)
 {
 	rtl_link_force_quiesce();                  /* recovery path: take the link away */
-	if (nx_net_link_taken() != 0)              /* ... and let the owner give it back */
+	if (link_bridge_link_taken() != 0)         /* ... and let the owner give it back */
 		cli_print(sh, "wifi: the host stack has not stood down yet -- `net info`, "
 		          "and retry if the next command is refused\r\n");
 }

@@ -18,19 +18,12 @@
 #include "stm32h7xx_hal.h" /* __get_PRIMASK / __disable_irq / __set_PRIMASK */
 
 #include "link_data.h"
-#include "nx_net.h"      /* the transmit budget asserted just below */
 
 /*
- * The transmit budget from app/nx_net.h, checked HERE (owhinata/wio-lite-ai#27) because
- * this is the translation unit that owns the transmit path -- it lived in nx_echo.c
- * until then, where deleting a diagnostic command would have silently taken the
- * production driver's sizing guarantee with it.  If a future socket or a deeper queue
- * breaks it, the build stops rather than the console stalling on a TCP retransmit timer.
+ * The transmit budget (app/nx_net.h) is checked in app/nx_net.c, next to the socket
+ * configuration it bounds (issue #222), so this link-layer file does not include the
+ * header of the layer above it.
  */
-_Static_assert(NXN_TCP_SOCKETS_MAX * NXN_TCP_TX_DEPTH + NX_ARP_MAX_QUEUE_DEPTH +
-                       NXN_TX_SPARE <= LINK_DATA_TX_BUFS,
-               "LINK_DATA_TX_BUFS is too shallow for the NetX transmit budget "
-               "(see the transmit budget note in app/nx_net.h)");
 
 /* ---- constants ------------------------------------------------------------- */
 

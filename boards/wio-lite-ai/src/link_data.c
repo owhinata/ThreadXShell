@@ -172,6 +172,15 @@ static void ld_reclaim_locked(void)
 	ld_ready = 1u;
 }
 
+/* link_data_reset()'s body, shared with link_data_detach() so the detach is one
+ * section.  Caller is inside the critical section. */
+static void ld_reset_locked(void)
+{
+	ld_init_locked();                        /* first call ever: build the free lists */
+	ld_reclaim_locked();
+	memset(&ld_ctr, 0, sizeof(ld_ctr));
+}
+
 /* Return one RX buffer to the pool.  A no-op unless the slot is actually held, which is
  * what makes every "give it back" path (abort, free, a failed CRC, a late commit after a
  * reset) safe to call unconditionally.  Caller is inside the critical section. */
@@ -234,17 +243,23 @@ int link_data_attach(int (*rx)(void *ctx, uint8_t chan, uint8_t *p, uint16_t n),
 	return rc;
 }
 
+/*
+ * ONE masked section (issue #224): the owner goes, the pools are reclaimed, the send
+ * generation moves and the counters are cleared together.  Split in two -- clear the
+ * owner, unmask, then reset -- the next owner could attach in between (its attach is
+ * refused only while the old owner is still there) and the second half would then
+ * move the generation it had just read, throw away the frames it had queued and zero
+ * its counters.  The section is link_data_reset()'s plus the two stores clearing the
+ * owner: no loop over frame data (LOCKING above).
+ */
 void link_data_detach(void)
 {
 	uint32_t p = ld_enter();
 
 	ld_rx_cb  = NULL;
 	ld_rx_ctx = NULL;
-	/* Moved here as well as in the reset below, so no sender can queue in the gap
-	 * between the two sections. */
-	ld_send_gen = link_send_gen_next(ld_send_gen);
+	ld_reset_locked();                       /* nothing left to deliver it to */
 	ld_exit(p);
-	link_data_reset();                       /* nothing left to deliver it to */
 }
 
 int link_data_attached(void)
@@ -528,9 +543,7 @@ void link_data_reset(void)
 {
 	uint32_t p = ld_enter();
 
-	ld_init_locked();                        /* first call ever: build the free lists */
-	ld_reclaim_locked();
-	memset(&ld_ctr, 0, sizeof(ld_ctr));
+	ld_reset_locked();
 	ld_exit(p);
 }
 

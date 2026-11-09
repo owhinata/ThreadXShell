@@ -412,7 +412,9 @@ gcc $CFLAGS -I "$board/src" \
 # real src/link_data.c that applies it: a send decided before an attach, a detach,
 # a reset or the NetX driver's fence is refused, including one whose fence lands
 # just before the buffer is taken, just before it is queued, or during the copy
-# -- the windows a preempted sender opens, which a console cannot stage.
+# -- the windows a preempted sender opens, which a console cannot stage.  Since
+# issue #224 also a consumer attaching during a detach: refused at the entry of
+# the detach's one masked section, with no second section to land in front of.
 # link_data_shim/ supplies the PRIMASK accessors (traced, and where the test lands
 # its preemption) and an empty tx_api.h; erpc_crc16() / erpc_data_posted() are
 # the test's own.  mem_sections.h is the real one.

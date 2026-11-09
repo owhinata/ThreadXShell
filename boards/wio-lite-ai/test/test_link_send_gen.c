@@ -26,6 +26,8 @@
  *     a fence just before the enqueue section, or during the copy: refused at
  *       the enqueue, nothing queued, the buffer given back exactly once
  *     a reset during the copy: the epoch and the generation share one exit
+ *     a consumer attaching during a detach (issue #224): refused at the entry of
+ *       its masked section, and there is no second section to land in front of
  *
  * [!] WHAT IT DOES NOT COVER: that every NetX send path holds nx_ip_protection,
  * and that nx_link_driver.c reads link_up and the generation in one masked step
@@ -351,6 +353,88 @@ static void test_reset_mid_copy(void)
 	expect_pool_whole("buffer given back exactly once");
 }
 
+/* ---- a consumer attaching during a detach (issue #224) ------------------------ */
+
+static int rx_cb2(void *ctx, uint8_t chan, uint8_t *p, uint16_t n)
+{
+	(void)ctx; (void)chan; (void)p; (void)n;
+	return 0;
+}
+
+/* What the next owner does when it lands inside the detach: attach, read its send
+ * generation, queue a frame.  Every result is recorded; none is acted on. */
+static unsigned intr_ran;
+static int      intr_attach_rc, intr_send_rc;
+static uint32_t intr_gen;
+
+static void act_attach_and_send(void)
+{
+	intr_ran++;
+	intr_attach_rc = link_data_attach(rx_cb2, NULL);
+	intr_gen       = link_data_send_gen();
+	intr_send_rc   = send(intr_gen);
+}
+
+static void intr_clear(void)
+{
+	intr_ran = 0u;
+	intr_attach_rc = intr_send_rc = 99;
+	intr_gen = 0u;
+}
+
+/* (a) At the entry of the detach's masked section the old owner is still attached, so
+ * the next owner's attach is refused; the frame it queued under the old owner's
+ * generation is reclaimed by the detach, and nobody is left attached. */
+static void test_attach_at_detach_entry(void)
+{
+	uint32_t g0;
+
+	fresh();
+	drain();
+	intr_clear();
+	g0 = link_data_send_gen();
+	arm_preempt(1u, act_attach_and_send);
+	link_data_detach();
+	EQ(intr_ran, 1, "the attach did land at the entry");
+	EQ(intr_attach_rc, -1, "attach at the entry: refused (old owner still there)");
+	EQ(intr_gen, g0, "the generation it read was still the old owner's");
+	EQ(intr_send_rc, 0, "its send went out under the old owner's generation");
+	EQ(link_data_attached(), 0, "nobody attached after the detach");
+	EQ(queued(), 0, "the detach reclaimed what was queued before it");
+	EQ(link_data_send_gen() != g0, 1, "the detach moved the generation");
+	EQ(ld_test_primask, 0u, "mask restored");
+	EQ(link_data_attach(rx_cb, NULL), 0, "the next owner attaches after it");
+	expect_pool_whole("no buffer kept across the detach");
+}
+
+/* (b) The detach has no second masked section: one entry, and an attach armed for a
+ * second entry never runs.  Not "if it ran, then ...": a second section that the
+ * attach slipped in front of is the bug, so its running at all is the failure. */
+static void test_detach_one_section(void)
+{
+	unsigned before, after;
+
+	fresh();
+	drain();
+	intr_clear();
+	arm_preempt(2u, act_attach_and_send);
+	before = ld_test_masked_sections;
+	link_data_detach();
+	after = ld_test_masked_sections;
+	preempt_at = 0u;                 /* disarm before anything else masks */
+	EQ(after - before, 1, "the detach is one masked section");
+	EQ(intr_ran, 0, "no second entry for an attach to land at");
+	EQ(link_data_attached(), 0, "the channel is left detached");
+	EQ(ld_test_primask, 0u, "mask restored");
+	/* The next owner, attaching after the detach, keeps its generation and frame. */
+	EQ(link_data_attach(rx_cb2, NULL), 0, "attach after the detach");
+	intr_gen = link_data_send_gen();
+	EQ(send(intr_gen), 0, "its send is accepted");
+	EQ(queued(), 1, "and stays queued");
+	EQ(link_data_send_gen(), intr_gen, "and its generation stays");
+	drain();
+}
+
 int main(void)
 {
 	test_pure();
@@ -364,6 +448,8 @@ int main(void)
 	test_fence_before_enqueue();
 	test_fence_mid_copy();
 	test_reset_mid_copy();
+	test_attach_at_detach_entry();
+	test_detach_one_section();
 
 	if (fails) {
 		printf("test_link_send_gen: %d failure(s)\n", fails);

@@ -45,6 +45,26 @@
  * the lock order acyclic once a real IP stack is attached: the receive callback runs
  * with no link lock held and may take the stack's lock, while a transmit from inside
  * the stack takes only the short interrupt-masked region in this file.
+ *
+ * Who attaches and detaches the consumer (issue #224).  link_data_attach() refuses a
+ * second consumer, but this file knows no mutex, so WHO may attach or detach, and when,
+ * is a rule its callers keep, not a check here:
+ *   - ATTACH only while holding the RTL8720 link's coarse mutex (src/rtl_link.h).  The
+ *     two that do are `wifi link dbench` (cmds/cmd_wifi_link.c) and the bridge session's
+ *     arming step (nxn_arm(), src/link_bridge.c).
+ *   - DETACH while holding that mutex, or -- the bridge session's own thread only, which
+ *     does not hold it there -- before it publishes the bridge as OFF (the link taken
+ *     away by `wifi on/off/reset`, and the recovery from FAILED).  Those detaches cannot
+ *     meet an attach: `wifi link dbench` attaches only while the bridge is OFF, and the
+ *     arming step runs on that same thread.  [!] `wifi link dbench` still detaches
+ *     just AFTER it lets the mutex go; moving its detach before that is the next step
+ *     of issue #224, and until then an arming step can find the bench still attached.
+ *   - An exit that ends FAILED with the consumer still attached leaves it there: while
+ *     the bridge is FAILED neither of the two attaches (the bench refuses unless the
+ *     bridge is OFF, link_bridge_up() refuses FAILED).
+ * A detach that clears the owner and resets the pools in one masked section
+ * (link_data_detach()) is what makes an attach landing at any point of it either
+ * refused (the old owner is still there) or after it (nothing left to undo).
  */
 #ifndef APP_LINK_DATA_H
 #define APP_LINK_DATA_H
@@ -139,7 +159,9 @@ int  link_data_attach(int (*rx)(void *ctx, uint8_t chan, uint8_t *p, uint16_t n)
  * (`wifi reset`, force-quiesce, UART close), where nothing survives to be desynchronised.
  *
  * Moves the send generation (and resets, see link_data_reset()), so a send decided
- * before the detach can no longer be queued after it.
+ * before the detach can no longer be queued after it.  Clearing the consumer and the
+ * reset are ONE interrupt-masked section, so a consumer attaching during a detach is
+ * either refused or attaches after the reset (see the ownership section above).
  */
 void link_data_detach(void);
 

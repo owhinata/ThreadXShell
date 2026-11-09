@@ -510,8 +510,9 @@ static void nxn_arm(void)
 	nx_link_driver_reset_stats();
 	memset(&nxn_mod, 0, sizeof nxn_mod);
 	if (link_data_attach(nx_link_driver_rx, NULL) != 0) {
-		nxn_why = "the link's DATA channel already has an owner "
-		          "(a `link` command is running)";
+		/* We hold the coarse mutex, so an owner here means the attach / detach rule
+		 * in link_data.h was broken; refuse rather than guess who it is (issue #224). */
+		nxn_why = "the link's DATA channel already has an owner";
 		goto unref;
 	}
 	attached = 1;

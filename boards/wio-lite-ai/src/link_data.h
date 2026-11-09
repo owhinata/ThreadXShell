@@ -56,9 +56,7 @@
  *     does not hold it there -- before it publishes the bridge as OFF (the link taken
  *     away by `wifi on/off/reset`, and the recovery from FAILED).  Those detaches cannot
  *     meet an attach: `wifi link dbench` attaches only while the bridge is OFF, and the
- *     arming step runs on that same thread.  [!] `wifi link dbench` still detaches
- *     just AFTER it lets the mutex go; moving its detach before that is the next step
- *     of issue #224, and until then an arming step can find the bench still attached.
+ *     arming step runs on that same thread.
  *   - An exit that ends FAILED with the consumer still attached leaves it there: while
  *     the bridge is FAILED neither of the two attaches (the bench refuses unless the
  *     bridge is OFF, link_bridge_up() refuses FAILED).

@@ -904,8 +904,9 @@ static int cmd_link_dbench(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)bytes, (unsigned long)secs,
 	          (unsigned long)rtl_link_erpc_baud());
 	if (link_data_cfg(sh, mode, (uint16_t)rx, secs * 1000u + 500u, 0x5Au) != 0) {
-		rtl_link_end(sh);                /* closes the UART: nothing can arrive now */
+		/* Still holding the link (see the order at the end of this function). */
 		link_data_detach();
+		rtl_link_end(sh);
 		return 1;
 	}
 
@@ -951,21 +952,29 @@ static int cmd_link_dbench(struct cli_instance *sh, int argc, char **argv)
 	link_print_host(sh);
 
 	/*
-	 * Order matters.  Detaching restores the pre-send RX flush, so it must not happen
-	 * while a DATA frame could still arrive.  TWO things make that true, and which one
-	 * applies depends on whether anything else is holding the link:
-	 *   - the settle above, which proves the module has stopped (its CFG(off)
-	 *     acknowledgement is a promise it has drained its own writer); and
-	 *   - rtl_link_end(), which drops OUR reference -- and if it was the last one the
-	 *     UART closes outright, so nothing can arrive at all.
-	 * With a telnet console resident the reference count does not reach zero and only
-	 * the first applies, which is exactly why settle is a state test and not a delay.
-	 * If it timed out we detach anyway and say so: a broken promise costs a
-	 * resynchronisation (the reader's CRC and overflow detectors handle it), and
-	 * refusing to detach would strand the channel with no owner.
+	 * Order matters: detach BEFORE rtl_link_end() lets the coarse mutex go (issue #224).
+	 *   - The next holder of the mutex may attach at once -- the bridge session's arming
+	 *     step, from `wifi connect` or the boot-time auto-connect, preempts us the moment
+	 *     the mutex is free.  Detached after the release, it could find us still
+	 *     attached and give up on the bridge.  The ownership rule is in link_data.h.
+	 *   - Detaching restores the pre-send RX flush, so it must not happen while a DATA
+	 *     frame could still arrive.  The settle above proves the module has stopped (its
+	 *     CFG(off) acknowledgement is a promise it has drained its own writer), and with
+	 *     the mutex held from that proof to the detach it cannot go stale in between.
+	 *     Nothing is sent between the detach and the release: our CTRL calls are
+	 *     synchronous and leave nothing queued, and every other request is made under
+	 *     the mutex we still hold.
+	 * If CFG(off) or the settle failed (and on the CFG failure exit near the top,
+	 * where the module may or may not have started its source) we detach anyway
+	 * (refusing would strand the channel with no owner).  When ours is the last UART
+	 * reference, rtl_link_end() then closes the UART and nothing can arrive at all.
+	 * When something else (a telnet console) keeps it open, a request made after we
+	 * release may flush the middle of a DATA frame; the reader's CRC and overflow
+	 * detectors resynchronise.  That degraded recovery is what it was before issue
+	 * #224; `wifi reset` clears it, as the settle's failure message says.
 	 */
-	rtl_link_end(sh);
 	link_data_detach();
+	rtl_link_end(sh);
 	return rc;
 }
 

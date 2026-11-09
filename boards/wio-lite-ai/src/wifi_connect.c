@@ -22,7 +22,8 @@
 #include "wifi_auto.h"   /* issue #32: the host's own re-association policy */
 #include "net_core.h"   /* net_core_source_is_dhcp() (issue #220) */
 #include "net_tty.h"
-#include "nx_net.h"      /* the host stack owns the module while it is up (#23 U3) */
+#include "link_bridge.h" /* the host stack owns the module while it is up (#23 U3) */
+#include "nx_net.h"      /* nx_net_write_status() */
 #include "stm32h7xx_hal.h"   /* HAL_GetTick: the retry budget in issue #40 */
 
 #include <stddef.h>
@@ -119,7 +120,7 @@ static int wifi_arm_bridge(struct cli_instance *sh)
 	cli_print(sh, "  bringing the host stack up...\r\n");
 	while (link_bridge_state() == LINK_BRIDGE_ARMING && waited < WIFI_ARM_WAIT_MS) {
 		/* Ctrl+C stops WAITING, not the owner: a half-installed bridge must be
-		 * unwound by the owner, never by a second thread (app/nx_net.h). */
+		 * unwound by the owner, never by a second thread (app/link_bridge.h). */
 		if (cli_cancel_requested(sh)) {
 			cli_print(sh, "  still arming in the background; `net info` to check\r\n");
 			return 1;

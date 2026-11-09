@@ -9,7 +9,7 @@
  * When the AP disappears, is switched off or deauthenticates us, the association goes and
  * nothing brings it back.  This file is the policy that does: the credentials of the last
  * successful `wifi connect`, an enable flag, a backoff, and the one eRPC call that
- * re-associates.  The DETECTION and the SEQUENCING live in app/nx_net.c, which already
+ * re-associates.  The DETECTION and the SEQUENCING live in app/link_bridge.c, which already
  * samples the association every NXN_REFRESH_MS with the coarse link mutex in hand; this
  * file never claims anything and never decides when it is safe to talk to the module.
  *
@@ -47,12 +47,13 @@
  *
  * ---- threading -----------------------------------------------------------------
  *
- * Two threads touch this state: a CLI thread running the `wifi` commands, and the nx_net
- * owner thread running an attempt.  Updates are made under a short PRIMASK critical
- * section so that no reader can catch the credentials, the armed flag and the backoff
- * half-updated (the same reason nx_net.c's nxn_mod_accumulate() masks).  The one
- * exception is wifi_auto_armed(), which is polled roughly every millisecond from
- * erpc_call_ex()'s abort hook and therefore only ever reads a single volatile bool.
+ * Two threads touch this state: a CLI thread running the `wifi` commands, and the bridge
+ * owner thread (`nx-net`, app/link_bridge.c) running an attempt.  Updates are made under
+ * a short PRIMASK critical section so that no reader can catch the credentials, the
+ * armed flag and the backoff half-updated (the same reason link_bridge.c's
+ * nxn_mod_accumulate() masks).  The one exception is wifi_auto_armed(), which is polled
+ * roughly every millisecond from erpc_call_ex()'s abort hook and therefore only ever
+ * reads a single volatile bool.
  *
  * No clock/RCC/register work of its own (clock-safe).  Clean-room design.
  */

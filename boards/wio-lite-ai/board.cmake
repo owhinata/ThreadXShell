@@ -1058,6 +1058,7 @@ add_executable(shell
     "${BOARD_DIR}/src/wifi_connect.c"
     "${BOARD_DIR}/src/rtl_link.c"
     "${BOARD_DIR}/src/nx_link_driver.c"
+    "${BOARD_DIR}/src/link_bridge.c"     # the bridge session (#222)
     "${BOARD_DIR}/src/nx_net.c"
     "${BOARD_DIR}/src/net_svc_wio.c"     # the shared `net` command's adapter (#219)
     "${BOARD_DIR}/port/threadx/tx_glue.c"

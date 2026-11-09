@@ -54,7 +54,7 @@
 #include "wifi_auto.h" /* issue #32: the host's own re-association policy */
 #include "wifi_connect.h" /* the association sequence, shared with boot (#37) */
 #include "net_tty.h"
-#include "nx_net.h"    /* the host stack owns the module while it is up (issue #23 U3) */
+#include "link_bridge.h" /* the host stack owns the module while it is up (issue #23 U3) */
 #include "stm32h7xx_hal.h"   /* #5 inc 6: HAL_GetTick (1 ms SysTick, fed via tx_glue.c)
                               * for the scan-wait deadline -- read-only, no HAL init. */
 

@@ -20,7 +20,7 @@
  *
  * So this file owns two things: a COARSE MUTEX that serialises whole command flows,
  * and a REFERENCE COUNT on the eRPC UART so a resident user (since owhinata/wio-lite-ai#30
- * B2b that is the L2 bridge owner in app/nx_net.c) can hold it open across many commands.
+ * B2b that is the L2 bridge owner in app/link_bridge.c) can hold it open across many commands.
  * Together with the service thread's "touch nothing while idle" rule they keep the
  * invariant that the RX ring
  * has exactly ONE consumer at any instant: the eRPC service thread while the UART is
@@ -29,7 +29,7 @@
  * Two API tiers:
  *   (a) thread-agnostic core -- rtl_link_claim/_unclaim, rtl_link_uart_ref/_unref,
  *       rtl_link_force_quiesce, the module lifecycle state.  Usable from any thread
- *       (the bridge owner thread in app/nx_net.c uses these directly).
+ *       (the bridge owner thread in app/link_bridge.c uses these directly).
  *   (b) shell adapters -- rtl_link_begin/_end and rtl_link_hw_claim/_hw_release, which
  *       add the console claim (foreground only, single owner of the console RX) and
  *       print the reason on failure.
@@ -135,7 +135,7 @@ void rtl_link_forget_module(void);
  * counters (an open that is really the same session continuing at a different rate).
  *
  * That is only safe with no RESIDENT reference holder: the host stack's owner thread
- * (src/nx_net.c) detects that its reference was revoked by comparing
+ * (src/link_bridge.c) detects that its reference was revoked by comparing
  * rtl_link_uart_gen(), and holding the generation
  * still here would hide a close/open from it.  `wifi link baud` enforces
  * rtl_link_uart_refs() == 1 for exactly this reason -- it is a precondition of the
@@ -186,7 +186,7 @@ bool rtl_link_rate_supported(uint32_t baud);
  * An ordinary command takes and drops its reference inside one coarse-mutex section, so its
  * reference can never be revoked underneath it.  A RESIDENT holder is different
  * (owhinata/wio-lite-ai#21 increment 9 introduced one; since owhinata/wio-lite-ai#30 B2b it
- * is the L2 bridge owner in app/nx_net.c):
+ * is the L2 bridge owner in app/link_bridge.c):
  * it holds a reference across many commands, and rtl_link_force_quiesce() (`wifi on/off/
  * reset`) deliberately drops the count to zero while it is holding one.  A plain
  * rtl_link_uart_unref() afterwards would decrement SOMEBODY ELSE'S reference -- the next
@@ -200,7 +200,7 @@ bool rtl_link_rate_supported(uint32_t baud);
  *
  * rtl_link_quiesce_gen() advances ONLY in rtl_link_force_quiesce(), i.e. only on the three
  * recovery commands, all of which drive CHIP_EN.  It is the "the module was power-cycled"
- * ticket a caller can wait for after leaking module-side state (see src/nx_net.c's FAILED
+ * ticket a caller can wait for after leaking module-side state (see src/link_bridge.c's FAILED
  * latch, nxn_failed_at); an ordinary ref/unref does not move it.
  */
 uint32_t rtl_link_uart_gen(void);

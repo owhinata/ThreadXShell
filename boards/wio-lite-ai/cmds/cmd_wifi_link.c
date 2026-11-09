@@ -43,7 +43,7 @@
 #include "link_data.h"
 #include "rtl_link.h"
 #include "rtl8720.h"
-#include "nx_net.h"          /* the L2 bridge owns the DATA channel while it is up */
+#include "link_bridge.h"     /* the L2 bridge owns the DATA channel while it is up */
 
 #include "stm32h7xx_hal.h"   /* HAL_GetTick, TIM2 */
 

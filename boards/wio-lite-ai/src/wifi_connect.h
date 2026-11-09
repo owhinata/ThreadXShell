@@ -37,8 +37,8 @@
 
 struct cli_instance;
 
-/* Firmware generation the L2 bridge needs (2.1.3+wio-n7), mirroring nx_net.c's own
- * gate.  Checked before the association rather than after it. */
+/* Firmware generation the L2 bridge needs (2.1.3+wio-n7), mirroring link_bridge.c's
+ * own gate.  Checked before the association rather than after it. */
 #define WIFI_BRIDGE_MIN_GEN 7u
 
 /**

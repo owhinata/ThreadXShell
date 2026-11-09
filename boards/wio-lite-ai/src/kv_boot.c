@@ -63,7 +63,7 @@
 #include "cli.h"
 #include "cli_backend_log.h"
 #include "net_core.h"   /* the shared address / DHCP operations (issue #220) */
-#include "nx_net.h"
+#include "link_bridge.h"
 #include "net_tty.h"      /* the telnet console's port (issue #221) */
 #include "rtl8720.h"
 #include "wifi_auto.h"

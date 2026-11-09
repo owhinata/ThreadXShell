@@ -44,7 +44,7 @@
 #include "log.h"             /* #19 M5: transfer post-mortem into the dmesg ring */
 #include "rtl_link.h"
 #include "wifi_auto.h"       /* #32: a flash session disarms the host's re-association */
-#include "nx_net.h"        /* the bridge has to be given back before we take the link */
+#include "link_bridge.h"   /* the bridge has to be given back before we take the link */
 
 #include <stdint.h>
 #include <stdbool.h>

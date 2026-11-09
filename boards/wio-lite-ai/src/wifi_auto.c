@@ -73,7 +73,7 @@ static const char *wa_why = "waiting for the next `wifi connect`";
  * Short PRIMASK sections, not a mutex: every one of these is a handful of stores, and the
  * state has to be consistent for a reader that cannot block (the abort hook) and for one
  * that runs on the owner thread while a CLI thread is disarming.  Same instrument, and the
- * same reason, as nx_net.c's nxn_mod_accumulate().
+ * same reason, as link_bridge.c's nxn_mod_accumulate().
  */
 static uint32_t wa_lock(void)
 {

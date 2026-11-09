@@ -15,7 +15,7 @@
  *      receive    the link_data_attach() callback, nx_link_driver_rx()
  *
  * It knows nothing about the RTL8720, the eRPC link, or how the bridge is turned on and
- * kept alive.  That is app/nx_net.c, which owns the session and calls the four setters
+ * kept alive.  That is app/link_bridge.c, which owns the session and calls the four setters
  * below.  Keeping the split here means this file can be read as "a NetX driver" and that
  * one as "an interface that comes and goes".
  *
@@ -33,7 +33,7 @@
  *   nx_link_driver_rx()   THE LINK SERVICE THREAD, priority 10, no link lock held,
  *                         and contractually obliged to return quickly -- nothing is
  *                         draining the UART's receive ring while it runs
- *   the setters           the nx_net owner thread
+ *   the setters           the bridge owner thread `nx-net` (app/link_bridge.c)
  */
 #ifndef APP_NX_LINK_DRIVER_H
 #define APP_NX_LINK_DRIVER_H
@@ -70,15 +70,16 @@ void nx_link_driver_set_speed(uint32_t bits_per_sec);
  * the DATA channel's send generation in the same masked step (issue #218); NetX is told
  * through _nx_ip_driver_link_status_event(), which wakes the IP thread to ask
  * NX_LINK_GET_STATUS and run the status-change callback -- which updates the interface
- * flag and nothing more (app/nx_net.c explains why it must not start DHCP from there).
+ * flag and nothing more (app/link_bridge.c explains why it must not start DHCP from
+ * there).
  */
 void nx_link_driver_set_link(int up);
 int  nx_link_driver_link_up(void);
 
 /*
- * The link_data consumer callback.  Registered by nx_net.c with link_data_attach(), never
- * called from here.  Always returns 0: the frame is copied into an NX_PACKET, so the DATA
- * pool buffer is finished with by the time it returns.
+ * The link_data consumer callback.  Registered by link_bridge.c with link_data_attach(),
+ * never called from here.  Always returns 0: the frame is copied into an NX_PACKET, so
+ * the DATA pool buffer is finished with by the time it returns.
  */
 int nx_link_driver_rx(void *ctx, uint8_t chan, uint8_t *p, uint16_t n);
 

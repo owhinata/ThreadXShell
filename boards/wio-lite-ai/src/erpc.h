@@ -64,7 +64,7 @@
  *
  * Every byte this link carries is little-endian at its natural width: the eRPC
  * BasicCodec (app/wifi_rpc.c), the eRPC framing itself (app/erpc.c) and the CTRL /
- * DATA channels below (shell/cmds/cmd_wifi_link.c, app/nx_net.c).  One definition,
+ * DATA channels below (shell/cmds/cmd_wifi_link.c, app/link_bridge.c).  One definition,
  * because they are all the SAME wire -- four private copies is how the four ends of
  * one protocol drift apart.  Byte-at-a-time deliberately: the buffers are packed, so
  * a cast to uint32_t* would be an unaligned access.

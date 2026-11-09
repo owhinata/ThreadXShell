@@ -27,6 +27,7 @@
 #include "fmt.h"
 #include "net_core.h"
 #include "net_tty.h"          /* the telnet console's lines (issue #221) */
+#include "link_bridge.h"
 #include "nx_net.h"
 
 /* The board's reasons, as the per-board command printed them. */

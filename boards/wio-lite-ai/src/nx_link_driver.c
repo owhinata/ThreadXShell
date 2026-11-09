@@ -56,7 +56,7 @@ static struct {
 	ULONG            mac_lsw;
 	volatile uint8_t link_up;
 	uint8_t          started;
-	ULONG            speed_bps;      /* the link's real bit rate, set by nx_net.c    */
+	ULONG            speed_bps;      /* the link's real bit rate, set by link_bridge.c */
 	struct nx_link_stats st;
 } g;
 
@@ -362,7 +362,7 @@ VOID nx_link_driver(NX_IP_DRIVER *req)
 	}
 }
 
-/* ---- setters used by app/nx_net.c ------------------------------------------ */
+/* ---- setters used by app/link_bridge.c ------------------------------------- */
 
 VOID nx_link_driver_set_pool(NX_PACKET_POOL *pool)
 {

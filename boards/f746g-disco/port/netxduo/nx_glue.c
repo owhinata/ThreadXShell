@@ -99,9 +99,9 @@ const struct net_core_facts net_core_board_facts = {
  *
  * The listener's stack: it runs the whole transmit path (packet allocate /
  * append / nx_tcp_socket_send -> IP -> nx_eth_driver), and the per-packet
- * receive work is the IP thread's.  2560 B as before #221, with a measured
- * peak of 448 B on this board; re-measure with `thread` after a change to
- * the drain.
+ * receive work is the IP thread's.  2560 B as before #221; the peak measured
+ * with #221's code on this board is 572 B (448 B before it).  Re-measure with
+ * `thread` after a change to the drain.
  *
  * The transmit queue depth (8) bounds what this console can hold of
  * eth_pool; 2 s / 10 retries / shift 1 put the first retransmit at 2 s,

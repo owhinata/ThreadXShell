@@ -1959,13 +1959,14 @@ telnet -- each with its own line editor, history and RX/TX drop counters.
 `console` prints those counters, one line per console; what counts as a console
 is in the root
 [README](../../README.md#a-board-can-run-more-than-one-console).  `wio-net>`'s
-`rx_drop` stays 0, but input can still be lost there: the telnet backend has a
-512 B receive ring (holding 511, `src/net_shell.c`), the NetX receive callback
-empties the socket into it at once so the TCP window never holds input back,
-and a byte that finds the ring full is discarded.  Those bytes are counted,
-just not in `console`: they are the `rx-drops` figure of `net shell status`
-(cumulative since boot, also in its `dmesg` line).  `tx_drop` applies to
-both.  The boot-time
+`rx_drop` stays 0, but input can still be lost there: the telnet console has a
+512 B receive ring (holding 511; the shared `shell/cmds/net_tty.c`, the buffer
+in `src/nx_net.c`), the NetX receive callback empties the socket into it at
+once so the TCP window never holds input back, and a byte that finds the ring
+full is discarded.  Those bytes are counted, just not in `console`: they are
+`rx drop` on the second `telnet:` line of `net info` (cumulative since boot;
+until issue #221 the `rx-drops` figure of `net shell status`).  `tx_drop`
+applies to both.  The boot-time
 KV shell (`src/kv_boot.c`) is an instance too, but it is never started as a
 console -- its output goes to `dmesg` -- so it is not listed.
 
@@ -1980,17 +1981,19 @@ This board's side:
 | File | What it holds |
 |---|---|
 | `src/net_svc_wio.c` | The adapter: the host stack's state checked before the shared operation in `shell/cmds/net_core.c` (coming up or going down is the only "busy", which the command waits out for up to 20 s; off is "no host stack"; FAILED says to run `wifi reset`), then the operation itself (issue #220; the shared side says LINK with the association down, before each probe of `net ping` too) |
-| `src/nx_net.c` | The host stack: the NetX objects, the shared operations' state and facts (`net_core_board_state`, `net_core_board_facts`) with the link worker's stack, and the bridge session's resident thread.  Its section of `net info` is `nx_net_write_status()`, which samples every value first and then writes one line at a time through the contract's writer (until issue #219 `nx_net_print_status()`, printing straight to the console).  Until issue #220 it also held the address, DHCP and ping code, and the resident thread stopped the DHCP client itself |
-| `svc/net_svc_config.h` | The properties: the `help` line and `shell` as the board's own subcommand |
-| `cmds/cmd_net_board.c` | `net shell start` / `stop` / `status` only, and it registers no root (until issue #219 `cmds/cmd_net.c` was the whole command); it goes when issue #221 makes the telnet console resident |
+| `src/nx_net.c` | The host stack: the NetX objects, the shared operations' state and facts (`net_core_board_state`, `net_core_board_facts`) with the link worker's stack, the telnet console's (`net_tty_board_state`, `net_tty_board_facts`, issue #221, [below](#the-telnet-console-issue-221)), and the bridge session's resident thread.  Its section of `net info` is `nx_net_write_status()`, which samples every value first and then writes one line at a time through the contract's writer (until issue #219 `nx_net_print_status()`, printing straight to the console).  Until issue #220 it also held the address, DHCP and ping code, and the resident thread stopped the DHCP client itself |
+| `svc/net_svc_config.h` | The properties: the `help` line, and no subcommand of the board's own (until issue #221 `shell`, from `cmds/cmd_net_board.c`, which went with it; until issue #219 that file was the whole command) |
 
-`net info` prints the address as two lines, then the host-stack section, then
-the link worker's last failure while one is recorded (below):
+`net info` prints the address as two lines, then the telnet console's two
+lines (the shared ones, issue #221), then the host-stack section, then the
+link worker's last failure while one is recorded (below):
 
 ```
 wio> net info
 ip:    192.168.11.15/24
 gw:    192.168.11.1 (dhcp)
+telnet: :23 listening, no client, ... sessions, last ended: ...
+telnet: rx drop ..., tx ... seg / ... B, ring peak ... B, refused q... w... buf... err..., dropped ... B
   host stack: up
   mac: ...
 ...
@@ -2012,11 +2015,14 @@ read without eRPC.  After `wifi off`:
 ```
 wio> net info
 ip:    none (no host stack -- `wifi connect` brings it up)
+telnet: :23 listening, no client, ... sessions, last ended: ...
+telnet: rx drop ..., ...
   host stack: off -- the RTL8720 link was taken away (wifi on/off/reset)
 ```
 
-The telnet console's statistics are still `net shell status`, not a line of
-`net info`; issue #221 moves them.
+The telnet console's state and statistics are those two `telnet:` lines since
+issue #221 (until then `net shell status`, which is gone); the console keeps
+listening with the host stack off.
 
 `net dhcp` prints `net: acquiring an address via DHCP (up to 30 s, Ctrl+C to
 stop)...` (until issue #219 `requesting DHCP lease (up to ~30s ...)`), then
@@ -2025,9 +2031,9 @@ the two lines, or `net: no DHCP lease after 30 s` and exit 1.  Since issue
 (`net: renewing the existing lease (kept meanwhile)...`, the address stays)
 unless the lease is stale, which is acquired again; until then it stopped the
 client and acquired again every time.  With the association down it is
-refused with the link sentence and changes nothing.  A successful `net ip`
-or `net dhcp` still arms the telnet console (`net_shell_autoarm()`), until
-issue #221.
+refused with the link sentence and changes nothing.  Until issue #221 a
+successful `net ip` or `net dhcp` also armed the telnet console; it is
+resident now and nothing arms it.
 
 `net ping` now prints a `PING <a.b.c.d>, <n> probes:` heading and ends with
 `<ok>/<sent> received, rtt min/avg/max <min>/<avg>/<max> ms` (until issue #219
@@ -2067,9 +2073,9 @@ revoked link, and a lost association only marked the lease stale.
 - **The KV store's `net.mode=dhcp`** at boot (`src/kv_boot.c`) only makes DHCP
   the source and wakes the worker (`net_core_dhcp_source()`), which starts the
   client once the link is recorded up; it no longer races the link record
-  right after the bridge comes up.  The lease wait and the telnet auto-arm
-  after it are as before; `static` sets the address through the shared
-  operation, and `manual` does nothing.
+  right after the bridge comes up.  The lease wait after it is as before (the
+  telnet auto-arm that followed it went in issue #221); `static` sets the
+  address through the shared operation, and `manual` does nothing.
 - **A failed step** of the worker (a stop, reinitialise or start NetX
   refused) is not retried.  The shared file cannot write this board's log, so
   it is the last line of `net info` until a later pass or a `net dhcp` /
@@ -2078,15 +2084,12 @@ revoked link, and a lost association only marked the lease stale.
 - **`wifi flash info`** (whose stop takes the link away the same way) does
   not end FAILED.
 
-Known, issue #221 (the telnet console, not changed here):
-
-- When the worker brings the address back by itself, the telnet console is
-  not re-armed: only the `net dhcp` / `net ip` commands arm it
-  (`net_svc_addressed()`).
-- An established telnet session is not closed on the board's side when the
-  link falls, and its send queue keeps filling.
-- The listening address `net shell status` shows is the one it was armed
-  with, and stays old after `net ip` changes the address.
+Issue #220 left three telnet problems here, all resolved by issue #221
+([below](#the-telnet-console-issue-221)): the console was not re-armed when
+the worker brought the address back (it now never stops listening), an
+established session was not closed when the link fell (the worker now passes
+the fall on and the session ends), and the listening address it showed went
+stale after `net ip` (no address is shown; `ip:` is the address).
 
 Measured at `e4581d0`:
 
@@ -2095,6 +2098,74 @@ Measured at `e4581d0`:
 | `net-link` worker | priority 15 (above the consoles, 16; below the IP thread, 11, and the DHCP thread, 13; `nx_net.c` asserts at build time that the IP thread outranks it); stack 1,024 B in DTCM (`net_worker_stack`, required by `cmake/check_dtcm_residency.py`), high-water **228 B** (`thread`) |
 | Internal flash free (app partition) | **11,324 B** (12,476 B before issue #220, 11,948 B after its first step) |
 | DTCM free (`_smsp_stack - _dtcm_used_end`) | **1,848 B** (2,872 B before; the worker's stack) |
+
+### The telnet console (issue #221)
+
+The telnet console is the shared one, `shell/cmds/net_tty.c` (how it works,
+the lines it prints and the rules it keeps are
+[`svc/README.md`](../../svc/README.md#the-telnet-console-issue-221)).  It is
+resident from boot: it listens on its port whether or not the host stack is
+up, the module associated or an address there, and stays listening through
+every link loss.  There is nothing to start or stop.  Until issue #221 it was
+this board's own `src/net_shell.c`, operated with `net shell start` / `stop` /
+`status` and armed by an auto-arm; all of that is gone.
+
+| File | What it holds |
+|---|---|
+| `src/nx_net.c` | Its state and facts (`net_tty_board_state`, `net_tty_board_facts`): the transmit ring (4,096 B) and the listener's stack (2,560 B) in DTCM, each a standalone symbol (`net_tty_tx_buf`, `net_tty_stack`, which `cmake/check_dtcm_residency.py` requires; until issue #221 `nsh_tx_buf` and `g_stack`), the receive ring (512 B), the per-packet extraction buffer (1,500 B) and the state in AXI-SRAM `.bss`; the socket's transmit queue depth and retransmit from the DATA channel's budget (`nx_net.h`: 4 segments, first retransmit 2 s, which the console's 5 s deadline is asserted to exceed); `USB CDC` as the console a refusal points to |
+| `src/main.c` | `NET_TTY_TRANSPORT_DEFINE(net_tr)` and the `wio-net>` instance bound to it; `net_tty_init()` right after `nx_net_init()`, and the default port at once when the KV thread will not hand one over |
+| `src/kv_boot.c` | The port: `net.shell.port`, read once, right after the store opens and before the association |
+| `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c`, `cmds/cmd_xfer.c`, `cmds/cmd_blob_board.c` | The commands that ask the shared question and refuse on the telnet console (below) |
+| `port/netxduo/nx_user.h` | `NX_ENABLE_EXTENDED_NOTIFY_SUPPORT` (new in #221) and `NX_ENABLE_TCP_QUEUE_DEPTH_UPDATE_NOTIFY`, which `net_tty.c` requires |
+
+- **The port is `net.shell.port`, read once at boot**, right after the store
+  opens.  A missing key, one that cannot be read, or a value that is not a
+  port (`net.shell.port=<n> is not a port -- telnet stays on 23` in `dmesg`)
+  gives 23, and so does a store that does not open, a KV thread that could
+  not be created or a build without the store.  A new value takes effect at
+  the next boot.  `net.shell.autoarm` is not read any more, whatever it holds
+  (a value left in the store is ignored, without a warning).
+- **It is reachable with nothing typed** as soon as the module is associated
+  and an address is there (`wifi.autoconnect` with `net.mode=dhcp`, or `wifi
+  connect` and a lease), and again after the link comes back and the worker
+  has the lease again.
+- **A link loss ends the session on the board's side**: `wifi disconnect`
+  (from the USB CDC console), the AP going away, and the stop of `wifi flash
+  info`, `wifi on` / `off` / `reset` all take the link away, the shared worker
+  passes the fall on, and the session ends with `last ended: the link fell`;
+  what it ran is cancelled and the listener stays.  The client sees no FIN
+  (there is no link to carry it).  The silence of the DATA channel while the
+  link is down is the driver's gate (issue #218), so the console is neither
+  asked to stop nor waited for: until issue #221 the bring-up waited for its
+  socket (`net_shell_stop_sync()`) and refused with "the telnet console would
+  not release its socket".  `wifi reset` and the `wifi flash info` stop with a
+  client attached do not end FAILED, and `wifi ver` afterwards reports no
+  receive errors.
+- **Refused on the telnet console**, because each would take away the session
+  it runs on or needs the raw serial port: `wifi connect` / `disconnect` /
+  `on` / `off` / `reset`, `mlperf`, and every YMODEM transfer (`xfer`, `blob
+  write`, `wifi flash imgload` / `backup`).  The words are as before:
+  `<what>: refused on the telnet console -- it would destroy this session. Run
+  it from the USB CDC console.`
+- **`net info` has two `telnet:` lines** (above); nothing of the console goes
+  to `dmesg` any more (until issue #221 its connect, disconnect, arm and stop
+  lines did).
+- **The establish callback had never run before issue #221.**  The old
+  `src/net_shell.c` registered it without `NX_ENABLE_EXTENDED_NOTIFY_SUPPORT`
+  and threw the answer, NX_NOT_SUPPORTED, away (its comment said the option
+  was on).  The shared console publishes a connection only after that callback
+  took the link's fall count, so the first flash of issue #221 stopped at boot
+  with `telnet: NOT listening on :23 -- callback registration failed (0x4b)`.
+  The option is on now, and the build fails without it.  It changes
+  `NX_TCP_SOCKET`.
+
+Measured at `a157609`:
+
+| What | Value |
+|---|---|
+| `net-tty` listener | priority 14 (above the link worker, 15, and the consoles, 16; below the IP thread, 11, and the DHCP thread, 13); stack 2,560 B in DTCM, high-water **588 B** (`thread`, after the test run of issue #221) |
+| Internal flash free (app partition) | **14,452 B** (11,316 B at `36e16cc` measured the same way; the 11,324 B of issue #220 above was measured another way) |
+| DTCM free (`_smsp_stack - _dtcm_used_end`) | **1,848 B**, unchanged (the stack and the transmit ring were already in DTCM; only their names changed) |
 
 ## Flashing and recovery
 

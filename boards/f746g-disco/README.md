@@ -1665,13 +1665,15 @@ net>                  0          0
 ```
 
 The `net>` row appears whether or not a telnet client is attached.  Its `rx_drop`
-stays 0, but that is not evidence that no input was lost: the telnet backend
-does have a receive ring (512 B, holding 511, in `port/netxduo/nx_shell.c`).
-The NetX receive callback pulls every segment out of the socket at once, so
-the TCP window never holds input back; when the console thread is not reading
-and the ring fills, the rest of the bytes are discarded and nothing counts
-them -- not `rx_drop` (only the VCP backend increments it), not the `telnet:`
-line of `net info`.  `tx_drop` applies to both, because the no-progress
+stays 0, but that is not evidence that no input was lost: the telnet console
+does have a receive ring (512 B, holding 511; the shared
+`shell/cmds/net_tty.c`, the buffer in `port/netxduo/nx_glue.c`).  The NetX
+receive callback pulls every segment out of the socket at once, so the TCP
+window never holds input back; when the console thread is not reading and the
+ring fills, the rest of the bytes are discarded.  They are counted, just not in
+`console` (only the VCP backend increments `rx_drop`): they are `rx drop` on
+the second `telnet:` line of `net info`, since issue #221 (nothing counted them
+before).  `tx_drop` applies to both, because the no-progress
 deadline that drops output lives in the shared output path.  What counts as a
 console, and what the two columns mean, is in the root
 [README](../../README.md#a-board-can-run-more-than-one-console).
@@ -2185,7 +2187,7 @@ with a 5 s connect timeout gives up.
 
 These counters tell where the packets of `net mjpeg` went.  They observe only.
 
-`net info` prints these lines below `telnet:` (see
+`net info` prints these lines last, below the `telnet:` lines (see
 [The `net` command](#the-net-command-shared-with-wio-lite-ai-issue-219) for
 the lines above them).  They
 count from boot and are never reset; the driver, TCP and pool groups are read one
@@ -2348,15 +2350,18 @@ This board's side:
 | `svc/net_svc_config.h` | The properties: the `help` line and `mjpeg` as the board's own subcommand |
 | `cmds/cmd_net_board.c` | `net mjpeg start` / `stop` / `stats` only; it registers no root (until issue #219 `cmds/cmd_net.c` was the whole command) |
 
-`net info` prints the address as two lines, then the link worker's last
-failure while one is recorded (below), `mjpeg:` while the MJPEG server runs,
-`telnet:`, and the [counters](#network-counters-net-info-and-net-mjpeg-stats-issue-202):
+`net info` prints the address as two lines, then the two `telnet:` lines (the
+shared ones, [below](#the-telnet-console-issue-221); first since issue #221,
+before then one line after `mjpeg:`), the link worker's last failure while one
+is recorded (below), `mjpeg:` while the MJPEG server runs, and the
+[counters](#network-counters-net-info-and-net-mjpeg-stats-issue-202):
 
 ```
 sh> net info
 ip:    192.168.11.29/24
 gw:    192.168.11.1 (dhcp)
-telnet: :23 (idle, 0 sessions), tx ...
+telnet: :23 listening, no client, ... sessions, last ended: ...
+telnet: rx drop ..., tx ... seg / ... B, ring peak ... B, refused q... w... buf... err..., dropped ... B
 eth rx: ok ..., drop ..., no-buf ...
 ...
 pool:   free ... of ..., empty ... (waited ...), bad release ...
@@ -2428,9 +2433,10 @@ did not stop the client.
 - **Cable in.**  When DHCP is the source, the worker reinitialises the client,
   drops the address and starts it: the address disappears once and comes back
   with the lease a few seconds later, and STALE clears; no `net dhcp` is
-  needed.  [!] An established telnet session does not survive this (the
-  address goes away under it); until issue #221 nothing closes it on the
-  board's side when the link falls.  With a static address nothing starts.
+  needed.  An established telnet session does not survive the cable pull:
+  since issue #221 the board ends it when the link falls (below), and the
+  listener stays, so once the lease is back a new connection works with
+  nothing typed.  With a static address nothing starts.
 - **Boot.**  DHCP is the boot source, fixed (the KV store that could choose it
   is issue #214), so the first link up starts the client.
 - **A failed step** of the worker (a stop, reinitialise or start NetX
@@ -2448,6 +2454,58 @@ did not stop the client.
 | Priority | 15: above the consoles (16), below the IP thread (12) and the DHCP thread (13); `nx_glue.c` asserts at build time that the IP thread outranks it |
 | Stack | 1,024 B in internal SRAM, high-water **272 B** (`thread`) after a cable pull and re-acquire |
 | Code | text +584 B over step 1 of issue #220 (`cae1b4e`) |
+
+### The telnet console (issue #221)
+
+The telnet console is the shared one, `shell/cmds/net_tty.c` (how it works,
+the lines it prints and the rules it keeps are
+[`svc/README.md`](../../svc/README.md#the-telnet-console-issue-221)).  It
+listens on :23 from boot, whether or not there is an address or a link, with
+nothing to start or stop.  Until issue #221 it was this board's own
+`port/netxduo/nx_shell.c` / `.h`, which are gone.  This board's side:
+
+| File | What it holds |
+|---|---|
+| `port/netxduo/nx_glue.c` | Its state and facts (`net_tty_board_state`, `net_tty_board_facts`): the receive ring (512 B), the per-packet extraction buffer (1,500 B), the transmit ring (4,096 B) and the listener's stack (2,560 B), all in internal SRAM (only the CPU touches them); the socket's transmit queue depth 8 and first retransmit 2 s (10 retries, shift 1), which the console's 5 s deadline is asserted to exceed; `VCP` as the console a refusal points to |
+| `src/main.c` | `NET_TTY_TRANSPORT_DEFINE(net_tr)` and the `net>` instance bound to it; `net_tty_init()` right after the NetX objects, then the port, 23, at once (`net: telnet console init failed (telnet disabled)` at boot when the init fails) |
+| `cmds/cmd_blob_board.c` | The YMODEM of `blob write` asks the shared question and is refused on the telnet console with the same words as before: `ymodem: refused on the telnet console -- it would destroy this session. Run it from the VCP console.` (the other YMODEM paths are issue #197) |
+| `port/netxduo/nx_user.h` | `NX_ENABLE_EXTENDED_NOTIFY_SUPPORT` (new in #221) and `NX_ENABLE_TCP_QUEUE_DEPTH_UPDATE_NOTIFY`, which `net_tty.c` requires |
+
+What changed for this board with the shared console:
+
+- **A peer close now cancels the running command.**  Closing the client
+  during `watch -n 1 dmesg` and connecting again gives a prompt; before
+  issue #221 the old session's command kept running and the new connection
+  got none.
+- **A cable pull ends the session on the board's side** (`last ended: the link
+  fell`) and cancels what it ran; the listener stays.  The client sees no
+  FIN (there is no link to carry it) and gives up on its own.  After the
+  cable and the lease are back, a connection works with nothing typed.
+- **A handshake cut off part way no longer risks the listener.**  After an
+  accept that failed, the old code called accept again on the same socket;
+  by NetX's code that leaks a packet per call and the socket stops accepting
+  (the leak issue #202 found in `net mjpeg`).  The shared console goes
+  through unaccept and relisten first.  Twenty connections cut during the
+  handshake left it accepting and the packet pool full again.
+- **`net info` has two `telnet:` lines** instead of one, adding the receive
+  drops, the refusals by cause and how the last session ended, or why it is
+  not listening.
+- **Nothing of the console goes to `dmesg`** (`listening on :23 (telnet)`,
+  `client connected`, `client disconnected` are gone): the shared file cannot
+  write the board's log.
+
+Why `NX_ENABLE_EXTENDED_NOTIFY_SUPPORT`: the console publishes a connection
+only after its establish callback took the link's fall count, and without the
+option the registration answers NX_NOT_SUPPORTED.  The first flash of issue
+#221 without it stopped at boot with
+`telnet: NOT listening on :23 -- callback registration failed (0x4b)`; the
+build now fails instead.  The option changes `NX_TCP_SOCKET`.
+
+| Measured at `a157609` | |
+|---|---|
+| `net-tty` listener | priority 14: above the link worker (15) and the consoles (16), below the IP thread (12) and the DHCP thread (13) |
+| Its stack | 2,560 B in internal SRAM, high-water **572 B** (`thread`, after the test run of issue #221) |
+| Code | text +1,184 B over `36e16cc` (the shared console against `nx_shell.c`) |
 
 ## Debugging
 

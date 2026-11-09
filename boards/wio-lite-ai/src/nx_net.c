@@ -209,8 +209,9 @@ const struct net_core_facts net_core_board_facts = {
  * extraction buffer and the state stay plain .bss (AXI-SRAM), as they were.
  *
  * The listener's stack: the whole transmit path runs on it (nx_tcp_socket_send ->
- * IP -> app/nx_link_driver.c -> link_data_send).  2560 B as before #221, with a
- * measured peak of 492-612 B; if DTCM gets tight this is a safe 1 KB to give back.
+ * IP -> app/nx_link_driver.c -> link_data_send).  2560 B as before #221; the peak
+ * measured with #221's code is 588 B (492-612 B before it).  If DTCM gets tight
+ * this is a safe 1 KB to give back.
  *
  * Transmit queue depth and retransmit: the DATA channel's budget (nx_net.h), and the
  * first retransmit at NXN_TCP_RTO_MS, which the console's deadline must exceed.

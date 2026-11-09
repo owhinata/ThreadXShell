@@ -20,9 +20,11 @@
  */
 #include "net_svc.h"
 
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 
+#include "fmt.h"
 #include "net_core.h"
 #include "net_shell.h"        /* net_shell_autoarm() */
 #include "nx_net.h"
@@ -100,8 +102,31 @@ void net_svc_addressed(void)
 }
 
 /* The host-stack section: why it is (not) up, then its counters.  Written in
- * every state, even OFF: its first line carries WHY it is off. */
+ * every state, even OFF: its first line carries WHY it is off.  Then the shared
+ * link worker's last failure, only while one is recorded: the shared side cannot
+ * write this board's log (issue #220). */
+static int net_wio_line(net_svc_write_fn write, void *ctx, const char *fmt, ...)
+{
+	char line[96];
+	va_list ap;
+	int n;
+
+	va_start(ap, fmt);
+	n = fmt_vsnformat(line, sizeof line, fmt, ap);
+	va_end(ap);
+	return (write(ctx, line, (size_t)n) < 0) ? -1 : 0;
+}
+
 int net_svc_board_lines(net_svc_write_fn write, void *ctx)
 {
-	return nx_net_write_status(write, ctx);
+	struct net_core_failure lf;
+
+	if (nx_net_write_status(write, ctx) < 0)
+		return -1;
+	if (!net_core_last_failure(&lf))
+		return 0;
+	return net_wio_line(write, ctx,
+	                    "dhcp: the link worker's %s failed (0x%02x) with the link %s\r\n",
+	                    net_core_op_name(lf.op), (unsigned)lf.status,
+	                    lf.link_up ? "up" : "down");
 }

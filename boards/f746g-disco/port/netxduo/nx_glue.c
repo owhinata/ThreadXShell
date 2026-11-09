@@ -15,7 +15,6 @@
  */
 #include "nx_api.h"
 #include "nxd_dhcp_client.h"
-#include "stm32f7xx_hal.h"    /* __get_PRIMASK / __disable_irq / __set_PRIMASK   */
 
 #include "nx_glue.h"
 #include "nx_eth_driver.h"
@@ -32,8 +31,19 @@
 #define NXG_PAYLOAD       1600u
 #define NXG_POOL_BYTES    (64u * 1024u)
 #define NXG_IP_PRIORITY   12          /* below camera(10), above touch/GUIX/cli  */
+/* The shared link worker must run below the IP thread, so it cannot run before
+   the link notification returns (shell/cmds/net_core.h). */
+_Static_assert(NXG_IP_PRIORITY < NET_CORE_WORKER_PRIORITY,
+               "the net link worker must be below the IP thread");
 #define NXG_IP_STACK      2048u
 #define NXG_ARP_CACHE     1040u       /* ~20 entries                             */
+/*
+ * The shared link worker (shell/cmds/net_core.c, issue #220): one pass is the
+ * address lock, then at most a DHCP stop and a reinitialise / address drop /
+ * start, each a short NetX call chain on this thread.  1 KB, like the eth-link
+ * thread that ran the same DHCP start until #220 (1024 B, 408 B peak).
+ */
+#define NXG_WORKER_STACK  1024u
 
 static UCHAR eth_pool_mem[NXG_POOL_BYTES]
 	__attribute__((aligned(32), section(".sdram.eth")));
@@ -43,6 +53,7 @@ static NX_IP          eth_ip;
 static NX_DHCP        eth_dhcp;        /* user pool set -> no embedded DMA buffer */
 static ULONG          ip_stack[NXG_IP_STACK / sizeof(ULONG)];
 static ULONG          arp_cache[NXG_ARP_CACHE / sizeof(ULONG)];
+static ULONG          net_worker_stack[NXG_WORKER_STACK / sizeof(ULONG)];
 
 static bool nx_up;
 
@@ -56,16 +67,17 @@ static bool nx_up;
 
 /*
  * The shared operations' state and facts (shell/cmds/net_core.h, issue #220):
- * the address lock, the source, the DHCP client's state, the stale mark and the
- * recorded link level.  CPU-only, so regular SRAM like the other control
- * blocks.  The lock order on this board is
+ * the address lock, the link worker and its wake, the source, the DHCP
+ * client's state, the stale mark, the recorded link level and the worker's
+ * last failure.  CPU-only, so regular SRAM like the other control blocks (the
+ * worker's stack too).  The lock order on this board is
  *
  *     address lock -> nx_dhcp_mutex -> nx_ip_protection -> eth_lock
  *
  * and it is acyclic only because nothing takes the address lock while holding
- * a NetX mutex or eth_lock: the link-status callback (IP thread, under
- * nx_ip_protection) only records the level, and the DHCP start after a link-up
- * runs on the eth-link poll thread, which holds nothing (issue #13).
+ * a NetX mutex or eth_lock: the shared link notification (IP thread, under
+ * nx_ip_protection) only records the level and wakes the worker, and the
+ * worker and the commands hold nothing when they take it (issue #13).
  */
 struct net_core_state net_core_board_state;
 const struct net_core_facts net_core_board_facts = {
@@ -75,80 +87,11 @@ const struct net_core_facts net_core_board_facts = {
 	.boot_source = NET_CORE_SRC_DHCP,     /* DHCP is the boot default */
 	.why_link    = "the Ethernet link is down (no cable? see `eth`)",
 	.why_down    = "IP stack not up",
+	.worker_stack      = net_worker_stack,
+	.worker_stack_size = sizeof net_worker_stack,
 };
 
-/*
- * The autostart request: written by the IP thread in the link-status callback,
- * read and cleared by the eth-link poll hook.  Every access is inside a short
- * save/restore-PRIMASK section (NXG_CRIT_*), which on this single-core part is
- * what excludes the producer from the consumer's snapshot.  [!] TEMPORARY:
- * issue #220 step 2 moves the reaction to the link into the shared worker.
- */
-static volatile bool link_start_pending;   /* a link-up wants DHCP started      */
-
-/* PRIMASK critical section, as in nx_shell.c / backend/cli_backend_uart.c.  Nests
-   safely inside ThreadX's own PRIMASK sections, and restores the previous mask
-   rather than enabling unconditionally. */
-#define NXG_CRIT_ENTER()  do { uint32_t _pm = __get_PRIMASK(); __disable_irq()
-#define NXG_CRIT_EXIT()   __set_PRIMASK(_pm); } while (0)
-
 extern VOID nx_eth_driver(NX_IP_DRIVER *driver_req_ptr);
-
-/*
- * Poll-complete hook, registered with the ETH driver and run on the `eth-link`
- * thread (issue #13).  This is where the DHCP autostart actually happens: that
- * thread holds no lock at all when it gets here, so the shared start -- the
- * address lock, and through it the DHCP and IP mutexes -- follows the
- * documented order.  Waiting here delays only the next PHY poll.
- *
- * The request is consumed even if the shared side then finds nothing to do (the
- * source is static, the client runs): a start that fails is retried on the next
- * link-up or a manual `net dhcp`, not five times a second.
- */
-static void nxg_poll_hook(void *arg)
-{
-	bool pending;
-	UINT s;
-
-	(void)arg;
-	NXG_CRIT_ENTER();
-	pending            = link_start_pending;
-	link_start_pending = false;
-	NXG_CRIT_EXIT();
-	if (!pending)
-		return;
-	s = net_core_link_up_start();
-	if (s != NX_SUCCESS)
-		LOG_ERR("dhcp start failed (0x%02x)", (unsigned)s);
-}
-
-/*
- * NetX link-status callback -- IP helper thread, WITH nx_ip_protection HELD.
- *
- * Everything here must be non-blocking and NetX-free: taking the DHCP mutex from
- * this context is the deadlock in issue #13, and taking the address lock would put
- * a NetX mutex above it in the order.  So this only publishes: NetX's own link
- * flag (a byte store, on the thread NetX itself would have written it --
- * upstream's deferred link-status processing never assigns it, and route lookup
- * reads it outside the IP mutex), then the shared record of the level
- * (net_core_link_note(), one masked store) and the autostart request.
- *
- * The request is published on every callback reporting up, not only on a
- * down -> up transition, because NetX raises this callback for a speed or duplex
- * change too and the old code started DHCP on those as well.  It cannot become a
- * busy loop: the driver only raises the event when the PHY state actually changed.
- */
-static void nx_link_status_cb(NX_IP *ip, UINT iface_index, UINT up)
-{
-	ip->nx_ip_interface[iface_index].nx_interface_link_up = (UCHAR)up;
-
-	net_core_link_note(up != 0u);
-	if (up != 0u) {
-		NXG_CRIT_ENTER();
-		link_start_pending = true;
-		NXG_CRIT_EXIT();
-	}
-}
 
 int nx_net_init(void)
 {
@@ -181,11 +124,9 @@ int nx_net_init(void)
 	nx_udp_enable(&eth_ip);              /* DHCP needs UDP                        */
 	nx_tcp_enable(&eth_ip);              /* P3-ready (no sockets yet)             */
 
-	nx_ip_link_status_change_notify_set(&eth_ip, nx_link_status_cb);
-
-	/* DHCP is the boot default (user choice).  Created here; the link-status
-	   callback publishes the request and the eth-link poll thread does the start
-	   (issue #13).  Reuses the shared non-cacheable pool. */
+	/* DHCP is the boot default (user choice).  Created here; the shared link
+	   worker starts it when the link comes up (issue #220).  Reuses the shared
+	   non-cacheable pool. */
 	if (nx_dhcp_create(&eth_dhcp, &eth_ip, "eth") == NX_SUCCESS) {
 		nx_dhcp_packet_pool_set(&eth_dhcp, &eth_pool);
 		dhcp_created = true;
@@ -193,17 +134,13 @@ int nx_net_init(void)
 		LOG_WRN("dhcp create failed; use 'net ip' for a static address");
 	}
 
-	/* The shared operations' lock and state.  Before the hook below and before
-	   the scheduler starts, so the first link callback finds them in place. */
+	/* The shared operations' lock and state, the link worker and the link
+	   notification (it registers NetX's link-status callback).  Before the
+	   scheduler starts, so the first link notice finds them in place. */
 	if (net_core_init(dhcp_created) != 0) {
 		LOG_ERR("net core init failed");
 		return NXG_ERR;
 	}
-
-	/* Last, so every precondition the hook reads is already final.  Ordering is
-	   not what makes this safe -- nothing runs until the scheduler starts -- but
-	   it keeps the hook from being readable as "may run mid-init". */
-	nx_eth_set_poll_hook(nxg_poll_hook, NULL);
 
 	nx_up = true;
 	LOG_INF("NetX Duo up (IPv4); pool %u B, IP thread prio %u",

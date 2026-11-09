@@ -30,9 +30,9 @@ extern "C" {
 /**
  * One-time bring-up from tx_application_define() (after eth_init()): NetX system
  * init, the shared pool (.sdram.eth), the IP instance + IP thread, ARP/ICMP/UDP/
- * TCP, the DHCP client (created here; started later from the eth-link poll
- * thread once the link comes up -- issue #13) and the shared operations' state
- * (net_core_init()).  Only creates ThreadX objects (no
+ * TCP, the DHCP client (created here; started later by the shared link worker
+ * once the link comes up -- issue #220) and the shared operations' state, worker
+ * and link notification (net_core_init()).  Only creates ThreadX objects (no
  * blocking), so it is safe before the scheduler.  Returns NXG_OK or a negative.
  */
 int  nx_net_init(void);

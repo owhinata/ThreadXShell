@@ -472,7 +472,7 @@ static void check_info(void)
 	       before("gw:    192.168.1.1 (dhcp)", "a: 1\r\nb: 2\r\n") &&
 	       net_stub.lines_written == 2 && net_stub.write_rc_bad == 0);
 	expect("STALE after the gw",
-	       has("gw:    192.168.1.1 (dhcp)  <-- STALE (link went down; run `net dhcp`)\r\n"));
+	       has("gw:    192.168.1.1 (dhcp)  <-- STALE (link went down; DHCP restarts when it returns)\r\n"));
 	reset();
 	run("net info\r");
 	expect("no STALE without the mark",

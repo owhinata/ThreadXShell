@@ -118,7 +118,8 @@ net_f746_sample_mjpeg(struct net_f746_sample *s)
 }
 
 /*
- * The MJPEG state (while it runs), the telnet console's output health and the
+ * The shared link worker's last failure (when there is one), the MJPEG state
+ * (while it runs), the telnet console's output health and the
  * driver / TCP / packet-pool counters since boot (issue #202), in that order and
  * in today's words.  The getters each take what lock they need and are done
  * before anything is written; the groups are read one after another, not as one
@@ -128,10 +129,21 @@ int net_svc_board_lines(net_svc_write_fn write, void *ctx)
 {
 	struct net_f746_sample s;
 	const struct nx_net_diag *d = &s.d;
+	struct net_core_failure lf;
+	bool fail_on;
 
 	net_f746_sample_mjpeg(&s);
 	s.telnet_on = nx_shell_stats_get(&s.ts);
 	s.diag_on = (nx_net_diag_get(&s.d) == NXG_OK);
+	fail_on = net_core_last_failure(&lf);
+
+	/* The shared link worker cannot write this board's log, so its last
+	 * failure is told here, and only while one is recorded (issue #220). */
+	if (fail_on &&
+	    net_f746_line(write, ctx, "dhcp: the link worker's %s failed (0x%02x) "
+	                  "with the link %s\r\n", net_core_op_name(lf.op),
+	                  (unsigned)lf.status, lf.link_up ? "up" : "down") != 0)
+		return -1;
 
 	if (s.mjpeg_on &&
 	    net_f746_line(write, ctx, "mjpeg: http://board:80 (%s, %lu frames)\r\n",

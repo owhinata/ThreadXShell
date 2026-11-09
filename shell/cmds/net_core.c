@@ -25,6 +25,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "cli_config.h"       /* CLI_INSTANCE_PRIORITY */
+
+/* The worker reacts to the link while a console sits in a command: it must
+ * run ahead of every console (ThreadX: lower number, higher priority). */
+CLI_STATIC_ASSERT(NET_CORE_WORKER_PRIORITY < CLI_INSTANCE_PRIORITY,
+                  "the net link worker must outrank the consoles");
+
+/* The worker's one event flag: "look at the pair again". */
+#define NET_CORE_EVT_WAKE ((ULONG)0x1u)
+
 /* The echo's payload.  The probe's wait goes to NetX as ticks, which are
  * milliseconds on both boards (NX_IP_PERIODIC_RATE 1000). */
 #define NET_CORE_PING_DATA "threadx-ping"
@@ -102,23 +112,29 @@ static void net_core_drop_address(void)
  * The state moves with each step that succeeded: once the address is dropped
  * the source is DHCP and nothing is stale, whatever the start then answers.
  * ADDRESS LOCK HELD, client not running.  @return the first failure, or
- * NX_SUCCESS.
+ * NX_SUCCESS; on a failure @p op (when not NULL) says which step.
  */
-static UINT net_core_dhcp_begin(void)
+static UINT net_core_dhcp_begin(uint8_t *op)
 {
 	struct net_core_state *s = &net_core_board_state;
 	const struct net_core_facts *f = &net_core_board_facts;
 	UINT st;
 
 	st = nx_dhcp_interface_reinitialize(f->dhcp, f->iface);
-	if (st != NX_SUCCESS)
+	if (st != NX_SUCCESS) {
+		if (op != NULL)
+			*op = NET_CORE_OP_REINIT;
 		return st;
+	}
 	net_core_drop_address();
 	s->source = NET_CORE_SRC_DHCP;
 	s->lease_stale = 0u;
 	st = nx_dhcp_interface_start(f->dhcp, f->iface);
-	if (st != NX_SUCCESS)
+	if (st != NX_SUCCESS) {
+		if (op != NULL)
+			*op = NET_CORE_OP_START;
 		return st;
+	}
 	s->dhcp_running = 1u;
 	return NX_SUCCESS;
 }
@@ -139,24 +155,173 @@ static UINT net_core_dhcp_stop(void)
 	return NX_SUCCESS;
 }
 
+/* The DHCP state moved as asked: an older worker failure no longer describes
+ * it.  ADDRESS LOCK HELD. */
+static void net_core_fail_clear(void)
+{
+	struct net_core_failure *lf = &net_core_board_state.last_fail;
+
+	lf->op = NET_CORE_OP_NONE;
+	lf->link_up = 0u;
+	lf->status = NX_SUCCESS;
+}
+
+/* ADDRESS LOCK HELD. */
+static void net_core_fail_note(uint8_t op, UINT status, uint8_t link_up)
+{
+	struct net_core_failure *lf = &net_core_board_state.last_fail;
+
+	lf->op = op;
+	lf->link_up = link_up;
+	lf->status = status;
+}
+
+/* ---- the link: notification and worker -------------------------------------- */
+
+/*
+ * NetX's link-status callback -- the IP thread, WITH nx_ip_protection HELD
+ * (nx_ip_thread_entry.c), for every change the driver flags, including an up
+ * that repeats (f746g-disco reports speed and duplex changes this way).
+ *
+ * Everything here must be non-blocking and NetX-free: the DHCP client takes
+ * its own mutex and then nx_ip_protection, so a DHCP call from here closes a
+ * lock-order cycle (issue #13), and the address lock would put a NetX mutex
+ * above it.  So it only publishes:
+ *  - NetX's own interface flag, on the thread NetX itself would write it
+ *    from: upstream's deferred link-status processing never assigns it, and
+ *    route lookup reads it outside the IP mutex;
+ *  - the level and, on a down, the fall mark -- together, in one masked
+ *    section, which is what the worker's copy pairs with;
+ *  - the wake, after the section (an event-flag set never blocks; the worker
+ *    is below the IP thread, so it does not run until this returns).
+ */
+static VOID net_core_link_notify(NX_IP *ip, UINT iface, UINT up)
+{
+	TX_INTERRUPT_SAVE_AREA
+	struct net_core_state *s = &net_core_board_state;
+
+	ip->nx_ip_interface[iface].nx_interface_link_up = (UCHAR)(up != 0u);
+	if (iface != net_core_board_facts.iface)
+		return;
+	TX_DISABLE
+	s->link_up = (up != 0u) ? 1u : 0u;
+	if (up == 0u)
+		s->link_fell = 1u;
+	TX_RESTORE
+	(void)tx_event_flags_set(&s->wake, NET_CORE_EVT_WAKE, TX_OR);
+}
+
+void net_core_link_react(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+	struct net_core_state *s = &net_core_board_state;
+	const struct net_core_facts *f = &net_core_board_facts;
+	ULONG ip = 0u, mask = 0u;
+	uint8_t up, fell, op = NET_CORE_OP_NONE;
+	bool acted = false, failed = false;
+	UINT st;
+
+	if (!s->ready)
+		return;
+	net_core_lock();
+	/* The pair, and the mark cleared, in one section: a notice after this
+	 * leaves a new mark and a new wake for the next pass. */
+	TX_DISABLE
+	up = s->link_up;
+	fell = s->link_fell;
+	s->link_fell = 0u;
+	TX_RESTORE
+
+	/*
+	 * Decided from the state of THIS moment, under the lock: a `net ip` that
+	 * got in first made the source static and nothing starts; a `net dhcp`
+	 * that started a client after an unhandled fall sees it stopped here and
+	 * started again below (the link is up), losing one acquisition only.
+	 */
+	if (fell) {
+		if (s->dhcp_running) {
+			acted = true;
+			st = net_core_dhcp_stop();
+			if (st != NX_SUCCESS) {
+				/* Still recorded running: nothing starts below. */
+				failed = true;
+				net_core_fail_note(NET_CORE_OP_STOP, st, up);
+			}
+		}
+		(void)nx_ip_interface_address_get(f->ip, f->iface, &ip, &mask);
+		if (s->source == NET_CORE_SRC_DHCP && ip != 0u)
+			s->lease_stale = 1u;
+	}
+	if (up && s->dhcp_created && s->source == NET_CORE_SRC_DHCP &&
+	    !s->dhcp_running) {
+		acted = true;
+		st = net_core_dhcp_begin(&op);
+		if (st != NX_SUCCESS) {
+			failed = true;
+			net_core_fail_note(op, st, up);
+		}
+	}
+	if (acted && !failed)
+		net_core_fail_clear();
+	net_core_unlock();
+}
+
+/* The worker: wait, react, forever.  Every wake gets a full pass; an extra
+ * wake is a pass that finds nothing to do. */
+static VOID net_core_worker_entry(ULONG arg)
+{
+	ULONG got;
+
+	(void)arg;
+	for (;;) {
+		if (tx_event_flags_get(&net_core_board_state.wake, NET_CORE_EVT_WAKE,
+		                       TX_OR_CLEAR, &got, TX_WAIT_FOREVER) == TX_SUCCESS)
+			net_core_link_react();
+	}
+}
+
+/* Wake the worker from a command thread. */
+static void net_core_wake(void)
+{
+	(void)tx_event_flags_set(&net_core_board_state.wake, NET_CORE_EVT_WAKE,
+	                         TX_OR);
+}
+
 /* ---- init -------------------------------------------------------------------- */
 
 int net_core_init(bool dhcp_created)
 {
 	struct net_core_state *s = &net_core_board_state;
+	const struct net_core_facts *f = &net_core_board_facts;
 
 	s->ready = 0u;
-	if (tx_mutex_create(&s->addr_lock, "net-addr", TX_INHERIT) != TX_SUCCESS)
-		return -1;
 	s->dhcp_created = dhcp_created ? 1u : 0u;
 	s->link_up = 0u;
+	s->link_fell = 0u;
 	/* A board that boots on DHCP but could not create the client has no
 	   source until someone sets a static address. */
-	s->source = net_core_board_facts.boot_source;
+	s->source = f->boot_source;
 	if (s->source == NET_CORE_SRC_DHCP && !dhcp_created)
 		s->source = NET_CORE_SRC_NONE;
 	s->dhcp_running = 0u;
 	s->lease_stale = 0u;
+	net_core_fail_clear();
+
+	/* Nothing below runs before the scheduler starts, and the first link
+	   notice comes after it: by then all of it is in place, or ready is
+	   clear and every operation says DOWN. */
+	if (tx_mutex_create(&s->addr_lock, "net-addr", TX_INHERIT) != TX_SUCCESS)
+		return -1;
+	if (tx_event_flags_create(&s->wake, "net-link") != TX_SUCCESS)
+		return -1;
+	if (tx_thread_create(&s->worker, "net-link", net_core_worker_entry, 0u,
+	                     f->worker_stack, f->worker_stack_size,
+	                     NET_CORE_WORKER_PRIORITY, NET_CORE_WORKER_PRIORITY,
+	                     TX_NO_TIME_SLICE, TX_AUTO_START) != TX_SUCCESS)
+		return -1;
+	if (nx_ip_link_status_change_notify_set(f->ip, net_core_link_notify)
+	    != NX_SUCCESS)
+		return -1;
 	s->ready = 1u;              /* last: everything above is in place */
 	return 0;
 }
@@ -225,6 +390,7 @@ void net_core_set_static(uint32_t ip, uint32_t mask, uint32_t gw,
 
 	s->source = NET_CORE_SRC_STATIC;
 	s->lease_stale = 0u;            /* the operator said what the address is */
+	net_core_fail_clear();
 	net_core_unlock();
 	net_core_say(res, NET_SVC_OK, NULL);
 	return;
@@ -281,7 +447,9 @@ void net_core_dhcp_start(struct net_svc_result *res)
 	}
 
 	if (!s->dhcp_running) {
-		st = net_core_dhcp_begin();
+		st = net_core_dhcp_begin(NULL);
+		if (st == NX_SUCCESS)
+			net_core_fail_clear();
 		net_core_unlock();
 		net_core_say(res, (st == NX_SUCCESS) ? NET_SVC_OK : NET_SVC_REFUSED,
 		             NULL);
@@ -302,6 +470,7 @@ void net_core_dhcp_start(struct net_svc_result *res)
 		st = nx_dhcp_interface_force_renew(f->dhcp, f->iface);
 		if (st == NX_SUCCESS) {
 			s->source = NET_CORE_SRC_DHCP;
+			net_core_fail_clear();
 			net_core_unlock();
 			net_core_say(res, NET_SVC_RENEWED, NULL);
 			return;
@@ -318,7 +487,9 @@ void net_core_dhcp_start(struct net_svc_result *res)
 		return;
 	}
 	/* Running without a lease, or with a stale one: start from scratch. */
-	st = net_core_dhcp_begin();
+	st = net_core_dhcp_begin(NULL);
+	if (st == NX_SUCCESS)
+		net_core_fail_clear();
 	net_core_unlock();
 	net_core_say(res, (st == NX_SUCCESS) ? NET_SVC_OK : NET_SVC_REFUSED, NULL);
 }
@@ -360,7 +531,6 @@ void net_core_ping(uint32_t ip, unsigned timeout_ms, unsigned *rtt_ms,
 void net_core_dhcp_source(struct net_svc_result *res)
 {
 	struct net_core_state *s = &net_core_board_state;
-	UINT st = NX_SUCCESS;
 
 	if (net_core_not_ready(res))
 		return;
@@ -370,59 +540,40 @@ void net_core_dhcp_source(struct net_svc_result *res)
 	}
 	net_core_lock();
 	s->source = NET_CORE_SRC_DHCP;
-	if (!s->dhcp_running)
-		st = net_core_dhcp_begin();   /* [!] step 1 only: see net_core.h */
 	net_core_unlock();
-	net_core_say(res, (st == NX_SUCCESS) ? NET_SVC_OK : NET_SVC_REFUSED, NULL);
+	/* After the source changed: a worker that already handled the up starts
+	   the client on this pass; with the link down it starts on the up. */
+	net_core_wake();
+	net_core_say(res, NET_SVC_OK, NULL);
 }
 
-/* ---- the link, until the worker -------------------------------------------------- */
-
-void net_core_link_note(bool up)
-{
-	TX_INTERRUPT_SAVE_AREA
-
-	TX_DISABLE
-	net_core_board_state.link_up = up ? 1u : 0u;
-	TX_RESTORE
-}
-
-UINT net_core_link_up_start(void)
+bool net_core_last_failure(struct net_core_failure *out)
 {
 	struct net_core_state *s = &net_core_board_state;
-	UINT st = NX_SUCCESS;
-
-	if (!s->ready || !s->dhcp_created)
-		return NX_SUCCESS;
-	net_core_lock();
-	/* Decided under the lock from the state of that moment: a `net ip` that
-	 * got here first made the source static, and nothing starts. */
-	if (net_core_link_is_up() && s->source == NET_CORE_SRC_DHCP &&
-	    !s->dhcp_running)
-		st = net_core_dhcp_begin();
-	net_core_unlock();
-	return st;
-}
-
-UINT net_core_link_lost(bool stop_dhcp)
-{
-	struct net_core_state *s = &net_core_board_state;
-	const struct net_core_facts *f = &net_core_board_facts;
-	ULONG ip = 0u, mask = 0u;
-	UINT st = NX_SUCCESS;
+	bool have;
 
 	if (!s->ready)
-		return NX_SUCCESS;
+		return false;
 	net_core_lock();
-	/* Recorded here too, under the lock, so a `net dhcp` that takes the lock
-	 * after this sees the link down whether or not the IP thread has run the
-	 * link-status callback yet. */
-	net_core_link_note(false);
-	if (stop_dhcp && s->dhcp_running)
-		st = net_core_dhcp_stop();
-	(void)nx_ip_interface_address_get(f->ip, f->iface, &ip, &mask);
-	if (s->source == NET_CORE_SRC_DHCP && ip != 0u)
-		s->lease_stale = 1u;
+	*out = s->last_fail;
 	net_core_unlock();
-	return st;
+	have = (out->op != NET_CORE_OP_NONE);
+	return have;
+}
+
+const char *net_core_op_name(uint8_t op)
+{
+	switch (op) {
+	case NET_CORE_OP_STOP:   return "stop";
+	case NET_CORE_OP_REINIT: return "reinitialise";
+	case NET_CORE_OP_START:  return "start";
+	default:                 return "?";
+	}
+}
+
+bool net_core_source_is_dhcp(void)
+{
+	const struct net_core_state *s = &net_core_board_state;
+
+	return s->ready && s->source == NET_CORE_SRC_DHCP;
 }

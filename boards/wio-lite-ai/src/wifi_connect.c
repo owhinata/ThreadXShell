@@ -20,6 +20,7 @@
 #include "wifi_rpc.h"
 #include "rtl_link.h"
 #include "wifi_auto.h"   /* issue #32: the host's own re-association policy */
+#include "net_core.h"   /* net_core_source_is_dhcp() (issue #220) */
 #include "net_shell.h"
 #include "nx_net.h"      /* the host stack owns the module while it is up (#23 U3) */
 #include "stm32h7xx_hal.h"   /* HAL_GetTick: the retry budget in issue #40 */
@@ -107,6 +108,8 @@ static int wifi_arm_bridge(struct cli_instance *sh)
 		 * off->on(STA) cycle), so there is nothing to do.  The link flag follows on
 		 * the owner's next association poll, within NXN_REFRESH_MS. */
 		cli_print(sh, "  the host stack is already up (link follows within ~8s)\r\n");
+		if (net_core_source_is_dhcp())
+			cli_print(sh, "  DHCP takes the address again once it does\r\n");
 		return 0;
 	}
 	if (nx_net_up(&why) != 0) {
@@ -128,7 +131,12 @@ static int wifi_arm_bridge(struct cli_instance *sh)
 		(void)nx_net_write_status(wifi_status_write, sh);
 		return 1;
 	}
-	cli_print(sh, "  host stack up -- run `net dhcp` for an address\r\n");
+	/* The shared link worker starts DHCP by itself when DHCP is the source
+	 * (`net dhcp` or the KV boot made it so, issue #220). */
+	if (net_core_source_is_dhcp())
+		cli_print(sh, "  host stack up -- DHCP takes an address (`net info`)\r\n");
+	else
+		cli_print(sh, "  host stack up -- run `net dhcp` for an address\r\n");
 	return 0;
 }
 

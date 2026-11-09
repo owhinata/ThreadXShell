@@ -74,6 +74,7 @@ REQUIRED_DTCM = (
     "net_sh_stack",                 # telnet shell instance    (CLI_INSTANCE_DEFINE)
     "nxn_stack",                    # NetX Duo owner thread
     "nxn_ip_stack",                 # NetX Duo IP thread
+    "net_worker_stack",             # shared net link worker (shell/cmds/net_core.c, #220)
     "g_stack",                      # net_shell listener
     "erpc_svc_stack",               # eRPC link service
     "iwdg_stack",                   # watchdog petter

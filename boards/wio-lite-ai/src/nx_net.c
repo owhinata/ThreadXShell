@@ -58,6 +58,10 @@
 #define NXN_POOL_BYTES     (48u * 1024u)
 
 #define NXN_IP_PRIORITY    11u        /* just below the link service thread (10)     */
+/* The shared link worker must run below the IP thread, so it cannot run before the link
+ * notification returns (shell/cmds/net_core.h). */
+_Static_assert(NXN_IP_PRIORITY < NET_CORE_WORKER_PRIORITY,
+               "the net link worker must be below the IP thread");
 #define NXN_IP_STACK       2048u
 #define NXN_ARP_CACHE      1040u      /* ~20 entries                                 */
 
@@ -90,10 +94,10 @@
 /*
  * How long nx_net_link_taken() waits for the owner to act on a revoked link
  * (owhinata/wio-lite-ai#41).  The owner only has to reach the generation check at the top of
- * its UP branch and run nxn_link_revoked(), which issues no eRPC and takes no link -- only the
- * shared address lock and, to stop the client, the DHCP mutex (net_core_link_lost()) -- so
- * this is a scheduler turn plus a DHCP stop, not a transaction, and half a second is ample
- * slack.  It is deliberately NOT sized for the module: nothing here talks to it.
+ * its UP branch and run nxn_link_revoked(), which issues no eRPC, takes no link and no
+ * lock (the DHCP stop is the shared link worker's since issue #220) -- so this is a
+ * scheduler turn, not a transaction, and half a second is ample slack.  It is
+ * deliberately NOT sized for the module: nothing here talks to it.
  */
 #define NXN_TAKEN_WAIT_MS  500u
 #define NXN_TAKEN_POLL_MS  5u
@@ -131,6 +135,15 @@
  */
 #define NXN_LINK_DOWN_SAMPLES 2
 
+/*
+ * The shared link worker's stack (shell/cmds/net_core.c, issue #220).  One pass is the
+ * address lock, then at most a DHCP stop and a reinitialise / address drop / start, each
+ * a short NetX call chain; the eRPC never runs on it.  1 KB, against this board's nx-net
+ * owner at 3072 B with a measured peak of 788-860 B on far longer chains (eRPC calls with
+ * 160-byte locals).  DTCM like every other thread stack here (check_dtcm_residency.py).
+ */
+#define NXN_WORKER_STACK   1024u
+
 #define NXN_DSTAT_WORDS    12u        /* LINK_DATA_STATS reply                        */
 #define NXN_ETH_REPLY_MIN  (8u + ERPC_ETH_STAT_WORDS * 4u)
 
@@ -160,21 +173,24 @@ static NX_IP          nxn_ip;
 static NX_DHCP        nxn_dhcp;
 static ULONG          nxn_ip_stack[NXN_IP_STACK / sizeof(ULONG)] DTCM_BSS;
 static ULONG          nxn_arp_cache[NXN_ARP_CACHE / sizeof(ULONG)];
+static UCHAR          net_worker_stack[NXN_WORKER_STACK] DTCM_BSS __attribute__((aligned(8)));
 
 static bool nxn_ready;                /* the NetX objects exist                      */
 static bool nxn_dhcp_created;
 
 /*
  * The shared operations' state and facts (shell/cmds/net_core.h, issue #220):
- * the address lock, the source, the DHCP client's state, the stale mark and the
- * recorded link level.  Plain .bss (AXI-SRAM) like the other NetX control
- * blocks here; nothing but the CPU touches it.
+ * the address lock, the link worker and its wake, the source, the DHCP client's
+ * state, the stale mark, the recorded link level and the worker's last failure.
+ * Plain .bss (AXI-SRAM) like the other NetX control blocks here; nothing but the
+ * CPU touches it.  The worker's stack is DTCM (net_worker_stack above).
  *
  * LOCK ORDER: the address lock is NEVER taken while the rtl_link coarse mutex is
- * held.  net_core_link_lost() runs before nxn_stop() claims the link, and the CLI
- * entry points take no link at all.  Below it sit the NetX DHCP mutex and
- * nx_ip_protection, which is the same direction everything else in this file
- * goes.
+ * held.  It is taken only by threads that hold no other lock: the CLI entry points
+ * (which take no link at all), the shared link worker, the telnet listener
+ * (net_shell.c, reading the address) and the KV boot thread (kv_boot.c); the owner
+ * thread here never takes it.  Below it sit the NetX DHCP mutex and nx_ip_protection, which is the
+ * same direction everything else in this file goes.
  *
  * Boots with no source: nothing addresses this interface until `net dhcp`,
  * `net ip` or the KV boot does.
@@ -187,6 +203,8 @@ const struct net_core_facts net_core_board_facts = {
 	.boot_source = NET_CORE_SRC_NONE,
 	.why_link    = "the link is down (not associated) -- `wifi connect` first",
 	.why_down    = "the host stack did not initialise",
+	.worker_stack      = net_worker_stack,
+	.worker_stack_size = sizeof net_worker_stack,
 };
 
 /* Owner thread. */
@@ -324,47 +342,7 @@ static int nxn_eth_info(uint8_t mac[6], uint8_t *flags)
 	return 0;
 }
 
-/* ---- NetX callbacks ---------------------------------------------------------- */
-
-/*
- * IP helper thread, under nx_ip_protection.  NetX only calls this because
- * nx_ip_link_status_change_notify_set() registered it -- without a callback,
- * _nx_ip_deferred_link_status_process() returns without even asking the driver, so the
- * interface flag would never move.
- *
- * It updates NetX's field and the shared record of the level, and nothing else.  Starting
- * the DHCP client from here would be wrong twice over:
- * NetX runs this callback WITH nx_ip_protection held (nx_ip_thread_entry.c), while the
- * DHCP client takes its own mutex and then sends packets that take nx_ip_protection --
- * so an IP->DHCP edge here plus the DHCP->IP edge that already exists is a lock-order
- * cycle.  And `net dhcp` can start the client from a CLI thread at the same moment.
- * The DHCP client is started only by `net dhcp` (shell/cmds/net_core.c) and the KV boot,
- * from their own threads.
- */
-static void nxn_link_status_cb(NX_IP *ip, UINT iface_index, UINT link_up)
-{
-	ip->nx_ip_interface[iface_index].nx_interface_link_up = (UCHAR)link_up;
-	/* The shared record of the level: one masked store, no NetX call, no lock
-	 * (issue #220; step 2 replaces this callback with the shared one). */
-	net_core_link_note(link_up != 0u);
-}
-
 /* ---- the owner thread -------------------------------------------------------- */
-
-/*
- * The link is closed: record it, stop DHCP if asked, and mark a DHCP address stale --
- * all in the shared state, under its lock (net_core_link_lost(), issue #220).  The
- * stop's answer only goes to the log: the shared side keeps the client recorded as
- * running when NetX did not stop it.  [!] TEMPORARY: step 2 of issue #220 moves this
- * reaction into the shared worker and removes these calls.
- */
-static void nxn_link_lost(bool stop_dhcp)
-{
-	UINT s = net_core_link_lost(stop_dhcp);
-
-	if (s != NX_SUCCESS)
-		LOG_WRN("dhcp stop failed (0x%02x)", (unsigned)s);
-}
 
 /*
  * Wait until BOTH ends are quiet.  This is app/link_data.h's detach ordering rule, and it
@@ -455,7 +433,10 @@ static void nxn_stop(const char *why)
 	 */
 	nx_link_driver_set_link(0);
 	net_shell_stop_request();
-	nxn_link_lost(true);
+	/* The DHCP client is stopped by the shared link worker, which the down notice
+	 * of set_link(0) wakes (issue #220).  It may run after the module is told
+	 * DATA_CFG(off) below; a DHCP frame it would send meanwhile is refused at the
+	 * gate just closed. */
 
 	if (rtl_link_claim(NXN_ARM_CLAIM_MS) != 0) {
 		/* Nobody gave up the mutex in twenty seconds.  We cannot even ask the module
@@ -706,10 +687,9 @@ refuse:
  * to say "up" costs nothing, being early to say "down" costs every socket.
  *
  * The write itself goes through nx_link_driver_set_link(), which only flags the change
- * and lets the IP thread run the status callback; nx_interface_link_up is never written
- * from this thread.  Nothing here starts or stops DHCP: that lock-order cycle is
- * documented at nxn_link_status_cb(), and a DHCP lease is instead marked stale for
- * `net info` to report.
+ * and lets the IP thread run the shared status notification; nx_interface_link_up is
+ * never written from this thread.  Nothing here starts or stops DHCP or marks a lease
+ * stale: the shared link worker does, woken by that notification (issue #220).
  */
 static void nxn_publish_link(int assoc)
 {
@@ -736,7 +716,6 @@ static void nxn_publish_link(int assoc)
 		return;
 
 	nx_link_driver_set_link(0);
-	nxn_link_lost(false);            /* a DHCP address outlived the association */
 	LOG_WRN("link down (%s)", (assoc == 0) ? "not associated" : "module did not answer");
 }
 
@@ -897,8 +876,7 @@ static void nxn_refresh(void)
  */
 static void nxn_link_revoked(void)
 {
-	nx_link_driver_set_link(0);
-	nxn_link_lost(true);
+	nx_link_driver_set_link(0);       /* the shared worker stops DHCP (issue #220) */
 	link_data_detach();
 	rtl_link_uart_unref_gen(nxn_uart_gen);
 	nxn_uart_gen = 0u;
@@ -1011,8 +989,6 @@ int nx_net_init(void)
 	nx_udp_enable(&nxn_ip);                  /* DHCP                                */
 	nx_tcp_enable(&nxn_ip);                  /* compiled in for U4; no sockets yet  */
 
-	nx_ip_link_status_change_notify_set(&nxn_ip, nxn_link_status_cb);
-
 	if (nx_dhcp_create(&nxn_dhcp, &nxn_ip, "nx-link") == NX_SUCCESS) {
 		nx_dhcp_packet_pool_set(&nxn_dhcp, &nxn_pool);
 		/*
@@ -1027,6 +1003,9 @@ int nx_net_init(void)
 		LOG_WRN("dhcp create failed; use `net ip` for a static address");
 	}
 
+	/* The shared lock and state, the link worker and the link notification (it
+	 * registers NetX's link-status callback, which NetX needs before it even asks
+	 * the driver: nx_link_driver.c).  Before the scheduler, as everything here. */
 	if (net_core_init(nxn_dhcp_created) != 0)
 		return NXN_ERR;
 	if (tx_event_flags_create(&nxn_evt, "nx-net") != TX_SUCCESS)

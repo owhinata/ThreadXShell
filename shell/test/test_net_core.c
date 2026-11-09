@@ -3,9 +3,12 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test: the one implementation of the address, DHCP and ping operations
- * (shell/cmds/net_core.c, issue #220 step 1), compiled as it is, over fake
- * NetX / DHCP / ThreadX calls (nx_shim/, shim/tx_api.h) that record every
- * call, whether the address lock was held for it, and the masked sections.
+ * and of the link notification and worker (shell/cmds/net_core.c, issue
+ * #220), compiled as it is, over fake NetX / DHCP / ThreadX calls (nx_shim/,
+ * shim/tx_api.h) that record every call, whether the address lock was held
+ * for it, and the masked sections.  The worker's thread is not run: one pass
+ * (net_core_link_react()) is called directly, and the notification is the
+ * function net_core_init() registered with the fake NetX.
  *
  * The fake DHCP record has three states (not started / acquiring / bound)
  * and refuses a start after a stop until it is reinitialised, as NetX
@@ -30,13 +33,30 @@
  *    lock;
  *  - `net ip` and `net dhcp` clear the stale mark, and `net dhcp` on a stale
  *    lease acquires from scratch instead of renewing it;
- *  - the temporary link entries: the start after a link-up only with the
- *    link up, the source DHCP and the client stopped; the link-lost entry
- *    records the link down, stops when asked, marks a DHCP address stale
- *    only, and keeps a client NetX did not stop as running;
- *  - the KV "source DHCP" starts even with the link recorded down;
- *  - the link note is one masked store, no NetX call, no lock.
+ *  - init creates the lock, the event flags, the worker (priority, stack)
+ *    and registers the notification, and any one failing leaves ready clear;
+ *  - the notification: NetX's interface flag, the level and the fall mark in
+ *    one masked section, the wake after it; no NetX call, no lock;
+ *  - one worker pass: the copy and the clearing of the mark in one section,
+ *    then under the lock: a fall stops a running client (the address stays)
+ *    and marks a DHCP address stale (not a static one); the link up with DHCP
+ *    the source and the client stopped starts it; no source, static, or no
+ *    client starts nothing; up -> down -> up stops and starts again, down ->
+ *    up -> down only stops, a repeated up does nothing;
+ *  - a notice that arrives after the copy leaves a new mark and a new wake,
+ *    and the next pass handles it;
+ *  - a bounce, then `net dhcp`: the next pass stops and restarts that client,
+ *    and it ends running;
+ *  - a failed stop, reinitialise or start moves the state only by what
+ *    succeeded and is kept as the last failure (step, NetX's answer, the
+ *    level); a later success -- a pass, `net dhcp`, `net ip` -- clears it, a
+ *    pass with nothing to do does not;
+ *  - the KV "source DHCP": not refused with the link down, starts nothing by
+ *    itself, wakes the worker -- which starts the client if the up was
+ *    already handled, or on the up;
+ *  - the worker thread waits for its flag and runs one pass per wake.
  */
+#include <setjmp.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -51,6 +71,7 @@
 
 static NX_IP   fake_ip;
 static NX_DHCP fake_dhcp;
+static ULONG   fake_worker_stack[256];
 
 struct net_core_state net_core_board_state;
 const struct net_core_facts net_core_board_facts = {
@@ -60,6 +81,8 @@ const struct net_core_facts net_core_board_facts = {
 	.boot_source = NET_CORE_SRC_DHCP,
 	.why_link    = "board: link down",
 	.why_down    = "board: not up",
+	.worker_stack      = fake_worker_stack,
+	.worker_stack_size = sizeof fake_worker_stack,
 };
 
 /* ---- the fakes --------------------------------------------------------------- */
@@ -89,6 +112,15 @@ struct fake {
 	/* the lock and the masked sections */
 	int mutex_fail, mutex_created;
 	int held, takes, irq_depth, irq_sections;
+	/* the event flags, the worker thread and the notification */
+	int flags_fail, flags_created, thread_fail, threads, notify_fail, notifies;
+	int wakes, wakes_masked, wakes_locked, waits;
+	VOID (*entry)(ULONG);
+	VOID *stack; ULONG stack_size; UINT prio, preempt, autostart; ULONG slice;
+	VOID (*notify)(NX_IP *, UINT, UINT);
+	NX_IP *notify_ip;
+	/* run inside a DHCP stop / start, after the worker's copy */
+	void (*during_stop)(void), (*during_start)(void);
 	/* what was called, in order, and whether the lock was held */
 	char log[LOG_MAX][32];
 	int locked[LOG_MAX];
@@ -138,6 +170,72 @@ UINT tx_mutex_put(TX_MUTEX *m)
 	(void)m;
 	fk.held = 0;
 	return TX_SUCCESS;
+}
+
+UINT tx_event_flags_create(TX_EVENT_FLAGS_GROUP *g, CHAR *name)
+{
+	(void)g; (void)name;
+	if (fk.flags_fail)
+		return 0x06u;
+	fk.flags_created++;
+	return TX_SUCCESS;
+}
+
+UINT tx_event_flags_set(TX_EVENT_FLAGS_GROUP *g, ULONG flags, UINT opt)
+{
+	(void)g; (void)flags; (void)opt;
+	fk.wakes++;
+	if (fk.irq_depth != 0)
+		fk.wakes_masked++;
+	if (fk.held)
+		fk.wakes_locked++;
+	return TX_SUCCESS;
+}
+
+/* The worker's wait: the first call returns a wake, the second leaves the
+ * worker's loop (the thread-body test). */
+static jmp_buf worker_out;
+
+UINT tx_event_flags_get(TX_EVENT_FLAGS_GROUP *g, ULONG req, UINT opt,
+                        ULONG *got, ULONG wait)
+{
+	(void)g;
+	fk.waits++;
+	if (req != 0x1u || opt != TX_OR_CLEAR || wait != TX_WAIT_FOREVER)
+		fk.waits += 1000;            /* not the worker's wait */
+	if (fk.waits > 1)
+		longjmp(worker_out, 1);
+	*got = req;
+	return TX_SUCCESS;
+}
+
+UINT tx_thread_create(TX_THREAD *t, CHAR *name, VOID (*entry)(ULONG),
+                      ULONG input, VOID *stack, ULONG size, UINT prio,
+                      UINT preempt, ULONG slice, UINT autostart)
+{
+	(void)t; (void)name; (void)input;
+	if (fk.thread_fail)
+		return 0x0Fu;
+	fk.threads++;
+	fk.entry = entry;
+	fk.stack = stack;
+	fk.stack_size = size;
+	fk.prio = prio;
+	fk.preempt = preempt;
+	fk.slice = slice;
+	fk.autostart = autostart;
+	return TX_SUCCESS;
+}
+
+UINT nx_ip_link_status_change_notify_set(NX_IP *ip,
+        VOID (*cb)(NX_IP *, UINT, UINT))
+{
+	if (fk.notify_fail)
+		return 0x07u;
+	fk.notifies++;
+	fk.notify = cb;
+	fk.notify_ip = ip;
+	return NX_SUCCESS;
 }
 
 UINT tx_shim_disable(void)
@@ -229,6 +327,8 @@ UINT nx_dhcp_interface_start(NX_DHCP *d, UINT i)
 {
 	(void)d; (void)i;
 	note("start", 1);
+	if (fk.during_start != NULL)
+		fk.during_start();
 	if (fk.fail_start)
 		return fk.fail_start;
 	if (fk.needs_init)
@@ -243,6 +343,8 @@ UINT nx_dhcp_interface_stop(NX_DHCP *d, UINT i)
 {
 	(void)d; (void)i;
 	note("stop", 1);
+	if (fk.during_stop != NULL)
+		fk.during_stop();
 	if (fk.fail_stop)
 		return fk.fail_stop;
 	if (fk.dstate == D_IDLE)
@@ -327,18 +429,35 @@ static void clear_calls(void)
 	fk.masked_netx = 0;
 	fk.addr_sets = 0;              /* the Nth-call failures count from here */
 	fk.gw_sets = 0;
+	fk.wakes = 0;
+	fk.wakes_masked = 0;
+	fk.wakes_locked = 0;
+}
+
+/* The IP thread reports the link: the notification init registered. */
+static void link(bool up)
+{
+	fk.notify(&fake_ip, 0u, up ? 1u : 0u);
+}
+
+/* One pass of the worker. */
+static void react(void)
+{
+	net_core_link_react();
 }
 
 #define S (&net_core_board_state)
 
-/* A ready core, link up, nothing addressed. */
+/* A ready core, link up (notified; the worker has not run), nothing
+ * addressed, the client not running. */
 static void fresh(bool dhcp_created)
 {
 	memset(&fk, 0, sizeof fk);
 	memset(&net_core_board_state, 0, sizeof net_core_board_state);
+	memset(&fake_ip, 0, sizeof fake_ip);
 	fk.mask = 0u;
 	(void)net_core_init(dhcp_created);
-	net_core_link_note(true);
+	link(true);
 	clear_calls();
 }
 
@@ -397,20 +516,45 @@ static void check_init(void)
 	net_core_ping(GW_A, 1000u, &rtt, &r);
 	expect("before init: ping is DOWN", r.status == NET_SVC_DOWN && fk.nlog == 0);
 	net_core_dhcp_source(&r);
-	expect("before init: the KV source is DOWN", r.status == NET_SVC_DOWN && fk.nlog == 0);
-	expect("before init: the link entries do nothing",
-	       net_core_link_up_start() == NX_SUCCESS &&
-	       net_core_link_lost(true) == NX_SUCCESS && fk.nlog == 0 && fk.takes == 0);
+	expect("before init: the KV source is DOWN, no wake",
+	       r.status == NET_SVC_DOWN && fk.nlog == 0 && fk.wakes == 0);
+	react();
+	expect("before init: a worker pass does nothing",
+	       fk.nlog == 0 && fk.takes == 0 && fk.irq_sections == 0);
 
 	fk.mutex_fail = 1;
 	expect("init: a lock that cannot be created fails, ready stays clear",
 	       net_core_init(true) == -1 && S->ready == 0);
+	memset(&fk, 0, sizeof fk);
+	fk.flags_fail = 1;
+	expect("init: event flags that cannot be created fail, ready stays clear",
+	       net_core_init(true) == -1 && S->ready == 0);
+	memset(&fk, 0, sizeof fk);
+	fk.thread_fail = 1;
+	expect("init: a worker that cannot be created fails, ready stays clear",
+	       net_core_init(true) == -1 && S->ready == 0 && fk.notifies == 0);
+	memset(&fk, 0, sizeof fk);
+	fk.notify_fail = 1;
+	expect("init: a notification NetX refuses fails, ready stays clear",
+	       net_core_init(true) == -1 && S->ready == 0);
+	net_core_addr_get(&a, &r);
+	expect("init: ... and the operations stay DOWN", r.status == NET_SVC_DOWN);
 
 	memset(&fk, 0, sizeof fk);
 	expect("init: ready, the lock created once, the boot source DHCP",
 	       net_core_init(true) == 0 && S->ready == 1 && fk.mutex_created == 1 &&
 	       S->source == NET_CORE_SRC_DHCP && S->dhcp_running == 0 &&
-	       S->link_up == 0 && S->dhcp_created == 1 && fk.nlog == 0);
+	       S->link_up == 0 && S->link_fell == 0 && S->dhcp_created == 1 &&
+	       fk.nlog == 0 && S->last_fail.op == NET_CORE_OP_NONE);
+	expect("init: the flags, the worker (priority 15, the board's stack, "
+	       "auto start, no time slice) and the notification on the board's IP",
+	       fk.flags_created == 1 && fk.threads == 1 &&
+	       fk.prio == NET_CORE_WORKER_PRIORITY && fk.preempt == fk.prio &&
+	       fk.stack == (VOID *)fake_worker_stack &&
+	       fk.stack_size == sizeof fake_worker_stack &&
+	       fk.autostart == TX_AUTO_START && fk.slice == TX_NO_TIME_SLICE &&
+	       fk.notifies == 1 && fk.notify != NULL && fk.notify_ip == &fake_ip &&
+	       fk.wakes == 0);
 	memset(&fk, 0, sizeof fk);
 	expect("init: boots on DHCP without a client -> no source",
 	       net_core_init(false) == 0 && S->source == NET_CORE_SRC_NONE &&
@@ -474,7 +618,7 @@ static void check_static(void)
 	       r.status == NET_SVC_OK &&
 	       calls_are("addr_get, gw_get, addr_set c0a80b63, gw_clear") && fk.gw == 0u);
 
-	net_core_link_note(false);
+	link(false);
 	clear_calls();
 	net_core_set_static(IP_S, MASK24, GW_A, &r);
 	expect("ip: allowed with the link down", r.status == NET_SVC_OK && fk.gw == GW_A);
@@ -555,7 +699,7 @@ static void check_dhcp(void)
 	struct net_svc_result r;
 
 	fresh(true);
-	net_core_link_note(false);
+	link(false);
 	clear_calls();
 	fk.ip = IP_S;
 	S->source = NET_CORE_SRC_STATIC;
@@ -687,7 +831,7 @@ static void check_ping(void)
 	unsigned rtt = 0;
 
 	fresh(true);
-	net_core_link_note(false);
+	link(false);
 	clear_calls();
 	net_core_ping(GW_A, 1000u, &rtt, &r);
 	expect("ping: the link down is LINK, no probe sent",
@@ -725,22 +869,37 @@ static void check_stale(void)
 
 	fresh(true);
 	bound(IP_A, GW_A);
-	(void)net_core_link_lost(false);
-	expect("stale: a DHCP address under a lost link is marked", S->lease_stale == 1);
-	net_core_link_note(true);
+	link(false);
+	react();
+	expect("stale: a DHCP address under a fallen link is marked, the client "
+	       "stopped, the address kept",
+	       S->lease_stale == 1 && S->dhcp_running == 0 && fk.ip == IP_A);
+	link(true);
+	S->source = NET_CORE_SRC_DHCP;
 	net_core_set_static(IP_S, MASK24, GW_A, &r);
 	expect("stale: `net ip` clears it", r.status == NET_SVC_OK && S->lease_stale == 0);
 
 	fresh(true);
 	bound(IP_A, GW_A);
-	(void)net_core_link_lost(false);
-	net_core_link_note(true);
+	link(false);
+	react();
+	link(true);                        /* the worker has not run for it yet */
 	clear_calls();
 	net_core_dhcp_start(&r);
 	expect("stale: `net dhcp` acquires from scratch (no renew) and clears it",
 	       r.status == NET_SVC_OK &&
-	       calls_are("stop, reinit, addr_set 0, gw_clear, start") &&
+	       calls_are("reinit, addr_set 0, gw_clear, start") &&
 	       fk.ip == 0u && S->dhcp_running == 1 && S->lease_stale == 0);
+
+	/* Still running with a stale lease (the worker's stop had failed). */
+	fresh(true);
+	bound(IP_A, GW_A);
+	S->lease_stale = 1u;
+	net_core_dhcp_start(&r);
+	expect("stale: running and stale -> stop, reinit, drop, start, no renew",
+	       r.status == NET_SVC_OK &&
+	       calls_are("stop, reinit, addr_set 0, gw_clear, start") &&
+	       S->dhcp_running == 1 && S->lease_stale == 0);
 	fresh(true);
 	bound(IP_A, GW_A);
 	S->lease_stale = 1u;
@@ -751,110 +910,408 @@ static void check_stale(void)
 	       S->dhcp_running == 1 && S->lease_stale == 1);
 }
 
-/* ---- the temporary link entries and the KV source --------------------------- */
+/* ---- the notification ------------------------------------------------------- */
 
-static void check_link_entries(void)
+static void check_notify(void)
+{
+	fresh(true);
+	expect("notify: up -> NetX's flag up, the level up, no fall mark, one wake",
+	       fake_ip.nx_ip_interface[0].nx_interface_link_up == 1 &&
+	       S->link_up == 1 && S->link_fell == 0);
+	link(false);
+	expect("notify: down -> one masked section, no NetX call, no lock",
+	       fk.irq_sections == 1 && fk.irq_depth == 0 && fk.nlog == 0 &&
+	       fk.takes == 0);
+	expect("notify: ... NetX's flag down, the level down, the fall marked",
+	       fake_ip.nx_ip_interface[0].nx_interface_link_up == 0 &&
+	       S->link_up == 0 && S->link_fell == 1);
+	expect("notify: ... one wake, set outside the masked section",
+	       fk.wakes == 1 && fk.wakes_masked == 0 && fk.wakes_locked == 0);
+	clear_calls();
+	link(true);
+	expect("notify: an up after a fall keeps the mark for the worker",
+	       S->link_up == 1 && S->link_fell == 1 && fk.wakes == 1 &&
+	       fk.nlog == 0 && fk.takes == 0);
+	clear_calls();
+	link(true);
+	expect("notify: a repeated up wakes again (the worker decides)",
+	       fk.wakes == 1 && S->link_up == 1);
+
+	/* Another interface: NetX's own flag, nothing of ours. */
+	fresh(true);
+	fk.notify(&fake_ip, 1u, 0u);
+	expect("notify: another interface moves only NetX's flag for it",
+	       fake_ip.nx_ip_interface[1].nx_interface_link_up == 0 &&
+	       S->link_up == 1 && S->link_fell == 0 && fk.wakes == 0);
+}
+
+/* ---- the worker's reactions ------------------------------------------------ */
+
+static void check_worker(void)
 {
 	struct net_svc_result r;
-	UINT st;
 
-	/* The note: one masked store, nothing else. */
+	/* Fall under a held lease. */
 	fresh(true);
-	net_core_link_note(false);
-	expect("note: one masked section, no NetX call, no lock",
-	       fk.irq_sections == 1 && fk.irq_depth == 0 && fk.nlog == 0 &&
-	       fk.takes == 0 && S->link_up == 0);
-	net_core_link_note(true);
-	expect("note: up", S->link_up == 1);
+	bound(IP_A, GW_A);
+	link(false);
+	clear_calls();
+	react();
+	expect("worker: a fall stops the client under the lock, keeps the address",
+	       calls_are("stop, addr_get") && fk.locked[0] && fk.locked[1] &&
+	       S->dhcp_running == 0 && fk.ip == IP_A && fk.gw == GW_A &&
+	       S->lease_stale == 1 && S->link_fell == 0);
+	expect("worker: ... one hold of the lock, one masked section (the copy)",
+	       fk.takes == 1 && fk.irq_sections == 1);
+	no_lock_left("worker fall");
+	clear_calls();
+	react();
+	expect("worker: the next pass finds nothing to do", fk.nlog == 0 &&
+	       S->dhcp_running == 0 && S->lease_stale == 1);
 
-	/* f746: start after a link-up. */
+	/* Fall with a static address. */
+	fresh(true);
+	net_core_set_static(IP_S, MASK24, GW_A, &r);
+	link(false);
+	clear_calls();
+	react();
+	expect("worker: a fall under a static address: no stop, not stale",
+	       strstr(calls(), "stop") == NULL && S->lease_stale == 0 &&
+	       fk.ip == IP_S && S->source == NET_CORE_SRC_STATIC);
+
+	/* Fall with DHCP running but no address yet. */
+	fresh(true);
+	net_core_dhcp_start(&r);
+	link(false);
+	react();
+	expect("worker: a fall before any lease: stopped, nothing stale",
+	       S->dhcp_running == 0 && S->lease_stale == 0);
+
+	/* Up, the source DHCP, not running: start. */
 	fresh(true);
 	fk.ip = IP_A;
-	st = net_core_link_up_start();
-	expect("up-start: up, DHCP, stopped -> reinit, drop, start",
-	       st == NX_SUCCESS && calls_are("reinit, addr_set 0, gw_clear, start") &&
-	       S->dhcp_running == 1);
-	clear_calls();
-	st = net_core_link_up_start();
-	expect("up-start: already running -> nothing", st == NX_SUCCESS && fk.nlog == 0);
+	S->lease_stale = 1u;
+	react();
+	expect("worker: up, DHCP, stopped -> reinit, drop, start under the lock",
+	       calls_are("reinit, addr_set 0, gw_clear, start") && fk.locked[0] &&
+	       fk.locked[3] && S->dhcp_running == 1 && fk.ip == 0u &&
+	       S->lease_stale == 0 && fk.dstate == D_ACQUIRING);
+	no_lock_left("worker up");
 
-	fresh(true);
-	S->source = NET_CORE_SRC_STATIC;
-	st = net_core_link_up_start();
-	expect("up-start: static -> nothing", st == NX_SUCCESS && fk.nlog == 0 &&
-	       S->dhcp_running == 0);
 	fresh(true);
 	S->source = NET_CORE_SRC_NONE;
-	(void)net_core_link_up_start();
-	expect("up-start: no source -> nothing", fk.nlog == 0);
-	fresh(true);
-	net_core_link_note(false);
-	clear_calls();
-	(void)net_core_link_up_start();
-	expect("up-start: link down -> nothing", fk.nlog == 0);
-	fresh(false);
-	(void)net_core_link_up_start();
-	expect("up-start: no client -> nothing", fk.nlog == 0 && fk.takes == 0);
-	fresh(true);
-	fk.fail_start = 0x23u;
-	st = net_core_link_up_start();
-	expect("up-start: a failed start returns NetX's status, not running",
-	       st == 0x23u && S->dhcp_running == 0);
-	no_lock_left("up-start");
-
-	/* wio: the link is lost. */
-	fresh(true);
-	bound(IP_A, GW_A);
-	st = net_core_link_lost(true);
-	expect("lost: records down, stops, marks a DHCP address stale",
-	       st == NX_SUCCESS && S->link_up == 0 && S->dhcp_running == 0 &&
-	       S->lease_stale == 1 && fk.ip == IP_A && fk.takes == 1 &&
-	       strstr(calls(), "stop") != NULL);
-	fresh(true);
-	bound(IP_A, GW_A);
-	(void)net_core_link_lost(false);
-	expect("lost without stop: the client keeps running, still stale",
-	       S->dhcp_running == 1 && S->lease_stale == 1 &&
-	       strstr(calls(), "stop") == NULL && S->link_up == 0);
-	fresh(true);
-	S->source = NET_CORE_SRC_STATIC;
-	fk.ip = IP_S;
-	(void)net_core_link_lost(true);
-	expect("lost: a static address is not stale", S->lease_stale == 0);
-	fresh(true);
-	net_core_dhcp_start(&r);          /* running, no address yet */
-	(void)net_core_link_lost(true);
-	expect("lost: no address, nothing stale", S->lease_stale == 0 &&
+	react();
+	expect("worker: up with no source starts nothing", fk.nlog == 0 &&
 	       S->dhcp_running == 0);
 	fresh(true);
-	bound(IP_A, GW_A);
-	fk.fail_stop = 0x22u;
-	st = net_core_link_lost(true);
-	expect("lost: a stop NetX refused keeps the client running, status returned",
-	       st == 0x22u && S->dhcp_running == 1);
-	no_lock_left("lost");
-
-	/* A `net dhcp` after the link was lost is LINK even before the IP thread's
-	   callback ran. */
-	net_core_dhcp_start(&r);
-	expect("lost: a later `net dhcp` is LINK", r.status == NET_SVC_LINK);
-
-	/* KV: source DHCP even with the link recorded down. */
+	S->source = NET_CORE_SRC_STATIC;
+	react();
+	expect("worker: up with a static source starts nothing", fk.nlog == 0);
+	fresh(false);
+	S->source = NET_CORE_SRC_DHCP;
+	react();
+	expect("worker: up with no DHCP client starts nothing", fk.nlog == 0);
 	fresh(true);
-	net_core_link_note(false);
+	link(false);
+	clear_calls();
+	react();
+	expect("worker: down, DHCP, stopped: nothing to stop, nothing starts",
+	       strstr(calls(), "start") == NULL && strstr(calls(), "stop") == NULL &&
+	       S->dhcp_running == 0);
+
+	/* A static `net ip` that got the lock before the worker. */
+	fresh(true);
+	net_core_set_static(IP_S, MASK24, GW_A, &r);
+	clear_calls();
+	react();
+	expect("worker: decided under the lock -- a static address got there first",
+	       fk.nlog == 0 && S->source == NET_CORE_SRC_STATIC);
+
+	/* After a static address, `net dhcp` while the link is up. */
+	fresh(true);
+	react();                           /* the boot up: DHCP starts */
+	lease_arrives(IP_A, GW_A);
+	clear_calls();
+	link(true);                        /* speed / duplex change */
+	react();
+	expect("worker: a repeated up with the client running does nothing",
+	       fk.nlog == 0 && S->dhcp_running == 1 && fk.ip == IP_A);
+}
+
+/* ---- folding several notices into one pass ----------------------------- */
+
+static void check_fold(void)
+{
+	fresh(true);
+	bound(IP_A, GW_A);
+	link(false);
+	link(true);
+	clear_calls();
+	react();
+	expect("fold: up -> down -> up in one pass stops, then starts again",
+	       calls_are("stop, addr_get, reinit, addr_set 0, gw_clear, start") &&
+	       S->dhcp_running == 1 && fk.dstate == D_ACQUIRING &&
+	       S->lease_stale == 0 && fk.ip == 0u);
+
+	fresh(true);
+	bound(IP_A, GW_A);
+	link(false);
+	link(true);
+	link(false);
+	clear_calls();
+	react();
+	expect("fold: down -> up -> down in one pass only stops",
+	       calls_are("stop, addr_get") && S->dhcp_running == 0 &&
+	       S->lease_stale == 1 && fk.ip == IP_A);
+
+	fresh(true);
+	bound(IP_A, GW_A);
+	link(true);
+	link(true);
+	clear_calls();
+	react();
+	expect("fold: repeated ups with the client running do nothing",
+	       fk.nlog == 0 && S->dhcp_running == 1);
+}
+
+/* ---- a notice after the worker's copy --------------------------------------- */
+
+static void up_now(void)   { fk.during_stop = NULL; fk.during_start = NULL; link(true); }
+static void down_now(void) { fk.during_stop = NULL; fk.during_start = NULL; link(false); }
+
+static void check_after_copy(void)
+{
+	/* The link comes back while the worker is stopping the client. */
+	fresh(true);
+	bound(IP_A, GW_A);
+	link(false);
+	clear_calls();
+	fk.during_stop = up_now;
+	react();
+	expect("after copy: an up during the stop is not acted on by this pass",
+	       S->dhcp_running == 0 && strstr(calls(), "start") == NULL &&
+	       S->link_up == 1 && S->link_fell == 0);
+	expect("after copy: ... it woke the worker again", fk.wakes == 1);
+	clear_calls();
+	react();
+	expect("after copy: ... and the next pass starts the client",
+	       calls_are("reinit, addr_set 0, gw_clear, start") &&
+	       S->dhcp_running == 1);
+
+	/* The link falls while the worker is starting the client. */
+	fresh(true);
+	clear_calls();
+	fk.during_start = down_now;
+	react();
+	expect("after copy: a fall during the start leaves a new mark and a wake",
+	       S->dhcp_running == 1 && S->link_fell == 1 && S->link_up == 0 &&
+	       fk.wakes == 1);
+	clear_calls();
+	react();
+	expect("after copy: ... and the next pass stops the client",
+	       strstr(calls(), "stop") != NULL && S->dhcp_running == 0 &&
+	       S->link_fell == 0);
+}
+
+/* ---- a bounce the worker has not handled, then `net dhcp` ------------------- */
+
+static void check_bounce_then_dhcp(void)
+{
+	struct net_svc_result r;
+
+	/* Not running before (static), the operator asks for DHCP. */
+	fresh(true);
+	net_core_set_static(IP_S, MASK24, GW_A, &r);
+	react();
+	link(false);
+	link(true);
+	net_core_dhcp_start(&r);
+	expect("bounce: `net dhcp` after an unhandled down -> up starts (OK)",
+	       r.status == NET_SVC_OK && S->dhcp_running == 1);
+	clear_calls();
+	react();
+	expect("bounce: the pending fall stops that client and the pass starts it "
+	       "again -- it ends running",
+	       calls_are("stop, addr_get, reinit, addr_set 0, gw_clear, start") &&
+	       S->dhcp_running == 1 && fk.dstate == D_ACQUIRING &&
+	       S->source == NET_CORE_SRC_DHCP && S->lease_stale == 0);
+
+	/* A held lease, renewed by the operator between the bounce and the pass. */
+	fresh(true);
+	bound(IP_A, GW_A);
+	link(false);
+	link(true);
+	net_core_dhcp_start(&r);
+	expect("bounce: a held lease is renewed by `net dhcp`",
+	       r.status == NET_SVC_RENEWED && S->dhcp_running == 1);
+	react();
+	expect("bounce: ... the pass still stops it and acquires again (running)",
+	       S->dhcp_running == 1 && fk.dstate == D_ACQUIRING && fk.ip == 0u &&
+	       S->lease_stale == 0 && S->link_fell == 0);
+}
+
+/* ---- failures and the last-failure record ----------------------------------- */
+
+static void check_failures(void)
+{
+	struct net_svc_result r;
+	struct net_core_failure lf;
+
+	fresh(true);
+	expect("fail: none recorded -> the getter says so",
+	       !net_core_last_failure(&lf) && fk.takes == 1);
+
+	/* The stop fails: still running, nothing started even with the link up. */
+	fresh(true);
+	bound(IP_A, GW_A);
+	link(false);
+	link(true);
+	fk.fail_stop = 0x22u;
+	clear_calls();
+	react();
+	expect("fail: a failed stop keeps the client running and starts nothing",
+	       calls_are("stop, addr_get") && S->dhcp_running == 1 &&
+	       fk.ip == IP_A && S->lease_stale == 1);
+	expect("fail: ... recorded as the stop, NetX's answer, the level up",
+	       net_core_last_failure(&lf) && lf.op == NET_CORE_OP_STOP &&
+	       lf.status == 0x22u && lf.link_up == 1 &&
+	       strcmp(net_core_op_name(lf.op), "stop") == 0);
+	no_lock_left("fail stop");
+	clear_calls();
+	link(true);
+	react();
+	expect("fail: a pass with nothing to do keeps the record",
+	       net_core_last_failure(&lf) && lf.op == NET_CORE_OP_STOP);
+
+	/* The stop fails with the link down: the level recorded is down. */
+	fresh(true);
+	bound(IP_A, GW_A);
+	link(false);
+	fk.fail_stop = 0x22u;
+	react();
+	expect("fail: a failed stop with the link down records the level down",
+	       net_core_last_failure(&lf) && lf.op == NET_CORE_OP_STOP &&
+	       lf.link_up == 0);
+	/* The next fall, with the stop working again, clears it. */
+	fk.fail_stop = 0u;
+	link(false);
+	react();
+	expect("fail: a later pass whose steps succeed clears the record",
+	       !net_core_last_failure(&lf) && S->dhcp_running == 0);
+
+	/* The reinitialise fails: not started, the address kept. */
+	fresh(true);
+	fk.ip = IP_A;
+	fk.fail_reinit = 0x24u;
+	react();
+	expect("fail: a failed reinit on the up starts nothing, keeps the address",
+	       calls_are("reinit") && S->dhcp_running == 0 && fk.ip == IP_A);
+	expect("fail: ... recorded as the reinitialise with the level up",
+	       net_core_last_failure(&lf) && lf.op == NET_CORE_OP_REINIT &&
+	       lf.status == 0x24u && lf.link_up == 1 &&
+	       strcmp(net_core_op_name(lf.op), "reinitialise") == 0);
+
+	/* The start fails: the address dropped, the source DHCP, not running. */
+	fresh(true);
+	fk.ip = IP_A;
+	S->lease_stale = 1u;
+	fk.fail_start = 0x23u;
+	react();
+	expect("fail: a failed start: address dropped, DHCP, not running, not stale",
+	       fk.ip == 0u && S->source == NET_CORE_SRC_DHCP &&
+	       S->dhcp_running == 0 && S->lease_stale == 0);
+	expect("fail: ... recorded as the start",
+	       net_core_last_failure(&lf) && lf.op == NET_CORE_OP_START &&
+	       lf.status == 0x23u && lf.link_up == 1 &&
+	       strcmp(net_core_op_name(lf.op), "start") == 0);
+	/* No retry: another wake with nothing new does the same once, no loop. */
+	fk.fail_start = 0u;
+	clear_calls();
+	react();
+	expect("fail: the next pass (a later wake) starts it, and clears the record",
+	       S->dhcp_running == 1 && !net_core_last_failure(&lf));
+
+	/* `net dhcp` and `net ip` successes clear it too. */
+	fresh(true);
+	fk.fail_start = 0x23u;
+	react();
+	fk.fail_start = 0u;
+	net_core_dhcp_start(&r);
+	expect("fail: a successful `net dhcp` clears the record",
+	       r.status == NET_SVC_OK && !net_core_last_failure(&lf));
+	fresh(true);
+	fk.fail_start = 0x23u;
+	react();
+	net_core_set_static(IP_S, MASK24, GW_A, &r);
+	expect("fail: a successful `net ip` clears the record",
+	       r.status == NET_SVC_OK && !net_core_last_failure(&lf));
+	fresh(true);
+	fk.fail_start = 0x23u;
+	react();
+	net_core_dhcp_start(&r);
+	expect("fail: a refused `net dhcp` keeps it",
+	       r.status == NET_SVC_REFUSED && net_core_last_failure(&lf) &&
+	       lf.op == NET_CORE_OP_START);
+	no_lock_left("fail");
+}
+
+/* ---- the KV source -------------------------------------------------------- */
+
+static void check_kv(void)
+{
+	struct net_svc_result r;
+
+	/* The up was already handled (no source then): the KV wakes the worker. */
+	fresh(true);
+	S->source = NET_CORE_SRC_NONE;
+	react();
 	clear_calls();
 	net_core_dhcp_source(&r);
-	expect("kv: the link down does not refuse it; it starts the client",
+	expect("kv: link up and handled -> source DHCP, no DHCP call, a wake "
+	       "after the lock",
 	       r.status == NET_SVC_OK && S->source == NET_CORE_SRC_DHCP &&
-	       S->dhcp_running == 1 && calls_are("reinit, addr_set 0, gw_clear, start"));
+	       fk.nlog == 0 && fk.wakes == 1 && fk.wakes_locked == 0 &&
+	       S->dhcp_running == 0);
+	react();
+	expect("kv: ... the woken pass starts the client",
+	       calls_are("reinit, addr_set 0, gw_clear, start") &&
+	       S->dhcp_running == 1);
+
+	/* The link still down: not refused, the up starts it. */
+	fresh(true);
+	S->source = NET_CORE_SRC_NONE;
+	link(false);
+	react();
 	clear_calls();
 	net_core_dhcp_source(&r);
-	expect("kv: already running -> nothing more", r.status == NET_SVC_OK &&
-	       fk.nlog == 0);
+	expect("kv: the link down does not refuse it", r.status == NET_SVC_OK &&
+	       S->source == NET_CORE_SRC_DHCP && fk.wakes == 1);
+	react();
+	expect("kv: ... the pass with the link down starts nothing",
+	       strstr(calls(), "start") == NULL && S->dhcp_running == 0);
+	link(true);
+	react();
+	expect("kv: ... the up starts it", S->dhcp_running == 1);
+
 	fresh(false);
 	net_core_dhcp_source(&r);
-	expect("kv: no client is REFUSED", r.status == NET_SVC_REFUSED && fk.nlog == 0);
+	expect("kv: no client is REFUSED, no wake",
+	       r.status == NET_SVC_REFUSED && fk.nlog == 0 && fk.wakes == 0);
 	no_lock_left("kv");
+}
+
+/* ---- the worker thread --------------------------------------------------- */
+
+static void check_thread(void)
+{
+	fresh(true);
+	if (setjmp(worker_out) == 0)
+		fk.entry(0u);
+	expect("thread: waits for its flag (or-clear, forever) and runs one pass "
+	       "per wake",
+	       fk.waits == 2 && S->dhcp_running == 1 &&
+	       calls_are("reinit, addr_set 0, gw_clear, start"));
+	fk.held = 0;                       /* left the loop between passes */
 }
 
 int main(void)
@@ -866,7 +1323,14 @@ int main(void)
 	check_dhcp();
 	check_ping();
 	check_stale();
-	check_link_entries();
+	check_notify();
+	check_worker();
+	check_fold();
+	check_after_copy();
+	check_bounce_then_dhcp();
+	check_failures();
+	check_kv();
+	check_thread();
 	if (failures != 0) {
 		printf("test_net_core: %d failure(s)\n", failures);
 		return 1;

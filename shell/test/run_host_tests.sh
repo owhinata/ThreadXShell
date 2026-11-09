@@ -1235,8 +1235,12 @@ done
 # so they are pinned here: `net ip` puts everything back (the reinitialise
 # before the address), `net dhcp`'s three cases and LINK with nothing called,
 # each failed step moving the state only by what succeeded, ping's three
-# answers, the stale mark, and the temporary link entries of step 1.
+# answers, the stale mark, and the link: the notification (one masked section,
+# no NetX call, no lock), one worker pass's reactions and folding, a notice
+# after the worker's copy, a bounce before `net dhcp`, the last-failure record,
+# the KV source's wake and init failing on any of its objects.
 gcc $CFLAGS -I "$here/shim" -I "$here/nx_shim" -I "$here/../cmds" -I "$svc/net" \
+    -I "$here/../include" \
     "$here/test_net_core.c" "$here/../cmds/net_core.c" \
     $LDFLAGS -o "$out/test_net_core"
 "$out/test_net_core"

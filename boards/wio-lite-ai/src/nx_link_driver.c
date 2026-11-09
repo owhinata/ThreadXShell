@@ -421,8 +421,9 @@ void nx_link_driver_set_link(int up)
 	__set_PRIMASK(pm);
 	/*
 	 * Only flag the change; the IP thread asks NX_LINK_GET_STATUS for the real state and
-	 * runs the status-change callback, which updates the interface flag and nothing else
-	 * (nx_net.c records why starting DHCP from there would be a lock-order cycle).  Note
+	 * runs the shared status-change notification (shell/cmds/net_core.c), which updates
+	 * the interface flag, records the level and wakes the link worker -- it never calls
+	 * DHCP itself, which would be a lock-order cycle (issue #13).  Note
 	 * that _nx_ip_deferred_link_status_process() returns immediately when no callback is
 	 * registered, so nx_ip_link_status_change_notify_set() is not optional.
 	 */

@@ -12,7 +12,9 @@
 
 #include "tx_api.h"
 
-typedef struct NX_IP_STRUCT { int opaque; } NX_IP;
+/* Only the member the link notification writes (NetX's own interface flag). */
+typedef struct NX_INTERFACE_STRUCT { UCHAR nx_interface_link_up; } NX_INTERFACE;
+typedef struct NX_IP_STRUCT { NX_INTERFACE nx_ip_interface[2]; } NX_IP;
 typedef struct NX_PACKET_STRUCT { int opaque; } NX_PACKET;
 
 #define NX_NULL        ((void *)0)
@@ -29,5 +31,8 @@ UINT nx_ip_gateway_address_clear(NX_IP *ip_ptr);
 UINT nx_icmp_ping(NX_IP *ip_ptr, ULONG ip_address, CHAR *data, ULONG data_size,
                   NX_PACKET **response_ptr, ULONG wait_option);
 UINT nx_packet_release(NX_PACKET *packet_ptr);
+UINT nx_ip_link_status_change_notify_set(NX_IP *ip_ptr,
+        VOID (*link_status_change_notify)(NX_IP *ip_ptr, UINT interface_index,
+                                          UINT link_up));
 
 #endif /* NX_API_H */

@@ -17,7 +17,8 @@
  * _Static_assert still has to find the board's value.
  *
  * The shared NetX operations (shell/cmds/net_core.c, issue #220) also take a
- * mutex and mask interrupts: the mutex calls and the TX_DISABLE / TX_RESTORE
+ * mutex, mask interrupts, create and wait on an event-flags group and create
+ * their link worker thread: those calls and the TX_DISABLE / TX_RESTORE
  * section are declared below as calls into the test (test_net_core.c defines
  * them and records what was held when), and nothing else uses them.
  */
@@ -40,12 +41,28 @@ typedef struct { void *opaque; } TX_MUTEX;
 #define TX_SUCCESS ((UINT)0)
 #define TX_WAIT_FOREVER ((ULONG)0xFFFFFFFFUL)
 #define TX_INHERIT      ((UINT)1)
+#define TX_OR           ((UINT)0)
+#define TX_OR_CLEAR     ((UINT)1)
+#define TX_NO_TIME_SLICE ((ULONG)0)
+#define TX_AUTO_START   ((UINT)1)
 
 ULONG tx_time_get(void);
 
 UINT tx_mutex_create(TX_MUTEX *mutex_ptr, CHAR *name_ptr, UINT inherit);
 UINT tx_mutex_get(TX_MUTEX *mutex_ptr, ULONG wait_option);
 UINT tx_mutex_put(TX_MUTEX *mutex_ptr);
+
+UINT tx_event_flags_create(TX_EVENT_FLAGS_GROUP *group_ptr, CHAR *name_ptr);
+UINT tx_event_flags_set(TX_EVENT_FLAGS_GROUP *group_ptr, ULONG flags_to_set,
+                        UINT set_option);
+UINT tx_event_flags_get(TX_EVENT_FLAGS_GROUP *group_ptr, ULONG requested_flags,
+                        UINT get_option, ULONG *actual_flags_ptr,
+                        ULONG wait_option);
+UINT tx_thread_create(TX_THREAD *thread_ptr, CHAR *name_ptr,
+                      VOID (*entry_function)(ULONG entry_input),
+                      ULONG entry_input, VOID *stack_start, ULONG stack_size,
+                      UINT priority, UINT preempt_threshold, ULONG time_slice,
+                      UINT auto_start);
 
 /* The interrupt-masked section, as calls the test counts. */
 UINT tx_shim_disable(void);

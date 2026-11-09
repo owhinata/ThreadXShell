@@ -269,11 +269,13 @@ static void cfg_net(void)
 	}
 
 	if (strcmp(mode, "dhcp") == 0) {
-		/* Make DHCP the source: unlike `net dhcp` it is not refused while the
-		 * link record is still catching up with the association. */
+		/* Make DHCP the source and let the shared link worker start the
+		 * client once the link is up (issue #220).  Unlike `net dhcp` it is not
+		 * refused while the link record is still catching up with the
+		 * association, so the order does not rest on thread priorities. */
 		net_core_dhcp_source(&r);
 		if (r.status != NET_SVC_OK) {
-			LOG_WRN("the DHCP client would not start");
+			LOG_WRN("DHCP cannot be the source (no DHCP client)");
 			return;
 		}
 		if (!cfg_wait_ip(KV_BOOT_DHCP_WAIT_MS)) {

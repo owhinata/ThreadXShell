@@ -71,7 +71,7 @@ NET_SVC_BOARD_DECLS
 /* A board marks a DHCP lease its link layer saw the link go down under
  * (issue #220). */
 #define NET_CMD_STALE(a) ((a)->lease_stale \
-	? "  <-- STALE (link went down; run `net dhcp`)" : "")
+	? "  <-- STALE (link went down; DHCP restarts when it returns)" : "")
 
 /* Ticks since @p start (1 tick = 1 ms, asserted above); wrap-safe. */
 static ULONG net_elapsed(ULONG start)

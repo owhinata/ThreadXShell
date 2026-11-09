@@ -89,13 +89,13 @@ src cmds svc cmake test README。wio のみ boot も）。
 モデルとその出力を解釈するコードを 1 blob で運ぶ。plugin は board code と同格の**信頼された native
 code** で、ゲートが証明するのはスタック上限だけ（**メモリ安全性も MMIO も証明しない**）。
 
-- **`svc/plugin/plugin_load.c` は呼び出し可能なポインタを返さない**（整数オフセットとコピー済みバイトのみ）。
+- **container の検査（本体は `svc/plugin/plugin_load_body.h`）は呼び出し可能なポインタを返さない**（整数オフセットとコピー済みバイトのみ）。
   「実行しない」は型の性質なので関数ポインタを足さない。
 - **ゲートは plugin ELF にも適用する**（対象外にしない）。**ダイジェストは署名ではない**。
 - **container は組んでから検査し、その同一ファイルを送る**（ホストは `verify_container` で**デバイスと
-  同じ `svc/plugin/plugin_load.c`** を走らせる）。**通るまで公開しない**（private path で組む）。**asset の行き先は slot 必須**（全ボード `--slot` と slot 表に公開前に照合。無し・半分は拒否。#159・#195）。
+  同じ検査本体 `svc/plugin/plugin_load_body.h`** を走らせる）。**通るまで公開しない**（private path で組む）。**asset の行き先は slot 必須**（全ボード `--slot` と slot 表に公開前に照合。無し・半分は拒否。#159・#195）。
 - **モデル区画は 16 バイト整列**（flatbuffer の 4 ではなく Ethos-U ドライバの要求）。
-- **オフセット → アドレスの変換は `plugin_run_slot()` の 1 箇所**で、**実行前に MPU を読み戻して
+- **オフセット → アドレスの変換は `plugin_exec_slot()`（`svc/plugin/plugin_exec.c`、`plugin_run_slot()` はそれを呼ぶだけ）の 1 箇所**で、**実行前に MPU を読み戻して
   fail-closed**（純関数・ホストテスト必須）。**窓を守る新しい機構は作らない**。
 - **上限は実測から導出する。超えられない上限は上限ではない。導出値 0 は「未測定」ではない**
   （absent の綴りは slot 側で、`stack_limit == 0` の拒否は明示的に書く。非同期予約は Armv8-M が `FPCCR.TS == 0` の強制、Armv7-M は TS 無しで ASPEN/LSPEN は縮める向きだけ＝208 B）。**許容値は slot に到達しうる

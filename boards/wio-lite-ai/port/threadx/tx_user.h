@@ -10,8 +10,10 @@
 
 /* ThreadX tick rate.  The SysTick handler (tx_glue.c) calls _tx_timer_interrupt()
    every TX_GLUE_TICK_DIV ms, so the effective tick rate is 1000 / TX_GLUE_TICK_DIV
-   Hz.  Default: 1 kHz (1 tick = 1 ms).  The SysTick reload is derived from
-   SystemCoreClock (=550 MHz -> 550000) by HAL_InitTick(); see port/threadx/tx_glue.c. */
+   Hz; a _Static_assert in tx_glue.c fails the build when this define does not
+   match that rate.  Default: 1 kHz (1 tick = 1 ms).  The SysTick reload is
+   derived from SystemCoreClock (=550 MHz -> 550000) by HAL_InitTick(); see
+   port/threadx/tx_glue.c. */
 #ifndef TX_TIMER_TICKS_PER_SECOND
 #define TX_TIMER_TICKS_PER_SECOND  1000
 #endif

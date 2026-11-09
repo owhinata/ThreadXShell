@@ -65,11 +65,22 @@ void tx_glue_profile_enable(void)
 }
 
 /* Number of 1 ms SysTicks per ThreadX tick. Default 1 (1 kHz ThreadX tick).
-   Override with -DTX_GLUE_TICK_DIV (e.g. 10 -> 100 Hz). Keep in sync with
-   TX_TIMER_TICKS_PER_SECOND in tx_user.h. */
+   Override with -DTX_GLUE_TICK_DIV (e.g. 10 -> 100 Hz) together with
+   TX_TIMER_TICKS_PER_SECOND in tx_user.h; the assert below rejects a build
+   where only one of them moved. */
 #ifndef TX_GLUE_TICK_DIV
 #define TX_GLUE_TICK_DIV 1u
 #endif
+
+/* The HAL programs SysTick for a period of HAL_TICK_FREQ_DEFAULT ms (the
+   initial uwTickFreq; nothing in this firmware calls HAL_SetTickFreq), and
+   every TX_GLUE_TICK_DIV-th SysTick is one ThreadX tick.  The rate ThreadX
+   is told must be exactly that.  Written as a product so that a divider
+   which does not divide 1000 fails too. */
+_Static_assert((unsigned long)TX_TIMER_TICKS_PER_SECOND * TX_GLUE_TICK_DIV *
+               HAL_TICK_FREQ_DEFAULT == 1000ul,
+               "TX_TIMER_TICKS_PER_SECOND must be 1000 / (TX_GLUE_TICK_DIV * "
+               "HAL tick period in ms)");
 
 void SysTick_Handler(void)
 {

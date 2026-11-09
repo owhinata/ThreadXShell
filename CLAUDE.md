@@ -148,15 +148,15 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
 1. **Plan 確定前**: **`codex-review` skill** で 3 面（設計 / MCU 実機能（対象ボードの RM 照合）/
    HW リソース競合）review。BLOCKING / CONCERN を全解消してから `ExitPlanMode`。
 2. **実装後**（commit 前）: branch の diff を review → BLOCKING 解消 → 実機 verify 依頼 → commit。
+3. **記録は Issue のコメント**（「plan v1」→ 各巡の指摘・裏取り・採否を同じ Issue に、全文は `<details>`、確定は編集。`.md` は作らない）。
 
 [!] **1 つの diff に掛けるレビューは 1 本だけ**（後者は前者を含むので重複するのは待ち時間だけ）。
 **既定は `/codex:review`**。**`/codex:adversarial-review <focus>` を選ぶのは、変更がチェック機構・
 ゲート・安全機構そのものを足す/変えるとき** — 汎用レビュアーは「この検査は騙せるか」を見ない。
 **focus は 1〜2 問に絞り**、「この検査を通過したまま X できるか」の形で疑う面を名指しする。
 
-入口: **plan = `codex-review` skill**（marker を更新する唯一の経路）/ 実装後の差分 =
-`/codex:review`、検査機構を足す差分は `/codex:adversarial-review <focus>` / 原因追跡 = `codex-debug`
-skill または `/codex:rescue`。Codex 呼び出しは codex plugin のランタイムに一本化（MCP server は
+入口: **plan = `codex-review` skill**（marker を更新する唯一の経路）/ 実装後の差分 = 上の 2 つ / 原因追跡 =
+`codex-debug` skill または `/codex:rescue`。Codex 呼び出しは codex plugin のランタイムに一本化（MCP server は
 使わない）。毎回 120s を超えるので `run_in_background: true` で起動して待つ（`/codex:status`）。
 **Codex の指摘は鵜呑みにしない** — ローカルの実物・対象ボードの RM で裏を取ってから報告する。
 

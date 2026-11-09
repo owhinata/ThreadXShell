@@ -561,6 +561,7 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_sdram.c"
     "${BOARD_DIR}/cmds/cmd_eth.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_net.c"    # the one shared command (#219)
+    "${CMAKE_SOURCE_DIR}/shell/cmds/net_core.c"   # ...its one NetX implementation (#220)
     "${BOARD_DIR}/cmds/cmd_net_board.c"           # ...and this board's `net mjpeg`
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"

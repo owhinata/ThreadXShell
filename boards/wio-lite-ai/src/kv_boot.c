@@ -57,6 +57,7 @@
 
 #include "cli.h"
 #include "cli_backend_log.h"
+#include "net_core.h"   /* the shared address / DHCP operations (issue #220) */
 #include "nx_net.h"
 #include "net_shell.h"
 #include "rtl8720.h"
@@ -232,11 +233,13 @@ static void cfg_wifi(void)
 /* Wait for the host stack to hold an address.  Returns 1 when it does. */
 static int cfg_wait_ip(unsigned budget_ms)
 {
-	struct nx_net_info ni;
+	struct net_svc_addr a;
+	struct net_svc_result r;
 	unsigned waited = 0u;
 
 	for (;;) {
-		if (nx_net_info_get(&ni) == NXN_OK && ni.ip_valid)
+		net_core_addr_get(&a, &r);
+		if (r.status == NET_SVC_OK && a.ip_valid)
 			return 1;
 		if (waited >= budget_ms)
 			return 0;
@@ -249,6 +252,7 @@ static void cfg_net(void)
 {
 	char mode[16];
 	char ip[16], mask[16], gw[16];
+	struct net_svc_result r;
 	uint32_t a, m, g;
 
 	if (!cfg_str("net.mode", mode, sizeof mode))
@@ -265,7 +269,10 @@ static void cfg_net(void)
 	}
 
 	if (strcmp(mode, "dhcp") == 0) {
-		if (nx_net_dhcp_renew() != NXN_OK) {
+		/* Make DHCP the source: unlike `net dhcp` it is not refused while the
+		 * link record is still catching up with the association. */
+		net_core_dhcp_source(&r);
+		if (r.status != NET_SVC_OK) {
 			LOG_WRN("the DHCP client would not start");
 			return;
 		}
@@ -289,7 +296,8 @@ static void cfg_net(void)
 			LOG_WRN("net.ip/mask/gw: not all are dotted quads");
 			return;
 		}
-		if (nx_net_set_static(a, m, g) != NXN_OK) {
+		net_core_set_static(a, m, g, &r);
+		if (r.status != NET_SVC_OK) {
 			LOG_WRN("the host stack refused the static address");
 			return;
 		}

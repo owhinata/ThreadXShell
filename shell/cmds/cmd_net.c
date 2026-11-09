@@ -47,9 +47,9 @@
  * [!] EVERY PROPERTY IS DECLARED BY THE BOARD.  A missing one is a build error,
  * so a typo cannot silently change what `net` prints.
  */
-#if !defined(NET_SVC_HELP) || !defined(NET_SVC_HAS_LEASE_STALE) || \
-    !defined(NET_SVC_BOARD_DECLS) || !defined(NET_SVC_BOARD_SUBCMDS)
-#error "net_svc_config.h must define NET_SVC_HELP, NET_SVC_HAS_LEASE_STALE, NET_SVC_BOARD_DECLS and NET_SVC_BOARD_SUBCMDS"
+#if !defined(NET_SVC_HELP) || !defined(NET_SVC_BOARD_DECLS) || \
+    !defined(NET_SVC_BOARD_SUBCMDS)
+#error "net_svc_config.h must define NET_SVC_HELP, NET_SVC_BOARD_DECLS and NET_SVC_BOARD_SUBCMDS"
 #endif
 
 /* The waits below are milliseconds read off the ThreadX tick, the same
@@ -68,12 +68,10 @@ NET_SVC_BOARD_DECLS
 #define NET_CMD_PING_DEFAULT   4u
 #define NET_CMD_PING_MAX       100u
 
-#if NET_SVC_HAS_LEASE_STALE
+/* A board marks a DHCP lease its link layer saw the link go down under
+ * (issue #220). */
 #define NET_CMD_STALE(a) ((a)->lease_stale \
 	? "  <-- STALE (link went down; run `net dhcp`)" : "")
-#else
-#define NET_CMD_STALE(a) ""
-#endif
 
 /* Ticks since @p start (1 tick = 1 ms, asserted above); wrap-safe. */
 static ULONG net_elapsed(ULONG start)

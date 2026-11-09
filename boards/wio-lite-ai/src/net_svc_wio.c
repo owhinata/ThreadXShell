@@ -6,28 +6,25 @@
  * @file    net_svc_wio.c
  * @brief   The shared `net` command's adapter on Wio Lite AI (issue #219).
  *
- * Answers the calls of svc/net/net_svc.h from the host stack (src/nx_net.h)
- * and reads its NXN_* results as the contract's statuses.  Takes no
- * `struct cli_instance`: printing, waiting and Ctrl+C are the shared
+ * Checks this board's own state -- the host stack's OFF / ARMING / UP /
+ * STOPPING / FAILED -- and hands the address, DHCP and ping operations to the
+ * shared implementation (shell/cmds/net_core.c, issue #220), which also puts
+ * a failed static address back and says LINK with the association down.
+ * Takes no `struct cli_instance`: printing, waiting and Ctrl+C are the shared
  * command's (shell/cmds/cmd_net.c).  Owns no storage.
  *
- * [!] BUSY COMES ONLY FROM THE STATE CHECK BELOW, BEFORE ANY GLUE CALL.  The
+ * [!] BUSY COMES ONLY FROM THE STATE CHECK BELOW, BEFORE ANY SHARED CALL.  The
  * host stack's ARMING and STOPPING resolve by themselves; picking a backend
  * mid-transition is how a command ends up talking to the stack on its way
- * out, so the shared command waits them out and calls again.  A refusal the
- * glue gives later (the state moved under its lock) is DOWN, never BUSY: by
- * then the glue has been called.
- *
- * The glue does not put a static address or a DHCP start back when NetX
- * refuses part way (src/nx_net.c, until issue #220), which REFUSED allows.
+ * out, so the shared command waits them out and calls again.
  */
 #include "net_svc.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
+#include "net_core.h"
 #include "net_shell.h"        /* net_shell_autoarm() */
-#include "nx_link_driver.h"   /* the link state for `net ping` (issue #30 B2a) */
 #include "nx_net.h"
 
 /* The board's reasons, as the per-board command printed them. */
@@ -37,10 +34,8 @@ static const char net_wio_arming[] = "the host stack is still coming up";
 static const char net_wio_stopping[] = "the host stack is still going down";
 static const char net_wio_failed[] =
 	"the host stack could not be shut down cleanly -- run `wifi reset`";
-static const char net_wio_link[] =
-	"the link is down (not associated) -- `wifi connect` first";
 
-/* The host stack's state, before any glue call.  1 when it is up and the
+/* The host stack's state, before any shared call.  1 when it is up and the
  * caller may go on; 0 with @p res filled otherwise. */
 static int net_wio_ready(struct net_svc_result *res)
 {
@@ -68,75 +63,33 @@ static int net_wio_ready(struct net_svc_result *res)
 	}
 }
 
-/* An NXN_* result as the contract's status. */
-static void net_wio_result(int rc, struct net_svc_result *res)
-{
-	res->why = NULL;
-	switch (rc) {
-	case NXN_OK:      res->status = NET_SVC_OK;      break;
-	case NXN_TIMEOUT: res->status = NET_SVC_TIMEOUT; break;
-	case NXN_ERR_STATE:
-		/* The state moved between the check and the glue's own, under its
-		 * lock: the stack is on its way out (or never initialised). */
-		res->status = NET_SVC_DOWN;
-		res->why = net_wio_down;
-		break;
-	default:          res->status = NET_SVC_REFUSED; break;   /* NXN_ERR, unknown */
-	}
-}
-
 void net_svc_addr_get(struct net_svc_addr *out, struct net_svc_result *res)
 {
-	struct nx_net_info ni;
-	int rc;
-
-	if (!net_wio_ready(res))
-		return;
-	rc = nx_net_info_get(&ni);
-	net_wio_result(rc, res);
-	if (rc != NXN_OK)
-		return;
-	out->ip_valid = ni.ip_valid;
-	out->dhcp_mode = ni.dhcp_mode;
-	out->lease_stale = ni.lease_stale;   /* NET_SVC_HAS_LEASE_STALE 1 */
-	out->ip = ni.ip;
-	out->mask = ni.mask;
-	out->gw = ni.gw;
+	if (net_wio_ready(res))
+		net_core_addr_get(out, res);
 }
 
 void net_svc_set_static(uint32_t ip, uint32_t mask, uint32_t gw,
                         struct net_svc_result *res)
 {
-	if (!net_wio_ready(res))
-		return;
-	net_wio_result(nx_net_set_static(ip, mask, gw), res);
+	if (net_wio_ready(res))
+		net_core_set_static(ip, mask, gw, res);
 }
 
 void net_svc_dhcp_start(struct net_svc_result *res)
 {
-	if (!net_wio_ready(res))
-		return;
-	net_wio_result(nx_net_dhcp_renew(), res);
+	if (net_wio_ready(res))
+		net_core_dhcp_start(res);
 }
 
-/*
- * Say WHY rather than letting NetX refuse every probe in turn: with the link
- * down (owhinata/wio-lite-ai#30 B2a) the interface still has an address and
- * looks configured.  Asked before each probe, so a link that drops during a
- * run stops it.  The echo itself is NetX's, resolved by our own ARP cache and
- * relayed by the module; the RTT is measured across nx_icmp_ping() alone.
- */
+/* The echo is NetX's, resolved by our own ARP cache and relayed by the
+ * module.  Asked before each probe, so a link that drops during a run stops
+ * it (the shared side says LINK, owhinata/wio-lite-ai#30 B2a). */
 void net_svc_ping(uint32_t ip, unsigned timeout_ms, unsigned *rtt_ms,
                   struct net_svc_result *res)
 {
-	if (!net_wio_ready(res))
-		return;
-	if (!nx_link_driver_link_up()) {
-		res->status = NET_SVC_LINK;
-		res->why = net_wio_link;
-		return;
-	}
-	net_wio_result(nx_net_ping(ip, timeout_ms, rtt_ms), res);
+	if (net_wio_ready(res))
+		net_core_ping(ip, timeout_ms, rtt_ms, res);
 }
 
 /* The host stack has an address: this is where the telnet console belongs

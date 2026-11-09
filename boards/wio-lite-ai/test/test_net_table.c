@@ -12,8 +12,7 @@
  *    reuses a shared one would be silently unreachable.
  *  - the shared info / ip / dhcp / ping come first and the board's `shell`
  *    after them, reaching its own table through the dispatcher.
- *  - NET_SVC_HAS_LEASE_STALE is what this board has (1), and the gw line
- *    follows it.
+ *  - the gw line carries the STALE mark (every board since issue #220).
  */
 #include <stdio.h>
 #include <string.h>
@@ -91,8 +90,6 @@ int main(void)
 	       net_table_index(t, "info") == 0 && net_table_index(t, "ip") == 1 &&
 	       net_table_index(t, "dhcp") == 2 && net_table_index(t, "ping") == 3 &&
 	       net_table_index(t, "shell") == 4 && t[5].name == NULL);
-	expect("NET_SVC_HAS_LEASE_STALE is 1 on this board",
-	       NET_SVC_HAS_LEASE_STALE == 1);
 
 	net_stub_reset();
 	run("net shell status\r");
@@ -102,9 +99,8 @@ int main(void)
 	net_stub_reset();
 	net_stub.address.lease_stale = true;
 	run("net info\r");
-	expect("the gw line follows the property",
-	       (strstr(cli_dummy_output_str(&tr0), "<-- STALE") != NULL) ==
-	       (NET_SVC_HAS_LEASE_STALE != 0));
+	expect("the gw line marks a stale lease",
+	       strstr(cli_dummy_output_str(&tr0), "<-- STALE") != NULL);
 
 	if (failures != 0) {
 		printf("test_net_table: %d failure(s)\n", failures);

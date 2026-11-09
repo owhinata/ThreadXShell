@@ -71,6 +71,7 @@
 #include "cli_instance.h"
 #include "cli_uart_ring.h"
 
+#include "net_core.h"   /* the interface address (issue #220) */
 #include "nx_net.h"
 
 #define LOG_TAG "nshell"
@@ -713,7 +714,8 @@ static int nsh_arm_accept(void)
 static int nsh_arm(uint16_t port)
 {
 	NX_IP *ip = (NX_IP *)nx_net_ip();
-	struct nx_net_info ni;
+	struct net_svc_addr ni;
+	struct net_svc_result nr;
 	UINT s;
 
 	if (ip == NX_NULL || !nx_net_is_up()) {
@@ -777,7 +779,8 @@ static int nsh_arm(uint16_t port)
 		goto fail;
 	}
 
-	if (nx_net_info_get(&ni) == NXN_OK && ni.ip_valid) {
+	net_core_addr_get(&ni, &nr);
+	if (nr.status == NET_SVC_OK && ni.ip_valid) {
 		g_ip[0] = (uint8_t)(ni.ip >> 24); g_ip[1] = (uint8_t)(ni.ip >> 16);
 		g_ip[2] = (uint8_t)(ni.ip >> 8);  g_ip[3] = (uint8_t)ni.ip;
 	}

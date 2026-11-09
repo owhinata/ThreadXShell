@@ -53,9 +53,13 @@ enum net_svc_status {
 	NET_SVC_FAILED,
 	/** The link is down. */
 	NET_SVC_LINK,
-	/** NetX refused.  [!] PART OF THE CHANGE MAY ALREADY BE MADE: wio-lite-ai
-	 *  does not put a static address or a DHCP start back on a failure
-	 *  (f746g-disco does) until issue #220, so nothing may say "restored". */
+	/** NetX refused.  A refused `net ip` puts back the address, the gateway
+	 *  and the source (issue #220); a DHCP client it had stopped is started
+	 *  again from scratch when it can be (the lease itself is not restored)
+	 *  and left "DHCP, not running" when it cannot.  A failure while putting
+	 *  things back is not reported.  [!] A REFUSED `net dhcp` PUTS NOTHING
+	 *  BACK: a step that failed part way can leave the address dropped and
+	 *  the client stopped, so nothing may say "restored". */
 	NET_SVC_REFUSED,
 	/** `net ping` only: no reply within the probe's wait. */
 	NET_SVC_TIMEOUT,
@@ -77,17 +81,20 @@ struct net_svc_result {
  * The address of the interface, from one call.
  *
  * [!] ONE CALL, NOT ONE MOMENT.  The contract promises that every field comes
- * from the same call, not that they were all read at the same instant: the
- * protection inside the call is the glue's (f746g-disco reads them under one
- * lock; wio-lite-ai reads ip / mask / gw outside its address lock and the DHCP
- * state inside it, so the two can be from different moments -- left to issue
- * #220).
+ * from the same call, not that they were all read at the same instant.  Every
+ * board reads them in one hold of its address lock (shell/cmds/net_core.c),
+ * but the DHCP client writes the address and the gateway of a new lease in
+ * two separate NetX calls under its own mutex, which is not taken here: for a
+ * few microseconds a reader can pair the new address with the old gateway
+ * (issue #220, kept as the contract rather than reaching into NetX's
+ * internals).
  */
 struct net_svc_addr {
 	bool     ip_valid;     /**< a non-zero address is assigned               */
 	bool     dhcp_mode;    /**< the DHCP client owns the address (vs static) */
-	/** The link went down while this address was live and nothing renewed it.
-	 *  Read by the shared command only where NET_SVC_HAS_LEASE_STALE is 1. */
+	/** The link went down while this DHCP address was live and nothing
+	 *  renewed it -- set where the board's link layer records the link going
+	 *  down (issue #220); `net ip` and `net dhcp` clear it. */
 	bool     lease_stale;
 	uint32_t ip, mask, gw; /**< gw 0 is "no gateway", not an address          */
 };
@@ -117,7 +124,8 @@ void net_svc_set_static(uint32_t ip, uint32_t mask, uint32_t gw,
 /** `net dhcp`: (re)start the DHCP client.  NET_SVC_OK when an acquisition
  *  was started (the address is dropped first, so an address that appears
  *  afterwards is the lease), NET_SVC_RENEWED when a held lease is renewed in
- *  place.  The wait for the lease is the shared command's. */
+ *  place, NET_SVC_LINK (nothing changed) with the link down.  The wait for
+ *  the lease is the shared command's. */
 void net_svc_dhcp_start(struct net_svc_result *res);
 
 /** `net ping`: one ICMP echo to @p ip, waiting up to @p timeout_ms.  With

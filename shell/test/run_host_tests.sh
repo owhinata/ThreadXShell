@@ -1206,14 +1206,14 @@ done
 # once per shape a board may declare (net_cfg/net_svc_config.h).  Nothing gates
 # what a command prints, and the exit value does not reach the console, so both
 # are pinned here: the bad counts and the default of 4 (N1), exit 1 with no
-# reply (N2), the 30 s DHCP wait (N3), the two address lines and STALE only
-# under its property (N4), BUSY called again within one deadline a slow adapter
+# reply (N2), the 30 s DHCP wait (N3), the two address lines and the STALE mark
+# (N4), BUSY called again within one deadline a slow adapter
 # does not stretch, Ctrl+C in each wait, and the board's lines through the
 # writer.  The DUP shape registers a board `info` on top of the shared one: the
 # check the real boards' tables pass (boards/<board>/test/host_tests.sh) must
 # see that.  TX_TIMER_TICKS_PER_SECOND is passed because the shim does not
 # define it (the command asserts 1 ms ticks).
-for shape in STALE BARE DUP; do
+for shape in EXTRA BARE DUP; do
     gcc $CFLAGS -DCLI_USE_COLOR=0 -DNET_TEST_SHAPE_$shape -DTX_TIMER_TICKS_PER_SECOND=1000 \
         $glue_inc -I "$here/shim" -I "$here/net_cfg" \
         -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" -I "$svc/net" \
@@ -1225,6 +1225,21 @@ for shape in STALE BARE DUP; do
         $LDFLAGS -o "$out/test_net_cmd_$shape"
     "$out/test_net_cmd_$shape"
 done
+
+# issue #220 -- the one implementation of the address, DHCP and ping operations
+# (shell/cmds/net_core.c) as it is compiled for the boards, over fake NetX / DHCP
+# / ThreadX calls that record each call, whether the address lock was held for
+# it and the interrupt-masked sections (nx_shim/, shim/tx_api.h).  The fake DHCP
+# record refuses a start after a stop until it is reinitialised, as NetX documents.
+# Nothing a board prints shows a rollback's order or a lock that was not held,
+# so they are pinned here: `net ip` puts everything back (the reinitialise
+# before the address), `net dhcp`'s three cases and LINK with nothing called,
+# each failed step moving the state only by what succeeded, ping's three
+# answers, the stale mark, and the temporary link entries of step 1.
+gcc $CFLAGS -I "$here/shim" -I "$here/nx_shim" -I "$here/../cmds" -I "$svc/net" \
+    "$here/test_net_core.c" "$here/../cmds/net_core.c" \
+    $LDFLAGS -o "$out/test_net_core"
+"$out/test_net_core"
 
 # issue #99 -- the shared stream lifecycle (svc/nn/nn_stream_life.c).
 #

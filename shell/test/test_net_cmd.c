@@ -18,7 +18,7 @@
  *    wait calls nothing more;
  *  - N3: the DHCP wait is 30 s and ends in exit 1; an address on the way is
  *    two lines and exit 0; the renew sentence;
- *  - N4: the two address lines, gw none, STALE only under its property;
+ *  - N4: the two address lines, gw none, the STALE mark (every board, #220);
  *  - every refusal of an argument comes before the adapter is called;
  *  - the board's lines arrive through the writer one line per write, and a
  *    failed write stops them.
@@ -37,15 +37,15 @@
 #include "net_svc_stub.h"
 #include "net_table_check.h"
 
-#if defined(NET_TEST_SHAPE_STALE)
-#define SHAPE "stale (lease-stale mark; board: extra)"
+#if defined(NET_TEST_SHAPE_EXTRA)
+#define SHAPE "extra (board: extra)"
 #elif defined(NET_TEST_SHAPE_BARE)
-#define SHAPE "bare (no lease-stale mark, no board subcommand)"
+#define SHAPE "bare (no board subcommand)"
 #else
-#define SHAPE "dup (stale, and the board also registers `info`)"
+#define SHAPE "dup (extra, and the board also registers `info`)"
 #endif
 
-#if NET_SVC_HAS_LEASE_STALE
+#if !defined(NET_TEST_SHAPE_BARE)
 /* The board's subcommand (NET_SVC_BOARD_DECLS). */
 static int board_calls;
 int test_net_board_cmd(struct cli_instance *sh, int argc, char **argv)
@@ -81,7 +81,7 @@ static void reset(void)
 	cli_test_set_sleep_hook(net_stub_sleep_hook, NULL);
 	net_stub_reset();
 	net_stub_set_transport(&tr0);
-#if NET_SVC_HAS_LEASE_STALE
+#if !defined(NET_TEST_SHAPE_BARE)
 	board_calls = 0;
 #endif
 }
@@ -158,7 +158,7 @@ static void check_table(void)
 	expect("shared order: info ip dhcp ping",
 	       net_table_index(t, "info") == 0 && net_table_index(t, "ip") == 1 &&
 	       net_table_index(t, "dhcp") == 2 && net_table_index(t, "ping") == 3);
-#if NET_SVC_HAS_LEASE_STALE
+#if !defined(NET_TEST_SHAPE_BARE)
 	expect("the board's subcommand comes last", net_table_index(t, "extra") == 4 &&
 	       t[5].name == NULL);
 	reset();
@@ -471,13 +471,12 @@ static void check_info(void)
 	       rc == 0 && before("ip:    192.168.1.10/24\r\n", "gw:    192.168.1.1 (dhcp)") &&
 	       before("gw:    192.168.1.1 (dhcp)", "a: 1\r\nb: 2\r\n") &&
 	       net_stub.lines_written == 2 && net_stub.write_rc_bad == 0);
-#if NET_SVC_HAS_LEASE_STALE
-	expect("STALE after the gw (property 1)",
+	expect("STALE after the gw",
 	       has("gw:    192.168.1.1 (dhcp)  <-- STALE (link went down; run `net dhcp`)\r\n"));
-#else
-	expect("no STALE without the property, whatever the adapter says",
+	reset();
+	run("net info\r");
+	expect("no STALE without the mark",
 	       has("gw:    192.168.1.1 (dhcp)\r\n") && !has("STALE"));
-#endif
 
 	reset();
 	net_stub.address.gw = 0u;

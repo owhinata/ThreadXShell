@@ -7,10 +7,9 @@
  *
  * Two things live here, because they are the same thing seen from two sides:
  *
- *   1. The control API `net` calls -- info / static address / DHCP / ping.  It is
- *      deliberately the same shape as ../stm32f746g-disco's port/netxduo/nx_glue.h so
- *      that shell/cmds/cmd_net.c reads the same on both boards, and so that nothing
- *      above this file has to include nx_api.h.
+ *   1. The NetX objects the shared address / DHCP / ping operations run on
+ *      (shell/cmds/net_core.c, issue #220): the IP instance, its pool and the DHCP
+ *      client, created here, and the state those operations keep, defined here.
  *   2. The resident owner of the bridge session: the thread that holds the RTL8720 link
  *      reference, turns the module into an L2 relay, keeps its watchdog fed, and takes
  *      the whole thing down again provably.
@@ -132,11 +131,9 @@ struct cli_instance;
 #define NXN_TCP_RTO_RETRIES   10u
 #define NXN_TCP_RTO_SHIFT     1u
 
-/* Return codes, mirroring the f746 nx_glue.h. */
+/* Return codes of nx_net_init(), mirroring the f746 nx_glue.h. */
 #define NXN_OK          0
-#define NXN_ERR_STATE  (-1)      /* the host stack is not up                       */
-#define NXN_ERR        (-2)      /* NetX refused                                   */
-#define NXN_TIMEOUT    (-3)      /* no answer (ping)                               */
+#define NXN_ERR        (-2)      /* a ThreadX / NetX create failed                 */
 
 enum nx_net_state {
 	NX_NET_OFF = 0,          /* the module's own lwIP owns the network          */
@@ -144,15 +141,6 @@ enum nx_net_state {
 	NX_NET_UP,               /* the host stack owns the network                 */
 	NX_NET_STOPPING,
 	NX_NET_FAILED            /* teardown could not prove silence -- `wifi reset` */
-};
-
-struct nx_net_info {
-	bool     ip_valid;
-	bool     dhcp_mode;
-	bool     lease_stale;    /* the link went down while this address was live */
-	uint32_t ip;             /* host byte order */
-	uint32_t mask;
-	uint32_t gw;
 };
 
 /* Module-side counters accumulated across bridge re-arms (each re-arm zeroes the
@@ -201,11 +189,6 @@ void nx_net_down(void);
  * which the caller reports and then carries on with, rather than refusing.
  */
 int  nx_net_link_taken(void);
-
-int  nx_net_info_get(struct nx_net_info *out);
-int  nx_net_set_static(uint32_t ip, uint32_t mask, uint32_t gw);
-int  nx_net_dhcp_renew(void);
-int  nx_net_ping(uint32_t ip, unsigned timeout_ms, unsigned *rtt_ms);
 
 /* The MAC the interface transmits with (the module's), valid once up. */
 void nx_net_mac_get(uint8_t mac[6]);

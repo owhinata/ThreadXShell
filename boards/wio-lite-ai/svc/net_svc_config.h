@@ -18,11 +18,6 @@
 /** The `net` line of the top-level `help`. */
 #define NET_SVC_HELP "IPv4 (L3) over the onboard RTL8720 (info / ip / dhcp / ping / shell)"
 
-/** 1: an address the link went down under is marked (owhinata/wio-lite-ai#30
- *  B2a) and `net info` says STALE after the gw.  Issue #220 gives both boards
- *  the mark and removes this property. */
-#define NET_SVC_HAS_LEASE_STALE 1
-
 /*
  * The board's own subcommands, appended to the shared `net` table: a run of
  * CLI_CMD / CLI_CMD_ARG / CLI_CMD_ARG_USAGE entries, EACH FOLLOWED BY A COMMA,

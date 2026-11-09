@@ -491,6 +491,7 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_wifi.c"
     "${BOARD_DIR}/cmds/cmd_wifi_flash.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_net.c"    # the one shared command (#219)
+    "${CMAKE_SOURCE_DIR}/shell/cmds/net_core.c"   # ...its one NetX implementation (#220)
     "${BOARD_DIR}/cmds/cmd_net_board.c"           # ...and this board's `net shell`
     "${BOARD_DIR}/cmds/cmd_wifi_link.c"
     "${BOARD_DIR}/cmds/cmd_xfer.c"

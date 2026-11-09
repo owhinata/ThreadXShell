@@ -49,10 +49,12 @@
  *
  * ---- one invariant this file owes the rest of the firmware ----------------------
  *
- * The server thread takes NEITHER the rtl_link coarse mutex NOR nx_net.c's nxn_addr_lock.
- * It touches only NetX.  That is what lets nx_net.c's owner thread drive the stop entries
- * below whether or not it holds the coarse mutex, without creating a lock-order cycle.
- * Do not add a link call to this thread.
+ * The server thread takes NOT the rtl_link coarse mutex, and the shared address lock
+ * (shell/cmds/net_core.h, issue #220) only for the one address read when it arms, holding
+ * nothing else; nobody holding that lock waits for this thread.  Otherwise it touches only
+ * NetX.  That is what lets nx_net.c's owner thread drive the stop entries below whether or
+ * not it holds the coarse mutex, without creating a lock-order cycle.  Do not add a link
+ * call to this thread.
  *
  * No clock/RCC/register work of its own (clock-safe).  Layering:
  * HAL/CMSIS/ThreadX <- NetX <- nx_net/link_data <- shell <- here.

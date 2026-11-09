@@ -6,14 +6,14 @@
  * @file    net_svc_f746.c
  * @brief   The shared `net` command's adapter on STM32F746G-DISCO (issue #219).
  *
- * Answers the calls of svc/net/net_svc.h from this board's NetX glue
- * (nx_glue.h) and reads the glue's NXG_* results as the contract's statuses.
- * Takes no `struct cli_instance`: printing, waiting and Ctrl+C are the shared
- * command's (shell/cmds/cmd_net.c).  Owns no storage.
+ * Checks this board's own state -- is the IP stack there at all -- and hands
+ * the address, DHCP and ping operations to the shared implementation
+ * (shell/cmds/net_core.c, issue #220), which also puts a failed static
+ * address back.  Takes no `struct cli_instance`: printing, waiting and Ctrl+C
+ * are the shared command's (shell/cmds/cmd_net.c).  Owns no storage.
  *
- * This board's glue never returns BUSY (the IP stack is created once at boot
- * and is never taken down), has no link check of its own on these calls, and
- * puts a failed static address back (nx_net_set_static() is transactional).
+ * This board never returns BUSY: the IP stack is created once at boot and is
+ * never taken down.
  */
 #include "net_svc.h"
 
@@ -22,6 +22,7 @@
 #include <stdint.h>
 
 #include "fmt.h"
+#include "net_core.h"
 #include "nx_glue.h"
 #include "nx_mjpeg.h"
 #include "nx_shell.h"   /* telnet console output statistics (issue #6) */
@@ -30,53 +31,41 @@
    eth_init() succeeded, so its absence says the link driver did not start. */
 static const char net_f746_not_up[] = "IP stack not up";
 
-/* An NXG_* result as the contract's status. */
-static void net_f746_result(int rc, struct net_svc_result *res)
+/* 1 when the IP stack exists and the caller may go on; 0 with @p res filled
+ * otherwise. */
+static int net_f746_ready(struct net_svc_result *res)
 {
-	res->why = NULL;
-	switch (rc) {
-	case NXG_OK:        res->status = NET_SVC_OK;      break;
-	case NXG_RENEWED:   res->status = NET_SVC_RENEWED; break;
-	case NXG_TIMEOUT:   res->status = NET_SVC_TIMEOUT; break;
-	case NXG_ERR_STATE:
-		res->status = NET_SVC_DOWN;
-		res->why = net_f746_not_up;
-		break;
-	default:            res->status = NET_SVC_REFUSED; break;   /* NXG_ERR, unknown */
-	}
+	if (nx_net_is_up())
+		return 1;
+	res->status = NET_SVC_DOWN;
+	res->why = net_f746_not_up;
+	return 0;
 }
 
 void net_svc_addr_get(struct net_svc_addr *out, struct net_svc_result *res)
 {
-	struct nx_net_info ni;
-	int rc = nx_net_info_get(&ni);
-
-	net_f746_result(rc, res);
-	if (rc != NXG_OK)
-		return;
-	out->ip_valid = ni.ip_valid;
-	out->dhcp_mode = ni.dhcp_mode;
-	out->lease_stale = false;            /* NET_SVC_HAS_LEASE_STALE 0 */
-	out->ip = ni.ip;
-	out->mask = ni.mask;
-	out->gw = ni.gw;
+	if (net_f746_ready(res))
+		net_core_addr_get(out, res);
 }
 
 void net_svc_set_static(uint32_t ip, uint32_t mask, uint32_t gw,
                         struct net_svc_result *res)
 {
-	net_f746_result(nx_net_set_static(ip, mask, gw), res);
+	if (net_f746_ready(res))
+		net_core_set_static(ip, mask, gw, res);
 }
 
 void net_svc_dhcp_start(struct net_svc_result *res)
 {
-	net_f746_result(nx_net_dhcp_renew(), res);
+	if (net_f746_ready(res))
+		net_core_dhcp_start(res);
 }
 
 void net_svc_ping(uint32_t ip, unsigned timeout_ms, unsigned *rtt_ms,
                   struct net_svc_result *res)
 {
-	net_f746_result(nx_net_ping(ip, timeout_ms, rtt_ms), res);
+	if (net_f746_ready(res))
+		net_core_ping(ip, timeout_ms, rtt_ms, res);
 }
 
 /* Nothing to arm: the telnet console is resident on this board. */

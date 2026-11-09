@@ -18,10 +18,6 @@
 /** The `net` line of the top-level `help`. */
 #define NET_SVC_HELP "NetX Duo IPv4 over the on-board Ethernet (link: see `eth`)"
 
-/** 0: nothing marks a lease the link went down under (issue #220 gives both
- *  boards the mark and removes this property). */
-#define NET_SVC_HAS_LEASE_STALE 0
-
 /*
  * The board's own subcommands, appended to the shared `net` table: a run of
  * CLI_CMD / CLI_CMD_ARG / CLI_CMD_ARG_USAGE entries, EACH FOLLOWED BY A COMMA,

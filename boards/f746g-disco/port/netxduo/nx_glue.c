@@ -19,6 +19,7 @@
 
 #include "nx_glue.h"
 #include "nx_eth_driver.h"
+#include "net_core.h"         /* the shared address / DHCP / ping (issue #220) */
 
 #define LOG_TAG "net"
 #include "log.h"
@@ -44,55 +45,45 @@ static ULONG          ip_stack[NXG_IP_STACK / sizeof(ULONG)];
 static ULONG          arp_cache[NXG_ARP_CACHE / sizeof(ULONG)];
 
 static bool nx_up;
-static bool dhcp_created;
-static bool dhcp_started;
-static bool static_mode;
 
 /*
- * The one interface (nx_ip_create above).  Every DHCP call below is the
- * INTERFACE-scoped variant with this index, never the global one: the global
- * nx_dhcp_stop() / nx_dhcp_reinitialize() / nx_dhcp_force_renew() loop over the
- * records, DISCARD each per-interface status and unconditionally return
- * NX_SUCCESS (nxd_dhcp_client.c).  Checking their return value is therefore
- * meaningless -- and for force_renew actively harmful, because "nothing was
- * bound" would read as "renew sent".  nx_dhcp_create() enables index 0, so the
- * record always exists.
+ * The one interface (nx_ip_create below).  The shared operations name it on
+ * every call and use only the interface-scoped DHCP calls (shell/cmds/
+ * net_core.c says why).  nx_dhcp_create() enables index 0, so the record
+ * always exists.
  */
 #define NXG_IFACE  0u
 
 /*
- * Serialises the glue's own state (dhcp_started / static_mode) together with the
- * NetX DHCP calls that move it.  Without it, `net dhcp` from the shell races the
- * link-status callback on the NetX IP thread, and the pair can leave the flags
- * describing a client that is in a different state.
+ * The shared operations' state and facts (shell/cmds/net_core.h, issue #220):
+ * the address lock, the source, the DHCP client's state, the stale mark and the
+ * recorded link level.  CPU-only, so regular SRAM like the other control
+ * blocks.  The lock order on this board is
  *
- * ORDER: this mutex is always taken BEFORE any NetX internal mutex, never after.
- * The whole lock graph on this board is
+ *     address lock -> nx_dhcp_mutex -> nx_ip_protection -> eth_lock
  *
- *     nxg_lock -> nx_dhcp_mutex -> nx_ip_protection -> eth_lock
- *
- * and it is acyclic only because NOTHING takes this mutex while holding a NetX
- * mutex or eth_lock.  The one edge that used to violate it was
- * nx_ip_protection -> nx_dhcp_mutex: the IP thread calls the link-status callback
- * while holding nx_ip_protection, and that callback used to start DHCP, whose
- * first act is to take the DHCP mutex -- while the DHCP thread holds that mutex
- * across its whole loop body and calls nx_ip_interface_address_set(), which waits
- * for nx_ip_protection.  Both threads stopping takes the entire stack down, not
- * just DHCP (issue #13).  The callback therefore no longer calls NetX at all: it
- * publishes the link state and the autostart request, and the work runs on the
- * eth-link poll thread, which holds nothing (see nxg_poll_hook).
+ * and it is acyclic only because nothing takes the address lock while holding
+ * a NetX mutex or eth_lock: the link-status callback (IP thread, under
+ * nx_ip_protection) only records the level, and the DHCP start after a link-up
+ * runs on the eth-link poll thread, which holds nothing (issue #13).
  */
-static TX_MUTEX nxg_lock;
+struct net_core_state net_core_board_state;
+const struct net_core_facts net_core_board_facts = {
+	.ip          = &eth_ip,
+	.dhcp        = &eth_dhcp,
+	.iface       = NXG_IFACE,
+	.boot_source = NET_CORE_SRC_DHCP,     /* DHCP is the boot default */
+	.why_link    = "the Ethernet link is down (no cable? see `eth`)",
+	.why_down    = "IP stack not up",
+};
 
 /*
- * The link handshake: written by the IP thread in the link-status callback, read
- * and cleared by the two consumers below.  `volatile` is not what makes this safe
- * -- it stops the compiler caching the loads, but it is not an inter-thread
- * synchronisation primitive and gives no ordering.  Every access is inside a short
+ * The autostart request: written by the IP thread in the link-status callback,
+ * read and cleared by the eth-link poll hook.  Every access is inside a short
  * save/restore-PRIMASK section (NXG_CRIT_*), which on this single-core part is
- * what actually excludes the producer from a consumer's snapshot.
+ * what excludes the producer from the consumer's snapshot.  [!] TEMPORARY:
+ * issue #220 step 2 moves the reaction to the link into the shared worker.
  */
-static volatile bool link_up;              /* last state the callback reported  */
 static volatile bool link_start_pending;   /* a link-up wants DHCP started      */
 
 /* PRIMASK critical section, as in nx_shell.c / backend/cli_backend_uart.c.  Nests
@@ -103,110 +94,44 @@ static volatile bool link_start_pending;   /* a link-up wants DHCP started      
 
 extern VOID nx_eth_driver(NX_IP_DRIVER *driver_req_ptr);
 
-/* ---- glue lock helpers ----------------------------------------------------- */
-
-static void nxg_lock_acquire(void)
-{
-	(void)tx_mutex_get(&nxg_lock, TX_WAIT_FOREVER);
-}
-
-/*
- * Apply a gateway, where 0 means "no gateway" (issue #19).  NetX refuses
- * 0.0.0.0 as a gateway address outright (nxe_ip_gateway_address_set.c), so the
- * two cases are different calls -- passing 0 through fails, and because the
- * static path is transactional that failure rolled the whole thing back, which
- * is what made `net ip <a.b.c.d/mask>` impossible to use without a gateway.
- */
-static UINT nxg_gateway_apply(uint32_t gw)
-{
-	return (gw != 0u) ? nx_ip_gateway_address_set(&eth_ip, (ULONG)gw)
-	                  : nx_ip_gateway_address_clear(&eth_ip);
-}
-
-/*
- * Give up the address we currently hold, BEFORE starting the DHCP client, so that
- * "the interface has an address" means "a lease arrived" and nothing else (issue
- * #20).  The client zeroes it itself on the way into INIT, but it does that on its
- * OWN thread, so a caller that starts the client and then watches for an address
- * (cmd_net.c) races it and can read the previous one: `net ip 192.168.11.100/24`
- * followed by `net dhcp` printed "192.168.11.100 (dhcp)" at once while the real
- * lease landed later -- a wrong answer that looks exactly like a right one.  The
- * wio-lite-ai port already does this for the same reason.
- *
- * CALL WITH THE GLUE LOCK HELD, and only where there is no lease to lose: never on
- * the force-renew path, whose entire point is that the lease stays valid (#9).
- */
-static void nxg_drop_address(void)
-{
-	(void)nx_ip_address_set(&eth_ip, 0u, 0u);
-	(void)nxg_gateway_apply(0u);
-}
-
-/*
- * Consume a published link-up: start DHCP if nothing else owns the address.  CALL
- * WITH THE GLUE LOCK HELD, and never from the IP thread (issue #13).
- *
- * The snapshot and the clear happen together under PRIMASK so the producer cannot
- * land between them; everything that can block or take a lock -- the DHCP call and
- * its logging -- runs afterwards, with interrupts back on.  The edge is consumed
- * even if the preconditions turn out to be false: that matches the previous
- * behaviour, where a start that fails is retried on the next qualifying link event
- * or a manual `net dhcp`, not five times a second.
- */
-static void nxg_run_link_pending_locked(void)
-{
-	bool pending, up;
-	UINT s;
-
-	NXG_CRIT_ENTER();
-	pending            = link_start_pending;
-	up                 = link_up;
-	link_start_pending = false;
-	NXG_CRIT_EXIT();
-
-	if (!pending || !up || !dhcp_created || static_mode || dhcp_started)
-		return;
-
-	s = nx_dhcp_interface_start(&eth_dhcp, NXG_IFACE);
-	if (s == NX_SUCCESS)
-		dhcp_started = true;
-	else
-		LOG_ERR("dhcp start failed (0x%02x)", (unsigned)s);
-}
-
-/* Release the glue lock, first finishing any start published while this thread
-   held it -- so a link-up during a shell command starts DHCP at once instead of
-   waiting for the next PHY poll. */
-static void nxg_unlock(void)
-{
-	nxg_run_link_pending_locked();
-	tx_mutex_put(&nxg_lock);
-}
-
 /*
  * Poll-complete hook, registered with the ETH driver and run on the `eth-link`
  * thread (issue #13).  This is where the DHCP autostart actually happens: that
- * thread holds no lock at all when it gets here, so taking the glue lock -- and
- * through it the DHCP and IP mutexes -- follows the documented order.  Waiting
- * here delays only the next PHY poll.
+ * thread holds no lock at all when it gets here, so the shared start -- the
+ * address lock, and through it the DHCP and IP mutexes -- follows the
+ * documented order.  Waiting here delays only the next PHY poll.
+ *
+ * The request is consumed even if the shared side then finds nothing to do (the
+ * source is static, the client runs): a start that fails is retried on the next
+ * link-up or a manual `net dhcp`, not five times a second.
  */
 static void nxg_poll_hook(void *arg)
 {
+	bool pending;
+	UINT s;
+
 	(void)arg;
-	nxg_lock_acquire();
-	nxg_run_link_pending_locked();
-	tx_mutex_put(&nxg_lock);
+	NXG_CRIT_ENTER();
+	pending            = link_start_pending;
+	link_start_pending = false;
+	NXG_CRIT_EXIT();
+	if (!pending)
+		return;
+	s = net_core_link_up_start();
+	if (s != NX_SUCCESS)
+		LOG_ERR("dhcp start failed (0x%02x)", (unsigned)s);
 }
 
 /*
  * NetX link-status callback -- IP helper thread, WITH nx_ip_protection HELD.
  *
  * Everything here must be non-blocking and NetX-free: taking the DHCP mutex from
- * this context is the deadlock in issue #13, and taking the glue lock would put a
- * NetX mutex above it in the order.  So this only publishes: NetX's own link flag
- * (a byte store, on the thread NetX itself would have written it -- upstream's
- * deferred link-status processing never assigns it, and route lookup reads it
- * outside the IP mutex), then the glue's copy plus the autostart request.
+ * this context is the deadlock in issue #13, and taking the address lock would put
+ * a NetX mutex above it in the order.  So this only publishes: NetX's own link
+ * flag (a byte store, on the thread NetX itself would have written it --
+ * upstream's deferred link-status processing never assigns it, and route lookup
+ * reads it outside the IP mutex), then the shared record of the level
+ * (net_core_link_note(), one masked store) and the autostart request.
  *
  * The request is published on every callback reporting up, not only on a
  * down -> up transition, because NetX raises this callback for a speed or duplex
@@ -217,25 +142,18 @@ static void nx_link_status_cb(NX_IP *ip, UINT iface_index, UINT up)
 {
 	ip->nx_ip_interface[iface_index].nx_interface_link_up = (UCHAR)up;
 
-	NXG_CRIT_ENTER();
-	link_up = (up != 0u);
-	if (up != 0u)
+	net_core_link_note(up != 0u);
+	if (up != 0u) {
+		NXG_CRIT_ENTER();
 		link_start_pending = true;
-	NXG_CRIT_EXIT();
+		NXG_CRIT_EXIT();
+	}
 }
 
 int nx_net_init(void)
 {
+	bool dhcp_created = false;
 	UINT s;
-
-	/* Before anything can change the glue's state.  This whole function runs from
-	   tx_application_define(), i.e. with the scheduler not yet started, so neither
-	   the IP thread nor the eth-link thread can observe a half-built glue -- but
-	   the mutex still has to exist before the first user of it is created. */
-	if (tx_mutex_create(&nxg_lock, "nxglue", TX_INHERIT) != TX_SUCCESS) {
-		LOG_ERR("glue mutex create failed");
-		return NXG_ERR;
-	}
 
 	nx_system_initialize();
 
@@ -275,6 +193,13 @@ int nx_net_init(void)
 		LOG_WRN("dhcp create failed; use 'net ip' for a static address");
 	}
 
+	/* The shared operations' lock and state.  Before the hook below and before
+	   the scheduler starts, so the first link callback finds them in place. */
+	if (net_core_init(dhcp_created) != 0) {
+		LOG_ERR("net core init failed");
+		return NXG_ERR;
+	}
+
 	/* Last, so every precondition the hook reads is already final.  Ordering is
 	   not what makes this safe -- nothing runs until the scheduler starts -- but
 	   it keeps the hook from being readable as "may run mid-init". */
@@ -299,27 +224,6 @@ void *nx_net_ip(void)
 void *nx_net_pool(void)
 {
 	return nx_up ? (void *)&eth_pool : NULL;
-}
-
-int nx_net_info_get(struct nx_net_info *out)
-{
-	ULONG ip = 0, mask = 0, gw = 0;
-
-	if (!nx_up)
-		return NXG_ERR_STATE;
-
-	/* Snapshot under the lock so `net info` cannot catch a half-applied
-	   transition (address already cleared, flags not yet updated). */
-	nxg_lock_acquire();
-	nx_ip_address_get(&eth_ip, &ip, &mask);
-	nx_ip_gateway_address_get(&eth_ip, &gw);
-	out->ip = (uint32_t)ip;
-	out->mask = (uint32_t)mask;
-	out->gw = (uint32_t)gw;
-	out->ip_valid = (ip != 0);
-	out->dhcp_mode = dhcp_created && !static_mode;
-	nxg_unlock();
-	return NXG_OK;
 }
 
 /* Counters for `net info` (issue #202).  Only reads: nx_tcp_info_get() and
@@ -376,189 +280,4 @@ int nx_net_diag_get(struct nx_net_diag *out)
 		out->pool_invalid_rel = (uint32_t)ir;
 	}
 	return NXG_OK;
-}
-
-/*
- * Switch to a static address.  Transactional: either the address, the gateway and
- * the mode flags all move together, or nothing does.  The old code stopped DHCP
- * and set static_mode BEFORE the address call, so a failure there left the board
- * with no DHCP client, no address, and a mode flag claiming static.
- */
-int nx_net_set_static(uint32_t ip, uint32_t mask, uint32_t gw)
-{
-	ULONG old_ip = 0, old_mask = 0, old_gw = 0;
-	bool  old_started, old_static;
-	int   rc = NXG_OK;
-	UINT  s;
-
-	if (!nx_up)
-		return NXG_ERR_STATE;
-
-	/* NetX accepts a gateway only if it sits on an interface's subnet
-	   (nx_ip_gateway_address_set.c), and the address has to be set BEFORE the
-	   gateway -- so a gateway off the new subnet fails only after the address has
-	   already moved.  Reject it here, before anything changes; the rollback below
-	   stays as the backstop for failures that cannot be predicted (issue #19). */
-	if (gw != 0u && (gw & mask) != (ip & mask))
-		return NXG_ERR;
-
-	nxg_lock_acquire();
-
-	nx_ip_address_get(&eth_ip, &old_ip, &old_mask);
-	nx_ip_gateway_address_get(&eth_ip, &old_gw);
-	old_started = dhcp_started;
-	old_static  = static_mode;
-
-	if (dhcp_started) {
-		s = nx_dhcp_interface_stop(&eth_dhcp, NXG_IFACE);
-		if (s != NX_SUCCESS && s != NX_DHCP_NOT_STARTED) {
-			rc = NXG_ERR;
-			goto out;              /* nothing changed yet */
-		}
-		dhcp_started = false;
-	}
-
-	if (nx_ip_address_set(&eth_ip, ip, mask) != NX_SUCCESS) {
-		rc = NXG_ERR;
-		goto rollback;
-	}
-	if (nxg_gateway_apply(gw) != NX_SUCCESS) {
-		rc = NXG_ERR;
-		goto rollback;
-	}
-
-	static_mode = true;
-	LOG_INF("static %lu.%lu.%lu.%lu", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
-	        (ip >> 8) & 0xFF, ip & 0xFF);
-	goto out;
-
-rollback:
-	/* Order matters: nx_dhcp_interface_reinitialize() clears the DHCP-managed
-	   address, so it has to run BEFORE the old address is put back.  It is also
-	   mandatory before a restart -- NetX documents that a stopped client must be
-	   reinitialised before nx_dhcp_interface_start() (nxd_dhcp_client.c). */
-	if (old_started)
-		(void)nx_dhcp_interface_reinitialize(&eth_dhcp, NXG_IFACE);
-	(void)nx_ip_address_set(&eth_ip, old_ip, old_mask);
-	(void)nxg_gateway_apply((uint32_t)old_gw);   /* 0 restores "no gateway" */
-	static_mode = old_static;
-	if (old_started) {
-		if (nx_dhcp_interface_start(&eth_dhcp, NXG_IFACE) == NX_SUCCESS) {
-			dhcp_started = true;
-		} else {
-			/* Could not put DHCP back: leave a state the link-up callback
-			   and a later `net dhcp` can recover from, rather than one that
-			   claims a client that is not running. */
-			dhcp_started = false;
-			static_mode  = false;
-			LOG_ERR("static failed and DHCP could not be restarted");
-		}
-	}
-
-out:
-	nxg_unlock();
-	return rc;
-}
-
-/*
- * `net dhcp`: re-acquire an address.  Three cases, because the one thing this must
- * not do is throw away a working lease (issue #9 -- the old code called
- * nx_dhcp_reinitialize() on a RUNNING client, which clears the address, and then
- * nx_dhcp_start() failed on the still-bound socket and its status was discarded,
- * leaving the board with no address and no way back).
- *
- *   not started  -> start
- *   BOUND        -> force renew; the lease stays valid the whole time (NXG_RENEWED)
- *   started but not bound (stuck in INIT/SELECTING/REQUESTING)
- *                -> stop, reinitialise, start.  Nothing is lost: there is no lease.
- */
-int nx_net_dhcp_renew(void)
-{
-	int  rc;
-	UINT s;
-
-	if (!nx_up)
-		return NXG_ERR_STATE;
-	if (!dhcp_created)
-		return NXG_ERR;
-
-	nxg_lock_acquire();
-	static_mode = false;
-
-	if (!dhcp_started) {
-		nxg_drop_address();
-		s = nx_dhcp_interface_start(&eth_dhcp, NXG_IFACE);
-		if (s != NX_SUCCESS) {
-			LOG_ERR("dhcp start failed (0x%02x)", (unsigned)s);
-			rc = NXG_ERR;
-			goto out;
-		}
-		dhcp_started = true;
-		rc = NXG_OK;
-		goto out;
-	}
-
-	s = nx_dhcp_interface_force_renew(&eth_dhcp, NXG_IFACE);
-	if (s == NX_SUCCESS) {
-		rc = NXG_RENEWED;              /* lease kept, DHCPREQUEST sent */
-		goto out;
-	}
-	if (s != NX_DHCP_NOT_BOUND) {
-		LOG_ERR("dhcp force renew failed (0x%02x)", (unsigned)s);
-		rc = NXG_ERR;
-		goto out;
-	}
-
-	/* Not bound: restart the state machine from scratch. */
-	s = nx_dhcp_interface_stop(&eth_dhcp, NXG_IFACE);
-	if (s != NX_SUCCESS && s != NX_DHCP_NOT_STARTED) {
-		LOG_ERR("dhcp stop failed (0x%02x)", (unsigned)s);
-		rc = NXG_ERR;
-		goto out;
-	}
-	dhcp_started = false;              /* the link callback may restart it now */
-
-	nxg_drop_address();
-
-	s = nx_dhcp_interface_reinitialize(&eth_dhcp, NXG_IFACE);
-	if (s != NX_SUCCESS) {
-		LOG_ERR("dhcp reinitialize failed (0x%02x)", (unsigned)s);
-		rc = NXG_ERR;
-		goto out;
-	}
-	s = nx_dhcp_interface_start(&eth_dhcp, NXG_IFACE);
-	if (s != NX_SUCCESS) {
-		LOG_ERR("dhcp restart failed (0x%02x)", (unsigned)s);
-		rc = NXG_ERR;
-		goto out;
-	}
-	dhcp_started = true;
-	rc = NXG_OK;
-
-out:
-	nxg_unlock();
-	return rc;
-}
-
-int nx_net_ping(uint32_t ip, unsigned timeout_ms, unsigned *rtt_ms)
-{
-	NX_PACKET *resp = NX_NULL;
-	ULONG t0;
-	UINT rc;
-
-	if (!nx_up)
-		return NXG_ERR_STATE;
-
-	t0 = tx_time_get();
-	rc = nx_icmp_ping(&eth_ip, (ULONG)ip, "nx_glue_ping", 12, &resp,
-	                  (ULONG)timeout_ms);    /* NX_IP_PERIODIC_RATE=1000 -> ms    */
-	if (rc == NX_SUCCESS) {
-		if (rtt_ms != NULL)
-			*rtt_ms = (unsigned)(tx_time_get() - t0);
-		nx_packet_release(resp);
-		return NXG_OK;
-	}
-	if (resp != NX_NULL)
-		nx_packet_release(resp);
-	return (rc == NX_NO_RESPONSE) ? NXG_TIMEOUT : NXG_ERR;
 }

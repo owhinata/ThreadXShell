@@ -15,6 +15,11 @@
  * defines it as its own clock (net_svc_stub.c).  TX_TIMER_TICKS_PER_SECOND is
  * deliberately NOT defined here: that test passes it, so the command's
  * _Static_assert still has to find the board's value.
+ *
+ * The shared NetX operations (shell/cmds/net_core.c, issue #220) also take a
+ * mutex and mask interrupts: the mutex calls and the TX_DISABLE / TX_RESTORE
+ * section are declared below as calls into the test (test_net_core.c defines
+ * them and records what was held when), and nothing else uses them.
  */
 #ifndef TX_API_H
 #define TX_API_H
@@ -33,7 +38,20 @@ typedef struct { void *opaque; } TX_EVENT_FLAGS_GROUP;
 typedef struct { void *opaque; } TX_MUTEX;
 
 #define TX_SUCCESS ((UINT)0)
+#define TX_WAIT_FOREVER ((ULONG)0xFFFFFFFFUL)
+#define TX_INHERIT      ((UINT)1)
 
 ULONG tx_time_get(void);
+
+UINT tx_mutex_create(TX_MUTEX *mutex_ptr, CHAR *name_ptr, UINT inherit);
+UINT tx_mutex_get(TX_MUTEX *mutex_ptr, ULONG wait_option);
+UINT tx_mutex_put(TX_MUTEX *mutex_ptr);
+
+/* The interrupt-masked section, as calls the test counts. */
+UINT tx_shim_disable(void);
+void tx_shim_restore(UINT saved);
+#define TX_INTERRUPT_SAVE_AREA UINT interrupt_save;
+#define TX_DISABLE             interrupt_save = tx_shim_disable();
+#define TX_RESTORE             tx_shim_restore(interrupt_save);
 
 #endif /* TX_API_H */

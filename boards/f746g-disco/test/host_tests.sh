@@ -260,8 +260,7 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 \
 # the shared stub adapter.  A board subcommand that reuses a shared name is
 # silently unreachable (the parser takes the first match), and only the built
 # table shows it; shell/test/test_net_cmd.c proves the check sees a duplicate.
-# The run also pins this board's NET_SVC_HAS_LEASE_STALE and that the gw line
-# follows it.
+# The run also pins that the gw line carries the STALE mark (issue #220).
 st="$HOST_TEST_SHELL_TEST"
 gcc $CFLAGS -DCLI_USE_COLOR=0 -DTX_TIMER_TICKS_PER_SECOND=1000 \
     -I "$st" -I "$HOST_TEST_BACKEND" -I "$st/shim" \

@@ -243,7 +243,7 @@ void rtl_tcpip_set_inited(bool v);
 /*
  * (The host-side memo of how the address was obtained -- rtl_ip_mode() -- lived here
  * until owhinata/wio-lite-ai#30 B1.  The module no longer takes an address at all, and the
- * host stack keeps its own dhcp-vs-static flag in struct nx_net_info.)
+ * host stack's address source is the shared one, shell/cmds/net_core.h.)
  */
 
 /* ---- (b) shell adapters ------------------------------------------------------- */

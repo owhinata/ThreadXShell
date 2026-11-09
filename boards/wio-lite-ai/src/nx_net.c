@@ -23,6 +23,7 @@
 #include "link_data.h"
 #define LOG_TAG "nx"
 #include "log.h"
+#include "net_core.h"         /* the shared address / DHCP / ping (issue #220) */
 #include "net_shell.h"
 #include "nx_link_driver.h"
 #include "rtl_link.h"
@@ -88,9 +89,10 @@
 #define NXN_REFRESH_MS     8000u
 /*
  * How long nx_net_link_taken() waits for the owner to act on a revoked link
- * (owhinata/wio-lite-ai#41).  The owner only has to reach the generation check at the top of its UP
- * branch and run nxn_link_revoked(), which issues no eRPC and takes no lock -- so this is a
- * scheduler turn, not a transaction, and half a second is already three orders of magnitude of
+ * (owhinata/wio-lite-ai#41).  The owner only has to reach the generation check at the top of
+ * its UP branch and run nxn_link_revoked(), which issues no eRPC and takes no link -- only the
+ * shared address lock and, to stop the client, the DHCP mutex (net_core_link_lost()) -- so
+ * this is a scheduler turn plus a DHCP stop, not a transaction, and half a second is ample
  * slack.  It is deliberately NOT sized for the module: nothing here talks to it.
  */
 #define NXN_TAKEN_WAIT_MS  500u
@@ -163,35 +165,29 @@ static bool nxn_ready;                /* the NetX objects exist                 
 static bool nxn_dhcp_created;
 
 /*
- * Address-acquisition state, and the mutex that owns it.
+ * The shared operations' state and facts (shell/cmds/net_core.h, issue #220):
+ * the address lock, the source, the DHCP client's state, the stale mark and the
+ * recorded link level.  Plain .bss (AXI-SRAM) like the other NetX control
+ * blocks here; nothing but the CPU touches it.
  *
- * These are touched from two directions: a CLI thread running `net dhcp` / `net ip`, and
- * the owner thread halting the client as it takes the interface down.  Without
- * serialisation `net dhcp &` (a background job) racing a foreground `net down` can leave
- * them lying: the owner reads nxn_dhcp_started == false, skips the stop, and the job then
- * sets it true after the halt point -- a client left running under an interface that is
- * on its way out.
+ * LOCK ORDER: the address lock is NEVER taken while the rtl_link coarse mutex is
+ * held.  net_core_link_lost() runs before nxn_stop() claims the link, and the CLI
+ * entry points take no link at all.  Below it sit the NetX DHCP mutex and
+ * nx_ip_protection, which is the same direction everything else in this file
+ * goes.
  *
- * LOCK ORDER: this mutex is NEVER taken while the rtl_link coarse mutex is held.
- * nxn_dhcp_halt() runs before nxn_stop() claims the link, and the CLI entry points below
- * take no link at all.  Below it sit the NetX DHCP mutex and nx_ip_protection, which is
- * the same direction everything else in this file goes.
+ * Boots with no source: nothing addresses this interface until `net dhcp`,
+ * `net ip` or the KV boot does.
  */
-static TX_MUTEX nxn_addr_lock;
-static bool nxn_dhcp_started;
-static bool nxn_static_mode;
-
-static void nxn_addr_take(void)
-{
-	if (nxn_ready)
-		(void)tx_mutex_get(&nxn_addr_lock, TX_WAIT_FOREVER);
-}
-
-static void nxn_addr_give(void)
-{
-	if (nxn_ready)
-		(void)tx_mutex_put(&nxn_addr_lock);
-}
+struct net_core_state net_core_board_state;
+const struct net_core_facts net_core_board_facts = {
+	.ip          = &nxn_ip,
+	.dhcp        = &nxn_dhcp,
+	.iface       = 0u,
+	.boot_source = NET_CORE_SRC_NONE,
+	.why_link    = "the link is down (not associated) -- `wifi connect` first",
+	.why_down    = "the host stack did not initialise",
+};
 
 /* Owner thread. */
 static TX_THREAD             nxn_thread;
@@ -211,11 +207,9 @@ static uint32_t nxn_uart_gen;
 static uint8_t  nxn_mac[6];
 static uint8_t  nxn_radio_up;
 
-/* Association tracking for the link state (owhinata/wio-lite-ai#30 B2a).  Owner thread only, except
- * nxn_lease_stale which readers sample without the lock -- a bool that only ever moves
- * on a link transition or a successful lease, so a torn read is not a thing. */
+/* Association tracking for the link state (owhinata/wio-lite-ai#30 B2a).  Owner thread
+ * only.  The stale mark it used to keep is the shared one now (issue #220). */
 static uint8_t  nxn_link_down_run;
-static bool     nxn_lease_stale;
 /* Association poll tally, so a spurious link-down can be told apart from a real one:
  * "the module said no" and "the module did not answer" are different failures and only
  * the first is the network's fault. */
@@ -338,30 +332,38 @@ static int nxn_eth_info(uint8_t mac[6], uint8_t *flags)
  * _nx_ip_deferred_link_status_process() returns without even asking the driver, so the
  * interface flag would never move.
  *
- * It updates one field and nothing else.  The f746 port starts the DHCP client from here
- * because DHCP is its boot default; doing that on this board would be wrong twice over:
+ * It updates NetX's field and the shared record of the level, and nothing else.  Starting
+ * the DHCP client from here would be wrong twice over:
  * NetX runs this callback WITH nx_ip_protection held (nx_ip_thread_entry.c), while the
  * DHCP client takes its own mutex and then sends packets that take nx_ip_protection --
  * so an IP->DHCP edge here plus the DHCP->IP edge that already exists is a lock-order
  * cycle.  And `net dhcp` can start the client from a CLI thread at the same moment.
- * There is therefore exactly ONE owner of the DHCP client: nx_net_dhcp_renew(), i.e. the
- * `net dhcp` command, which is also what `net up` tells the user to run.
+ * The DHCP client is started only by `net dhcp` (shell/cmds/net_core.c) and the KV boot,
+ * from their own threads.
  */
 static void nxn_link_status_cb(NX_IP *ip, UINT iface_index, UINT link_up)
 {
 	ip->nx_ip_interface[iface_index].nx_interface_link_up = (UCHAR)link_up;
+	/* The shared record of the level: one masked store, no NetX call, no lock
+	 * (issue #220; step 2 replaces this callback with the shared one). */
+	net_core_link_note(link_up != 0u);
 }
 
 /* ---- the owner thread -------------------------------------------------------- */
 
-static void nxn_dhcp_halt(void)
+/*
+ * The link is closed: record it, stop DHCP if asked, and mark a DHCP address stale --
+ * all in the shared state, under its lock (net_core_link_lost(), issue #220).  The
+ * stop's answer only goes to the log: the shared side keeps the client recorded as
+ * running when NetX did not stop it.  [!] TEMPORARY: step 2 of issue #220 moves this
+ * reaction into the shared worker and removes these calls.
+ */
+static void nxn_link_lost(bool stop_dhcp)
 {
-	nxn_addr_take();
-	if (nxn_dhcp_started) {
-		nx_dhcp_stop(&nxn_dhcp);
-		nxn_dhcp_started = false;
-	}
-	nxn_addr_give();
+	UINT s = net_core_link_lost(stop_dhcp);
+
+	if (s != NX_SUCCESS)
+		LOG_WRN("dhcp stop failed (0x%02x)", (unsigned)s);
 }
 
 /*
@@ -453,7 +455,7 @@ static void nxn_stop(const char *why)
 	 */
 	nx_link_driver_set_link(0);
 	net_shell_stop_request();
-	nxn_dhcp_halt();
+	nxn_link_lost(true);
 
 	if (rtl_link_claim(NXN_ARM_CLAIM_MS) != 0) {
 		/* Nobody gave up the mutex in twenty seconds.  We cannot even ask the module
@@ -630,7 +632,6 @@ static void nxn_arm(void)
 	}
 
 	nxn_link_down_run = 0u;
-	nxn_lease_stale   = false;
 	nxn_assoc_yes = nxn_assoc_no = nxn_assoc_noanswer = 0u;
 	armed = 1;                       /* from here on, only nxn_stop() may end this */
 	if (nxn_data_cfg(ERPC_DATA_MODE_BRIDGE, NXN_HOLD_MS) != 0) {
@@ -706,8 +707,9 @@ refuse:
  *
  * The write itself goes through nx_link_driver_set_link(), which only flags the change
  * and lets the IP thread run the status callback; nx_interface_link_up is never written
- * from this thread.  Nothing here starts DHCP: that lock-order cycle is documented at
- * nxn_link_status_cb() and the lease is instead latched stale for `net info` to report.
+ * from this thread.  Nothing here starts or stops DHCP: that lock-order cycle is
+ * documented at nxn_link_status_cb(), and a DHCP lease is instead marked stale for
+ * `net info` to report.
  */
 static void nxn_publish_link(int assoc)
 {
@@ -734,7 +736,7 @@ static void nxn_publish_link(int assoc)
 		return;
 
 	nx_link_driver_set_link(0);
-	nxn_lease_stale = true;          /* the address outlived the association */
+	nxn_link_lost(false);            /* a DHCP address outlived the association */
 	LOG_WRN("link down (%s)", (assoc == 0) ? "not associated" : "module did not answer");
 }
 
@@ -814,9 +816,8 @@ static int nxn_auto_reconnect(void)
 		return -1;
 	if (connected != WIFI_RPC_OK)
 		return 0;
-	/* The address outlived an association, so it may belong to a network we are no
-	 * longer on.  `net info` turns this into "run `net dhcp`". */
-	nxn_lease_stale = true;
+	/* Not marked stale (issue #220, decided with the user): a re-association inside one
+	 * refresh never took the link down, so NetX and the lease saw nothing. */
 	return 1;
 }
 
@@ -897,7 +898,7 @@ static void nxn_refresh(void)
 static void nxn_link_revoked(void)
 {
 	nx_link_driver_set_link(0);
-	nxn_dhcp_halt();
+	nxn_link_lost(true);
 	link_data_detach();
 	rtl_link_uart_unref_gen(nxn_uart_gen);
 	nxn_uart_gen = 0u;
@@ -1026,7 +1027,7 @@ int nx_net_init(void)
 		LOG_WRN("dhcp create failed; use `net ip` for a static address");
 	}
 
-	if (tx_mutex_create(&nxn_addr_lock, "nx-addr", TX_INHERIT) != TX_SUCCESS)
+	if (net_core_init(nxn_dhcp_created) != 0)
 		return NXN_ERR;
 	if (tx_event_flags_create(&nxn_evt, "nx-net") != TX_SUCCESS)
 		return NXN_ERR;
@@ -1139,159 +1140,6 @@ int nx_net_link_taken(void)
 	return (nxn_state == NX_NET_UP) ? -1 : 0;
 }
 
-int nx_net_info_get(struct nx_net_info *out)
-{
-	ULONG ip = 0, mask = 0, gw = 0;
-
-	if (!nxn_ready)
-		return NXN_ERR_STATE;
-
-	nx_ip_address_get(&nxn_ip, &ip, &mask);
-	nx_ip_gateway_address_get(&nxn_ip, &gw);
-	out->ip        = (uint32_t)ip;
-	out->mask      = (uint32_t)mask;
-	out->gw        = (uint32_t)gw;
-	out->ip_valid  = (ip != 0);
-	/* Set when the link went down under a live address (owhinata/wio-lite-ai#30 B2a).  The lease is
-	 * not renewed automatically -- starting the DHCP client from the link transition is
-	 * the lock-order cycle nxn_link_status_cb() documents -- so the address on the
-	 * interface may be one the network no longer agrees with. */
-	out->lease_stale = nxn_lease_stale;
-	/* Under the lock like every other reader of it: the cost is a mutex on a reporting
-	 * path, and the alternative is a rule with an exception, which is the kind of thing
-	 * that is true right up until somebody adds the next caller. */
-	nxn_addr_take();
-	out->dhcp_mode = nxn_dhcp_created && !nxn_static_mode;
-	nxn_addr_give();
-	return NXN_OK;
-}
-
-int nx_net_set_static(uint32_t ip, uint32_t mask, uint32_t gw)
-{
-	int rc = NXN_OK;
-
-	if (!nxn_ready)
-		return NXN_ERR_STATE;
-
-	/* NetX accepts a gateway only if it sits on an interface's subnet
-	 * (nx_ip_gateway_address_set.c), and the address has to be set BEFORE the
-	 * gateway -- so a gateway off the new subnet fails only after the address has
-	 * already moved, and this function has no rollback.  Reject it up front, while
-	 * nothing has been touched (issue #19). */
-	if (gw != 0u && (gw & mask) != (ip & mask))
-		return NXN_ERR;
-
-	nxn_addr_take();
-	/* Re-checked HERE, under the lock, not by the caller: between a CLI thread's
-	 * nx_net_is_up() and this call the owner may have started taking the interface
-	 * down, and the loser of that race must be this one. */
-	if (nxn_state != NX_NET_UP) {
-		nxn_addr_give();
-		return NXN_ERR_STATE;
-	}
-	if (nxn_dhcp_started) {
-		nx_dhcp_stop(&nxn_dhcp);
-		nxn_dhcp_started = false;
-	}
-	nxn_static_mode = true;
-	nxn_lease_stale = false;         /* the operator just said what the address is */
-	if (nx_ip_address_set(&nxn_ip, ip, mask) != NX_SUCCESS) {
-		rc = NXN_ERR;
-	} else {
-		/* gw == 0 means "no gateway" and has to CLEAR it: NetX refuses 0.0.0.0 as
-		 * a gateway address outright (nxe_ip_gateway_address_set.c), so passing it
-		 * through failed -- and the status was discarded, so `net ip <a.b.c.d/mask>`
-		 * reported success while silently keeping the previous gateway, which after
-		 * DHCP is a lease-derived one (issue #19). */
-		UINT s = (gw != 0u) ? nx_ip_gateway_address_set(&nxn_ip, (ULONG)gw)
-		                    : nx_ip_gateway_address_clear(&nxn_ip);
-		if (s != NX_SUCCESS)
-			rc = NXN_ERR;
-	}
-	nxn_addr_give();
-	return rc;
-}
-
-int nx_net_dhcp_renew(void)
-{
-	UINT s;
-
-	if (!nxn_ready)
-		return NXN_ERR_STATE;
-	if (!nxn_dhcp_created)
-		return NXN_ERR;
-
-	nxn_addr_take();
-	/* The client only makes sense while the host stack owns the network: with the link
-	 * down every DISCOVER goes nowhere and the state machine just retries.  Checked
-	 * under the lock so a concurrent `net down` either finishes first (and this
-	 * refuses) or waits (and then stops what this started). */
-	if (nxn_state != NX_NET_UP) {
-		nxn_addr_give();
-		return NXN_ERR_STATE;
-	}
-
-	nxn_static_mode = false;
-	if (nxn_dhcp_started) {
-		nx_dhcp_stop(&nxn_dhcp);
-		nx_dhcp_reinitialize(&nxn_dhcp);
-		nxn_dhcp_started = false;
-	}
-	/*
-	 * Drop the address we hold BEFORE the client starts, so "the interface has an
-	 * address" means "a lease arrived" and nothing else.  The DHCP client zeroes it
-	 * itself on the way into INIT, but it does that on its OWN thread -- so a caller
-	 * that starts the client and then watches for an address (shell/cmds/cmd_net.c)
-	 * races it and can read the previous one.  Measured on board #2: `net ip
-	 * 192.168.11.99/24` followed by `net dhcp` reported "192.168.11.99 (dhcp)" at once
-	 * while the real lease (192.168.11.44) landed seconds later -- a wrong answer that
-	 * looked exactly like a right one.  Clearing here is also what "renew" means.
-	 */
-	(void)nx_ip_address_set(&nxn_ip, 0u, 0u);
-	/* CLEAR, not set-to-zero: NetX rejects 0.0.0.0 as a gateway address, so the
-	 * set() this used to call always failed and the old gateway survived the
-	 * switch to DHCP -- the same trap as issue #19, at a second call site. */
-	(void)nx_ip_gateway_address_clear(&nxn_ip);
-	nxn_lease_stale = false;         /* whatever we get next is by definition fresh */
-	s = nx_dhcp_start(&nxn_dhcp);
-	/* ALREADY_STARTED means the state we wanted is the state we have -- that is a
-	 * success, not a failure, and treating it as one is how a second `net dhcp` ends up
-	 * reporting an error while a lease is on its way. */
-	if (s != NX_SUCCESS && s != NX_DHCP_ALREADY_STARTED) {
-		nxn_addr_give();
-		return NXN_ERR;
-	}
-	nxn_dhcp_started = true;
-	nxn_addr_give();
-	return NXN_OK;
-}
-
-int nx_net_ping(uint32_t ip, unsigned timeout_ms, unsigned *rtt_ms)
-{
-	NX_PACKET *resp = NX_NULL;
-	ULONG t0, t1;
-	UINT s;
-
-	if (!nxn_ready)
-		return NXN_ERR_STATE;
-
-	t0 = tx_time_get();
-	/* NX_IP_PERIODIC_RATE is 1000 here (port/netxduo/nx_user.h), so the wait option
-	 * really is a millisecond count. */
-	s  = nx_icmp_ping(&nxn_ip, (ULONG)ip, "wio-nx-ping", 11, &resp, (ULONG)timeout_ms);
-	t1 = tx_time_get();
-
-	if (resp != NX_NULL)
-		nx_packet_release(resp);
-	if (s == NX_NO_RESPONSE)
-		return NXN_TIMEOUT;
-	if (s != NX_SUCCESS)
-		return NXN_ERR;
-	if (rtt_ms)
-		*rtt_ms = (unsigned)(t1 - t0);
-	return NXN_OK;
-}
-
 void nx_net_mac_get(uint8_t mac[6])
 {
 	memcpy(mac, nxn_mac, 6);
@@ -1347,7 +1195,6 @@ struct nxn_status_sample {
 	uint8_t                mac[6];
 	bool                   link_up;
 	bool                   radio_up;
-	bool                   lease_stale;
 	uint32_t               assoc_yes, assoc_no, assoc_noanswer;
 	struct nx_link_stats   st;
 	ULONG                  pool_avail, pool_total, pool_empty;
@@ -1383,7 +1230,6 @@ int nx_net_write_status(net_svc_write_fn write, void *ctx)
 		memcpy(s.mac, nxn_mac, sizeof s.mac);
 		s.link_up = nx_link_driver_link_up();
 		s.radio_up = (nxn_radio_up != 0u);
-		s.lease_stale = nxn_lease_stale;
 		s.assoc_yes = nxn_assoc_yes;
 		s.assoc_no = nxn_assoc_no;
 		s.assoc_noanswer = nxn_assoc_noanswer;
@@ -1408,11 +1254,10 @@ int nx_net_write_status(net_svc_write_fn write, void *ctx)
 	 * started -- which stays up across an AP going away, so it is reported separately
 	 * rather than being allowed to masquerade as the link state. */
 	if (nxn_status_line(write, ctx,
-	                    "  mac: %02x:%02x:%02x:%02x:%02x:%02x, link %s, driver %s%s\r\n",
+	                    "  mac: %02x:%02x:%02x:%02x:%02x:%02x, link %s, driver %s\r\n",
 	                    s.mac[0], s.mac[1], s.mac[2], s.mac[3], s.mac[4], s.mac[5],
 	                    s.link_up ? "up" : "DOWN",
-	                    s.radio_up ? "started" : "stopped",
-	                    s.lease_stale ? "  <-- lease may be stale, run `net dhcp`" : "") != 0)
+	                    s.radio_up ? "started" : "stopped") != 0)
 		return -1;
 
 	if (nxn_status_line(write, ctx,

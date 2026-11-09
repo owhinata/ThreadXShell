@@ -123,7 +123,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   同じ検査本体 `svc/plugin/plugin_load_body.h`** を走らせ、**全ゲート通過まで公開しない**。**`--profile` と行き先は必須**
   で前者はファイル名から推測しない。**asset の行き先は slot 必須**（全ボード `--slot` と slot 表に公開前に照合。無し・半分は拒否。#159・#195）。**`--profile` はチェック集合の選択であって識別ではない**ので非対称
   — 対処は**拒否ではなく警告**で、**`cls` 側に出力 shape 固定を足さない**。
-- **[!] モデル区画は 16 バイト整列**（flatbuffer の 4 ではなく Ethos-U ドライバの要求）。
+- **[!] モデル区画は 16 バイト整列**（4 ではない。理由は `asset/README.md`）。
   **[!] オフセット → アドレスの変換は `plugin_exec_slot()`（`svc/plugin/plugin_exec.c`、`plugin_run_slot()` はそれを呼ぶだけ）の 1 箇所**で、**実行前に MPU を読み戻して
   fail-closed**: Armv8-M に「番号の大きいリージョンが勝つ」規則は無く、`limit` は最後の 32 B を含み、
   MAIR は完全復号、リージョン数は `MPU_TYPE.DREGION` で**読めた表より大きければ clamp せず拒否**。判定は
@@ -150,11 +150,11 @@ plugin は board code と同格の**信頼された native code**。ゲートが
 - **[!] target word は 2 端で検査する**（firmware の `_Static_assert` + gate の `.ARM.attributes`）。
   **CMSE ビットは image に記録されないので firmware の assert が唯一の検査**。`__ARM_FP` 単独で FPU を
   決めず、写像できない組は `#error`。
-- **[!] アセットは `--target asset-<name>` が作る。ゲートは送信時ではなくビルド時にある** — 送信は打った
-  パスをそのまま送り**それがその成果物かは誰も検査しない**ので、閉じ手は receipt の **CRC32** を転送後に
+- **[!] アセットは `--target asset-<name>` が作る。ゲートは送信時ではなくビルド時にある**（流れは `asset/README.md`）。
+  送った物が**その成果物かは誰も検査しない**ので、閉じ手は receipt の **CRC32** を転送後に
   ボードの保存バイトの CRC（全ボード `blob list`）と突き合わせること。**モデルは commit + SHA256 で pin**（Git LFS 不在だとポインタが
   exit 0 で置かれる）、**pin が消えたら fail closed**。**ファームと plugin は別成果物で間違いは両方向。** **[!] veneer ゲートの DELIVERY は build.ninja から導出したファーム成果物の使用者と両方向で照合し（`cmake/check_delivery_gate.py`）、全 target がその検査を先に待つ。外す・弱めない。**
-- **[!] slot 表は出荷後 append のみ**（identity は基底アドレス、全面の作り直しは各ボード一度きり: Grove #94・wio #193、f746 は #194 で wio の表から）。**置き場に入らない slot はリンク後に共有の `check_blob_staging.py` が拒む**（wio・f746。外す・弱めない）。`empty` は「ヘッダが無い」で「空きフラッシュ」ではない。
+- **[!] slot 表は出荷後 append のみ**（identity は基底アドレス。作り直しの経緯と `empty` の意味は `asset/README.md`）。**置き場に入らない slot はリンク後に共有の `check_blob_staging.py` が拒む**（wio・f746。外す・弱めない）。
 - **[!] 同じ plugin の callback は 2 つ同時に走らない**: plugin に入る全経路（param・admission・report・load/unload も）がボードの lease を取り、worker とコンソールは有界に待ち、panel は try だけ。**入口（ボードの分岐点と ENTRY の直前）は保持を検査し、無ければ「plugin 無し」とは別の答えを返す**（#127）。
 - **[!] 3 ボードのファームとも共有デコーダをリンクしない — デコーダは container でしか届かない**（**常駐デコーダを戻さない。別フラグで組み直した監査対象を作らない**。f746 も #159 で外した）。素の `.tflite` は **`nn run` でテンソルをそのまま報告**、**`nn stream start` は拒否**、**`nn thresh` は none**（set は **state**）。**非 tflm backend も同じ答え。**
   **wio・f746 は admission を `nn run` と共有するので shape の問いは no-plugin で通し**（refuse すると素のモデルの `nn run` が消える）、**stream を止めるのは `nn_active_can_draw()` 1 本**（Grove は 12 節）。

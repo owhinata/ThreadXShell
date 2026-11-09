@@ -94,7 +94,7 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
 - **ゲートは plugin ELF にも適用する**（対象外にしない）。**ダイジェストは署名ではない**。
 - **container は組んでから検査し、その同一ファイルを送る**（ホストは `verify_container` で**デバイスと
   同じ検査本体 `svc/plugin/plugin_load_body.h`** を走らせる）。**通るまで公開しない**（private path で組む）。**asset の行き先は slot 必須**（全ボード `--slot` と slot 表に公開前に照合。無し・半分は拒否。#159・#195）。
-- **モデル区画は 16 バイト整列**（flatbuffer の 4 ではなく Ethos-U ドライバの要求）。
+- **モデル区画は 16 バイト整列**（4 ではない。理由は `asset/README.md`）。
 - **オフセット → アドレスの変換は `plugin_exec_slot()`（`svc/plugin/plugin_exec.c`、`plugin_run_slot()` はそれを呼ぶだけ）の 1 箇所**で、**実行前に MPU を読み戻して
   fail-closed**（純関数・ホストテスト必須）。**窓を守る新しい機構は作らない**。
 - **上限は実測から導出する。超えられない上限は上限ではない。導出値 0 は「未測定」ではない**
@@ -107,10 +107,10 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
 - **image gate も共有**（`cmake/check_plugin_image.py`）。予約 / 禁止シンボル表 / veneer base cost は
   `add_plugin()` の**必須引数**で、**ゲートに告げる予約は MEMORY fragment と別の宣言**。TU の ABI も照合。**スタック計算は veneer 検査と同じ `cmake/thumb_stack_analysis.py` の 1 実装で、違うのは止まる場所だけ**（別実装を戻さない）。
 - **target word は 2 端で検査する**（firmware の `_Static_assert` + gate の `.ARM.attributes`）。
-- **[!] ゲートは送信時ではなくビルド時にある**（`--target asset-<name>`）。送信は打ったパスをそのまま送る
-  ので**閉じ手は receipt の CRC32 とボードの保存バイトの CRC（全ボード `blob list`）の照合**。「ビルド時に検査済み」を「何も起きない」と書き換えない。**配送 target（DELIVERY）は build.ninja から導出した使用者と両方向照合する**（`check_delivery_gate.py`、全 target が先に待つ）。
+- **[!] ゲートは送信時ではなくビルド時にある**（`--target asset-<name>`。流れは `asset/README.md`）。
+  **閉じ手は receipt の CRC32 とボードの保存バイトの CRC（全ボード `blob list`）の照合**。「ビルド時に検査済み」を「何も起きない」と書き換えない。**配送 target（DELIVERY）は build.ninja から導出した使用者と両方向照合する**（`check_delivery_gate.py`、全 target が先に待つ）。
 - **モデルは commit と SHA256 で pin**し、消えたら **fail closed**。fetch は build 時で `asset-*` は ALL 外。
-- **[!] slot 表は出荷後 append のみ**（identity は基底アドレス、全面の作り直しは各ボード一度きり: Grove #94・wio #193、f746 は #194 で wio の表から）。**置き場に入らない slot はリンク後に共有の `check_blob_staging.py` が拒む**（wio・f746、外さない）。`empty` は「ヘッダが無い」で「空きフラッシュ」ではない。
+- **[!] slot 表は出荷後 append のみ**（identity は基底アドレス。作り直しの経緯と `empty` の意味は `asset/README.md`）。**置き場に入らない slot はリンク後に共有の `check_blob_staging.py` が拒む**（wio・f746、外さない）。
 - **ファームと plugin は別成果物で間違いは両方向**（焼いても container は更新されず、逆も焼き直し不要）。
 - **[!] 同じ plugin の callback は 2 つ同時に走らない**: plugin に入る全経路（param・admission・report・load/unload も）がボードの lease を取り、worker とコンソールは有界に待ち、panel は try だけ。**入口は保持を検査し、無ければ「plugin 無し」と別の答え**（#127）。
 - **[!] デコーダは 3 ボードとも container でしか届かない（常駐デコーダを戻さない）**。素の `.tflite` は `nn run` がテンソルを報告、`nn stream start` は拒否、`nn thresh` は none、非 tflm backend も同じ答え。

@@ -178,7 +178,8 @@ case changes the table's row with it.
 # Plugin veneer cost gate
 
 `veneer_cost_check` runs on every shipping `shell` build of a board that
-registers it (#112: Grove Vision AI V2 and Wio Lite AI). `check_plugin_image.py`
+registers it (#112: Grove Vision AI V2 and Wio Lite AI; STM32F746G-DISCO too,
+in its `tflm` build, the one that loads plugins). `check_plugin_image.py`
 cannot see across a plugin veneer, so a crossing into the base is charged a flat
 allowance c, `VENEER_BASE_COST`. This is the other side of that charge:
 `check_veneer_base_cost.py` derives the stack the FIRMWARE spends below each
@@ -385,6 +386,7 @@ directions, with what it derives from the `build.ninja` CMake wrote.
 |---|---|---|---|
 | Grove | `shell.elf`, `shell.map`, `shell.img`, and the image tool's byte-identical copies `image_gen/output_case1_sec_wlcsp/output.img` and `image_gen/input_case1_secboot/EPII_CM55M_gnu_epii_evb_WLCSP65_s.elf` (declared as BYPRODUCTS) | `flash` (layout check + `xmodem_send.py --file=.../shell.img`) | `flash` |
 | wio | `shell.elf`, `shell.bin`, `shell.hex` | `dfu-shell` (`dfu-util -D shell.bin`) | `dfu-shell`, `flash` (depends on `dfu-shell`) |
+| f746 (`tflm` build) | `shell.elf`, `shell.bin`, `shell.hex` | `flash` (`st-flash ... write shell.bin 0x08000000`) | `flash` |
 
 An edge USES the firmware when, other than the link edge, the gate's check and
 this check, an explicit or implicit input (resolved through phony nodes) is a
@@ -435,8 +437,9 @@ are not declared; anything run outside the build (a shell alias, picocom by
 hand); and a `POST_BUILD` / `PRE_LINK` step on the FIRMWARE target itself, which
 is part of its link edge and runs before any gate can. A target named `asset-*`
 is exempt from the naming rule (rule 2) -- it still waits for the gate. The
-match is by file name, so it errs towards flagging. Other firmware (f746) is not this
-gate's: only the registered firmware's artifacts are looked for.
+match is by file name, so it errs towards flagging. Each board registers its
+own firmware, and only that firmware's artifacts are looked for; f746's builds
+with another backend register no gate, so nothing there waits for it.
 
 `fixtures/run_veneer_gate_build_tests.py`'s `delivery_*` cases: the plain tree
 passes; a new target that uses the image by file dependency
@@ -809,8 +812,8 @@ Every slot of the ABI must have exactly one row, every allowance must be
 positive (the loader reads 0 as a refused slot) and used by some slot, and the
 table is registered once. `add_plugin()` takes `SLOTS <slot ...>` (which slots
 the plugin exports) and derives `--entry pl_<slot>=<limit>` from the table; it
-refuses `ENTRIES` by name. `add_asset()` (`add_asset.cmake`, shared by both
-boards' asset rules) derives `--policy-stack <slot>=<limit>`, which
+refuses `ENTRIES` by name. `add_asset()` (`add_asset.cmake`, shared by every
+board's asset rules) derives `--policy-stack <slot>=<limit>`, which
 `build_asset.py` maps to the validator's slot indices through the
 `abi_layout.json` the host compiler prints from `svc/plugin/plugin_abi.h`. The slot
 indices the read-back uses are `check_plugin_image.ABI`'s, pinned to the same
@@ -825,12 +828,14 @@ and compares it with the seven numbers the shipped policy
 What it CATCHES: a later `-D` or `#define` of an allowance (CMAKE_C_FLAGS wins
 over the definition the table makes, with only a warning), lowering or raising
 it; and the firmware mapping a slot to a different allowance than the table --
-both boards' firmware still states its own slot -> allowance mapping, next to
+each board's firmware still states its own slot -> allowance mapping, next to
 the asserts that hold each allowance under the threads its slot runs on
-(Grove `port/nn/nn_plugin_stack.h`, wio `port/nn/nn_svc_wio.c`).
+(Grove `port/nn/nn_plugin_stack.h`, wio `port/nn/nn_svc_wio.c`, f746
+`port/nn/nn_svc_f746_model.c` with the asserts in `port/nn/nn_svc_f746.c` and
+`port/nn/nn_camera.c`).
 
 What it does NOT catch: a mapping disagreement between two allowances of EQUAL
-value -- today every allowance on both boards is 1,024 B, so the device enforces
+value -- today every allowance on all three boards is 1,024 B, so the device enforces
 the table's numbers either way and the disagreement stays invisible (and
 harmless) until the values differ; trusted firmware code going around the
 shared code on purpose (a cast write to the const policy, a parse body copied

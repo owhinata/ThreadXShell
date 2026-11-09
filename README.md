@@ -80,7 +80,8 @@ svc/                  board-independent services: generic ones (fmt, crc32, ymod
                       the board's side)
 asset/                board-independent plugin sources and the container toolchain --
                       common/ (veneers and the ABI's section layout), plugins/<name>/,
-                      tools/ (packer, ABI layout, container verifier)
+                      tools/ (packer, ABI layout, container verifier, slot table);
+                      asset/README.md follows one asset from build to board
 lib/                  upstream mirror submodules (read-only)
 boards/<board>/       board.cmake, src/ port/ cmds/ backend/ svc/ include/ ldscript/ cmake/,
                       lib/ (f746g-disco, wio-lite-ai: the ST Cube set fetched at configure

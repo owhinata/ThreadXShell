@@ -13,7 +13,7 @@ The files are grouped by the feature they serve (issue #153):
 |---|---|
 | `svc/` | Generic services any layer uses: the formatter (`fmt`), CRC-32 (`crc32`), YMODEM (`ymodem`) and small graphics helpers (`gfx_rot`, `rect_geom`). |
 | `svc/nn/` | The `nn` command's contract and shared core (`nn_*`, described below), the neutral tensor descriptor (`tensor.h`), the inference API `nn.h`, its one implementation `nn.c` (the dispatcher over the compiled-in backend, `nn_backend.h`) and its translation into that descriptor `nn_desc` (every board: issue #161, grove-vision-ai-v2 since issue #169), the tflm and Ethos-U backends (`tflm/`, `ethosu/`), and the BlazeFace decoder (`blazeface`), which reaches every board only inside a plugin container (no board links it into its firmware since issue #159 Step 4c). |
-| `svc/plugin/` | The plugin container's ABI, loader, executor and the checks around them (`plugin_*`, below). |
+| `svc/plugin/` | The plugin container's ABI, loader, executor and the checks around them (`plugin_*`, below). How a container is built, stored, checked and run, end to end, is [`asset/README.md`](../asset/README.md). |
 | `svc/camera/` | The camera frame pipeline (`frame`, `frame_pipeline`), the camera stream's holder table, sink steps and stream generations (`cam_holders`, `cam_step`, `cam_gen`, below) and the `camera` command's contract (`camera_svc`, below). |
 | `svc/blob/` | The asset store's board-independent parts (issue #192): the header format and a transfer's decisions (`blob_state`), the slot table's rules and lookups (`blob_map`), the `blob write` coordinator (`blob_write`), and since issue #194 the one set of store results (`blob_err.h`) and the store contract of the shared `blob` command (`blob_svc.h`); see [The asset store's shared parts](#the-asset-stores-shared-parts-issue-192). No file here is named `blob.h` (every board has a `src/blob.h` of its own). |
 | `svc/net/` | The contract of the shared `net` command, `net_svc.h` (issue #219; f746g-disco and wio-lite-ai, grove-vision-ai-v2 has no network). A header only: the command is `shell/cmds/cmd_net.c`, the one implementation under it is `shell/cmds/net_core.c` (issue #220) and the one telnet console is `shell/cmds/net_tty.c` (issue #221) -- both need NetX and ThreadX, so they cannot live here -- and each board's adapter is the board's; see [The `net` command and the telnet console are one implementation](#the-net-command-and-the-telnet-console-are-one-implementation-issue-212). |
@@ -774,7 +774,12 @@ relative to `svc/`.
 
 All three boards link `svc/blob/` (grove-vision-ai-v2 since issue #192,
 wio-lite-ai since #193, f746g-disco since #194), and one `blob` command,
-`shell/cmds/cmd_blob.c`, sits on it (next section).  The files:
+`shell/cmds/cmd_blob.c`, sits on it (next section).  This section and the next
+are the reference for the files and the command; the slot layout, what a slot
+table may and may not change, and how a stored blob is checked against the
+build are told end to end in
+[`asset/README.md`](../asset/README.md#the-blob-store-and-its-slot-tables).
+The files:
 
 | File | What |
 |---|---|
@@ -810,12 +815,9 @@ time that its program page is that size (grove-vision-ai-v2: `src/blob.c`,
 against `NOR_PROGRAM_PAGE`; wio-lite-ai: `src/blob.c`, against `NOR_PAGE_SIZE`)
 rather than the format following the board.
 
-[!] **A slot table only grows by appending once it has shipped.**  A stored
-header names its own slot's base address, and that base is the blob's
-identity, so moving a slot strands what is in it.  Each board's table has been
-re-carved whole once (grove-vision-ai-v2 at #94, wio-lite-ai at #193;
-f746g-disco started from wio-lite-ai's at #194), and each board pins every
-entry in its own test.
+[!] **A slot table only grows by appending once it has shipped** -- the base
+address is the blob's identity; why, and when each board's table was rebuilt,
+is [`asset/README.md`](../asset/README.md#the-blob-store-and-its-slot-tables).
 
 The translation units hold no mutable storage (the build-derived audit covers
 them like the rest of `svc/`, and `shell/cmds/cmd_blob.c` with the shared
@@ -886,8 +888,8 @@ nn model load <name>         load the blob stored under <name>
 - A finished transfer prints the YMODEM counters, then `rx drops : N (clean)`
   -- with the ring's high-water on a board that reports it (f746g-disco) --
   then `stored :` and `verify : PASS (read back <crc>)`.
-- `empty` means "no header", not "blank flash": the payload underneath may
-  still hold old data.
+- `empty` means "no header", not "blank flash"; the slot states are described
+  in [`asset/README.md`](../asset/README.md#the-blob-store-and-its-slot-tables).
 
 What stays a board's: its words and limits (above), which operations hold its
 busy flag or reservation, and how the part behaves (each board README's store

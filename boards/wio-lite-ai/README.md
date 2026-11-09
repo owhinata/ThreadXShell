@@ -142,7 +142,7 @@ reason the placement policy exists:
 
 `.plugin` is a fixed NOLOAD reservation at `0x24048000..0x24050000`, anchored at
 the top of AXI-SRAM, for the load image of a model post-processing plugin
-(#78; see [Plugin containers](#plugin-containers-issue-108--78-step-3a)).  A
+(#78; see [Plugin containers](#plugin-containers-issues-108-110-116--78-steps-3a-3b-and-3c)).  A
 plugin is **prelinked** for that address -- the loader services no relocations --
 so it cannot drift the way a sequential section would the day `.bss` grew, and
 moving it later invalidates every container built for this board.
@@ -985,8 +985,10 @@ PSRAM staging buffer and CRC-checks that copy exactly as before, then:
 
 - a payload that is not a container is a bare model and takes the old path
   unchanged (models already in the store do not need re-sending);
-- a container goes through `svc/plugin/plugin_load.c` -- the same validator the host
-  build runs -- with this board's policy, and its **model section is handed to
+- a container goes through `plugin_parse()` -- the same validator the host
+  build runs (one body, `svc/plugin/plugin_load_body.h`; see
+  [`asset/README.md`](../../asset/README.md#building-an-asset)) -- with this
+  board's policy, and its **model section is handed to
   the backend in place**, at its offset inside the staged container.  The TFLM
   backend accepts any range inside the staging buffer it handed out that starts
   on `NN_MODEL_ALIGN` (16 B); a container's model section is 16-aligned by the

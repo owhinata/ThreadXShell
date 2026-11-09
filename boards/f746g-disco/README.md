@@ -1269,8 +1269,9 @@ the receive):
 
 A **container** carries a model together with the code that interprets its
 output (a *plugin*).  The format, the validator and the build rules are shared
-with grove-vision-ai-v2 and wio-lite-ai (their READMEs have the design); this
-section is what is different here.  Step 4a recognises, validates and reports a
+with grove-vision-ai-v2 and wio-lite-ai (the shared design is
+[`asset/README.md`](../../asset/README.md); their READMEs have its history);
+this section is what is different here.  Step 4a recognises, validates and reports a
 container **without ever executing one**; Step 4b runs the plugin and builds
 this board's own containers; Step 4c removed the resident decoder and the
 built-in model, so a container is the only way a decoder reaches this board.

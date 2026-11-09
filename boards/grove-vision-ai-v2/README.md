@@ -6422,8 +6422,11 @@ wrote straight to the output, a verifier failing -- or the build being
 interrupted between them -- would leave a complete-looking `.nnc` at the path
 this README tells you to send.
 
-`verify_container` links `svc/plugin/plugin_load.c` -- the same validator the firmware
-runs -- so a container cannot pass on the host and be refused on the board.
+`verify_container` runs the same validator the firmware runs -- one body,
+`svc/plugin/plugin_load_body.h`, entered on the host through
+`plugin_parse_with_policy()` and in the firmware through `plugin_parse()`
+since issue #165 (see [`asset/README.md`](../../asset/README.md#building-an-asset))
+-- so a container cannot pass on the host and be refused on the board.
 Issue #93 is why that matters: its host gate used the flatbuffer verifier's
 default limits while the firmware used its own, and a model passed on the host
 and failed on the board, after the erase and the transfer had been spent.

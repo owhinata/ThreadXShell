@@ -1981,7 +1981,8 @@ This board's side:
 | File | What it holds |
 |---|---|
 | `src/net_svc_wio.c` | The adapter: the host stack's state checked before the shared operation in `shell/cmds/net_core.c` (coming up or going down is the only "busy", which the command waits out for up to 20 s; off is "no host stack"; FAILED says to run `wifi reset`), then the operation itself (issue #220; the shared side says LINK with the association down, before each probe of `net ping` too) |
-| `src/nx_net.c` | The host stack: the NetX objects, the shared operations' state and facts (`net_core_board_state`, `net_core_board_facts`) with the link worker's stack, the telnet console's (`net_tty_board_state`, `net_tty_board_facts`, issue #221, [below](#the-telnet-console-issue-221)), and the bridge session's resident thread.  Its section of `net info` is `nx_net_write_status()`, which samples every value first and then writes one line at a time through the contract's writer (until issue #219 `nx_net_print_status()`, printing straight to the console).  Until issue #220 it also held the address, DHCP and ping code, and the resident thread stopped the DHCP client itself |
+| `src/nx_net.c` | The host stack: the NetX objects, the shared operations' state and facts (`net_core_board_state`, `net_core_board_facts`) with the link worker's stack, and the telnet console's (`net_tty_board_state`, `net_tty_board_facts`, issue #221, [below](#the-telnet-console-issue-221)).  Its section of `net info` is `nx_net_write_status()`, which samples every value first -- the session's in one call to the link layer (`link_bridge_session_get()`), the module's DATA counters last in one copy with interrupts masked -- and then writes one line at a time through the contract's writer (until issue #219 `nx_net_print_status()`, printing straight to the console).  Until issue #220 it also held the address, DHCP and ping code, and the resident thread stopped the DHCP client itself; until issue #222 it also held the bridge session's resident thread |
+| `src/link_bridge.c` | The bridge session the host stack runs over: the resident thread `nx-net` that brings it up and takes it down, and the state the adapter checks (`link_bridge_state()`).  It is the link layer, moved out of `src/nx_net.c` by issue #222; see [The WiFi link layer](#the-wifi-link-layer-issue-222) |
 | `svc/net_svc_config.h` | The properties: the `help` line, and no subcommand of the board's own (until issue #221 `shell`, from `cmds/cmd_net_board.c`, which went with it; until issue #219 that file was the whole command) |
 
 `net info` prints the address as two lines, then the telnet console's two
@@ -2045,7 +2046,8 @@ link down it prints only
 
 The reaction to the link is the shared one
 ([`svc/README.md`](../../svc/README.md#the-link-notice-and-the-worker-issue-220)).
-Every path of the bridge session's resident thread that takes the link away
+Every path of the bridge session's resident thread (`src/link_bridge.c`)
+that takes the link away
 -- an association lost for `NXN_LINK_DOWN_SAMPLES` refreshes in a row, `wifi
 on` / `off` / `reset`, the `wifi flash` stop -- closes the driver's gate with
 `nx_link_driver_set_link(0)`, which raises NetX's link event; the notice
@@ -2112,7 +2114,8 @@ this board's own `src/net_shell.c`, operated with `net shell start` / `stop` /
 
 | File | What it holds |
 |---|---|
-| `src/nx_net.c` | Its state and facts (`net_tty_board_state`, `net_tty_board_facts`): the transmit ring (4,096 B) and the listener's stack (2,560 B) in DTCM, each a standalone symbol (`net_tty_tx_buf`, `net_tty_stack`, which `cmake/check_dtcm_residency.py` requires; until issue #221 `nsh_tx_buf` and `g_stack`), the receive ring (512 B), the per-packet extraction buffer (1,500 B) and the state in AXI-SRAM `.bss`; the socket's transmit queue depth and retransmit from the DATA channel's budget (`nx_net.h`: 4 segments, first retransmit 2 s, which the console's 5 s deadline is asserted to exceed); `USB CDC` as the console a refusal points to |
+| `src/nx_net.c` | Its state and facts (`net_tty_board_state`, `net_tty_board_facts`): the transmit ring (4,096 B) and the listener's stack (2,560 B) in DTCM, each a standalone symbol (`net_tty_tx_buf`, `net_tty_stack`, which `cmake/check_dtcm_residency.py` requires; until issue #221 `nsh_tx_buf` and `g_stack`), the receive ring (512 B), the per-packet extraction buffer (1,500 B) and the state in AXI-SRAM `.bss`; the socket's transmit queue depth and retransmit from the DATA channel's budget (`nx_net.h`: 4 segments, first retransmit 2 s, which the console's 5 s deadline is asserted to exceed), and the build-time check that the DATA channel's transmit pool holds that budget (moved here from `src/nx_link_driver.c` by issue #222); `USB CDC` as the console a refusal points to |
+| `src/link_bridge.c` | The bridge session: every path that takes the link away closes the driver's gate (`nx_link_driver_set_link(0)`) and neither stops the console nor waits for it (issues #218 and #221; until issue #222 this was in `src/nx_net.c`) |
 | `src/main.c` | `NET_TTY_TRANSPORT_DEFINE(net_tr)` and the `wio-net>` instance bound to it; `net_tty_init()` right after `nx_net_init()`, and the default port at once when the KV thread will not hand one over |
 | `src/kv_boot.c` | The port: `net.shell.port`, read once, right after the store opens and before the association |
 | `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c`, `cmds/cmd_xfer.c`, `cmds/cmd_blob_board.c` | The commands that ask the shared question and refuse on the telnet console (below) |
@@ -2166,6 +2169,49 @@ Measured at `a157609`:
 | `net-tty` listener | priority 14 (above the link worker, 15, and the consoles, 16; below the IP thread, 11, and the DHCP thread, 13); stack 2,560 B in DTCM, high-water **588 B** (`thread`, after the test run of issue #221) |
 | Internal flash free (app partition) | **14,452 B** (11,316 B at `36e16cc` measured the same way; the 11,324 B of issue #220 above was measured another way) |
 | DTCM free (`_smsp_stack - _dtcm_used_end`) | **1,848 B**, unchanged (the stack and the transmit ring were already in DTCM; only their names changed) |
+
+### The WiFi link layer (issue #222)
+
+The board has no Ethernet MAC.  The RTL8720DN relays raw Ethernet frames
+(its L2 bridge) over the same serial link that carries eRPC, and the files
+below make that look like a NetX interface.  This is a map only: what each
+file does and why is the comment at the top of the file (the header for the
+design), and the layering rules are
+[`svc/README.md`'s](../../svc/README.md#the-four-rules-of-the-layering-issue-212).
+In short, nothing here calls or includes `net` (`shell/cmds/net_core.c`,
+`net_tty.c`, the adapter) or `src/nx_net.c`, which creates the NetX objects
+and calls down into `link_bridge.c`; the only NetX calls are the driver's.
+
+| File | Its part |
+|---|---|
+| `src/nx_link_driver.c` / `.h` | The NetX driver (`nx_link_driver()`, passed to `nx_ip_create()`): frames to and from the DATA channel, and the setters the session calls (link up / down, MAC, speed, counters).  It knows nothing of the RTL8720 |
+| `src/link_bridge.c` / `.h` | The bridge session (until issue #222 in `src/nx_net.c`): the resident thread `nx-net`, which arms the module's bridge, refreshes it, follows the association, re-associates, takes it down or ends FAILED, and stands down at once when `wifi on` / `off` / `reset` takes the link away; the calls `wifi`, the adapter and `src/kv_boot.c` make |
+| `src/link_data.c` / `.h`, `src/link_send_gen.h` | The DATA channel: the frame pools and queues, and the send generation that refuses a frame decided before the link was dropped (issue #218) |
+| `src/erpc.c` / `.h` | The eRPC client and the link's service thread, the one owner of the UART: eRPC calls, the LINK-CTRL channel and DATA frames on one wire |
+| `src/rtl_link.c` / `.h` | Who holds the RTL8720 link: the coarse mutex every command flow takes, the UART reference count, and the generations a resident holder checks |
+| `src/rtl8720.c` / `.h` | The module's power (`CHIP_EN`) and its UART |
+| `src/wifi_rpc.c`, `src/wifi_auto.c` | The typed eRPC calls, and the host-side automatic re-association, that the session uses |
+
+| Thread | Priority | Stack | What it runs here |
+|---|---|---|---|
+| `erpc` (`src/erpc.c`) | 10 | 1,536 B, DTCM | the UART, and the driver's receive (`nx_link_driver_rx()`) |
+| `nx-link` (the NetX IP thread, created by `src/nx_net.c`) | 11 | 2,048 B, DTCM | the driver's control requests |
+| `nx-net` (`src/link_bridge.c`) | 13 | 3,072 B, DTCM | the bridge session |
+
+Locks, in order: `rtl_link`'s coarse mutex, then `erpc.c`'s internal mutex
+(the `erpc` thread takes only the second).  The session gives the MAC to NetX,
+which takes `nx_ip_protection`, only after it has released the coarse mutex.
+The DATA channel takes no mutex, only short interrupt-masked regions, so a
+sender that holds `nx_ip_protection` can queue a frame.
+
+Measured at `e8e3146` (the move, issue #222; nothing it does or prints
+changed):
+
+| What | Value |
+|---|---|
+| `nx-net` | priority 13, stack 3,072 B in DTCM (`nxn_stack`, required by `cmake/check_dtcm_residency.py`), high-water **788 B** (`thread`), as before |
+| Internal flash free (app partition) | **14,476 B** (14,452 B before; the code is 24 B smaller) |
+| DTCM free (`_smsp_stack - _dtcm_used_end`) | **1,848 B**, unchanged (the same objects in the same place) |
 
 ## Flashing and recovery
 

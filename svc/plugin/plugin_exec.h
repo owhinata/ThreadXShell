@@ -7,12 +7,13 @@
  * @brief   Copy a validated plugin image into a board's reservation and call
  *          its entry point (issues #103, #110).
  *
- * THREE LAYERS, AND THIS IS THE MIDDLE ONE.  svc/plugin/plugin_load.c validates a
- * container and hands back a POD snapshot of integer offsets -- it yields no
- * callable pointer, so "validation does not execute anything" is a property of
- * its types.  This file is where those offsets become an address and where the
- * branch happens.  A board's own port/plugin/plugin_run.c binds it: it owns the
- * state, the reservation, and the three things that differ per board.
+ * THREE LAYERS, AND THIS IS THE MIDDLE ONE.  svc/plugin/plugin_load_body.h
+ * validates a container and hands back a POD snapshot of integer offsets -- it
+ * yields no callable pointer, so "validation does not execute anything" is a
+ * property of its types.  This file is where those offsets become an address
+ * and where the branch happens.  A board's own port/plugin/plugin_run.c binds
+ * it: it owns the state, the reservation, and the three things that differ per
+ * board.
  *
  * WHY IT IS SHARED (issue #110).  grove-vision-ai-v2 had all of this to itself
  * until wio-lite-ai needed the same machine, and f746g-disco is the known third
@@ -141,7 +142,7 @@ struct plugin_exec_port {
  * A board's binding: its state, its hooks, and its reservation.
  *
  * [!] THE RESERVATION IS PASSED IN, NOT LOOKED UP.  This file could have
- * referenced the linker symbols directly -- both boards happen to spell them
+ * referenced the linker symbols directly -- every board happens to spell them
  * the same -- and then a shared translation unit would silently depend on a
  * board's linker script.  It is the board's fact, so the board states it.
  */
@@ -205,18 +206,19 @@ int plugin_exec_active(const struct plugin_exec_env *env);
 /**
  * @brief  The address of one entry point of the active plugin, or NULL.
  *
- * [!] THE ONE PLACE AN OFFSET BECOMES SOMETHING CALLABLE.  svc/plugin/plugin_load.c
- * deliberately hands back integers and no function pointers, so that "the
- * validation step does not execute anything" is a property of its types rather
- * than a discipline someone keeps.  Here is where the arithmetic happens, and
- * it happens for the loader's own entry call as well -- an earlier shape had
- * the loader compute the entry address and the decoder shim compute the other
- * six, which is two places claiming to be one.
+ * [!] THE ONE PLACE AN OFFSET BECOMES SOMETHING CALLABLE.  The parse
+ * (svc/plugin/plugin_load_body.h) deliberately hands back integers and no
+ * function pointers, so that "the validation step does not execute anything"
+ * is a property of its types rather than a discipline someone keeps.  Here is
+ * where the arithmetic happens, and it happens for the loader's own entry call
+ * as well -- an earlier shape had the loader compute the entry address and the
+ * decoder shim compute the other six, which is two places claiming to be one.
  *
  * @return NULL for an absent slot, an out-of-range index, or any time no plugin
  *         has completed its entry point.  A caller casts the result to the
  *         prototype enum plugin_slot names for that slot; the Thumb bit is kept,
- *         because the manifest carried it and plugin_load.c insisted on it.
+ *         because the manifest carried it and the parse
+ *         (plugin_load_body.h) insisted on it.
  */
 void *plugin_exec_slot(const struct plugin_exec_env *env, unsigned slot);
 

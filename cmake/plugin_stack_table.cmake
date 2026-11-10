@@ -29,16 +29,17 @@
 #  registered no table.
 #
 #  [!] THE FIRMWARE STILL STATES ITS OWN SLOT -> ALLOWANCE MAPPING, AND THAT IS
-#  WHAT THE READ-BACK COMPARES WITH.  Grove's port/nn/nn_plugin_stack.h and
-#  wio's nn_svc_wio.c map each slot to one of the macros defined here, next to
-#  the asserts that hold every allowance under the threads its slot runs on.
+#  WHAT THE READ-BACK COMPARES WITH.  Grove's port/nn/nn_plugin_stack.h,
+#  wio's port/nn/nn_svc_wio.c and f746's port/nn/nn_svc_f746_model.c map each
+#  slot to one of the macros defined here, and the board's asserts (on f746 in
+#  port/nn/nn_svc_f746.c) hold every allowance under the threads its slot runs on.
 #  cmake/check_policy_probe.py reads the seven numbers the shipped policy
 #  actually holds and compares them with this table, slot by slot.  So it
 #  catches a later -D or #define of an allowance (CMAKE_C_FLAGS wins over the
 #  definition made here, with only a warning), in either direction, and a
 #  firmware mapping that disagrees with SLOTS below -- but only where the two
 #  allowances differ in VALUE.  Where they are equal (today every allowance on
-#  both boards is 1,024 B) the device enforces exactly the numbers the host
+#  every board is 1,024 B) the device enforces exactly the numbers the host
 #  checked, so the disagreement is invisible and, for as long as it stays so,
 #  harmless.
 #
@@ -95,7 +96,7 @@ function(plugin_stack_table)
         # board refuses the slot", so a 0 here would ship a firmware that
         # refuses every container on a slot it calls -- and a stack_limit of 0
         # is not "not measured yet" either.  A slot a board does not call is not
-        # something either board has; when one does, it is spelled out, not
+        # something any board has; when one does, it is spelled out, not
         # reached by an empty variable.
         if(NOT _v MATCHES "^[1-9][0-9]*$")
             message(FATAL_ERROR

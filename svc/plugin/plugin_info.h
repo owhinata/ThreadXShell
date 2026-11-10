@@ -7,12 +7,13 @@
  * @brief   The plugin stack lines of `nn info`, for every board that loads
  *          plugins (issue #111).
  *
- * [!] ONE COPY.  Grove and wio print the same two lines about a validated
+ * [!] ONE COPY.  Every board prints the same two lines about a validated
  * container's stack; written in each board they would drift apart the way the
  * `nn` output did before issue #50.  A board calls this and adds nothing.
  *
  * [!] KEPT OUT OF plugin_load.c.  The host container verifier links
- * plugin_load.c and crc32.c only, and formatting would pull svc/fmt.c into it.
+ * plugin_load.c, plugin_load_host.c and crc32.c only, and formatting would pull
+ * svc/fmt.c into it.
  *
  * Owns no mutable storage (the line buffer is on the caller's stack).
  */

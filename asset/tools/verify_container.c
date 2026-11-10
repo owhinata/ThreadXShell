@@ -7,7 +7,11 @@
  * @brief   Run the DEVICE's container validator over a packed container, on the
  *          host (issue #101).
  *
- * [!] IT LINKS svc/plugin/plugin_load.c ITSELF.  That is the whole design, and it is
+ * [!] IT COMPILES THE DEVICE'S OWN PARSE ITSELF.  The body of the check is
+ * svc/plugin/plugin_load_body.h; the firmware enters it through
+ * plugin_load_board.c and this tool through plugin_load_host.c, and the build
+ * rule (each board's board.cmake) links this file with plugin_load.c,
+ * plugin_load_host.c and crc32.c.  That is the whole design, and it is
  * the same one verify_vela_model uses when it links the firmware's own
  * npu_payload.c: a host checker that reimplemented the walk could agree with
  * itself and disagree with the board, and the disagreement would surface as a

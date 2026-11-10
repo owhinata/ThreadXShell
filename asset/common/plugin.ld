@@ -86,8 +86,9 @@ SECTIONS
      * code is by address and rounds outward to 32-byte lines, so a ragged end
      * would let that rounding reach past what the plugin owns.  Rounding up HERE
      * rather than in the packer keeps the one declaration of the image's shape
-     * in the script that produced it.  plugin_load.c refuses a mem_size that is
-     * not a multiple, so a script that dropped this line fails on the device.
+     * in the script that produced it.  plugin_load_body.h refuses a mem_size
+     * that is not a multiple, so a script that dropped this line fails on the
+     * device.
      */
     . = ALIGN(32);
     __plugin_mem_end = .;

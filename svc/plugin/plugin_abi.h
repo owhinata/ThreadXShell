@@ -9,9 +9,10 @@
  *
  * A model can be swapped on the device without reflashing (issues #92/#93/#94
  * built the asset store), but the code that INTERPRETS its output cannot: the
- * firmware holds exactly one decoder.  The store scales to eleven slots and the
- * interpretation stops at one.  A container carries the model and the code that
- * reads it together, so a new model family costs no firmware change.
+ * firmware holds exactly one decoder.  The store scales to every slot of the
+ * board's table (src/blob_slots.c) and the interpretation stops at one.  A
+ * container carries the model and the code that reads it together, so a new
+ * model family costs no firmware change.
  *
  * [!] THIS HEADER IS THE ONLY DECLARATION OF THE FORMAT.  Three independent
  * artifact graphs consume it -- the host packer, the device decoder, and the
@@ -22,10 +23,12 @@
  * than scraped out of its C source.
  *
  * [!] STEP 1a NEVER EXECUTES A PLUGIN.  Nothing here yields a callable pointer:
- * every entry point is an OFFSET, and plugin_load.c returns those offsets as
- * integers inside a POD snapshot.  Turning one into a function pointer is Step
- * 1b's job, after checks this header does not contain (MPU attributes, cache
- * maintenance, the admission policy for the stack allowances).
+ * every entry point is an OFFSET, and the parse (plugin_load_body.h, entered
+ * through plugin_parse() on the firmware and plugin_parse_with_policy() on the
+ * host) returns those offsets as integers inside a POD snapshot.  Turning one
+ * into a function pointer is Step 1b's job, after checks this header does not
+ * contain (MPU attributes, cache maintenance, the admission policy for the
+ * stack allowances).
  *
  * [!] THE GATE THAT CHECKS A PLUGIN PROVES NEITHER MEMORY SAFETY NOR THE RANGE
  * IN WHICH IT USES THE POINTERS THE BASE HANDS IT.  A plugin is REVIEWED,
@@ -444,12 +447,13 @@ enum plugin_slot {
  *   @ref stack_crossing   one bit per slot: set when that slot reaches a veneer.
  *
  * Neither depends on c, so the firmware adds its OWN c at load time
- * (plugin_load.c) and a container stays correct across a change of it.  What
- * lies beyond the printer veneer is not only the base, though: a plugin that
- * formats into its own buffer (asset/common/plugin_text.c) puts its sink there,
- * and @ref stack_sink (S) is that sink's measured bound.  The loader charges
- * max(c, S) at the crossing -- one uniform charge for every veneer -- so a
- * container whose sink is deeper than some later, smaller c is still bounded.
+ * (plugin_load_body.h) and a container stays correct across a change of it.
+ * What lies beyond the printer veneer is not only the base, though: a plugin
+ * that formats into its own buffer (asset/common/plugin_text.c) puts its sink
+ * there, and @ref stack_sink (S) is that sink's measured bound.  The loader
+ * charges max(c, S) at the crossing -- one uniform charge for every veneer --
+ * so a container whose sink is deeper than some later, smaller c is still
+ * bounded.
  * @ref stack_accounting says which analysis produced these numbers; see
  * PLUGIN_STACK_ACCOUNTING.
  *

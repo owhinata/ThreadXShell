@@ -76,7 +76,7 @@ void plugin_lease_give(void);
  * [!] OUTSIDE A THREAD THE ANSWER IS THE BOARD'S, AND tx_thread_identify() IS
  * NOT ENOUGH.  Inside an ISR the Cortex-M ports leave it pointing at the
  * interrupted thread, so an implementation that compares only the owner with
- * it answers "yes" in an ISR that interrupted the holder.  Both boards'
+ * it answers "yes" in an ISR that interrupted the holder.  Every board's
  * refuse any exception and pre-scheduler context first (issue #130).
  */
 int plugin_lease_held(void);

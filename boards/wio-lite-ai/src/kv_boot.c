@@ -58,7 +58,8 @@
 #define LOG_TAG "cfg"
 #include "log.h"
 
-#include "kv.h"
+#include "kv.h"        /* the shared store (svc/kv, issue #214) */
+#include "kv_boot.h"
 
 #include "cli.h"
 #include "cli_backend_log.h"

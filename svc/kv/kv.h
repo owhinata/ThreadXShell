@@ -1,16 +1,23 @@
 /*
  * SPDX-License-Identifier: MIT
- * Copyright (c) 2026 Wio Lite AI ThreadX Shell Project
+ * Copyright (c) 2026 ThreadX Shell Project
  */
 /**
  * @file    kv.h
- * @brief   Persistent configuration key-value store (owhinata/wio-lite-ai#37).
+ * @brief   Persistent configuration key-value store (owhinata/wio-lite-ai#37;
+ *          shared by the boards that have one since issue #214).
  *
- * A FlashDB KVDB in the first megabyte of the external NOR, wrapped so the rest of
- * the firmware never sees FlashDB or FAL.  This is the answer to "where does a
- * setting live": it must be readable at every boot, before any filesystem, on a
- * board whose microSD slot may well be empty and has no card-detect line to say so
- * -- which leaves the soldered-down NOR as the only candidate.
+ * A FlashDB KVDB in a partition of the board's external flash, wrapped so the
+ * rest of the firmware never sees FlashDB or FAL.  This is the answer to "where
+ * does a setting live": it must be readable at every boot, before any
+ * filesystem, on a board whose microSD slot may well be empty and has no
+ * card-detect line to say so -- which leaves the soldered-down flash as the only
+ * candidate.
+ *
+ * svc/kv/kv.c is the one implementation (and the only caller of FlashDB); the
+ * board gives it its state, its partition's name and how to take the device
+ * (svc/kv/kv_board.h), and the FAL device and partition table under it
+ * (the board's fal_cfg.h).
  *
  * WHAT THIS LAYER ADDS OVER FlashDB
  *
@@ -18,8 +25,8 @@
  *     fdb_kv_set_blob()/fdb_kv_get_blob(), but NOT inside fdb_kv_iterator_init(),
  *     fdb_kv_iterate() or fdb_blob_read() -- so an iteration that read values as it
  *     went would be unserialised against a concurrent write.  Every entry point
- *     here takes the NOR device mutex for the duration instead.  The mutex is
- *     recursive, so FlashDB re-taking it inside costs nothing.
+ *     here takes the board's device hold for the duration instead.  The board's
+ *     lock is recursive (FlashDB takes it again inside), so that costs nothing.
  *   - **A refusal instead of a wrong answer.**  Until kv_init() has succeeded, and
  *     after anything has gone wrong, every call fails with a state that says which
  *     -- the shell must come up and be usable with a broken store, but it must not
@@ -35,8 +42,8 @@
  *
  * THREAD CONTEXT ONLY, and only after the scheduler is running: erases sleep.
  */
-#ifndef APP_KV_H
-#define APP_KV_H
+#ifndef SVC_KV_H
+#define SVC_KV_H
 
 #include <stdint.h>
 
@@ -82,7 +89,7 @@ extern "C" {
 /* Store state (kv_state()). */
 #define KV_STATE_INIT     0  /* kv_init() has not finished yet                   */
 #define KV_STATE_READY    1  /* usable                                           */
-#define KV_STATE_DOWN     2  /* the NOR device never came up                     */
+#define KV_STATE_DOWN     2  /* the flash device never came up                   */
 #define KV_STATE_CORRUPT  3  /* partition holds something that is not a database */
 #define KV_STATE_FAILED   4  /* initialisation failed for another reason         */
 
@@ -100,8 +107,9 @@ struct kv_info {
  * Open the database, formatting it ONLY if the partition is completely blank.
  *
  * Must run on a thread, after the scheduler has started: a first-time format
- * erases, and erases wait by sleeping.  It is called from the configuration thread
- * (app/kv_boot.c), not from tx_application_define().
+ * erases, and erases wait by sleeping.  It is called from the board's
+ * configuration thread (wio-lite-ai: src/kv_boot.c), not from
+ * tx_application_define().
  *
  * The two-stage approach is deliberate.  FlashDB will happily reformat a partition
  * whose sector headers it does not recognise, which would turn "something went
@@ -197,15 +205,8 @@ int kv_get_info(struct kv_info *info);
 typedef int (*kv_iter_cb)(const char *key, const struct kv_value *v, void *arg);
 int kv_foreach(const char *prefix, kv_iter_cb cb, void *arg);
 
-/**
- * Create the configuration thread (app/kv_boot.c), which opens the store once the
- * scheduler is running.  Pure ThreadX object creation -- call it from
- * tx_application_define().  Returns 0 on success.
- */
-int kv_boot_init(void);
-
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* APP_KV_H */
+#endif /* SVC_KV_H */

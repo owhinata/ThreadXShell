@@ -14,7 +14,8 @@
 #define _FAL_CFG_H_
 
 /* Names are matched by strncmp at run time, so they must agree with the ones the
- * partition table and app/kv.c use -- hence the macros. */
+ * partition table and the shared store (svc/kv/kv.c, through port/flashdb/
+ * fal_nor.c's kv_board_facts) use -- hence the macros. */
 #define NOR_FLASH_DEV_NAME             "w25q128"
 #define KV_PART_NAME                   "kv"
 

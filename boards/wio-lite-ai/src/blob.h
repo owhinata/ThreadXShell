@@ -16,7 +16,7 @@
  * replacing one costs nothing but a transfer.
  *
  * THIS IS THE THIRD SIBLING ON THE SAME DEVICE, not a layer under or over them:
- * port/nor is the device, src/kv.c is the configuration store, and this is the
+ * port/nor is the device, svc/kv/kv.c is the configuration store, and this is the
  * asset store.  It calls the nor_* primitives directly and knows nothing of
  * FlashDB or FAL -- the one thing it borrows from that side is the CRC-32
  * (port/nn/crc32_fdb.c serves svc/crc32.h's crc32_update() with FlashDB's).

@@ -1,15 +1,18 @@
 /*
  * SPDX-License-Identifier: MIT
- * Copyright (c) 2026 Wio Lite AI ThreadX Shell Project
+ * Copyright (c) 2026 ThreadX Shell Project
  */
 /**
  * @file    fdb_cfg.h
- * @brief   FlashDB build configuration for this firmware (owhinata/wio-lite-ai#37).
+ * @brief   FlashDB build configuration, one for every board with a key-value
+ *          store (owhinata/wio-lite-ai#37; shared since issue #214).
  *
  * FlashDB includes this by name (`#include <fdb_cfg.h>`); it is the only place its
  * compile-time behaviour is set.  Everything here is a deliberate choice -- see
- * port/flashdb/fal_nor.c for the storage side and app/kv.c for how the database is
- * driven.
+ * svc/kv/kv.c for how the database is driven, and the board's FAL device (its
+ * fal_cfg.h names it; wio-lite-ai: port/flashdb/fal_nor.c) for the storage side.
+ * What stays the board's is the device, the partition table and the three hooks
+ * declared at the bottom.
  */
 #ifndef _FDB_CFG_H_
 #define _FDB_CFG_H_
@@ -19,9 +22,9 @@
  * here logs samples, and leaving it out keeps fdb_tsdb.c an empty object. */
 #define FDB_USING_KVDB
 
-/* Storage through FAL, i.e. through port/flashdb/fal_nor.c onto the external NOR.
- * The file-backed modes (LIBC/POSIX) need a filesystem this database must not
- * depend on -- the configuration has to be readable before anything mounts. */
+/* Storage through FAL, i.e. through the board's FAL device onto its external
+ * flash.  The file-backed modes (LIBC/POSIX) need a filesystem this database must
+ * not depend on -- the configuration has to be readable before anything mounts. */
 #define FDB_USING_FAL_MODE
 
 /*
@@ -37,31 +40,36 @@
  *   gran = 8  each status gets its OWN byte: 0xFF FF FF -> 0x00 FF FF -> 0x00 00 FF.
  *             Every write targets a byte that still reads 0xFF.
  *
- * The W25Q128JV datasheet specifies page programming "at previously erased (FFh)
- * memory locations" (sec 8.2.13).  Read carefully, that constrains the *state* of
- * the target bytes, not the *history* of the page -- so gran = 8 stays entirely
- * inside what the datasheet promises, while gran = 1 depends on behaviour it does
- * not describe.  FlashDB's own comment agrees: "some flash (like stm32 onchip) NOT
- * supported repeated write before erase".
+ * NOR datasheets specify page programming at previously erased (FFh) locations
+ * (wio-lite-ai's W25Q128JV, sec 8.2.13).  Read carefully, that constrains the
+ * *state* of the target bytes, not the *history* of the page -- so gran = 8 stays
+ * entirely inside what the datasheet promises, while gran = 1 depends on behaviour
+ * it does not describe.  FlashDB's own comment agrees: "some flash (like stm32
+ * onchip) NOT supported repeated write before erase".  Each board README names its
+ * part and the datasheet line it relies on; shell/test/test_kv_store.c runs FlashDB
+ * under this file on a flash model that refuses a write to any byte that is not
+ * 0xFF.
  *
  * The cost is 4 extra bytes per KV node and per sector header (the status table
  * formula differs between gran = 1 and gran != 1, inc/fdb_low_lvl.h: six statuses
  * take 1 byte at gran 1 and 5 bytes at gran 8).  Since 8 bits is byte alignment,
  * FDB_WG_ALIGN() does not pad names or values at all.
  *
- * `nor test` measured this device accepting a same-byte overwrite too, so gran = 1
- * would probably work here -- but "probably, on this chip, today" is not the
- * footing to put a configuration store on, and the price of certainty is 4 bytes.
+ * wio-lite-ai's `nor test` measured its device accepting a same-byte overwrite
+ * too, so gran = 1 would probably work there -- but "probably, on this chip,
+ * today" is not the footing to put a configuration store on, and the price of
+ * certainty is 4 bytes.
  *
- * port/flashdb/fal_nor.c static-asserts that the FAL device agrees with this
- * value: fal_partition_write() passes its own write_gran field straight through
- * without checking it, so a mismatch would otherwise go undetected.
+ * Each board's FAL device static-asserts that it agrees with this value:
+ * fal_partition_write() passes its own write_gran field straight through without
+ * checking it, so a mismatch would otherwise go undetected.
  */
 #define FDB_WRITE_GRAN                 8
 
 /* Longest key.  The keys this stores are dotted paths like "net.shell.autoarm";
  * 32 leaves room and shrinks fdb_kvdb (whose iterator and current-KV structs both
- * embed a name buffer) against the 64-byte default. */
+ * embed a name buffer) against the 64-byte default.  svc/kv/kv.h's KV_KEY_MAX is
+ * this less the terminator. */
 #define FDB_KV_NAME_MAX                32
 
 /* Lookup caches (both must be non-zero to enable caching at all).  16 KV slots
@@ -71,14 +79,15 @@
 #define FDB_KV_CACHE_TABLE_SIZE        16
 #define FDB_SECTOR_CACHE_TABLE_SIZE    4
 
-/* Little-endian: do NOT define FDB_BIG_ENDIAN.  The Cortex-M7 runs little-endian
- * here and app/kv.c packs its records the same way. */
+/* Little-endian: do NOT define FDB_BIG_ENDIAN.  Every board runs its Cortex-M
+ * little-endian and svc/kv/kv_record.c packs its records the same way. */
 
 /*
  * Diagnostics.  FlashDB emits its messages as several FDB_PRINT() fragments per
- * line, so this points at a line-assembling shim (port/flashdb/fal_nor.c) that
- * feeds whole lines into the reset-persistent log ring -- readable with `dmesg`,
- * and never written to a console that a user might be typing into.
+ * line, so this points at the board's line-assembling shim (wio-lite-ai:
+ * port/flashdb/fal_nor.c) that feeds whole lines into the board's log ring --
+ * readable with `dmesg`, and never written to a console that a user might be
+ * typing into.
  *
  * FDB_DEBUG_ENABLE stays off: it prefixes every message with __FILE__, which
  * would drag the full source paths into the image for messages nobody reads.
@@ -87,10 +96,10 @@ void kv_fdb_print(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 #define FDB_PRINT(...)                 kv_fdb_print(__VA_ARGS__)
 
 /*
- * Assertions.  The stock macro ends in `while (1)`, which on this board means the
- * IWDG resets it a couple of seconds later -- taking down the shell, the console
- * and any chance of asking what happened.  That trade is wrong here: every
- * FDB_ASSERT in the KVDB path guards a programming error (a null handle, an
+ * Assertions.  The stock macro ends in `while (1)`, which on a board with a
+ * watchdog means a reset a couple of seconds later -- taking down the shell, the
+ * console and any chance of asking what happened.  That trade is wrong here:
+ * every FDB_ASSERT in the KVDB path guards a programming error (a null handle, an
  * initialisation-order mistake, our own sector alignment), never a data-dependent
  * invariant, so none of them can be tripped by a corrupt flash image.  Record it,
  * latch the database as wedged so `kv` refuses instead of pretending, and let the
@@ -99,7 +108,7 @@ void kv_fdb_print(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  * Be clear about what the latch does and does not buy: it stops the NEXT call, not
  * the current one.  Execution continues from the failed assertion into whatever the
  * function would have done anyway, exactly as it would with the C library's
- * NDEBUG-disabled assert.  That is an accepted trade -- app/kv.c validates every
+ * NDEBUG-disabled assert.  That is an accepted trade -- svc/kv/kv.c validates every
  * argument it passes down, so the guarded conditions are unreachable from here --
  * and not an oversight to be relied on the other way round.
  *
@@ -111,9 +120,11 @@ void kv_fdb_print(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  * grammar, not an optional separator, so without one the next statement is a
  * syntax error.  The bare `if` below matches what the stock macro does and carries
  * the same (statement-level only) usage requirement.
+ *
+ * Both functions are the board's, with the mark behind them.
  */
 void kv_fdb_assert_failed(const char *expr, const char *func);
-/** Nonzero once any FlashDB assertion has fired; app/kv.c latches on it. */
+/** Nonzero once any FlashDB assertion has fired; svc/kv/kv.c latches on it. */
 int kv_fdb_assert_tripped(void);
 #define FDB_ASSERT(EXPR)                                                       \
 	if (!(EXPR)) {                                                             \

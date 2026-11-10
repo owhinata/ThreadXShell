@@ -6,7 +6,7 @@
 # Board-pinned host tests for Wio Lite AI (issue #7).  These compile code this
 # board OWNS (port/flashdb, port/nn, port/mlperf) against the board's REAL
 # headers -- which is the point of them: a shimmed copy of mem_sections.h or
-# fdb_cfg.h could drift from the firmware's without anything noticing.  They
+# fal_cfg.h could drift from the firmware's without anything noticing.  They
 # cannot live in shell/test, which is board-independent by construction.
 #
 # Invoked by shell/test/run_host_tests.sh, which owns the toolchain flags and the
@@ -39,10 +39,11 @@ fdb="$HOST_TEST_REPO/lib/flashdb"   # third-party FlashDB (its CRC-32 is used by
 # (so the board and the PC agree) and that feeding the result back in continues the
 # same CRC (so a file arriving as ~185 YMODEM blocks lands on the one-call value).
 # Pinned here because it is the only part of the blob work verifiable off the board.
-# Built against port/flashdb (fdb_cfg.h) exactly as the firmware is; the FlashDB
-# sources are third-party, hence the one relaxed warning.
+# Built against svc/kv/fdb_cfg.h (shared since issue #214) and port/flashdb
+# (fal_cfg.h) exactly as the firmware is; the FlashDB sources are third-party,
+# hence the one relaxed warning.
 gcc $CFLAGS -Wno-unused-parameter \
-    -I "$board/port/flashdb" -I "$fdb/inc" -I "$fdb/port/fal/inc" \
+    -I "$svc/kv" -I "$board/port/flashdb" -I "$fdb/inc" -I "$fdb/port/fal/inc" \
     "$here/test_crc32.c" "$fdb/src/fdb_utils.c" \
     $LDFLAGS -o "$out/test_crc32"
 "$out/test_crc32"

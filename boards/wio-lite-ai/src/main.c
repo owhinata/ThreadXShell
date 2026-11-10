@@ -40,7 +40,7 @@
 #endif
 #if BSP_ENABLE_KV
 #include "nor_flash.h"  /* external W25Q128 NOR on OCTOSPI2 (issue #37) */
-#include "kv.h"         /* configuration key-value store on that NOR (issue #37) */
+#include "kv_boot.h"    /* configuration thread over the key-value store on that NOR (issue #37) */
 #endif
 #include "camera.h"     /* FPC-24 DVP camera: XCLK + SCCB bring-up (issue #8) */
 #if BSP_ENABLE_LCD

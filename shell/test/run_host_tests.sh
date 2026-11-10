@@ -362,6 +362,47 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
     $LDFLAGS -o "$out/test_blob_write"
 "$out/test_blob_write"
 
+# issue #214 -- the key-value store's record format and its key and value checks
+# (svc/kv/kv_record.c, moved out of wio-lite-ai's src/kv.c when the store became
+# shared): the encoder byte for byte (records already on a board's flash must keep
+# decoding), every field the decoder refuses on its own, the description bounded
+# before the value length is derived from it, both maxima in and one more out, and
+# the key alphabet and length.
+gcc $CFLAGS -I "$svc/kv" \
+    "$here/test_kv_record.c" "$svc/kv/kv_record.c" \
+    $LDFLAGS -o "$out/test_kv_record"
+"$out/test_kv_record"
+
+# issue #214 -- the store itself (svc/kv/kv.c) running the real FlashDB and FAL
+# under the real svc/kv/fdb_cfg.h, on a flash model in RAM (kv_cfg/fal_cfg.h is
+# its device and partition table, with a neighbour on each side): no program onto
+# a byte that is not 0xFF, nothing outside the partition, every device access
+# under a hold, every hold given back, the board's hold answers passed through
+# with the device untouched, a failed FlashDB lock latching the store offline, a
+# corrupt partition left alone, and the lines reported through the board's report
+# function.  FlashDB is a submodule (lib/flashdb, fetched by configuring a board
+# that has a store); without it this test cannot run, and says so by failing
+# rather than passing without it.  Its own sources are third-party and printf
+# their size_t with %u, hence the relaxed warnings on them alone.
+fdb="$repo/lib/flashdb"
+if [ ! -f "$fdb/src/fdb_kvdb.c" ]; then
+    echo "run_host_tests: lib/flashdb is not fetched, so test_kv_store cannot" \
+         "run -- configure wio-lite-ai once (it fetches the submodule)" >&2
+    exit 1
+fi
+mkdir -p "$out/kv_fdb"
+for kv_src in src/fdb.c src/fdb_kvdb.c src/fdb_utils.c \
+         port/fal/src/fal.c port/fal/src/fal_flash.c port/fal/src/fal_partition.c; do
+    gcc $CFLAGS -Wno-unused-parameter -Wno-format \
+        -I "$svc/kv" -I "$here/kv_cfg" -I "$fdb/inc" -I "$fdb/port/fal/inc" \
+        -c "$fdb/$kv_src" -o "$out/kv_fdb/$(basename "$kv_src" .c).o"
+done
+gcc $CFLAGS -I "$svc/kv" -I "$here/kv_cfg" -I "$fdb/inc" -I "$fdb/port/fal/inc" \
+    "$here/test_kv_store.c" "$svc/kv/kv.c" "$svc/kv/kv_record.c" \
+    "$out/kv_fdb"/*.o \
+    $LDFLAGS -o "$out/test_kv_store"
+"$out/test_kv_store"
+
 # issue #101 (#78 Step 1a) -- container and manifest validation (svc/plugin/plugin_load.c):
 # everything that must hold BEFORE a plugin's first instruction is fetched.
 #

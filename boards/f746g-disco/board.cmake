@@ -866,6 +866,20 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         blob_svc_erase_header
         blob_svc_erase_span
         blob_svc_program
+        # The key-value store's writers (issue #214): FAL's write and erase,
+        # which every FlashDB program and erase goes through, and the shared
+        # store's entry points that change the partition (svc/kv/kv.c;
+        # kv_init() formats a blank one).
+        # (This board has no key-value store yet; the names are here before it
+        # arrives, so the store is never linked without them.)
+        fal_partition_write
+        fal_partition_erase
+        fal_partition_erase_all
+        kv_init
+        kv_set
+        kv_set_desc
+        kv_del
+        kv_format
         HAL_RCC_OscConfig
         HAL_RCC_ClockConfig
         HAL_RCCEx_PeriphCLKConfig

@@ -4,8 +4,9 @@
  */
 /**
  * @file    fal_nor.c
- * @brief   FAL flash device over the external NOR, plus FlashDB's log/assert hooks
- *          (owhinata/wio-lite-ai#37).
+ * @brief   FAL flash device over the external NOR, FlashDB's log/assert hooks, and
+ *          the shared key-value store's state and device hold (owhinata/wio-lite-ai#37;
+ *          the store itself is svc/kv/kv.c since issue #214).
  *
  * This is the whole of FlashDB's contact with the hardware: four operations
  * forwarded to port/nor, which owns the controller, the device mutex and the
@@ -17,12 +18,15 @@
  * Locking: these callbacks do NOT take the device mutex themselves -- port/nor's
  * primitives take it (recursively) on every call, and FlashDB has already taken it
  * through its own lock callback by the time it gets here.  The recursion is what
- * makes the layering safe: app/kv.c can hold the lock across a whole multi-step
- * operation and every level below still just works.
+ * makes the layering safe: svc/kv/kv.c can hold the lock across a whole multi-step
+ * operation and every level below still just works.  On this board the store's
+ * outer hold and FlashDB's lock are the same NOR device mutex (kv_board_facts,
+ * at the end of this file).
  */
 #include <fal.h>
 #include <fdb_cfg.h>
 
+#include "kv_board.h"   /* the shared store's state and facts (issue #214) */
 #include "nor_flash.h"
 
 #include <stdarg.h>
@@ -117,7 +121,7 @@ const struct fal_flash_dev nor_flash_dev = {
  *
  * The assembler is static and unguarded, which is safe for one specific reason:
  * every FlashDB and FAL code path that logs runs with the NOR device mutex held
- * (app/kv.c takes it around the whole operation, and FlashDB's own lock callback
+ * (svc/kv/kv.c takes it around the whole operation, and FlashDB's own lock callback
  * takes it again inside), so there is never a second thread inside this function.
  * If a caller is ever added that logs outside that lock, this needs a lock too.
  */
@@ -144,7 +148,7 @@ void kv_fdb_print(const char *fmt, ...)
  * ------------------------------------------------------------------ */
 
 /* Sticky: once FlashDB has asserted, its internal state is not to be trusted, so
- * app/kv.c latches the database out of service rather than continuing to answer
+ * svc/kv/kv.c latches the database out of service rather than continuing to answer
  * queries from it.  See fdb_cfg.h for why this does not spin forever. */
 static volatile int kv_fdb_asserted;
 
@@ -158,3 +162,71 @@ int kv_fdb_assert_tripped(void)
 {
 	return kv_fdb_asserted;
 }
+
+/* ------------------------------------------------------------------ *
+ *  The shared store's state and device hold (svc/kv/kv_board.h, issue #214)
+ * ------------------------------------------------------------------ */
+
+/* The store's state, in plain .bss as it was in src/kv.c: zero is "not
+ * initialised yet". */
+struct kv_state kv_board_state;
+
+/* The store's log lines go to the reset-persistent ring under the "kv" tag, at the
+ * same levels they were written at in src/kv.c. */
+_Static_assert(KV_REPORT_ERR == LOG_LEVEL_ERR && KV_REPORT_WRN == LOG_LEVEL_WRN &&
+               KV_REPORT_INF == LOG_LEVEL_INF,
+               "kv report weights must be this board's log levels");
+
+static void kv_wio_report(unsigned level, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	log_vwrite(level, LOG_TAG, fmt, ap);
+	va_end(ap);
+}
+
+static int kv_wio_ready(void)
+{
+	return nor_flash_ready();
+}
+
+/* The outer hold kv_init() takes, and FlashDB's lock: wait forever.  For the lock
+ * callback this is the only safe answer -- FlashDB cannot be told it failed --
+ * and kv.c latches the store offline if even this fails. */
+static int kv_wio_lock_wait(void)
+{
+	return (nor_lock_blocking() == NOR_OK) ? 0 : -1;
+}
+
+/*
+ * How long an outer entry point waits for the device before giving up.  It has to
+ * outlast an ordinary sector erase (max 400 ms) by a wide margin without making a
+ * stuck operation look like a hang.  It does NOT try to outlast `kv format`, which
+ * erases a megabyte and can hold the device for tens of seconds in the worst case
+ * -- a command that arrives during a format is told the store is busy, which is
+ * both true and more useful than a console that stops answering.
+ */
+#define KV_LOCK_TIMEOUT_TICKS  5000u
+
+static int kv_wio_hold_try(void)
+{
+	int rc = nor_trylock(KV_LOCK_TIMEOUT_TICKS);
+
+	if (rc == NOR_ERR_BUSY)
+		return KV_ERR_BUSY;
+	if (rc != NOR_OK)
+		return KV_ERR_STATE;
+	return KV_OK;
+}
+
+const struct kv_facts kv_board_facts = {
+	.part_name    = KV_PART_NAME,
+	.device_ready = kv_wio_ready,
+	.hold_wait    = kv_wio_lock_wait,
+	.hold_try     = kv_wio_hold_try,
+	.hold_release = nor_unlock,
+	.db_lock      = kv_wio_lock_wait,
+	.db_unlock    = nor_unlock,
+	.report       = kv_wio_report,
+};

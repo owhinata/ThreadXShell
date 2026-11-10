@@ -765,16 +765,21 @@ option(BSP_ENABLE_KV "Enable the external NOR flash (OCTOSPI2) and the config KV
 # FlashDB (armink/FlashDB, Apache-2.0) is taken as three core
 # sources plus the FAL it ships in its own port/ directory.  Unlike ThreadX/FileX/
 # NetX Duo above, this one is NOT GLOB'd whole: fdb_tsdb.c (time-series database)
-# and fdb_file.c (filesystem-backed storage) are features port/flashdb/fdb_cfg.h
+# and fdb_file.c (filesystem-backed storage) are features svc/kv/fdb_cfg.h
 # does not enable, and fal_rtt.c is the RT-Thread integration and does not build
-# outside it.  Configuration comes from port/flashdb (fdb_cfg.h + fal_cfg.h), which
-# is why that directory is on the include path before FlashDB's own.
+# outside it.  Configuration comes from svc/kv/fdb_cfg.h (shared, issue #214) and
+# port/flashdb/fal_cfg.h (this board's device and partition), which is why both
+# directories are on the include path before FlashDB's own.
 if(BSP_ENABLE_KV)
     set(FDB_DIR "${CMAKE_SOURCE_DIR}/lib/flashdb")
     list(APPEND SHELL_SOURCES
         "${BOARD_DIR}/port/nor/nor_flash.c"
         "${BOARD_DIR}/port/flashdb/fal_nor.c"
-        "${BOARD_DIR}/src/kv.c"
+        # The key-value store over FlashDB is shared (issue #214): svc/kv/kv.c
+        # and its record format.  This board gives it its state and device hold
+        # (port/flashdb/fal_nor.c) and the FAL device and partition under it.
+        "${CMAKE_SOURCE_DIR}/svc/kv/kv.c"
+        "${CMAKE_SOURCE_DIR}/svc/kv/kv_record.c"
         "${BOARD_DIR}/src/kv_boot.c"
         "${BOARD_DIR}/src/blob.c"
         "${BOARD_DIR}/src/blob_writer.c"   # the shared `blob`'s store (#194)
@@ -1086,6 +1091,9 @@ target_include_directories(shell PRIVATE
     "${BOARD_DIR}/port/plugin"                   # plugin_lease.h, plugin_paint.h
     # Our fdb_cfg.h / fal_cfg.h must be found BEFORE FlashDB's own inc/,
     # which ships fdb_cfg_template.h only -- FlashDB includes <fdb_cfg.h> by name.
+    # fdb_cfg.h and the store's headers are svc/kv (issue #214), fal_cfg.h is
+    # this board's.
+    "${CMAKE_SOURCE_DIR}/svc/kv"
     "${BOARD_DIR}/port/flashdb"
     "${CMAKE_SOURCE_DIR}/lib/flashdb/inc"
     "${CMAKE_SOURCE_DIR}/lib/flashdb/port/fal/inc"
@@ -1532,6 +1540,18 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         blob_svc_erase_header
         blob_svc_erase_span
         blob_svc_program
+        # The key-value store's writers (issue #214): FAL's write and erase,
+        # which every FlashDB program and erase goes through, and the shared
+        # store's entry points that change the partition (svc/kv/kv.c;
+        # kv_init() formats a blank one).
+        fal_partition_write
+        fal_partition_erase
+        fal_partition_erase_all
+        kv_init
+        kv_set
+        kv_set_desc
+        kv_del
+        kv_format
         HAL_RCC_OscConfig
         HAL_RCC_ClockConfig
         HAL_RCCEx_PeriphCLKConfig

@@ -28,7 +28,7 @@
  *
  * EVERY SUBCOMMAND HERE REACHES THE BARE DEVICE, past both of its tenants.  Two
  * ranges hold live data and nothing in this file will stop you from erasing them:
- * [0, 1 MB) is the `kv` configuration partition (app/kv.c) and [1 MB, 8 MB) is the
+ * [0, 1 MB) is the `kv` configuration partition (svc/kv/kv.c) and [1 MB, 8 MB) is the
  * blob region's asset slots (src/blob.c, src/blob_slots.c).  Use `kv` and `blob` for
  * those; this is the tool for looking at the device itself, and it is deliberately
  * unguarded.

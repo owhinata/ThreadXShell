@@ -313,6 +313,10 @@ set(BOARD_HAS_FILEX ON)
 # The property shell/cmds/cmd_net.c is optional on (issue #219): this board
 # always has NetX Duo, so the shared storage audit wants that file shipped.
 set(BOARD_HAS_NETX ON)
+# The property shell/cmds/cmd_kv.c is optional on (issue #214): this board has
+# no key-value store yet, so the shared storage audit wants that file compiled
+# by nothing.
+set(BOARD_HAS_KV OFF)
 
 # --- Eclipse ThreadX GUIX (display GUI framework) ---------------------------
 # Same pattern as ThreadX/FileX: GLOB the core, configure via port/guix/gx_user.h

@@ -1,11 +1,12 @@
+/* shared-command: optional BOARD_HAS_KV */
 /*
  * SPDX-License-Identifier: MIT
- * Copyright (c) 2026 Wio Lite AI ThreadX Shell Project
+ * Copyright (c) 2026 ThreadX Shell Project
  */
 /**
  * @file    cmd_kv.c
- * @brief   `kv` shell command: the persistent configuration store
- * (owhinata/wio-lite-ai#37).
+ * @brief   The one `kv` shell command, for every board with a configuration
+ *          store (owhinata/wio-lite-ai#37; shared since issue #214).
  *
  *   kv list [prefix]           key, type, value and description
  *   kv get <key>
@@ -14,6 +15,13 @@
  *   kv del <key>
  *   kv info                    state, partition geometry and live usage
  *   kv format yes              erase the partition and rebuild -- destructive
+ *
+ * It speaks only svc/kv/kv.h (the one store, svc/kv/kv.c).  What differs is the
+ * board's words in its svc/kv_svc_config.h: what the store is on, and what
+ * `kv format yes` says before it starts.
+ *
+ * [!] THIS FILE OWNS NO STORAGE (cmake/check_no_mutable_storage.py, per board),
+ * and has no board in it: no `#ifdef <BOARD>`, no board header.
  *
  * Types are explicit rather than guessed from the text.  Inferring them would be
  * both surprising and lossy -- an SSID of "12345" is a string, not a number, and
@@ -32,22 +40,42 @@
  */
 #include "cli.h"
 #include "kv.h"
+#include "kv_svc_config.h"   /* the board's words */
 
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+
+/* [!] Every word is the board's; a missing one is a build error. */
+#if !defined(KV_SVC_MEDIUM) || !defined(KV_SVC_FORMAT_SAYS)
+#error "kv_svc_config.h must define KV_SVC_MEDIUM and KV_SVC_FORMAT_SAYS"
+#endif
 
 /*
  * Keys whose value is a secret get masked in listings.  This hides the PSK from a
  * shoulder-surfer and from a pasted log; it is NOT storage protection, and must
  * not be mistaken for it -- the value is written to the external flash in the
- * clear, where SWD or a hot-air gun reads it back.  There is nowhere on this board
- * to keep a key that would make encryption meaningful, since the option bytes and
- * RDP are deliberately never touched (see CLAUDE.md).  `kv get` still prints the
- * value, because a user who names the key explicitly is asking for it.
+ * clear, where SWD or a hot-air gun reads it back.  There is nowhere on these
+ * boards to keep a key that would make encryption meaningful (wio-lite-ai's
+ * option bytes and RDP are deliberately never touched, see CLAUDE.md).  `kv get`
+ * still prints the value, because a user who names the key explicitly is asking
+ * for it.
+ *
+ * ONE table for every board (issue #214): what a key means does not change with
+ * the board, so neither does whether its value is a secret.
  */
+static const char *const kv_secret_keys[] = {
+	"wifi.psk",
+};
+
 static int kv_is_secret(const char *key)
 {
-	return strcmp(key, "wifi.psk") == 0;
+	size_t i;
+
+	for (i = 0u; i < sizeof kv_secret_keys / sizeof kv_secret_keys[0]; i++)
+		if (strcmp(key, kv_secret_keys[i]) == 0)
+			return 1;
+	return 0;
 }
 
 static const char *kv_strerror(int rc)
@@ -364,7 +392,7 @@ static int cmd_kv_info(struct cli_instance *sh, int argc, char **argv)
 	(void)argc; (void)argv;
 	rc = kv_get_info(&info);
 
-	cli_print(sh, "KV store (FlashDB on the external NOR):\r\n");
+	cli_print(sh, "KV store (FlashDB on the " KV_SVC_MEDIUM "):\r\n");
 	cli_print(sh, "  state     : %s\r\n", kv_state_str());
 	cli_print(sh, "  partition : offset 0x%06lX, %lu KB, %lu B sectors\r\n",
 	          (unsigned long)info.part_offset,
@@ -397,9 +425,9 @@ static int cmd_kv_format(struct cli_instance *sh, int argc, char **argv)
 	}
 	/* Say how long this takes before starting it.  A command that returns nothing
 	 * for a quarter of a minute is indistinguishable from a hung console, and the
-	 * time is inherent: FlashDB erases all 256 sectors individually while laying
-	 * down its headers, at up to 400 ms each. */
-	cli_print(sh, "erasing 1 MB and rebuilding -- about 15 s...\r\n");
+	 * time is inherent (FlashDB erases every sector individually while laying
+	 * down its headers); the board says how long on its part. */
+	cli_print(sh, KV_SVC_FORMAT_SAYS "\r\n");
 
 	/* No kv_gate() here on purpose: formatting is the documented way out of a
 	 * corrupt or failed store, so it has to work exactly when nothing else does. */
@@ -429,4 +457,4 @@ CLI_SUBCMD_SET_CREATE(kv_subcmds,
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(kv, kv_subcmds,
-                 "persistent configuration store (external NOR)", NULL, 1, 0);
+                 "persistent configuration store (" KV_SVC_MEDIUM ")", NULL, 1, 0);

@@ -770,6 +770,14 @@ option(BSP_ENABLE_KV "Enable the external NOR flash (OCTOSPI2) and the config KV
 # outside it.  Configuration comes from svc/kv/fdb_cfg.h (shared, issue #214) and
 # port/flashdb/fal_cfg.h (this board's device and partition), which is why both
 # directories are on the include path before FlashDB's own.
+# BOARD_HAS_KV is the property shell/cmds/cmd_kv.c is optional on (issue #214):
+# the shared storage audit wants that file shipped when ON and compiled by
+# nothing when OFF.  Spelled ON / OFF here whatever truth value BSP_ENABLE_KV has.
+if(BSP_ENABLE_KV)
+    set(BOARD_HAS_KV ON)
+else()
+    set(BOARD_HAS_KV OFF)
+endif()
 if(BSP_ENABLE_KV)
     set(FDB_DIR "${CMAKE_SOURCE_DIR}/lib/flashdb")
     list(APPEND SHELL_SOURCES
@@ -796,7 +804,7 @@ if(BSP_ENABLE_KV)
         # digest with it); here with FlashDB because that is what it calls.
         "${BOARD_DIR}/port/nn/crc32_fdb.c"
         "${BOARD_DIR}/cmds/cmd_nor.c"
-        "${BOARD_DIR}/cmds/cmd_kv.c"
+        "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_kv.c"   # the one shared `kv` (#214)
         "${BOARD_DIR}/cmds/cmd_blob_board.c"  # the shared `blob`'s console pieces
         "${FDB_DIR}/src/fdb.c"
         "${FDB_DIR}/src/fdb_kvdb.c"

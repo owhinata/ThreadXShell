@@ -403,6 +403,24 @@ gcc $CFLAGS -I "$svc/kv" -I "$here/kv_cfg" -I "$fdb/inc" -I "$fdb/port/fal/inc" 
     $LDFLAGS -o "$out/test_kv_store"
 "$out/test_kv_store"
 
+# issue #214 -- the shared `kv` command (shell/cmds/cmd_kv.c) through the REAL
+# dispatcher over a stand-in store defined by the test (kv_type_name() is the real
+# svc/kv/kv_record.c), with made-up board words (kv_cfg/kv_svc_config.h).  No
+# gate compares what a command prints, so its lines are pinned here: the one
+# table of secret keys (`kv list` hides wifi.psk, `kv get` prints it), each
+# type's text to stored bytes and every refusal before the store is called, the
+# joined description, the state gate, every store result's sentence, `kv info`
+# and `kv format` with the board's words.
+gcc $CFLAGS -DCLI_USE_COLOR=0 \
+    $glue_inc -I "$here/shim" -I "$here/kv_cfg" \
+    -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" -I "$svc/kv" \
+    "$here/test_kv_cmd.c" "$here/../cmds/cmd_kv.c" "$svc/kv/kv_record.c" \
+    "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
+    "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
+    $glue \
+    $LDFLAGS -o "$out/test_kv_cmd"
+"$out/test_kv_cmd"
+
 # issue #101 (#78 Step 1a) -- container and manifest validation (svc/plugin/plugin_load.c):
 # everything that must hold BEFORE a plugin's first instruction is fetched.
 #

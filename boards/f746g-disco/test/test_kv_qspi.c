@@ -109,12 +109,18 @@ UINT tx_mutex_get(TX_MUTEX *m, ULONG wait)
 	return TX_NOT_AVAILABLE;
 }
 
+/* Defined below with the flag's wrappers. */
+static void kv_mutex_released(void);
+
 UINT tx_mutex_put(TX_MUTEX *m)
 {
 	if (m->owner != cur)
 		return TX_NOT_OWNED;
-	if (--m->count == 0u)
+	if (--m->count == 0u) {
 		m->owner = NULL;
+		if (m == kv_mutex)
+			kv_mutex_released();
+	}
 	return TX_SUCCESS;
 }
 
@@ -123,10 +129,30 @@ TX_THREAD *tx_thread_identify(void)
 	return cur;
 }
 
+/*
+ * [!] A ceiling on all the sleeping one test case does (reset_counts()).  The
+ * longest legitimate wait in this file is kv_init()'s 10 s; a hold whose
+ * deadline is broken sleeps forever, and must be a FAILURE here, not a test
+ * that never ends (the runner has no time limit of its own).
+ */
+#define SLEEP_CEILING_TICKS 200000ul
+/* ...and on the number of sleeps, since a loop that sleeps 0 ticks never
+ * reaches the tick ceiling (the longest legitimate wait is 1,000 sleeps). */
+#define SLEEP_CEILING_CALLS 100000ul
+static ULONG slept;
+
 UINT tx_thread_sleep(ULONG ticks)
 {
 	now += ticks;
+	slept += ticks;
 	sleeps++;
+	if (slept > SLEEP_CEILING_TICKS || sleeps > SLEEP_CEILING_CALLS) {
+		fprintf(stderr, "test_kv_qspi: FAIL: %lu sleeps, %lu ticks in one case "
+		        "(ceilings %lu, %lu) -- a wait that never ends\n",
+		        sleeps, (unsigned long)slept, SLEEP_CEILING_CALLS,
+		        SLEEP_CEILING_TICKS);
+		exit(1);
+	}
 	if (on_sleep != NULL)
 		on_sleep();
 	return TX_SUCCESS;
@@ -246,13 +272,57 @@ static struct {
 static int write_fail_after = -1;   /* writes that succeed before they fail */
 static int erase_fail_after = -1;   /* erases that succeed before they fail */
 
+/*
+ * The blob busy flag as fal_qspi.c sees it, through -Wl,--wrap (host_tests.sh):
+ * the real src/blob.c underneath, unchanged.  This file's own calls go to the
+ * __real_ functions, so everything that arrives here is fal_qspi.c's.  They
+ * check the order of the one way out of a hold: the record is cleared BEFORE
+ * the flag is given back, and the flag is given back BEFORE kv's mutex
+ * (kv_mutex_released(), from the mutex stand-in above).
+ */
+int  __real_blob_busy_acquire(void);
+void __real_blob_busy_release(void);
+static int kv_has_flag;            /* fal_qspi.c took the flag and holds it */
+static unsigned long order_bad;
+
+int __wrap_blob_busy_acquire(void)
+{
+	int rc = __real_blob_busy_acquire();
+
+	if (rc == BLOB_OK)
+		kv_has_flag = 1;
+	return rc;
+}
+
+void __wrap_blob_busy_release(void)
+{
+	if (kv_qspi_holder() != NULL) {
+		fprintf(stderr, "test_kv_qspi: the flag was given back while kv's "
+		        "record still names a thread\n");
+		order_bad++;
+	}
+	kv_has_flag = 0;
+	__real_blob_busy_release();
+}
+
+static void kv_mutex_released(void)
+{
+	if (kv_qspi_holder() != NULL || kv_has_flag) {
+		fprintf(stderr, "test_kv_qspi: kv's mutex was given back with the "
+		        "record (%s) or the flag (%s) still held\n",
+		        kv_qspi_holder() != NULL ? "set" : "clear",
+		        kv_has_flag ? "held" : "free");
+		order_bad++;
+	}
+}
+
 /* Is the blob busy flag held?  Asked by trying it and giving it straight back
  * when that worked (a public blob read would answer too, but reads the flash
  * when the flag is free). */
 static int flag_held(void)
 {
-	if (blob_busy_acquire() == BLOB_OK) {
-		blob_busy_release();
+	if (__real_blob_busy_acquire() == BLOB_OK) {
+		__real_blob_busy_release();
 		return 0;
 	}
 	return 1;
@@ -364,6 +434,7 @@ static void reset_counts(void)
 	erase_fail_after = -1;
 	on_sleep = NULL;
 	sleeps = 0u;
+	slept = 0u;
 	deadlocks = 0u;
 	cur = &thr_a;
 }
@@ -377,16 +448,16 @@ static int all_free(void)
 		return 0;
 	if (kv_mutex != NULL && (kv_mutex->owner != NULL || kv_mutex->count != 0u))
 		return 0;
-	flag_free = (blob_busy_acquire() == BLOB_OK);
+	flag_free = (__real_blob_busy_acquire() == BLOB_OK);
 	if (flag_free)
-		blob_busy_release();
+		__real_blob_busy_release();
 	return flag_free;
 }
 
 static int clean_accesses(void)
 {
 	return fm.unheld == 0u && fm.unflagged == 0u && fm.outside == 0u &&
-	       fm.not_blank == 0u && deadlocks == 0u;
+	       fm.not_blank == 0u && deadlocks == 0u && order_bad == 0u;
 }
 
 static const struct fal_flash_dev *dev(void)
@@ -484,7 +555,7 @@ static unsigned release_after;
 static void release_flag_later(void)
 {
 	if (release_after > 0u && --release_after == 0u)
-		blob_busy_release();
+		__real_blob_busy_release();
 }
 
 static void t_flag_busy(void)
@@ -494,7 +565,7 @@ static void t_flag_busy(void)
 	ULONG t0;
 
 	reset_counts();
-	CHECK(blob_busy_acquire() == BLOB_OK);     /* the other holder */
+	CHECK(__real_blob_busy_acquire() == BLOB_OK);     /* the other holder */
 
 	t0 = now;
 	w0 = fm.writes;
@@ -513,7 +584,7 @@ static void t_flag_busy(void)
 	 * its flag -- which also refuses the public blob reads. */
 	CHECK(fm.reads == 0u && fm.writes == w0 && n_erases == 0u);
 	CHECK(kv_qspi_holder() == NULL && kv_mutex->owner == NULL);
-	CHECK(blob_busy_acquire() == BLOB_ERR_BUSY);
+	CHECK(__real_blob_busy_acquire() == BLOB_ERR_BUSY);
 	{
 		struct blob_info bi;
 
@@ -522,7 +593,7 @@ static void t_flag_busy(void)
 
 	/* [!] A release with nothing held must not give back the other's flag. */
 	kv_board_facts.hold_release();
-	CHECK(blob_busy_acquire() == BLOB_ERR_BUSY);
+	CHECK(__real_blob_busy_acquire() == BLOB_ERR_BUSY);
 	CHECK(logged("hold given back by a thread that does not hold it"));
 
 	/* FAL's write and erase refuse while the flag is somebody else's. */
@@ -545,7 +616,7 @@ static void t_flag_busy(void)
 
 	/* kv_init()'s hold has no deadline: it waits until the flag comes back. */
 	restart_store();
-	CHECK(blob_busy_acquire() == BLOB_OK);
+	CHECK(__real_blob_busy_acquire() == BLOB_OK);
 	release_after = 1000u;                       /* 10 s at 10 ms a try */
 	on_sleep = release_flag_later;
 	t0 = now;
@@ -643,14 +714,14 @@ static void t_failure_exits(void)
 	reset_counts();
 	write_fail_after = 0;
 	CHECK(kv_set("f.w", KV_TYPE_U32, &u, 4u, NULL) == KV_ERR_IO);
-	CHECK(all_free());
+	CHECK(fm.writes > 0u && all_free() && clean_accesses());
 
 	/* kv_format(): its own wipe fails. */
 	reset_counts();
 	erase_fail_after = 0;
 	CHECK(kv_format() == KV_ERR_IO && kv_state() == KV_STATE_FAILED);
 	CHECK(logged("format: erase failed"));
-	CHECK(all_free());
+	CHECK(n_erases > 0u && all_free() && clean_accesses());
 
 	/*
 	 * kv_format(): the wipe works and FlashDB's own sector erases then fail.
@@ -668,7 +739,7 @@ static void t_failure_exits(void)
 		CHECK(rc == KV_OK || rc == KV_ERR_IO);
 	}
 	CHECK(n_erases > KV_FAL_DEV_LEN / QSPI_FLASH_SECTOR_SIZE);   /* it got there */
-	CHECK(all_free());
+	CHECK(all_free() && clean_accesses());
 
 	/* kv_format(): the way back. */
 	reset_counts();
@@ -788,6 +859,7 @@ int main(void)
 	t_reentry();
 	t_failure_exits();
 	t_bounds();
+	CHECK(order_bad == 0u);
 	if (failures != 0) {
 		fprintf(stderr, "test_kv_qspi: %d failure(s)\n", failures);
 		return 1;

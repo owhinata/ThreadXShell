@@ -225,7 +225,10 @@ gcc $CFLAGS -I "$here/blob_shim" \
 # flash; a re-entry from a walk's callback is refused before anything is taken;
 # FAL's write and erase refuse unless the record names the caller; a release
 # that does not own gives back nothing; nothing at or past 0x100000 is reached,
-# and a 64 KB erase is issued only on a 64 KB boundary.  kv_shim/ stands in for
+# and a 64 KB erase is issued only on a 64 KB boundary.  The flag is wrapped at
+# link time (--wrap, src/blob.c unchanged) to check the order of a release:
+# the record, then the flag, then kv's mutex.  A wait that never ends fails on
+# the test's sleep ceiling rather than hanging the runner.  kv_shim/ stands in for
 # tx_api.h and svc/log.h.  FlashDB is a submodule (lib/flashdb, fetched by
 # configuring this board or wio-lite-ai); without it this cannot run and fails.
 fdb="$HOST_TEST_REPO/lib/flashdb"
@@ -251,6 +254,7 @@ gcc $CFLAGS $kv_inc \
     "$board/src/blob.c" "$board/src/blob_slots.c" \
     "$HOST_TEST_SVC/blob/blob_map.c" "$HOST_TEST_SVC/blob/blob_state.c" \
     "$HOST_TEST_SVC/crc32.c" "$out/kv_fdb_f746"/*.o \
+    -Wl,--wrap=blob_busy_acquire -Wl,--wrap=blob_busy_release \
     $LDFLAGS -o "$out/test_kv_qspi"
 "$out/test_kv_qspi"
 

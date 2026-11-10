@@ -57,9 +57,10 @@ static const struct plugin_base_api *pl_base;
 
 /* Box colour and stroke.  Chosen to match the overlay the firmware used to draw
  * with its own decoder, so that the two paths could be compared on the panel as
- * well as in a test; neither board that runs this plugin has that overlay any
- * more (grove-vision-ai-v2 issue #104, wio-lite-ai issue #116).  The values stay
- * because the recorded panel runs are against them. */
+ * well as in a test; none of the three boards that run this plugin has that
+ * overlay any more (grove-vision-ai-v2 issue #104, wio-lite-ai issue #116,
+ * f746g-disco issue #159 Step 4c).  The values stay because the recorded panel
+ * runs are against them. */
 #define PL_RGB565   0x07E0u   /* green */
 #define PL_STROKE   2u
 

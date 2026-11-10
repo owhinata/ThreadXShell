@@ -72,7 +72,8 @@
 #endif
 
 /* Seven rows, one per slot the ABI has.  A slot added there would otherwise be
- * left at zero here, which plugin_load.c reads as "this board refuses it". */
+ * left at zero here, which plugin_load_body.h reads as "this board refuses
+ * it". */
 _Static_assert(PLUGIN_SLOT_COUNT == 7,
                "plugin stack [slots]: a new plugin slot needs a row in "
                "nn_plugin_stack.h");

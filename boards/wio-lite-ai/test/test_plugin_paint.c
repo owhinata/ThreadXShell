@@ -19,7 +19,7 @@
  * and golden numbers are pinned beside that, so the two sides are not one side
  * twice.
  *
- * [!] AND THE GOLDENS ARE THE OTHER BOARD'S.  rect_geom.c is shared, so an
+ * [!] AND THE GOLDENS ARE grove-vision-ai-v2's.  rect_geom.c is shared, so an
  * 8x8 outline of stroke 2 must cost 48 here exactly as it does there.  If the
  * two boards' loops ever disagree about that, one of them has stopped
  * following the rule they both borrow.
@@ -61,7 +61,7 @@ static uint16_t fb[SW * SH];
 static struct plugin_painter paint;
 static struct plugin_paint_budget bud;
 
-#define LIMIT 19200u      /* a quarter frame, as the other board budgets */
+#define LIMIT 19200u      /* a quarter frame, as grove-vision-ai-v2 budgets */
 #define OPS   64u
 
 static void arm(uint32_t pixels, uint32_t ops)

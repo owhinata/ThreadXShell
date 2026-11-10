@@ -7,7 +7,8 @@
  * @brief   Which decoder is in force.  See nn_active.h.
  *
  * The decision and every call into the plugin's decoder slots are
- * svc/nn/nn_active_core.c's, shared with wio-lite-ai (issue #126).  What is here
+ * svc/nn/nn_active_core.c's, shared with wio-lite-ai (issue #126) and
+ * f746g-disco (issue #159).  What is here
  * is this board's: the geometry and the transform, the conversion from
  * nn_tensor, and the three facts the shared file is handed below.
  *

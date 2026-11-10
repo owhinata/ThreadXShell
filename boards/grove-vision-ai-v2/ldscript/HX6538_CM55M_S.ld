@@ -534,7 +534,7 @@ SECTIONS
      * code is by address and rounds outward to whole 32-byte lines, so a
      * reservation whose end were ragged would let that rounding reach into
      * whatever followed it.  Both edges are 32-byte multiples here, and
-     * plugin_load.c refuses a mem_size that is not.
+     * plugin_load_body.h refuses a mem_size that is not.
      */
     .plugin 0x341E0000 (NOLOAD) :
     {

@@ -5,7 +5,8 @@
  * Host test for `nn model load <container>` on this board's tflm build
  * (issue #159 = #78 Step 4a; from the QSPI asset store since issue #194):
  * port/nn/nn_svc_f746_model.c compiled WITH CONFIG_NN_BACKEND_TFLM and this
- * board's policy macros, over the real svc/plugin/plugin_load.c, svc/crc32.c,
+ * board's policy macros, over the real container check
+ * (svc/plugin/plugin_load_body.h, through plugin_load_board.c), svc/crc32.c,
  * svc/nn/nn.c and the shared load order, against a stub backend that refuses
  * any model pointer outside its staging buffer or off NN_MODEL_ALIGN -- the
  * contract the tflm backend keeps -- and a stand-in store (nn_blob_stub.c).

@@ -151,16 +151,16 @@ static struct plugin_exec_env env = {
 /* ---- the container ------------------------------------------------------- */
 
 /*
- * A "container" is just bytes here: plugin_load.c has already validated the one
- * the device gets, and this file is testing what happens afterwards.  The view
- * is therefore built by hand, which is also the only way to reach states
+ * A "container" is just bytes here: plugin_load_body.h has already validated
+ * the one the device gets, and this file is testing what happens afterwards.
+ * The view is therefore built by hand, which is also the only way to reach states
  * plugin_parse() refuses to emit.
  */
 #define IMAGE_OFF   64u
 /*
  * Where the stub goes inside the image.  EVEN, and that is a host constraint
  * rather than a claim: on the target a slot offset carries the Thumb bit and
- * plugin_load.c refuses one that does not, so the loader passes it through
+ * plugin_load_body.h refuses one that does not, so the loader passes it through
  * untouched -- nothing here checks that, and an odd offset would simply be an
  * unaligned x86 branch.
  */

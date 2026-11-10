@@ -3,9 +3,12 @@
 
 Uses a small real CMake/Ninja project and the supplied ARM C and C++ compilers
 (C++ services since #161). Optional
---board-build replays copies of the three shared regression TUs using the
-selected consumer's actual compile context (Grove or Wio), without editing or
-building any firmware tree.  When that build compiles the shared TFLM backend
+--board-build replays copies of the four shared regression TUs using the
+selected consumer's actual compile context (any board build that loads plugins:
+Grove, Wio, or f746g-disco with CONFIG_NN_BACKEND=tflm; the others do not
+compile those TUs), without editing or building any firmware tree.  The
+firmware build and the host tests run it on Grove's tree only.  When that
+build compiles the shared TFLM backend
 (svc/nn/tflm/nn_tflm.cc: wio-lite-ai and f746g-disco with CONFIG_NN_BACKEND=tflm,
 issue #161) a copy of it is replayed the same way through the C++ driver;
 --require-tflm makes its absence a failure instead of a skip.

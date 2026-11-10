@@ -2,8 +2,9 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for svc/plugin/plugin_load.c -- container and manifest validation
- * (issue #101 = #78 Step 1a).
+ * Host unit test for svc/plugin/plugin_load_body.h (through plugin_load_host.c)
+ * and plugin_load.c -- container and manifest validation (issue #101 = #78
+ * Step 1a).
  *
  * WHY THIS FILE CARRIES SO MANY CASES.  plugin_load.h names thirty-two distinct
  * refusals on purpose: "the container is malformed" is true of every failure and

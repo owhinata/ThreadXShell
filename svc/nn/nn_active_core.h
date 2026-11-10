@@ -17,10 +17,11 @@
  *     board's: plugin_run_active() / plugin_run_slot());
  *   - where to record the stack depth a slot is entered at;
  *   - its answer to "can these shapes be read?" when NO plugin is loaded.
- *     The two boards give different answers on purpose and are not to be made
- *     to agree: grove-vision-ai-v2 refuses (its stream admission asks this and
- *     nothing else), wio-lite-ai accepts (its `nn run` on a bare model shares
- *     the question, and a stream is refused one question lower, by can_draw).
+ *     The boards give different answers on purpose and are not to be made to
+ *     agree: grove-vision-ai-v2 refuses (its stream admission asks this and
+ *     nothing else), wio-lite-ai and f746g-disco accept (their `nn run` on a
+ *     bare model shares the question, and a stream is refused one question
+ *     lower, by can_draw).
  *
  * [!] THIS FILE DOES NOT KNOW THAT A RESULT GATE EXISTS.  It takes no lock and
  * its contract does not say "the caller holds X".  Who may call a plugin and

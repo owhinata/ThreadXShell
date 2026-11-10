@@ -8,7 +8,8 @@
  *
  * The decision and every call into the plugin's decoder slots are
  * svc/nn/nn_active_core.c's; the lease-checked entries above it are
- * svc/nn/nn_active_lease.c's (both shared with wio-lite-ai).  What is here is
+ * svc/nn/nn_active_lease.c's (both shared with wio-lite-ai, the first with
+ * grove-vision-ai-v2 too).  What is here is
  * this board's: reading its model's outputs, where a depth sample goes, the
  * transform and the log sink of the base vtable, and the facts the shared
  * files are handed.  tflm only: no other backend can carry a container.

@@ -79,8 +79,9 @@ static void nn_life_cs_exit(unsigned posture)
 
 #if defined(CONFIG_NN_BACKEND_TFLM)
 /*
- * This board's policy for a plugin image.  svc/plugin/plugin_load.c holds no
- * board fact; every one of them arrives here, from board.cmake.
+ * This board's policy for a plugin image.  The shared check
+ * (svc/plugin/plugin_load_body.h) holds no board fact; every one of them
+ * arrives here, from board.cmake.
  *
  * Since Step 4b the plugin section is RUN: a load copies it into .plugin and
  * calls its entry (the load order's plugin hooks below), and from then on the
@@ -448,11 +449,11 @@ static int nn_life_prepare(struct nn_core_model_job *j)
  * previous one again by its name.
  *
  * A payload that is not a container is a bare model.  A container goes through
- * svc/plugin/plugin_load.c -- the same validator the host asset build runs --
- * with this board's policy, and its MODEL SECTION is handed to the backend IN
- * PLACE, at its offset inside the staged copy (nn.h, NN_MODEL_ALIGN): copying
- * it down to the buffer's start would overwrite the validated container with
- * bytes nobody validated.
+ * svc/plugin/plugin_load_body.h -- the same validator the host asset build
+ * runs -- with this board's policy, and its MODEL SECTION is handed to the
+ * backend IN PLACE, at its offset inside the staged copy (nn.h,
+ * NN_MODEL_ALIGN): copying it down to the buffer's start would overwrite the
+ * validated container with bytes nobody validated.
  */
 static int nn_life_fetch(struct nn_core_model_job *j)
 {

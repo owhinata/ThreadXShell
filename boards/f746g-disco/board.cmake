@@ -823,8 +823,9 @@ set(F746_PLUGIN_MEMORY_LD "${BOARD_DIR}/ldscript/plugin_memory.ld")
 #
 # `nn model load <blob>` (a file and `--path` until issue #194)
 # recognises a container, validates it with this
-# board's policy (svc/plugin/plugin_load.c -- the validator the host asset build
-# runs too), hands its model section to the backend in place and, since Step
+# board's policy (svc/plugin/plugin_load_body.h, entered here through
+# plugin_load_board.c -- the check the host asset build's verify_container runs
+# too), hands its model section to the backend in place and, since Step
 # 4b, copies its plugin into .plugin and starts it: the plugin then decodes on
 # the nn worker, draws on the GUIX thread and reports to a console, every entry
 # under the plugin lease.  Since Step 4c it is the only decoder this board has:
@@ -865,15 +866,17 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     set(F746_PLUGIN_SBUF_WRITE_MAX 64)
 
     target_sources(shell PRIVATE
-        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"   # the device's validator
-        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_board.c" # its firmware entry
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"   # probe and result names
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_board.c" # the device's validator
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"   # `nn info`'s stack lines
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c" # ...and the claims around them
         # (svc/crc32.c, the digest and the load CRC, is in the main sources
         # since issue #194: the blob store uses it in every backend.)
         # Step 4b: the loader, the lease, the painter and the decoder branch.
-        # What is board-independent is svc/'s (shared with wio-lite-ai); what
-        # touches this board's hardware or RTOS is port/plugin/ and port/nn/.
+        # What is board-independent is svc/'s (shared with wio-lite-ai, and all
+        # but nn_active_lease.c and plugin_run_core.c with grove-vision-ai-v2
+        # too); what touches this board's hardware or RTOS is port/plugin/ and
+        # port/nn/.
         "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_core.c"    # the one branch point
         "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_lease.c"   # ...its lease-checked entries
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_exec.c"   # the loader
@@ -1038,8 +1041,9 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
 
     # --- the container chain's host tools --------------------------------------
     #   abi_layout        svc/plugin/plugin_abi.h's layout as JSON, for the packer
-    #   verify_container  svc/plugin/plugin_load.c -- the device's validator -- on
-    #                     the host, so a container cannot pass here and fail there
+    #   verify_container  svc/plugin/plugin_load_body.h -- the device's validator --
+    #                     on the host, entered through plugin_load_host.c, so a
+    #                     container cannot pass here and fail there
     #   slot_table        THIS board's slot capacities, from src/blob_slots.c
     #                     (issue #194): what an asset's slot is checked against
     set(F746_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")

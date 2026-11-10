@@ -7,9 +7,10 @@
  * @brief   The painter's loops.  See plugin_paint.h.
  *
  * What each primitive decides before its first store -- the clip, a blit's
- * source offset, the charge -- is shared with grove-vision-ai-v2
- * (svc/plugin/plugin_paint_span.c).  What is here is what this panel makes different:
- * native RGB565 stored into a rotated surface, columns contiguous.
+ * source offset, the charge -- is shared with grove-vision-ai-v2 and
+ * f746g-disco (svc/plugin/plugin_paint_span.c).  What is here is what this
+ * panel makes different: native RGB565 stored into a rotated surface, columns
+ * contiguous.
  */
 #include "plugin_paint.h"
 

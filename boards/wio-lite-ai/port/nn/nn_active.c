@@ -7,7 +7,8 @@
  * @brief   Which decoder is in force.  See nn_active.h.
  *
  * The decision and every call into the plugin's decoder slots are
- * svc/nn/nn_active_core.c's, shared with grove-vision-ai-v2 (issue #126), and
+ * svc/nn/nn_active_core.c's, shared with grove-vision-ai-v2 (issue #126) and
+ * f746g-disco (issue #159), and
  * the lease-checked entries above it are svc/nn/nn_active_lease.c's, shared
  * with f746g-disco (issue #159).  What is here is this board's: the conversion
  * from nn_tensor, the transform and the log sink of the base vtable, and the

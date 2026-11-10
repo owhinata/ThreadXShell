@@ -36,8 +36,9 @@ static void ok(const char *what, int cond)
 	}
 }
 
-/* The allowance both boards give one draw(): a quarter of a 320 x 240 frame
- * and 64 primitives (NN_OV_DRAW_* / PREVIEW_PLUGIN_DRAW_*). */
+/* The allowance grove-vision-ai-v2 and wio-lite-ai give one draw(): a quarter
+ * of a 320 x 240 frame and 64 primitives (NN_OV_DRAW_* / PREVIEW_PLUGIN_DRAW_*;
+ * f746g-disco gives an eighth, NN_PANEL_DRAW_*). */
 #define LIMIT 19200u
 #define OPS   64u
 

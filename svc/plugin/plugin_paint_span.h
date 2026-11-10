@@ -8,11 +8,13 @@
  *          the clip, the source offset of a blit, the charge, and how the
  *          painter is filled in (issue #126).
  *
- * WHAT IS SHARED AND WHAT IS NOT.  Two boards let a plugin paint.  Their
+ * WHAT IS SHARED AND WHAT IS NOT.  All three boards let a plugin paint.  Their
  * pixel loops stay theirs, because each has a hardware reason to differ:
  * grove-vision-ai-v2 stores byte-swapped RGB565 row by row into a staged SRAM
  * frame and draws outlines with its own -O3 routine; wio-lite-ai stores native
- * RGB565 column by column into a rotated PSRAM surface.  What happens BEFORE
+ * RGB565 column by column into a rotated PSRAM surface; f746g-disco stores
+ * native RGB565 row by row into the camera view buffer in SDRAM, not rotated,
+ * which the preview then copies to the display.  What happens BEFORE
  * the loop has no such reason, and is here: which part of the rectangle lies
  * on the surface, which part of a blit's source that is, what the primitive is
  * charged, and in what order a refusal is decided.

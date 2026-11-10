@@ -867,8 +867,8 @@ def stack_analysis(elf_path, map_path, entries, objects, errors):
     [!] NO VENEER COST GOES IN HERE (issue #111).  The walk stops at a
     crossing (only a veneer has one), so a path crosses into the base at most
     once and what the firmware charges decomposes as max(A0, A1 + c) -- the
-    loader adds its own c (svc/plugin/plugin_load.c), so neither part goes
-    stale when c moves.  cmake/fixtures/run_plugin_gate_tests.py checks the
+    loader adds its own c (svc/plugin/plugin_load_body.h), so neither part
+    goes stale when c moves.  cmake/fixtures/run_plugin_gate_tests.py checks the
     parts against a transcription of the pre-#124 walk at three values of c."""
     try:
         elf = tsa.Elf(elf_path)

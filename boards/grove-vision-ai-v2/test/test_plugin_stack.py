@@ -26,7 +26,7 @@ separate reasons, and this file answers each:
      The runtime half (test_plugin_stack.c) prints the table the firmware builds
      its policy from, compiled with the allowances set to DIFFERENT sentinel
      values, and it is checked here against this file's own statement of which
-     slot runs where.  It also runs the device's validator (svc/plugin/plugin_load.c)
+     slot runs where.  It also runs the device's validator (svc/plugin/plugin_load_body.h)
      against the REAL allowances: one byte past each limit must be refused.
 
 The real values are read from where the firmware gets them -- board.cmake for

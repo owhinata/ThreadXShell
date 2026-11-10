@@ -64,7 +64,7 @@ static uint16_t fb[SW * SH];
 static struct plugin_painter paint;
 static struct plugin_paint_budget bud;
 
-#define LIMIT 19200u      /* a quarter frame, as the other board budgets */
+#define LIMIT 19200u      /* a quarter frame, as wio-lite-ai budgets */
 #define OPS   64u
 
 static void arm(uint32_t pixels, uint32_t ops)

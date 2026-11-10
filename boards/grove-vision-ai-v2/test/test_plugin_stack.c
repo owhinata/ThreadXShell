@@ -15,10 +15,11 @@
  *     threads the header says it runs on).  Compiled with the allowances set
  *     to different sentinel values, a slot wired to the wrong one shows up as
  *     the wrong number; with the real values (all 1,024) it could not.
- *   - runs svc/plugin/plugin_load.c -- the device's validator -- over a container that
- *     declares, slot by slot, exactly the limit (accepted) and one byte more
- *     (PLUGIN_ERR_STACK), and then the whole stack of each thread a slot runs
- *     on: the declaration issue #119 found ACCEPTED for decode.
+ *   - runs svc/plugin/plugin_load_body.h -- the device's validator -- over a
+ *     container that declares, slot by slot, exactly the limit (accepted) and
+ *     one byte more (PLUGIN_ERR_STACK), and then the whole stack of each
+ *     thread a slot runs on: the declaration issue #119 found ACCEPTED for
+ *     decode.
  *
  * Only the stack table is the firmware's.  The target, prelink base, capacity
  * and veneer cost below are whatever lets the parse reach the stack check; they

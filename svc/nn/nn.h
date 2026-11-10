@@ -17,10 +17,11 @@
  * belongs ABOVE this layer, so the same API serves any model the backend can
  * run.
  *
- * WHO USES IT: wio-lite-ai and f746g-disco.  grove-vision-ai-v2 has its own
- * Ethos-U path (port/nn/npu/) and does not include this header.
+ * WHO USES IT: all three boards -- wio-lite-ai and f746g-disco over the TFLM
+ * backend (svc/nn/tflm/), grove-vision-ai-v2 since issue #169 over the Ethos-U
+ * one (svc/nn/ethosu/).
  *
- * ONE IMPLEMENTATION (issue #161): svc/nn/nn.c, for both boards.  It owns no
+ * ONE IMPLEMENTATION (issue #161): svc/nn/nn.c, for every board.  It owns no
  * storage: its state is the board's object and its critical section, tick wait
  * and cycle counter are the board's hooks (svc/nn/nn_dispatch_state.h, defined in
  * boards/<board>/port/nn/nn_model_board.c).  A declaration marked with one

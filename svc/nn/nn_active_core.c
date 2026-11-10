@@ -55,10 +55,10 @@ int nn_active_core_decode(const struct nn_active_board *b,
 		return fn(d, n);
 	}
 	/*
-	 * [!] A BACKSTOP, NOT A PATH (issues #104, #116).  Neither board carries a
-	 * decoder of its own, and both ask whether a plugin is in force before
-	 * they get here.  A caller arriving anyway is told nothing is bound -- not
-	 * BF_ERR_MODEL, which means "not a detector".
+	 * [!] A BACKSTOP, NOT A PATH (issues #104, #116, #159).  No board carries
+	 * a decoder of its own, and every board asks whether a plugin is in force
+	 * before it gets here.  A caller arriving anyway is told nothing is
+	 * bound -- not BF_ERR_MODEL, which means "not a detector".
 	 */
 	return BF_ERR_UNINIT;
 }

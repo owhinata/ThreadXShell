@@ -602,7 +602,7 @@ gcc $CFLAGS \
 # never failing.  So the driver compiles the REAL header once per ceiling at,
 # below and above it (the others out of the way), and builds the runtime half
 # (test_plugin_stack.c) with sentinel allowances to catch a slot wired to the
-# wrong one, and with the real ones against svc/plugin/plugin_load.c.  Host cc only:
+# wrong one, and with the real ones against svc/plugin/plugin_load_body.h.  Host cc only:
 # nothing here needs the cross toolchain, so nothing here skips.
 python3 "$here/test_plugin_stack.py"
 

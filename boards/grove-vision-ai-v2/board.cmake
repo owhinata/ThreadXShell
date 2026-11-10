@@ -432,7 +432,8 @@ set(SHELL_SOURCES
     # verify_container compiles, so the two cannot disagree.
     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_board.c"
-    # `nn info`'s plugin stack lines, shared with wio (issue #111).
+    # `nn info`'s plugin stack lines, shared with wio (issue #111) and f746
+    # (issue #159).
     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"
     # ...and the open model's container claims around them, shared with wio
     # and f746 (issue #174).  ITCM: `nn info` is not the load / unload path.
@@ -457,7 +458,8 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/port/plugin/plugin_lease.c"
     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_lease_miss.c"
     # The one place that decides which decoder is in force (issue #103): the
-    # decision and the calls into the plugin shared with wio (issue #126), this
+    # decision and the calls into the plugin shared with wio (issue #126) and
+    # f746 (issue #159), this
     # board's tensors, geometry and depth record beside it.
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_core.c"
     "${BOARD_DIR}/port/nn/nn_active.c"
@@ -2127,8 +2129,9 @@ add_custom_target(plugin ALL DEPENDS ${GROVE_PLUGIN_ELFS})
 #   slot_table        prints the blob slot capacities through the firmware's own
 #                     accessors, so the sender can refuse an oversized container
 #                     BEFORE the device erases a slot to find out
-#   verify_container  runs svc/plugin/plugin_load.c -- the DEVICE's validator -- over a
-#                     packed container, so it cannot pass here and fail there
+#   verify_container  runs svc/plugin/plugin_load_body.h -- the DEVICE's validator,
+#                     entered through plugin_load_host.c -- over a packed
+#                     container, so it cannot pass here and fail there
 set(GROVE_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
 set(GROVE_SLOT_TABLE_JSON "${CMAKE_BINARY_DIR}/plugin/slot_table.json")
 set(GROVE_CONTAINER_VERIFIER "${CMAKE_BINARY_DIR}/verify_container")

@@ -6,7 +6,8 @@
  * @file    plugin_run.h
  * @brief   This board's binding of the shared plugin loader (issues #103, #110).
  *
- * The loader itself is svc/plugin/plugin_exec.c, shared with wio-lite-ai.  What is
+ * The loader itself is svc/plugin/plugin_exec.c, shared with wio-lite-ai and
+ * f746g-disco.  What is
  * genuinely this board's, and lives here, is:
  *
  *   - the state, in permanently allocated static memory;

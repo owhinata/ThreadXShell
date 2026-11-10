@@ -84,19 +84,20 @@ _Static_assert(WIO_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
 /* ---- plugin containers (issue #108 = #78 Step 3a) ------------------------- */
 
 /*
- * This board's policy for a plugin image.  svc/plugin/plugin_load.c holds no board
- * address, so the reservation, the target identity and what each thread can
- * spare arrive from here.
+ * This board's policy for a plugin image.  The shared check
+ * (svc/plugin/plugin_load_body.h) holds no board address, so the reservation,
+ * the target identity and what each thread can spare arrive from here.
  *
  * [!] EVERY NUMBER COMES FROM THE BUILD, NOT FROM HERE.  The host asset build
- * runs the same validator (verify_container links the very plugin_load.c this
- * board runs) with the same numbers, and if the two were declared separately a
- * container could pass on the host and be refused on the board -- the shape
- * issue #93 hit.  board.cmake defines them once and passes them both ways.  That
- * is not the issue #85 hazard: there, a layout and the gate CHECKING it came from
- * one variable.  Here the two consumers must AGREE; the reservation's address is
- * still verified independently, by the linker script and
- * cmake/check_plugin_reservation.py, which state it separately on purpose.
+ * runs the same validator (verify_container compiles the very
+ * plugin_load_body.h this board runs) with the same numbers, and if the two
+ * were declared separately a container could pass on the host and be refused
+ * on the board -- the shape issue #93 hit.  board.cmake defines them once and
+ * passes them both ways.  That is not the issue #85 hazard: there, a layout and
+ * the gate CHECKING it came from one variable.  Here the two consumers must
+ * AGREE; the reservation's address is still verified independently, by the
+ * linker script and cmake/check_plugin_reservation.py, which state it
+ * separately on purpose.
  *
  * [!] 3a NEVER CALLS THROUGH ANY OF THIS.  A container is validated and its
  * claims recorded; the plugin section is never copied and never branched into.

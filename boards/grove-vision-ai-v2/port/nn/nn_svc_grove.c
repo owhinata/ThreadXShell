@@ -515,9 +515,9 @@ static int nn_scan_slots(struct nn_op_result *res, uint32_t token,
 /* ---- containers (issue #101) ---------------------------------------------- */
 
 /*
- * This board's policy for a plugin image.  svc/plugin/plugin_load.c holds no board
- * address, so the reservation, the target identity and what each thread can
- * spare arrive from here.
+ * This board's policy for a plugin image.  The shared check
+ * (svc/plugin/plugin_load_body.h) holds no board address, so the reservation,
+ * the target identity and what each thread can spare arrive from here.
  *
  * [!] THE STACK LIMITS ARE nn_plugin_stack.h's, slot by slot (issue #119).  That
  * header says which thread each slot runs on and asserts every allowance below
@@ -528,12 +528,12 @@ static int nn_scan_slots(struct nn_op_result *res, uint32_t token,
  */
 /*
  * [!] EVERY NUMBER COMES FROM THE BUILD, NOT FROM HERE.  The host sender runs
- * the same validator (verify_container links this very file's plugin_load.c)
- * with the same policy, and if the two were declared separately a container
- * could pass on the host and be refused on the board -- which is exactly the
- * shape issue #93 hit when its host gate used the flatbuffer verifier's default
- * limits and the firmware used its own.  board.cmake defines these once and
- * passes them both ways.
+ * the same validator (verify_container compiles the same plugin_load_body.h
+ * this firmware runs) with the same policy, and if the two were declared
+ * separately a container could pass on the host and be refused on the board --
+ * which is exactly the shape issue #93 hit when its host gate used the
+ * flatbuffer verifier's default limits and the firmware used its own.
+ * board.cmake defines these once and passes them both ways.
  *
  * This is NOT the hazard issue #85 names.  There, a layout and the gate that
  * checked it came from one CACHE variable, so a single -D moved the rule and

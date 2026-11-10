@@ -438,7 +438,7 @@ for kv_dflt in none dhcp; do
     "$out/test_kv_cfg_$kv_dflt"
 done
 
-# issue #101 (#78 Step 1a) -- container and manifest validation (svc/plugin/plugin_load.c):
+# issue #101 (#78 Step 1a) -- container and manifest validation (svc/plugin/plugin_load_body.h):
 # everything that must hold BEFORE a plugin's first instruction is fetched.
 #
 # [!] EVERY ONE OF THE THIRTY-TWO REFUSAL CODES IS PROVOKED HERE.  plugin_load.h names

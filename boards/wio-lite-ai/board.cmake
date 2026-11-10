@@ -1431,8 +1431,9 @@ add_custom_command(TARGET shell POST_BUILD
 if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # --- the policy: ONE declaration, two consumers ----------------------------
     #
-    # The firmware's validator (port/nn/nn_svc_wio.c) and the host asset build
-    # (verify_container, which runs that same svc/plugin/plugin_load.c) take these from
+    # The firmware's policy (plugin_board_policy in port/nn/nn_svc_wio.c, which
+    # the validator reads by name) and the host asset build (verify_container,
+    # which runs the same check, svc/plugin/plugin_load_body.h) take these from
     # here, so a container cannot pass on the host and be refused on the board
     # (the shape issue #93 hit).  The reservation's ADDRESS is still stated
     # independently elsewhere -- see ldscript/plugin_memory.ld.
@@ -1511,17 +1512,21 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # into a caller-owned buffer, so a ceiling small enough to fire.
     set(WIO_PLUGIN_SBUF_WRITE_MAX 64)
 
-    # The device's validator -- the same file verify_container runs on the host.
-    # The CRC-32 it checks the plugin digest with is the one FlashDB already
-    # provides (port/nn/crc32_fdb.c says why), compiled with the blob store in
-    # the BSP_ENABLE_KV block above since issue #193.
+    # The device's validator: the check in svc/plugin/plugin_load_body.h,
+    # entered through plugin_load_board.c (plugin_load.c adds the probe and the
+    # result names) -- the same check verify_container runs on the host, through
+    # plugin_load_host.c.  The CRC-32 it checks the plugin digest with is the
+    # one FlashDB already provides (port/nn/crc32_fdb.c says why), compiled with
+    # the blob store in the BSP_ENABLE_KV block above since issue #193.
     target_sources(shell PRIVATE
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
         # Its firmware entry: the board's policy by name (issue #165).
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_board.c"
-        # `nn info`'s plugin stack lines, shared with Grove (issue #111).
+        # `nn info`'s plugin stack lines, shared with Grove (issue #111) and
+        # f746 (#159).
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"
-        # ...and the open model's claims around them, shared with f746 (#159).
+        # ...and the open model's claims around them, shared with f746 (#159)
+        # and Grove (#174).
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c")
 
     target_compile_definitions(shell PRIVATE
@@ -1718,8 +1723,9 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # because every CMake target in this project cross-compiles):
     #   abi_layout        svc/plugin/plugin_abi.h's layout as JSON, for the packer
     #   slot_table        THIS board's slot capacities, from src/blob_slots.c
-    #   verify_container  svc/plugin/plugin_load.c -- the device's validator -- on the
-    #                     host, so a container cannot pass here and fail there
+    #   verify_container  svc/plugin/plugin_load_body.h -- the device's validator --
+    #                     on the host, entered through plugin_load_host.c, so a
+    #                     container cannot pass here and fail there
     set(WIO_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
     set(WIO_SLOT_TABLE_JSON "${CMAKE_BINARY_DIR}/plugin/slot_table.json")
     set(WIO_CONTAINER_VERIFIER "${CMAKE_BINARY_DIR}/verify_container")

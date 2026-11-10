@@ -260,7 +260,7 @@ gcc $CFLAGS "$here/test_sbrk.c" "$out/retarget_host.o" \
 # claim ABOUT these loops, so comparing it against rect_geom_writes() would be
 # checking one side against itself.  Built with PLUGIN_PAINT_COUNT_STORES so
 # every store is counted where it happens, with golden numbers pinned beside
-# it -- and those goldens are the OTHER board's, because rect_geom.c is shared
+# it -- and those goldens are grove-vision-ai-v2's, because rect_geom.c is shared
 # and an 8x8 outline of stroke 2 must cost 48 on both.
 gcc $CFLAGS -DPLUGIN_PAINT_COUNT_STORES \
     -I "$board/port/plugin" -I "$board/../../svc" -I "$board/../../svc/nn" -I "$board/../../svc/plugin" -I "$board/../../svc/camera" -I "$board/../../svc/blob" \

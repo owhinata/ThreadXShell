@@ -7,10 +7,12 @@
  * @brief   The outline geometry rule, and the cost of drawing it (issues #105,
  *          #110).
  *
- * WHAT IS SHARED AND WHAT IS NOT.  Two boards draw a plugin's rectangles onto a
- * panel, and they draw them differently: grove-vision-ai-v2 stores byte-swapped
- * RGB565 into a staged framebuffer in SRAM, wio-lite-ai stores native RGB565
- * into a rotated surface in external PSRAM.  What they must NOT differ about is
+ * WHAT IS SHARED AND WHAT IS NOT.  All three boards draw a plugin's rectangles
+ * onto a panel, and they draw them differently: grove-vision-ai-v2 stores
+ * byte-swapped RGB565 into a staged framebuffer in SRAM, wio-lite-ai stores
+ * native RGB565 into a rotated surface in external PSRAM, and f746g-disco
+ * stores native RGB565 row by row into the camera view buffer in SDRAM, which
+ * the preview then copies to the display.  What they must NOT differ about is
  * which pixels a rectangle covers and how much work that is, because the
  * painter's budget is charged from the second and the drawing loop obeys the
  * first -- and a board whose charge and loop disagree either under-charges (the

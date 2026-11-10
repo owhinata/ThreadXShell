@@ -9,7 +9,9 @@
  *
  * [!] ONE COPY.  Every board prints the same two lines about a validated
  * container's stack; written in each board they would drift apart the way the
- * `nn` output did before issue #50.  A board calls this and adds nothing.
+ * `nn` output did before issue #50.  No board calls this directly: it is called
+ * by plugin_claims_info() (svc/plugin/plugin_claims.c), which every board calls
+ * for its `nn info` and adds nothing to.
  *
  * [!] KEPT OUT OF plugin_load.c.  The host container verifier links
  * plugin_load.c, plugin_load_host.c and crc32.c only, and formatting would pull

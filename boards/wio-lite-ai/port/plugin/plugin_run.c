@@ -19,7 +19,7 @@
  *   - cache maintenance: the M7's I- and D-caches are separate and an
  *     instruction fetch does not snoop the D-cache;
  *   - the Armv7-M MPU read-back, judged by svc/plugin/plugin_mpu_v7m.c, which
- *     is NOT the other board's judgement -- see that file;
+ *     is NOT grove-vision-ai-v2's judgement -- see that file;
  *   - where the loader's lines are logged.
  *
  * [!] AND THERE IS NO FLASH LEASE HERE.  Grove reads a container out of a

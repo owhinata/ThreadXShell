@@ -7,7 +7,7 @@
  * @brief   The painter's loops.  See plugin_paint.h.
  *
  * What each primitive decides before its first store -- the clip, a blit's
- * source offset, the charge -- is shared with wio-lite-ai
+ * source offset, the charge -- is shared with wio-lite-ai and f746g-disco
  * (svc/plugin/plugin_paint_span.c).  What is here is what this panel makes different:
  * pixels in wire byte order, row-major into the staged frame, and outlines
  * through the driver's own lcd_rect_wire().

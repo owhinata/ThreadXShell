@@ -7,21 +7,26 @@
  * @brief   What one plugin draw() may spend, and the one place it is charged
  *          (issues #105, #110).
  *
- * WHAT IS SHARED AND WHAT IS NOT.  Two boards let a plugin paint, and their
- * drawing loops have nothing in common: one stores byte-swapped RGB565 into a
- * staged framebuffer in SRAM, the other stores native RGB565 into a rotated
- * surface in external PSRAM.  What they must not differ about is the ACCOUNTING,
- * because that is the part issue #105 got wrong -- an outline charged for the
- * area it enclosed rather than the pixels it wrote, so one close-up face
- * exceeded the cap and its box silently vanished.  A rule that subtle should
- * have one implementation.
+ * WHAT IS SHARED AND WHAT IS NOT.  All three boards let a plugin paint, and
+ * their drawing loops have nothing in common: grove-vision-ai-v2 stores
+ * byte-swapped RGB565 into a staged framebuffer in SRAM, wio-lite-ai stores
+ * native RGB565 into a rotated surface in external PSRAM, and f746g-disco
+ * stores native RGB565 row by row into the camera view buffer in SDRAM, which
+ * the preview then copies to the display.  What they must not differ about is
+ * the ACCOUNTING, because that is the part issue #105 got wrong -- an outline
+ * charged for the area it enclosed rather than the pixels it wrote, so one
+ * close-up face exceeded the cap and its box silently vanished.  A rule that
+ * subtle should have one implementation.
  *
- * [!] WHAT THE BUDGET BOUNDS IS TIME SPENT WITH THE PANEL GUARD HELD.  It is
- * denominated in pixels because that is proportional to the work and cheap to
- * compute before the framebuffer is touched -- not because a pixel is a fixed
- * number of cycles.  A board still has to MEASURE the hold time its allowance
- * buys, and say so; issue #110 measured a loop that pairs two pixels into one
- * store, and a colour-keyed blit reads source pixels it never writes.
+ * [!] WHAT THE BUDGET BOUNDS IS TIME SPENT WITH THE PANEL GUARD HELD -- the
+ * lock under which draw() runs: Grove's panel guard, and the frame lock on
+ * wio-lite-ai and f746g-disco (on f746g-disco the camera producer needs that
+ * same lock to store the next frame).  It is denominated in pixels because
+ * that is proportional to the work and cheap to compute before the
+ * framebuffer is touched -- not because a pixel is a fixed number of cycles.
+ * A board still has to MEASURE the hold time its allowance buys, and say so;
+ * issue #110 measured a loop that pairs two pixels into one store, and a
+ * colour-keyed blit reads source pixels it never writes.
  *
  * [!] AND IT IS NOT A BOUND ON WHAT draw() COMPUTES.  A plugin may do as much
  * arithmetic as it likes between primitives; what is capped is the work the

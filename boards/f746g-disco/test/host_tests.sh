@@ -215,6 +215,45 @@ gcc $CFLAGS -I "$here/blob_shim" \
     $LDFLAGS -o "$out/test_blob_writer_f746"
 "$out/test_blob_writer_f746"
 
+# issue #214 -- this board's side of the key-value store: port/flashdb/
+# fal_qspi.c compiled unchanged under the real svc/kv/kv.c, the real FlashDB and
+# FAL (with this board's fal_cfg.h) and the real blob busy flag (src/blob.c), on
+# a 16 MB array.  Every QSPI access the store makes is under the flag with kv's
+# record naming the calling thread; every way out of every entry point leaves
+# the flag, the record and kv's lock free; an entry point waits out its deadline
+# for a flag somebody else holds and then answers busy without touching the
+# flash; a re-entry from a walk's callback is refused before anything is taken;
+# FAL's write and erase refuse unless the record names the caller; a release
+# that does not own gives back nothing; nothing at or past 0x100000 is reached,
+# and a 64 KB erase is issued only on a 64 KB boundary.  kv_shim/ stands in for
+# tx_api.h and svc/log.h.  FlashDB is a submodule (lib/flashdb, fetched by
+# configuring this board or wio-lite-ai); without it this cannot run and fails.
+fdb="$HOST_TEST_REPO/lib/flashdb"
+if [ ! -f "$fdb/src/fdb_kvdb.c" ]; then
+    echo "f746g-disco host tests: lib/flashdb is not fetched, so test_kv_qspi" \
+         "cannot run -- configure this board once (it fetches the submodule)" >&2
+    exit 1
+fi
+kv_inc="-I $here/kv_shim -I $here/blob_shim -I $board/port/flashdb \
+    -I $HOST_TEST_SVC/kv -I $fdb/inc -I $fdb/port/fal/inc \
+    -I $board/src -I $board/port/qspi -I $HOST_TEST_SVC -I $HOST_TEST_SVC/blob"
+mkdir -p "$out/kv_fdb_f746"
+for kv_src in src/fdb.c src/fdb_kvdb.c src/fdb_utils.c \
+         port/fal/src/fal.c port/fal/src/fal_flash.c port/fal/src/fal_partition.c; do
+    # Third-party: it printf's its size_t with %u, hence the relaxed warnings
+    # on these alone (as shell/test/run_host_tests.sh does).
+    gcc $CFLAGS -Wno-unused-parameter -Wno-format $kv_inc \
+        -c "$fdb/$kv_src" -o "$out/kv_fdb_f746/$(basename "$kv_src" .c).o"
+done
+gcc $CFLAGS $kv_inc \
+    "$here/test_kv_qspi.c" "$board/port/flashdb/fal_qspi.c" \
+    "$HOST_TEST_SVC/kv/kv.c" "$HOST_TEST_SVC/kv/kv_record.c" \
+    "$board/src/blob.c" "$board/src/blob_slots.c" \
+    "$HOST_TEST_SVC/blob/blob_map.c" "$HOST_TEST_SVC/blob/blob_state.c" \
+    "$HOST_TEST_SVC/crc32.c" "$out/kv_fdb_f746"/*.o \
+    $LDFLAGS -o "$out/test_kv_qspi"
+"$out/test_kv_qspi"
+
 # issue #194 -- tests for cmake/check_blob_staging.py (shared with
 # wio-lite-ai), the post-link gate that reads the slot table and the model
 # staging capacity back out of the image.  The header unit this board's

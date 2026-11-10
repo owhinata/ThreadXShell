@@ -313,12 +313,41 @@ set(BOARD_HAS_FILEX ON)
 # The property shell/cmds/cmd_net.c is optional on (issue #219): this board
 # always has NetX Duo, so the shared storage audit wants that file shipped.
 set(BOARD_HAS_NETX ON)
-# The property shell/cmds/cmd_kv.c is optional on (issue #214): this board has
-# no key-value store yet, so the shared storage audit wants that file compiled
-# by nothing.
-set(BOARD_HAS_KV OFF)
-# shell/cmds/kv_cfg.c needs a store AND NetX: no store yet, so compiled by nothing.
-set(BOARD_HAS_KV_NETX OFF)
+# The property shell/cmds/cmd_kv.c is optional on (issue #214): this board
+# always has the key-value store (FlashDB on the QSPI NOR's first megabyte), so
+# the shared storage audit wants that file shipped.
+set(BOARD_HAS_KV ON)
+# shell/cmds/kv_cfg.c (the shared boot steps: the telnet port and net.mode from
+# the store) needs the store AND NetX: ON exactly when both are, and the same
+# condition registers the file below.
+if(BOARD_HAS_KV AND BOARD_HAS_NETX)
+    set(BOARD_HAS_KV_NETX ON)
+else()
+    set(BOARD_HAS_KV_NETX OFF)
+endif()
+
+# --- FlashDB (the key-value store, issue #214) -------------------------------
+# armink/FlashDB (Apache-2.0), the same three core sources plus the FAL from
+# its own port/ directory as wio-lite-ai takes: fdb_tsdb.c and fdb_file.c are
+# features svc/kv/fdb_cfg.h does not enable, and fal_rtt.c is RT-Thread's.
+# Configuration is svc/kv/fdb_cfg.h (shared) and port/flashdb/fal_cfg.h (this
+# board's device and partition), both on the include path before FlashDB's
+# own inc/ (target_include_directories below).
+set(FDB_DIR "${CMAKE_SOURCE_DIR}/lib/flashdb")
+set(FDB_CORE
+    "${FDB_DIR}/src/fdb.c"
+    "${FDB_DIR}/src/fdb_kvdb.c"
+    "${FDB_DIR}/src/fdb_utils.c"
+    "${FDB_DIR}/port/fal/src/fal.c"
+    "${FDB_DIR}/port/fal/src/fal_flash.c"
+    "${FDB_DIR}/port/fal/src/fal_partition.c")
+# The shared boot steps, registered on the property their mark names.
+set(KV_CFG_SOURCES "")
+if(BOARD_HAS_KV_NETX)
+    set(KV_CFG_SOURCES
+        "${CMAKE_SOURCE_DIR}/shell/cmds/kv_cfg.c"
+        "${BOARD_DIR}/src/kv_boot.c")   # ...and the thread that runs them
+endif()
 
 # --- Eclipse ThreadX GUIX (display GUI framework) ---------------------------
 # Same pattern as ThreadX/FileX: GLOB the core, configure via port/guix/gx_user.h
@@ -580,7 +609,17 @@ add_executable(shell
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_core_model.c"   # ...and the order around it (#131)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_report.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/fs_cmd_core.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_kv.c"     # the one shared `kv` (#214)
     "${BOARD_DIR}/port/qspi/qspi_flash.c"
+    # The key-value store (issue #214): the shared svc/kv/kv.c and its record
+    # format over FlashDB, on this board's FAL device, state and hold
+    # (port/flashdb/fal_qspi.c: the first megabyte of the QSPI NOR, under the
+    # blob store's busy flag), and the boot steps with their thread.
+    "${CMAKE_SOURCE_DIR}/svc/kv/kv.c"
+    "${CMAKE_SOURCE_DIR}/svc/kv/kv_record.c"
+    "${BOARD_DIR}/port/flashdb/fal_qspi.c"
+    ${KV_CFG_SOURCES}
+    ${FDB_CORE}
     # The blob store on the QSPI NOR (issue #194), the same split as
     # wio-lite-ai's: this board's interval, reads, erases and busy flag
     # (src/blob.c) and its slot table (src/blob_slots.c) over the shared header
@@ -636,6 +675,14 @@ target_include_directories(shell PRIVATE
     "${BOARD_DIR}/port/threadx"
     "${BOARD_DIR}/port/qspi"
     "${BOARD_DIR}/src"             # blob.h, the store's interface (cmd_qspi.c)
+    # The key-value store (issue #214).  fdb_cfg.h (svc/kv, shared) and
+    # fal_cfg.h (port/flashdb, this board's) must be found BEFORE FlashDB's own
+    # inc/, which ships fdb_cfg_template.h only -- FlashDB includes <fdb_cfg.h>
+    # by name.
+    "${CMAKE_SOURCE_DIR}/svc/kv"
+    "${BOARD_DIR}/port/flashdb"
+    "${FDB_DIR}/inc"
+    "${FDB_DIR}/port/fal/inc"
     "${BOARD_DIR}/port/sd"
     "${BOARD_DIR}/port/camera"
     "${BOARD_DIR}/port/ltdc"
@@ -876,8 +923,6 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         # which every FlashDB program and erase goes through, and the shared
         # store's entry points that change the partition (svc/kv/kv.c;
         # kv_init() formats a blank one).
-        # (This board has no key-value store yet; the names are here before it
-        # arrives, so the store is never linked without them.)
         fal_partition_write
         fal_partition_erase
         fal_partition_erase_all
@@ -886,6 +931,15 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         kv_set_desc
         kv_del
         kv_format
+        # ...and, on this board, its readers too: FlashDB rewrites a record's
+        # state while it reads (fdb_kvdb.c read_kv()), which is why every one
+        # of them takes the blob busy flag (port/flashdb/fal_qspi.c).
+        kv_get
+        kv_get_str
+        kv_get_u32
+        kv_get_bool
+        kv_foreach
+        kv_get_info
         HAL_RCC_OscConfig
         HAL_RCC_ClockConfig
         HAL_RCCEx_PeriphCLKConfig

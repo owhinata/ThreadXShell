@@ -5,9 +5,10 @@
 #  boards/wio-lite-ai/submodules.cmake for why the list is per board and why the
 #  entries are sentinel FILES rather than directories.
 #
-#  Six mirrors: CoreMark, the Eclipse ThreadX family this firmware links --
+#  Seven mirrors: CoreMark, the Eclipse ThreadX family this firmware links --
 #  ThreadX, FileX (the microSD filesystem), GUIX (the LCD GUI) and
-#  NetX Duo (the Ethernet stack) -- and the ST OV5640 camera driver.  The ST
+#  NetX Duo (the Ethernet stack) -- the ST OV5640 camera driver, and FlashDB
+#  (the key-value store on the QSPI NOR, issue #214).  The ST
 #  Cube set (F7 HAL, CMSIS device, CMSIS core) is not here: board.cmake pins it
 #  per board and fetches it with cmake/fetch_upstream.cmake (issue #136).
 #
@@ -20,4 +21,5 @@ set(_submodule_sentinels
     "lib/filex/common/src/fx_media_open.c"
     "lib/guix/common/src/gx_system_initialize.c"
     "lib/netxduo/common/src/nx_ip_create.c"
-    "lib/ov5640/ov5640.c")
+    "lib/ov5640/ov5640.c"
+    "lib/flashdb/src/fdb_kvdb.c")

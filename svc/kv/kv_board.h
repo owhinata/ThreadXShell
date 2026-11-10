@@ -106,7 +106,8 @@ struct kv_facts {
 		__attribute__((format(printf, 2, 3)));
 };
 
-/** The board's two objects (wio-lite-ai: port/flashdb/fal_nor.c). */
+/** The board's two objects (wio-lite-ai: port/flashdb/fal_nor.c; f746g-disco:
+ *  port/flashdb/fal_qspi.c). */
 extern struct kv_state       kv_board_state;
 extern const struct kv_facts kv_board_facts;
 

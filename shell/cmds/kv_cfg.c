@@ -123,6 +123,10 @@ int kv_cfg_net_mode(char *mode, size_t size)
 			mode[0] = '\0';
 			return 0;
 		}
+		/* Said once, so `dmesg` tells a DHCP the board chose apart from one
+		 * net.mode asked for (a board whose default is NONE never says it). */
+		KV_CFG_FX.report(KV_CFG_REPORT_INF,
+		                 "no usable net.mode -- DHCP, this board's default");
 		memcpy(mode, "dhcp", sizeof "dhcp");
 		return 1;
 	}
@@ -171,8 +175,11 @@ static void kv_cfg_dhcp(void)
 /* A mode that could not be applied: the board's default, if it has one. */
 static void kv_cfg_fall_back(void)
 {
-	if (KV_CFG_FX.net_default == KV_CFG_NET_DHCP)
+	if (KV_CFG_FX.net_default == KV_CFG_NET_DHCP) {
+		KV_CFG_FX.report(KV_CFG_REPORT_INF,
+		                 "falling back to DHCP, this board's default");
 		kv_cfg_dhcp();
+	}
 }
 
 void kv_cfg_net_apply(const char *mode)

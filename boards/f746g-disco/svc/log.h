@@ -127,6 +127,41 @@ void log_iter_start(struct log_iter *it);
 /** Copy the next record into @p out; returns 1 on a record, 0 at end. */
 int  log_iter_next(struct log_iter *it, struct log_record *out);
 
+/*
+ * Line assembler: turn a stream of bytes into whole log records (issue #214;
+ * the same API and code as wio-lite-ai's svc/log.h).
+ *
+ * FlashDB and FAL print a single message as several printf fragments (a prefix,
+ * the body, a colour reset), so feeding each straight to log_write() would
+ * shred every message across records.  Bytes are accumulated here and one INF
+ * record is emitted per newline; ANSI CSI escapes are dropped on the way
+ * through, so `dmesg` does not replay FAL's colours onto a terminal.
+ *
+ * NOT internally synchronised -- one assembler belongs to one producer, and that
+ * producer is responsible for not feeding it from two threads at once.
+ */
+/* Sized to what a record holds: log_write() truncates to LOG_MSG_MAX, so an
+ * assembler that buffered more would lose the tail of the long lines (FlashDB's
+ * sector tables).  Flushing at the same limit splits them across records
+ * instead. */
+#define LOG_LINE_ASM_MAX (LOG_MSG_MAX + 1)
+
+struct log_line {
+	char     buf[LOG_LINE_ASM_MAX];
+	uint16_t used;
+	uint8_t  esc;                   /**< inside an escape sequence */
+};
+
+/** Reset an assembler (also correct on a zero-initialised one). */
+void log_line_init(struct log_line *l);
+
+/** Feed @p len bytes; emits one INF record per newline, tagged @p tag. */
+void log_line_feed(struct log_line *l, const char *tag, const void *data,
+                   size_t len);
+
+/** Emit whatever is buffered, if anything (for a producer that ends mid-line). */
+void log_line_flush(struct log_line *l, const char *tag);
+
 #ifdef __cplusplus
 }
 #endif

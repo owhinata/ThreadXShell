@@ -13,7 +13,8 @@
  * volume; the store is the same shape as wio-lite-ai's (src/blob.h there), so
  * `blob write` and `nn model load <name>` mean the same thing on both.
  *
- *   0x000000 .. 0x100000   reserved (1 MB, no slot; `qspi erase/test` reach it)
+ *   0x000000 .. 0x100000   the key-value store (1 MB, no slot; FlashDB through
+ *                          port/flashdb/fal_qspi.c, issue #214)
  *   0x100000 .. 0x800000   THIS: 13 slots in three sizes (src/blob_slots.c)
  *   0x800000 .. 0x1000000  unallocated (8 MB, no slot)
  *
@@ -36,10 +37,12 @@
  * serialised is the operations that change or depend on the store, against
  * each other, with the busy flag below: two consoles (the VCP and telnet), a
  * background job, `qspi erase` / `qspi test` (cmds/cmd_qspi.c takes the flag
- * too), `blob write` / `blob erase` (src/blob_writer.c's reservation), and
+ * too), `blob write` / `blob erase` (src/blob_writer.c's reservation),
  * `nn model load <name>` (port/nn/nn_svc_f746_model.c, from the name lookup
- * to the end of the payload read).  The flag is taken by the CALLER for the
- * span only it knows.
+ * to the end of the payload read), and every operation of the key-value store
+ * in the first megabyte, reads included (port/flashdb/fal_qspi.c, issue
+ * #214: FlashDB writes while it reads).  The flag is taken by the CALLER for
+ * the span only it knows.
  *
  * [!] AND THE PUBLIC READS REFUSE WHILE IT IS HELD (issue #194), unlike
  * wio-lite-ai's: blob_stat(), blob_read() and blob_verify() answer
@@ -170,12 +173,14 @@ int blob_find(const char *name, unsigned *slot, struct blob_info *out,
 /**
  * Who can hold the busy flag, in the words every refusal names them with:
  * cmds/cmd_blob_board.c (`blob`), cmds/cmd_qspi.c (`qspi erase` / `qspi
- * test`) and port/nn/nn_svc_f746_model.c (`nn model load`).  One string, so a
- * new holder is added to every refusal at once (issue #194).
+ * test`), port/nn/nn_svc_f746_model.c (`nn model load`) and
+ * port/flashdb/fal_qspi.c (any `kv` command, and the store's opening at boot;
+ * issue #214).  One string, so a new holder is added to every refusal at once
+ * (issue #194).
  */
 #define BLOB_BUSY_HOLDERS \
-	"a `blob write` / `blob erase`, a `qspi erase` / `qspi test` or an `nn " \
-	"model load <name>`"
+	"a `blob write` / `blob erase`, a `qspi erase` / `qspi test`, an `nn " \
+	"model load <name>` or a `kv` command"
 
 /* ---- mutating side (all of it under blob_busy_acquire) -------------------- */
 

@@ -275,38 +275,50 @@ static void t_port(void)
 	t_port_is(23, "net.shell.port=65536 is not a port -- telnet stays on 23");
 }
 
-static void t_mode_is(int want_rc, const char *want_mode, const char *line)
+/* What a board whose default is DHCP says when it takes it (issue #214); a
+ * board whose default is NONE says nothing. */
+#define DFLT_SAID   "no usable net.mode -- DHCP, this board's default"
+#define FALLBACK_SAID "falling back to DHCP, this board's default"
+
+/* @p dflt: this call ends at the board's default (and on DHCP says so). */
+static void t_mode_is(int want_rc, const char *want_mode, const char *line,
+                      int dflt)
 {
 	char mode[16];
+	int want_lines = (line ? 1 : 0) + ((dflt && DFLT_DHCP) ? 1 : 0);
 
 	memset(mode, 'x', sizeof mode);
 	CHECK(kv_cfg_net_mode(mode, sizeof mode) == want_rc);
 	if (want_mode)
 		CHECK(strcmp(mode, want_mode) == 0);
+	CHECK(nrep == want_lines);
 	if (line)
-		CHECK(nrep == 1 && said(KV_CFG_REPORT_WRN, line));
-	else
-		CHECK(nrep == 0);
+		CHECK(said(KV_CFG_REPORT_WRN, line));
+	if (dflt && DFLT_DHCP)
+		CHECK(said(KV_CFG_REPORT_INF, DFLT_SAID));
+	/* The default line comes last: after the reason it was taken. */
+	if (dflt && DFLT_DHCP && nrep > 0)
+		CHECK(strcmp(rep[nrep - 1].text, DFLT_SAID) == 0);
 }
 
 static void t_mode(void)
 {
 	reset();
-	t_mode_is(DFLT_DHCP, DFLT_DHCP ? "dhcp" : "", NULL);       /* missing */
+	t_mode_is(DFLT_DHCP, DFLT_DHCP ? "dhcp" : "", NULL, 1);    /* missing */
 	reset(); kv.ready = 0;
-	t_mode_is(DFLT_DHCP, DFLT_DHCP ? "dhcp" : "", NULL);       /* not open */
+	t_mode_is(DFLT_DHCP, DFLT_DHCP ? "dhcp" : "", NULL, 1);    /* not open */
 	reset(); put("net.mode", KV_OK, KV_TYPE_STR, "manual", 0u);
-	t_mode_is(0, "manual", NULL);
+	t_mode_is(0, "manual", NULL, 0);
 	reset(); put("net.mode", KV_OK, KV_TYPE_STR, "static", 0u);
-	t_mode_is(1, "static", NULL);
+	t_mode_is(1, "static", NULL, 0);
 	reset(); put("net.mode", KV_OK, KV_TYPE_STR, "dhcp", 0u);
-	t_mode_is(1, "dhcp", NULL);
+	t_mode_is(1, "dhcp", NULL, 0);
 	reset(); put("net.mode", KV_OK, KV_TYPE_U32, NULL, 1u);
-	t_mode_is(DFLT_DHCP, DFLT_DHCP ? "dhcp" : "", "net.mode: ignored (not a string)");
+	t_mode_is(DFLT_DHCP, DFLT_DHCP ? "dhcp" : "", "net.mode: ignored (not a string)", 1);
 	reset(); put("net.mode", KV_OK, KV_TYPE_STR, "a-much-too-long-mode", 0u);
-	t_mode_is(DFLT_DHCP, DFLT_DHCP ? "dhcp" : "", "net.mode: ignored (too long)");
+	t_mode_is(DFLT_DHCP, DFLT_DHCP ? "dhcp" : "", "net.mode: ignored (too long)", 1);
 	reset(); put("net.mode", KV_ERR_FORMAT, KV_TYPE_STR, NULL, 0u);
-	t_mode_is(DFLT_DHCP, DFLT_DHCP ? "dhcp" : "", "net.mode: ignored (unreadable)");
+	t_mode_is(DFLT_DHCP, DFLT_DHCP ? "dhcp" : "", "net.mode: ignored (unreadable)", 1);
 	/* None of these touched the network. */
 	CHECK(net.dhcp_calls == 0 && net.static_calls == 0);
 }
@@ -335,9 +347,15 @@ static void after_refusal(const char *line)
 {
 	CHECK(said(KV_CFG_REPORT_WRN, line));
 	CHECK(net.dhcp_calls == DFLT_DHCP);
-	CHECK(nrep == 1 + DFLT_DHCP);
-	if (DFLT_DHCP)
+	CHECK(nrep == 1 + 2 * DFLT_DHCP);
+	if (DFLT_DHCP) {
+		/* reason, then the fall-back, then what DHCP did */
+		CHECK(nrep == 3 && strcmp(rep[1].text, FALLBACK_SAID) == 0 &&
+		      rep[1].level == KV_CFG_REPORT_INF);
 		CHECK(said(KV_CFG_REPORT_INF, "DHCP lease acquired"));
+	} else {
+		CHECK(!said(KV_CFG_REPORT_INF, FALLBACK_SAID));
+	}
 }
 
 static void t_static(void)

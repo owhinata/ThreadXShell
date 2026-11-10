@@ -85,7 +85,9 @@ const struct net_core_facts net_core_board_facts = {
 	.ip          = &eth_ip,
 	.dhcp        = &eth_dhcp,
 	.iface       = NXG_IFACE,
-	.boot_source = NET_CORE_SRC_DHCP,     /* DHCP is the boot default */
+	/* No source at boot: the configuration thread sets it from `net.mode`,
+	   DHCP by default (src/kv_boot.c, issue #214). */
+	.boot_source = NET_CORE_SRC_NONE,
 	.why_link    = "the Ethernet link is down (no cable? see `eth`)",
 	.why_down    = "IP stack not up",
 	.worker_stack      = net_worker_stack,
@@ -169,9 +171,10 @@ int nx_net_init(void)
 	nx_udp_enable(&eth_ip);              /* DHCP needs UDP                        */
 	nx_tcp_enable(&eth_ip);              /* P3-ready (no sockets yet)             */
 
-	/* DHCP is the boot default (user choice).  Created here; the shared link
-	   worker starts it when the link comes up (issue #220).  Reuses the shared
-	   non-cacheable pool. */
+	/* The DHCP client.  Created here; the shared link worker starts it when
+	   the link comes up and DHCP is the source (issue #220), which the
+	   configuration thread makes it by default (issue #214).  Reuses the
+	   shared non-cacheable pool. */
 	if (nx_dhcp_create(&eth_dhcp, &eth_ip, "eth") == NX_SUCCESS) {
 		nx_dhcp_packet_pool_set(&eth_dhcp, &eth_pool);
 		dhcp_created = true;
@@ -196,6 +199,19 @@ int nx_net_init(void)
 bool nx_net_is_up(void)
 {
 	return nx_up;
+}
+
+/*
+ * [!] Before the scheduler only (nx_glue.h).  It writes the source the shared
+ * operations keep under the address lock without taking the lock: nothing else
+ * runs yet, and the link worker reads the source under the lock on its first
+ * pass, after the scheduler starts.  net_core_init() already decided the
+ * client exists (dhcp_created) and made the operations ready.
+ */
+void nx_net_boot_dhcp(void)
+{
+	if (nx_up && net_core_board_state.ready && net_core_board_state.dhcp_created)
+		net_core_board_state.source = NET_CORE_SRC_DHCP;
 }
 
 void *nx_net_ip(void)

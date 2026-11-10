@@ -9,7 +9,9 @@
  *
  * Owns the single NetX IP instance over the STM32 ETH MAC: the shared
  * non-cacheable packet pool, the IP thread, ARP/ICMP/UDP/TCP, and the DHCP
- * client (boot default).  Exposes a thin facade so the board's commands never
+ * client.  The boot-time address source is not decided here: the key-value
+ * store's configuration thread decides it (`net.mode`, DHCP by default; src/
+ * kv_boot.c, issue #214).  Exposes a thin facade so the board's commands never
  * include nx_api.h directly.  The address, DHCP and ping operations are the
  * shared ones (shell/cmds/net_core.h, issue #220) over the objects created here.
  */
@@ -39,6 +41,15 @@ int  nx_net_init(void);
 
 /** Nonzero once nx_net_init() created the IP instance. */
 bool nx_net_is_up(void);
+
+/**
+ * Make DHCP the boot-time address source, when the configuration thread that
+ * would otherwise decide it could not be created (src/main.c, issue #214).
+ * tx_application_define() ONLY, after nx_net_init() succeeded: the shared
+ * net_core_dhcp_source() waits on the address lock, which ThreadX refuses
+ * before the scheduler runs.  Does nothing without a DHCP client.
+ */
+void nx_net_boot_dhcp(void);
 
 /**
  * Counters for `net info` (issue #202): the Ethernet driver's, NetX's TCP-wide

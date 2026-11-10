@@ -47,6 +47,7 @@
 #include "eth_link.h"
 #include "nx_glue.h"
 #include "net_tty.h"
+#include "kv_boot.h"
 #include "guix_camera_ui.h"
 #include "cam_sink.h"
 #include "nn_camera.h"
@@ -66,10 +67,11 @@ CLI_BACKEND_UART_DEFINE(vcp_tr, &huart1);
 CLI_INSTANCE_DEFINE(vcp_sh, &vcp_tr, "sh> ");
 
 /* The telnet console (owhinata/stm32f746g-disco#49 P4; one implementation
- * since issue #221, shell/cmds/net_tty.c): one session at a time on :23, bound
- * to this instance.  The instance thread runs at boot (idle until a client
- * connects); the listener is created with the IP stack below and listens from
- * boot, whether or not there is an address or a link. */
+ * since issue #221, shell/cmds/net_tty.c): one session at a time, bound to this
+ * instance, on the port the configuration thread hands over (`net.shell.port`,
+ * or 23; issue #214).  The instance thread runs at boot (idle until a client
+ * connects); the listener is created with the IP stack below and listens once
+ * it has its port, whether or not there is an address or a link. */
 NET_TTY_TRANSPORT_DEFINE(net_tr);
 CLI_INSTANCE_DEFINE(net_sh, &net_tr, "net> ");
 
@@ -152,6 +154,11 @@ static void iwdg_entry(ULONG arg)
 /* Called by ThreadX during tx_kernel_enter() to create the application. */
 void tx_application_define(void *first_unused_memory)
 {
+	/* What the network bring-up below produced: the configuration thread is
+	 * told, so it hands the telnet port only to a listener that exists and
+	 * applies net.mode only on a NetX that is up (issue #214). */
+	int have_netx = 0, have_tty = 0;
+
 	(void)first_unused_memory;
 
 	/* Serialise the newlib heap before anything can allocate.  Here is the last
@@ -281,18 +288,36 @@ void tx_application_define(void *first_unused_memory)
 			 * creates ThreadX objects here -- DHCP negotiates later on the IP
 			 * thread.  On failure the link still works; `net` IP/ping report it. */
 			printf("net: NetX Duo init failed (IP disabled)\r\n");
-		} else if (net_tty_init() != 0) {
-			/* The telnet console's listener (issue #221): object creation
-			 * only.  The net_sh instance thread already started above; on
-			 * failure telnet is disabled, everything else keeps running, and
-			 * `net info` says so. */
-			printf("net: telnet console init failed (telnet disabled)\r\n");
 		} else {
-			/* This board's port is fixed: hand it over once, now. */
-			net_tty_port_set((uint16_t)NET_TTY_PORT_DEFAULT);
+			have_netx = 1;
+			if (net_tty_init() != 0)
+				/* The telnet console's listener (issue #221): object
+				 * creation only.  The net_sh instance thread already started
+				 * above; on failure telnet is disabled, everything else keeps
+				 * running, and `net info` says so. */
+				printf("net: telnet console init failed (telnet disabled)\r\n");
+			else
+				have_tty = 1;
 		}
 	} else {
 		printf("eth: skipped (SDRAM down)\r\n");
+	}
+
+	/* The key-value store's configuration thread (issue #214): it opens the
+	 * store on the QSPI NOR (after qspi_flash_init() above) once the scheduler
+	 * runs, then hands the telnet console its port and sets the address source
+	 * from `net.mode` -- 23 and DHCP whenever the store says nothing usable.
+	 * [!] If it cannot be created, this is where both are handed over instead,
+	 * once each: the port only to a listener that exists, DHCP only on a NetX
+	 * that is up.  Created whatever the network did: the `kv` command needs the
+	 * store open either way. */
+	if (kv_boot_init(have_netx, have_tty) != 0) {
+		printf("kv: configuration thread create failed (telnet on %u, DHCP)\r\n",
+		       (unsigned)NET_TTY_PORT_DEFAULT);
+		if (have_tty)
+			net_tty_port_set((uint16_t)NET_TTY_PORT_DEFAULT);
+		if (have_netx)
+			nx_net_boot_dhcp();
 	}
 
 	/* GUIX camera UI (owhinata/stm32f746g-disco#60/#61).  Register the widget-tree

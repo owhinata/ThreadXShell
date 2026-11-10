@@ -64,7 +64,7 @@ struct kv_cfg_facts {
 	uint8_t net_default;
 };
 
-/** The board's table (wio-lite-ai: src/kv_boot.c). */
+/** The board's table (wio-lite-ai and f746g-disco: src/kv_boot.c). */
 extern const struct kv_cfg_facts kv_cfg_board_facts;
 
 /**
@@ -98,7 +98,8 @@ void kv_cfg_tty_port(void);
  * something to apply (then pass @p mode to kv_cfg_net_apply()), 0 when there is
  * not: `manual`, or nothing usable with the board's default NONE.  An absent or
  * unreadable `net.mode`, or a store that is not open, becomes "dhcp" on a board
- * whose default is DHCP.
+ * whose default is DHCP, and says so ("no usable net.mode -- DHCP, this board's
+ * default").
  */
 int kv_cfg_net_mode(char *mode, size_t size);
 
@@ -106,7 +107,8 @@ int kv_cfg_net_mode(char *mode, size_t size);
  * Apply a `net.mode` read by kv_cfg_net_mode(): dhcp (make DHCP the source and
  * wait up to KV_CFG_DHCP_WAIT_MS for an address) or static (net.ip, net.mask and
  * net.gw, all three).  Anything that cannot be applied is reported; on a board
- * whose default is DHCP it then falls back to DHCP, once.  Call it only when the
+ * whose default is DHCP it then says so and falls back to DHCP, once.  Call it
+ * only when the
  * board has NetX, and only once.
  */
 void kv_cfg_net_apply(const char *mode);

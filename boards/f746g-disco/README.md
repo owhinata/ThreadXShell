@@ -1483,7 +1483,7 @@ the bytes it read; both are gone.)
   container on the console thread raised the `cli` stack peak from 2,096 B to
   2,652 B of 4,096 (`thread`, the wio container refused by target word); the
   inference worker's peak (1,516 B) did not move.
-- The container goes through `svc/plugin/plugin_load.c` -- the validator the
+- The container goes through `svc/plugin/plugin_load_body.h` -- the validator the
   host asset build runs -- with this board's policy (target word `0x1101`, link
   address `0x20048000`, capacity 32 KB, the stack table in `board.cmake`).  A
   refusal names its reason (`slot <n> is a container this firmware refuses:

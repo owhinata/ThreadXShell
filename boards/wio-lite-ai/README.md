@@ -1366,7 +1366,7 @@ and its plugin refused" and "the reload failed and the previous model was
 restored" (the second cannot happen here since issue #191) differ only in which
 one keeps its decoder, and telling them apart
 needs a container the DEVICE refuses -- which the build cannot produce, because
-the host packer runs the device's own validator (`svc/plugin/plugin_load.c`) over what
+the host packer runs the device's own validator (`svc/plugin/plugin_load_body.h`) over what
 it packs and publishes nothing that would be refused.  The host tests reach the
 no-decoder STATE (that is what `test_nn_active.c` pins) but not this branch
 that arrives at it; since #122 the ending table's host test reaches the
@@ -1599,9 +1599,9 @@ nothing checks that the file sent is the file built:
 
 | what you could send by mistake | what catches it | when |
 |---|---|---|
-| a container built for another board | `plugin_load.c` (target word) | `nn model load` |
-| a recognised container with malformed internals or a damaged plugin section | `plugin_load.c` | `nn model load` |
-| a container whose magic is damaged | probes as unknown and falls through as a bare model, so the TFLM backend -- **not** `plugin_load.c` | `nn model load` |
+| a container built for another board | `plugin_load_body.h` (target word) | `nn model load` |
+| a recognised container with malformed internals or a damaged plugin section | `plugin_load_body.h` | `nn model load` |
+| a container whose magic is damaged | probes as unknown and falls through as a bare model, so the TFLM backend -- **not** `plugin_load_body.h` | `nn model load` |
 | a malformed `.tflite` (bare, or as a container's model section) | the backend's parse only; the bounded verifier (`nn_tflm_verify_model_buffer()`, the host gate's) runs on the board only with `NN_TFLM_VERIFY=ON` (off by default) | `nn model load` |
 | a stale artifact, or a model that never passed `verify_tflite` | **nothing** | -- |
 | the wrong slot | **nothing** once `blob erase` has run -- the slot's previous contents are gone.  `blob write` alone refuses a slot holding another name's blob | `blob erase` / `blob write` |
@@ -1837,7 +1837,7 @@ manifest declares, per slot, the plugin's own deepest frames A0, its own frames
 at a crossing A1 and a crossing bit, plus S, the bound of every plugin function the base may be handed (issue #124;
 `pl_sbuf_write` alone on the shipped plugins), and the
 loader requires `max(A0, A1 + max(c, S))` with this firmware's c
-(`svc/plugin/plugin_load.c`).  A stack-accounting version in the manifest says which
+(`svc/plugin/plugin_load_body.h`).  A stack-accounting version in the manifest says which
 analysis produced the numbers; a mismatch is its own refusal.  The c is the one
 the build checked, read back out of `shell.elf` (`cmake/check_policy_probe.py`).
 

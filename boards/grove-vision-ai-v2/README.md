@@ -2928,8 +2928,8 @@ what, rather than "the gates ran at build time":
 | what you could send by mistake | what catches it | when |
 |---|---|---|
 | malformed `.tflite` | the backend's bounded verifier | `nn model load`, after erase + transfer |
-| a **recognised** container with malformed internals, incompatible plugin target, or a damaged **plugin** section | `plugin_load.c` | `nn model load` |
-| a container whose **magic** is damaged | probes as `UNKNOWN` and falls through as a bare model, so the backend -- **not** `plugin_load.c` | `nn model load` |
+| a **recognised** container with malformed internals, incompatible plugin target, or a damaged **plugin** section | `plugin_load_body.h` | `nn model load` |
+| a container whose **magic** is damaged | probes as `UNKNOWN` and falls through as a bare model, so the backend -- **not** `plugin_load_body.h` | `nn model load` |
 | **model-section** damage that still satisfies the backend | **nothing** -- only the plugin section has a digest | -- |
 | a **stale** artifact from another build | **nothing refuses it** | -- |
 | content that was never gated: a model that never passed `verify_vela_model`, or a container pairing the wrong model with the wrong plugin | **nothing** | -- |
@@ -6710,7 +6710,7 @@ granted only when no reader lease is live, and `npu_hw_init()` holds
 while a model is open, so the window is already pinned; `plugin_run_start()`
 asserts that with `nor_lease_held()` rather than building a second lock.
 
-**One place turns an offset into an address.**  `svc/plugin/plugin_load.c` deliberately
+**One place turns an offset into an address.**  `svc/plugin/plugin_load_body.h` deliberately
 returns integers and no function pointers, so "the validation step executes
 nothing" is a property of its types.  `plugin_run_slot()` is where that stops
 being true, and the loader's own entry call goes through the same helper -- the
@@ -7134,7 +7134,7 @@ per slot the plugin's own deepest frames **A0**, its own frames on a path that
 reaches a veneer **A1** plus a crossing bit, and for the whole plugin the bound
 **S** of every plugin function the base may be handed (since issue #124; on
 the shipped plugins that is the printer sink `pl_sbuf_write` alone, which sits
-on the far side of the printer veneer).  The loader (`svc/plugin/plugin_load.c`) requires
+on the far side of the printer veneer).  The loader (`svc/plugin/plugin_load_body.h`) requires
 
     max(A0, A1 + max(c, S))    for a slot that crosses,   A0 otherwise
 

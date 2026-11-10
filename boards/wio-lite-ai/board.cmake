@@ -786,6 +786,11 @@ if(BOARD_HAS_KV AND BOARD_HAS_NETX)
 else()
     set(BOARD_HAS_KV_NETX OFF)
 endif()
+# ...and the same condition registers it (in its place in the list below).
+set(KV_CFG_SOURCES "")
+if(BOARD_HAS_KV_NETX)
+    set(KV_CFG_SOURCES "${CMAKE_SOURCE_DIR}/shell/cmds/kv_cfg.c")
+endif()
 if(BSP_ENABLE_KV)
     set(FDB_DIR "${CMAKE_SOURCE_DIR}/lib/flashdb")
     list(APPEND SHELL_SOURCES
@@ -797,7 +802,7 @@ if(BSP_ENABLE_KV)
         "${CMAKE_SOURCE_DIR}/svc/kv/kv.c"
         "${CMAKE_SOURCE_DIR}/svc/kv/kv_record.c"
         "${BOARD_DIR}/src/kv_boot.c"
-        "${CMAKE_SOURCE_DIR}/shell/cmds/kv_cfg.c"   # the shared boot steps (#214)
+        ${KV_CFG_SOURCES}                           # the shared boot steps (#214)
         "${BOARD_DIR}/src/blob.c"
         "${BOARD_DIR}/src/blob_writer.c"   # the shared `blob`'s store (#194)
         "${BOARD_DIR}/src/blob_slots.c"

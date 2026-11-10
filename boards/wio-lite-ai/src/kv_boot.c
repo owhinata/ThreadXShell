@@ -116,6 +116,8 @@ static void kv_boot_report(unsigned level, const char *fmt, ...)
 {
 	va_list ap;
 
+	if (level > LOG_COMPILE_LEVEL)   /* the LOG_*() macros' build-time floor */
+		return;
 	va_start(ap, fmt);
 	log_vwrite(level, LOG_TAG, fmt, ap);
 	va_end(ap);

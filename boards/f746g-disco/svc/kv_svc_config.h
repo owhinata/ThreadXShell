@@ -21,9 +21,11 @@
  * part's (N25Q128A datasheet: 64 KB erase 0.7 s typical / 3 s max, 4 KB erase
  * 0.25 s / 0.8 s): our wipe of the megabyte is 16 64 KB erases, then FlashDB
  * erases each of the 256 4 KB sectors again while laying down its headers --
- * about 75 s typical, about 4 minutes at the datasheet's maxima.  Every other
+ * about 75 s at the datasheet's typical figures, about 4 minutes at its maxima.
+ * Measured on the board: about 55 s over old data, 33 s on a nearly blank
+ * partition, which is what the message quotes.  Every other
  * `kv` command and the blob store's commands answer busy until it is done.
  */
-#define KV_SVC_FORMAT_SAYS  "erasing 1 MB and rebuilding -- about 75 s (up to 4 min)..."
+#define KV_SVC_FORMAT_SAYS  "erasing 1 MB and rebuilding -- about 1 min (up to 4 min)..."
 
 #endif /* KV_SVC_CONFIG_H */

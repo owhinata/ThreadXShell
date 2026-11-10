@@ -25,7 +25,7 @@
  *   0x000000  kv        1 MB   FlashDB KVDB, 4 KB sectors x 256 (THIS)
  *   0x100000  blob      7 MB   the asset store's 13 slots (src/blob_slots.c),
  *                              owned by src/blob.c
- *   0x800000  (unused)  8 MB   unallocated
+ *   0x800000  (unused)  8 MB   unallocated; `qspi test` uses its first 4 KB
  *
  * [!] THE FAL DEVICE IS THE FIRST MEGABYTE, NOT THE PART (KV_FAL_DEV_LEN).  The
  * blob store has no partition entry here, as on wio-lite-ai, and on this board

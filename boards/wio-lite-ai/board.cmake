@@ -778,6 +778,14 @@ if(BSP_ENABLE_KV)
 else()
     set(BOARD_HAS_KV OFF)
 endif()
+# BOARD_HAS_KV_NETX is the property shell/cmds/kv_cfg.c (the shared boot steps:
+# the telnet port and net.mode from the store) is optional on (issue #214): it
+# needs the store AND NetX, so it is ON exactly when both are.
+if(BOARD_HAS_KV AND BOARD_HAS_NETX)
+    set(BOARD_HAS_KV_NETX ON)
+else()
+    set(BOARD_HAS_KV_NETX OFF)
+endif()
 if(BSP_ENABLE_KV)
     set(FDB_DIR "${CMAKE_SOURCE_DIR}/lib/flashdb")
     list(APPEND SHELL_SOURCES
@@ -789,6 +797,7 @@ if(BSP_ENABLE_KV)
         "${CMAKE_SOURCE_DIR}/svc/kv/kv.c"
         "${CMAKE_SOURCE_DIR}/svc/kv/kv_record.c"
         "${BOARD_DIR}/src/kv_boot.c"
+        "${CMAKE_SOURCE_DIR}/shell/cmds/kv_cfg.c"   # the shared boot steps (#214)
         "${BOARD_DIR}/src/blob.c"
         "${BOARD_DIR}/src/blob_writer.c"   # the shared `blob`'s store (#194)
         "${BOARD_DIR}/src/blob_slots.c"

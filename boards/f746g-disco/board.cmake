@@ -317,6 +317,8 @@ set(BOARD_HAS_NETX ON)
 # no key-value store yet, so the shared storage audit wants that file compiled
 # by nothing.
 set(BOARD_HAS_KV OFF)
+# shell/cmds/kv_cfg.c needs a store AND NetX: no store yet, so compiled by nothing.
+set(BOARD_HAS_KV_NETX OFF)
 
 # --- Eclipse ThreadX GUIX (display GUI framework) ---------------------------
 # Same pattern as ThreadX/FileX: GLOB the core, configure via port/guix/gx_user.h

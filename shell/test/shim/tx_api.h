@@ -50,6 +50,8 @@ typedef struct { void *opaque; } TX_MUTEX;
 #define TX_AUTO_START   ((UINT)1)
 
 ULONG tx_time_get(void);
+/* The KV boot steps' DHCP wait (shell/cmds/kv_cfg.c, issue #214). */
+UINT tx_thread_sleep(ULONG timer_ticks);
 
 UINT tx_mutex_create(TX_MUTEX *mutex_ptr, CHAR *name_ptr, UINT inherit);
 UINT tx_mutex_get(TX_MUTEX *mutex_ptr, ULONG wait_option);

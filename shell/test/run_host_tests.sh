@@ -421,6 +421,23 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 \
     $LDFLAGS -o "$out/test_kv_cmd"
 "$out/test_kv_cmd"
 
+# issue #214 -- the shared boot-time configuration steps (shell/cmds/kv_cfg.c:
+# open the store, the telnet port, net.mode) over a stand-in store, address
+# operations and telnet console defined by the test (cli_parse_ipv4() is the real
+# one), once with the board default NONE (wio-lite-ai's) and once with DHCP.
+# The port handed over exactly once on every path, what each missing, mistyped
+# or out-of-range key leads to, the 30 s DHCP wait, the static refusals and the
+# fall-back to the default, and every reported line word for word.
+for kv_dflt in none dhcp; do
+    kv_def=""
+    [ "$kv_dflt" = dhcp ] && kv_def="-DKV_CFG_TEST_DEFAULT_DHCP"
+    gcc $CFLAGS $kv_def -I "$here/shim" -I "$here/nx_shim" -I "$here/../cmds" \
+        -I "$svc/net" -I "$inc" -I "$backend" -I "$core" -I "$svc/kv" \
+        "$here/test_kv_cfg.c" "$here/../cmds/kv_cfg.c" "$core/cli_parse.c" \
+        $LDFLAGS -o "$out/test_kv_cfg_$kv_dflt"
+    "$out/test_kv_cfg_$kv_dflt"
+done
+
 # issue #101 (#78 Step 1a) -- container and manifest validation (svc/plugin/plugin_load.c):
 # everything that must hold BEFORE a plugin's first instruction is fetched.
 #

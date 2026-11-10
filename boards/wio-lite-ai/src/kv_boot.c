@@ -14,6 +14,11 @@
  * it must be pure object creation; the work that has to wait belongs on a thread,
  * and this is that thread.
  *
+ * The steps that are not this board's -- opening the store, the telnet port,
+ * net.mode, and the setting readers -- are the shared shell/cmds/kv_cfg.c (issue
+ * #214); this thread owns the order and calls them, and keeps what only this
+ * board does: the radio, and "net.mode waits for the WiFi session".
+ *
  * WHAT IT DOES, and what each step is allowed to assume:
  *
  *   kv_init()                  open the store (may format a blank partition)
@@ -60,12 +65,11 @@
 
 #include "kv.h"        /* the shared store (svc/kv, issue #214) */
 #include "kv_boot.h"
+#include "kv_cfg.h"    /* the shared boot steps (shell/cmds, issue #214) */
 
 #include "cli.h"
 #include "cli_backend_log.h"
-#include "net_core.h"   /* the shared address / DHCP operations (issue #220) */
 #include "link_bridge.h"
-#include "net_tty.h"      /* the telnet console's port (issue #221) */
 #include "rtl8720.h"
 #include "wifi_auto.h"
 #include "wifi_connect.h"
@@ -73,6 +77,7 @@
 
 #include "tx_api.h"
 
+#include <stdarg.h>
 #include <string.h>
 #include "mem_sections.h"  /* DTCM_BSS: CPU-only data out of AXI-SRAM (issue #46) */
 
@@ -84,10 +89,6 @@
  * that run the same sequence get 4 KB; there is no reason for this one to have
  * less, and a stack overflow here would be a boot-time fault with no console up. */
 #define KV_BOOT_STACK_SIZE  4096u
-
-/* How long to wait for a DHCP lease before giving up and moving on. */
-#define KV_BOOT_DHCP_WAIT_MS  30000u
-#define KV_BOOT_POLL_MS       250u
 
 static TX_THREAD kv_boot_thread;
 static UCHAR     kv_boot_stack[KV_BOOT_STACK_SIZE] DTCM_BSS __attribute__((aligned(8)));
@@ -102,53 +103,29 @@ static struct cli_instance kv_boot_sh = {
 };
 
 /* ------------------------------------------------------------------ *
- *  Setting readers
- * ------------------------------------------------------------------ *
- * Each returns the configured value or the supplied default.  A key that is absent
- * and a key that is present but of the wrong type are treated the same way -- as
- * "not configured" -- but only the second is logged, because a missing key is the
- * normal case and a mistyped one is a mistake somebody wants to hear about.
- */
-static int cfg_bool(const char *key, int dflt)
-{
-	int v;
-	int rc = kv_get_bool(key, &v);
+ *  The shared steps' facts (shell/cmds/kv_cfg.h)
+ * ------------------------------------------------------------------ */
 
-	if (rc == KV_OK)
-		return v;
-	if (rc != KV_ERR_NOTFOUND)
-		LOG_WRN("%s: ignored (%s)", key,
-		        (rc == KV_ERR_TYPE) ? "not a bool" : "unreadable");
-	return dflt;
+/* Their lines go to the log under this file's tag, at the levels they were
+ * written at here before they were shared. */
+_Static_assert(KV_CFG_REPORT_ERR == LOG_LEVEL_ERR && KV_CFG_REPORT_WRN == LOG_LEVEL_WRN &&
+               KV_CFG_REPORT_INF == LOG_LEVEL_INF,
+               "kv_cfg report weights must be this board's log levels");
+
+static void kv_boot_report(unsigned level, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	log_vwrite(level, LOG_TAG, fmt, ap);
+	va_end(ap);
 }
 
-static uint32_t cfg_u32(const char *key, uint32_t dflt)
-{
-	uint32_t v;
-	int rc = kv_get_u32(key, &v);
-
-	if (rc == KV_OK)
-		return v;
-	if (rc != KV_ERR_NOTFOUND)
-		LOG_WRN("%s: ignored (%s)", key,
-		        (rc == KV_ERR_TYPE) ? "not a u32" : "unreadable");
-	return dflt;
-}
-
-/* Returns 1 when @p buf holds a configured string. */
-static int cfg_str(const char *key, char *buf, uint32_t buflen)
-{
-	int rc = kv_get_str(key, buf, buflen);
-
-	if (rc == KV_OK)
-		return 1;
-	if (rc != KV_ERR_NOTFOUND)
-		LOG_WRN("%s: ignored (%s)", key,
-		        (rc == KV_ERR_TYPE) ? "not a string" :
-		        (rc == KV_ERR_TRUNC) ? "too long" : "unreadable");
-	buf[0] = '\0';
-	return 0;
-}
+const struct kv_cfg_facts kv_cfg_board_facts = {
+	.report      = kv_boot_report,
+	/* No net.mode: leave the address to the operator. */
+	.net_default = KV_CFG_NET_NONE,
+};
 
 /* ------------------------------------------------------------------ *
  *  Steps
@@ -161,7 +138,7 @@ static void cfg_wifi(void)
 	uint32_t security;
 	int have_psk, security_explicit;
 
-	if (!cfg_bool("wifi.enable", 0)) {
+	if (!kv_cfg_bool("wifi.enable", 0)) {
 		/* Nothing to do, and deliberately so: rtl8720_init() has already driven
 		 * CHIP_EN low from tx_application_define(), so the module is held OFF
 		 * rather than left floating.  That call is unconditional -- it is what
@@ -171,7 +148,7 @@ static void cfg_wifi(void)
 		return;
 	}
 
-	if (!cfg_bool("wifi.autoconnect", 0)) {
+	if (!kv_cfg_bool("wifi.autoconnect", 0)) {
 		/*
 		 * Power-only.  The boot wait is ours to do here because the paths that
 		 * would otherwise do it -- rtl_link_begin() and `wifi ver` -- only wait
@@ -193,11 +170,11 @@ static void cfg_wifi(void)
 	 * therefore skip the boot wait entirely and put the first eRPC frame on the
 	 * wire while the module was still starting.
 	 */
-	if (!cfg_str("wifi.ssid", ssid, sizeof ssid)) {
+	if (!kv_cfg_str("wifi.ssid", ssid, sizeof ssid)) {
 		LOG_WRN("wifi.autoconnect is set but wifi.ssid is not -- not associating");
 		return;
 	}
-	have_psk = cfg_str("wifi.psk", psk, sizeof psk);
+	have_psk = kv_cfg_str("wifi.psk", psk, sizeof psk);
 	security_explicit = (kv_get_u32("wifi.security", &security) == KV_OK);
 	if (!security_explicit)
 		security = have_psk ? WIFI_RPC_SEC_WPA2_AES_PSK : WIFI_RPC_SEC_OPEN;
@@ -209,7 +186,7 @@ static void cfg_wifi(void)
 	 * so enabling it afterwards would leave it armed with nothing, and the first
 	 * AP outage would find no credentials to retry with.
 	 */
-	if (cfg_bool("wifi.autoreconnect", 0))
+	if (kv_cfg_bool("wifi.autoreconnect", 0))
 		wifi_auto_set_enabled(true);
 
 	/*
@@ -236,35 +213,13 @@ static void cfg_wifi(void)
 	memset(psk, 0, sizeof psk);
 }
 
-/* Wait for the host stack to hold an address.  Returns 1 when it does. */
-static int cfg_wait_ip(unsigned budget_ms)
-{
-	struct net_svc_addr a;
-	struct net_svc_result r;
-	unsigned waited = 0u;
-
-	for (;;) {
-		net_core_addr_get(&a, &r);
-		if (r.status == NET_SVC_OK && a.ip_valid)
-			return 1;
-		if (waited >= budget_ms)
-			return 0;
-		tx_thread_sleep(KV_BOOT_POLL_MS);
-		waited += KV_BOOT_POLL_MS;
-	}
-}
-
+/* net.mode, through the shared steps.  Between reading it and applying it is the
+ * one check that is this board's (decision D4 of issue #214). */
 static void cfg_net(void)
 {
 	char mode[16];
-	char ip[16], mask[16], gw[16];
-	struct net_svc_result r;
-	uint32_t a, m, g;
 
-	if (!cfg_str("net.mode", mode, sizeof mode))
-		return;
-
-	if (strcmp(mode, "manual") == 0)
+	if (!kv_cfg_net_mode(mode, sizeof mode))
 		return;
 
 	if (!link_bridge_is_up()) {
@@ -274,60 +229,7 @@ static void cfg_net(void)
 		return;
 	}
 
-	if (strcmp(mode, "dhcp") == 0) {
-		/* Make DHCP the source and let the shared link worker start the
-		 * client once the link is up (issue #220).  Unlike `net dhcp` it is not
-		 * refused while the link record is still catching up with the
-		 * association, so the order does not rest on thread priorities. */
-		net_core_dhcp_source(&r);
-		if (r.status != NET_SVC_OK) {
-			LOG_WRN("DHCP cannot be the source (no DHCP client)");
-			return;
-		}
-		if (!cfg_wait_ip(KV_BOOT_DHCP_WAIT_MS)) {
-			LOG_WRN("no DHCP lease within %u s", KV_BOOT_DHCP_WAIT_MS / 1000u);
-			return;
-		}
-		LOG_INF("DHCP lease acquired");
-	} else if (strcmp(mode, "static") == 0) {
-		/* All three or none: a static address with a guessed netmask is a
-		 * quietly broken network, so an incomplete configuration is refused
-		 * rather than completed with defaults. */
-		if (!cfg_str("net.ip", ip, sizeof ip) ||
-		    !cfg_str("net.mask", mask, sizeof mask) ||
-		    !cfg_str("net.gw", gw, sizeof gw)) {
-			LOG_WRN("net.mode=static needs net.ip, net.mask and net.gw");
-			return;
-		}
-		if (cli_parse_ipv4(ip, &a) != 0 || cli_parse_ipv4(mask, &m) != 0 ||
-		    cli_parse_ipv4(gw, &g) != 0) {
-			LOG_WRN("net.ip/mask/gw: not all are dotted quads");
-			return;
-		}
-		net_core_set_static(a, m, g, &r);
-		if (r.status != NET_SVC_OK) {
-			LOG_WRN("the host stack refused the static address");
-			return;
-		}
-		LOG_INF("static address applied");
-	} else {
-		LOG_WRN("net.mode=%s is not one of dhcp/static/manual", mode);
-		return;
-	}
-}
-
-/* The telnet console's port, from the open store: the configured one, or the default
- * when it is missing, unreadable or not a port.  Called once, first. */
-static void cfg_tty_port(void)
-{
-	uint32_t port = cfg_u32("net.shell.port", NET_TTY_PORT_DEFAULT);
-
-	if (port == 0u || port > 0xFFFFu) {
-		LOG_WRN("net.shell.port=%lu is not a port -- telnet stays on %u",
-		        (unsigned long)port, (unsigned)NET_TTY_PORT_DEFAULT);
-		port = NET_TTY_PORT_DEFAULT;
-	}
-	net_tty_port_set((uint16_t)port);
+	kv_cfg_net_apply(mode);
 }
 
 /* ------------------------------------------------------------------ *
@@ -337,14 +239,13 @@ static void kv_boot_entry(ULONG arg)
 {
 	(void)arg;
 
-	if (kv_init() != KV_OK) {
-		LOG_WRN("configuration store unavailable: %s", kv_state_str());
-		net_tty_port_set((uint16_t)NET_TTY_PORT_DEFAULT);
+	if (kv_cfg_open() != 0) {
+		kv_cfg_tty_port();   /* the default, once */
 		return;   /* nothing to apply; every command still works by hand */
 	}
 
 	/* Before the association, so telnet listens as soon as an address comes. */
-	cfg_tty_port();
+	kv_cfg_tty_port();
 	cfg_wifi();
 	cfg_net();
 

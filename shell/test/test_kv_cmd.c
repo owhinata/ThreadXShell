@@ -302,6 +302,20 @@ static void t_desc(void)
 	expect("desc joins its words with spaces",
 	       strcmp(st.last_desc, "dhcp / static / manual") == 0 &&
 	       has("net.mode: dhcp / static / manual\r\n"));
+	/* The first word is an ordinary argument and the rest of the line comes
+	 * verbatim (CLI_ARG_RAW on a leaf): the gap after the first word becomes one
+	 * space, later runs of spaces are kept, and quotes are processed only on
+	 * the first word. */
+	run("kv desc net.mode dhcp   /  static\r");
+	expect("desc: one space after the first word, later gaps as typed",
+	       strcmp(st.last_desc, "dhcp /  static") == 0 &&
+	       has("net.mode: dhcp /  static\r\n"));
+	run("kv desc net.mode \"quoted text\"\r");
+	expect("desc: quotes around the first word are taken off",
+	       strcmp(st.last_desc, "quoted text") == 0);
+	run("kv desc net.mode x \"a  b\"\r");
+	expect("desc: quotes after the first word are stored as typed",
+	       strcmp(st.last_desc, "x \"a  b\"") == 0);
 	st.calls = 0;
 	strcpy(line, "kv desc net.mode ");
 	memset(line + 17, 'd', 60);

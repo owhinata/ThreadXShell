@@ -324,14 +324,17 @@ static int cmd_kv_set(struct cli_instance *sh, int argc, char **argv)
 }
 
 /*
- * A description is a sentence, so accept it as several tokens and join them with
- * single spaces rather than demanding quotes: `kv desc net.mode dhcp / static /
- * manual` should work as typed.  (CLI_ARG_RAW would be the direct way to get the
- * untokenized tail, but it only captures one on a LEAF command -- see cli.h -- and
- * `desc` is a subcommand of `kv`, where it merely relaxes the argument count.  So
- * the tokens are rejoined here instead; runs of whitespace collapse to one space,
- * which costs a description nothing.)  A quoted argument still arrives as a single
- * token and passes through unchanged.
+ * A description is a sentence, so it is taken as typed rather than demanding
+ * quotes: `kv desc net.mode dhcp / static / manual` works.  What arrives here is
+ * TWO arguments after the key, not one per word: `desc` has no subcommands of its
+ * own, so the parser treats it as a leaf and CLI_ARG_RAW (see cli.h) applies --
+ * it tokenizes the mandatory arguments (the key and the FIRST word of the text,
+ * quotes processed as for any argument) and hands the rest of the line over as
+ * one more argument, verbatim (leading whitespace trimmed, runs of spaces inside
+ * kept, quotes stored as typed).  The loop below joins them with one space.  So
+ * the gap after the first word becomes a single space and every later gap is
+ * kept as typed; `kv desc k "a b"` stores `a b`, `kv desc k x "a b"` stores
+ * `x "a b"`.
  */
 static int cmd_kv_desc(struct cli_instance *sh, int argc, char **argv)
 {

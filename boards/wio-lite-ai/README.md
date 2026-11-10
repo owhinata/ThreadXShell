@@ -839,6 +839,66 @@ Not yet measured on hardware: the erase time of a 256 KB / 512 KB / 1 MB slot
 announcement says about 1 s / 2 s / 3 s with 8 s / 16 s / 32 s at most) and how
 long `kv get` waits on another console during an erase.
 
+## The configuration store (`kv`, issue #214)
+
+Settings live in a FlashDB key-value database in the NOR's first megabyte
+(the `kv` partition, `0x000000 .. 0x100000`; owhinata/wio-lite-ai#37).  Since
+issue #214 the store, the `kv` command and the boot-time steps are the ones
+f746g-disco has too, one implementation for both
+([svc/README.md](../../svc/README.md#the-key-value-store-and-the-kv-command-are-one-implementation-issue-214)).
+Nothing the store does or prints on this board changed but one line (below).
+Where the files went:
+
+| Until issue #214 | Since |
+|---|---|
+| `src/kv.c` | `svc/kv/kv.c` (the store) and `svc/kv/kv_record.c` (the record format and the key checks) |
+| `src/kv.h` | `svc/kv/kv.h` |
+| `cmds/cmd_kv.c` | `shell/cmds/cmd_kv.c` |
+| `port/flashdb/fdb_cfg.h` | `svc/kv/fdb_cfg.h` (one for both boards) |
+| `net.shell.port` and `net.mode` in `src/kv_boot.c` | `shell/cmds/kv_cfg.c`, called by `src/kv_boot.c` |
+
+What is this board's:
+
+| File | What it holds |
+|---|---|
+| `port/flashdb/fal_cfg.h` | The FAL device over the NOR and the one partition `kv` |
+| `port/flashdb/fal_nor.c` | The FAL device's four operations over `port/nor`, FlashDB's log and assert hooks, `kv_board_state` and `kv_board_facts`.  The store's hold and FlashDB's lock are both the NOR device's recursive mutex: an entry point tries for up to 5 s and then answers `store busy`; `kv_init()` and FlashDB's lock wait without a limit |
+| `src/kv_boot.c` | The configuration thread `cfg` (priority 15, its stack in DTCM) and its order: open the store, `net.shell.port`, `wifi.enable`, `wifi.autoconnect`, `net.mode`, ignoring `net.mode` while the WiFi session is down; `kv_cfg_board_facts` (an absent `net.mode` leaves the address alone); the shell instance on the log transport that the WiFi steps print through |
+| `svc/kv_svc_config.h` | The words: `external NOR`, and `erasing 1 MB and rebuilding -- about 15 s...` |
+| `BSP_ENABLE_KV` | The build option (ON); OFF builds neither the store nor the two shared files |
+
+- **The part.**  FlashDB at an 8-bit write granularity programs only bytes
+  that still read 0xFF, which the W25Q128JV datasheet's page program
+  describes (sec 8.2.13).  `kv format yes` took about 14 s on board #2
+  (FlashDB erases each of the 256 sectors while it lays down its headers).
+- **kv's reads do not look at the blob busy flag** (f746g-disco's do).  A
+  `kv` command waits behind the NOR mutex while a blob erase or program holds
+  it, and the erase gives the mutex back between 64 KB blocks.
+- **One line is no longer printed.**  If the store opened at boot and then
+  became unusable before `net.mode` was read -- a FlashDB assert or a failed
+  lock in a `kv` command on another console during the WiFi association, up
+  to 22 s -- the thread used to print `net.mode: ignored (unreadable)`.  The
+  shared readers read a key only while the store is open, so that line is
+  gone; nothing is applied either way, as before.  (They read only while it
+  is open so that f746g-disco, whose store may not open at all, does not
+  print one line per key.)
+- **A plugin may not define the store's writers**: since #214
+  `WIO_PLUGIN_FORBIDDEN` in `board.cmake` names FAL's `fal_partition_write`,
+  `fal_partition_erase` and `fal_partition_erase_all` and the entries that
+  change the partition (`kv_init`, `kv_set`, `kv_set_desc`, `kv_del`,
+  `kv_format`).
+
+Checked on board #2 (one DFU, 2026-11-10): the same steps before (`ab21150`)
+and after (`e590e53`) -- every `kv` subcommand, a bad bool refused,
+`net.shell.port` as a string, as u32 0 and as u32 2323, `net.mode` as `foo`
+and as `static` with no other keys, six reboots -- and the two records
+compared.  They differed in three places only: the version line, the order of
+`net.mode` in the first `kv list` (rewritten at the end of the run before),
+and one boot's WiFi association succeeding on the third try instead of the
+second.  Every warning, the telnet port (23 / 2323), the DHCP lease and the
+six blobs' CRCs were the same.  The sizes are with the other measurements at
+the end of [the WiFi link layer](#the-wifi-link-layer-issue-222).
+
 ## Plugin containers (issues #108, #110, #116 = #78 Steps 3a, 3b and 3c)
 
 A **container** carries a model together with the code that interprets its
@@ -2225,6 +2285,16 @@ and the bridge's refusal no longer guessing who holds the channel):
 | What | Value |
 |---|---|
 | Internal flash free (app partition) | **14,516 B** (14,476 B before; the code is 40 B smaller, the detach alone 0 B) |
+| DTCM free (`_smsp_stack - _dtcm_used_end`) | **1,848 B**, unchanged |
+
+Measured for issue #214 (the key-value store, the `kv` command and the boot
+steps moved to the shared files, [The configuration
+store](#the-configuration-store-kv-issue-214); clean builds):
+
+| What | Value |
+|---|---|
+| `shell.bin` | 378,812 B after the move (378,700 B before) |
+| Internal flash free (app partition) | **14,404 B** after the move (14,516 B before: the store -40 B, the boot steps -72 B, the command 0 B); **14,396 B** after f746g-disco's port (`ca2e6a4`, -8 B here, no printed string changed) |
 | DTCM free (`_smsp_stack - _dtcm_used_end`) | **1,848 B**, unchanged |
 
 ## Flashing and recovery

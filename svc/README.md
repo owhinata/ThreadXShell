@@ -5,7 +5,9 @@ no CMSIS device header, no board header and no `tx_api.h`, so the same source is
 compiled into every board's firmware (from `shell/` and from `boards/<board>/`)
 and into the host tests under `shell/test/` and `boards/<board>/test/`. Anything
 that needs a peripheral, a memory map, a lock or a thread stays in the board and
-is reached from here through a hook or a declared API.
+is reached from here through a hook or a declared API. The one board header a
+`svc/` source reads is the board's `fal_cfg.h`, which FlashDB's `fal.h` includes
+by name under `svc/kv/kv.c` (see [The key-value store](#the-key-value-store-and-the-kv-command-are-one-implementation-issue-214)).
 
 The files are grouped by the feature they serve (issue #153):
 
@@ -17,11 +19,14 @@ The files are grouped by the feature they serve (issue #153):
 | `svc/camera/` | The camera frame pipeline (`frame`, `frame_pipeline`), the camera stream's holder table, sink steps and stream generations (`cam_holders`, `cam_step`, `cam_gen`, below) and the `camera` command's contract (`camera_svc`, below). |
 | `svc/blob/` | The asset store's board-independent parts (issue #192): the header format and a transfer's decisions (`blob_state`), the slot table's rules and lookups (`blob_map`), the `blob write` coordinator (`blob_write`), and since issue #194 the one set of store results (`blob_err.h`) and the store contract of the shared `blob` command (`blob_svc.h`); see [The asset store's shared parts](#the-asset-stores-shared-parts-issue-192). No file here is named `blob.h` (every board has a `src/blob.h` of its own). |
 | `svc/net/` | The contract of the shared `net` command, `net_svc.h` (issue #219; f746g-disco and wio-lite-ai, grove-vision-ai-v2 has no network). A header only: the command is `shell/cmds/cmd_net.c`, the one implementation under it is `shell/cmds/net_core.c` (issue #220) and the one telnet console is `shell/cmds/net_tty.c` (issue #221) -- both need NetX and ThreadX, so they cannot live here -- and each board's adapter is the board's; see [The `net` command and the telnet console are one implementation](#the-net-command-and-the-telnet-console-are-one-implementation-issue-212). |
+| `svc/kv/` | The persistent configuration store (issue #214; f746g-disco and wio-lite-ai, grove-vision-ai-v2 has none): the one implementation over FlashDB (`kv.c`, `kv.h`), its record format and key checks (`kv_record`), what the board gives it (`kv_board.h`) and FlashDB's one build configuration (`fdb_cfg.h`). The `kv` command and the boot-time steps are `shell/cmds/cmd_kv.c` and `shell/cmds/kv_cfg.c`; see [The key-value store](#the-key-value-store-and-the-kv-command-are-one-implementation-issue-214). |
 
-Every one of the six directories is on the
-include path wherever `svc/` is, so a source names a header by its file name
-alone (`#include "nn_core.h"`), and the storage audit covers the whole tree
-under `svc/`.
+`svc/` itself and `nn/`, `plugin/`, `camera/` and `blob/` are on the firmware's
+include path on every board, and `net/` and `kv/` on f746g-disco's and
+wio-lite-ai's (grove-vision-ai-v2 has neither feature), so a source names a
+header by its file name alone (`#include "nn_core.h"`). The storage audit
+covers every source a board's build compiles under `svc/` (see
+`cmake/README.md`).
 
 ## The `nn` command's layering
 
@@ -1041,7 +1046,7 @@ before is in brackets, with the issue that changed it.
 | N2 `net ping` with no reply at all | exit 1 (#219; before: exit 0 on f746g-disco) |
 | N3 `net dhcp`'s wait | 30 s, then an error and exit 1 (#219; before: on f746g-disco 10 s, a warning, exit 0) |
 | N4 how the address is printed | two lines, `ip:` and `gw:`, STALE after `gw:` (#219; before: one line on f746g-disco, which prints STALE since #220) |
-| No address and nothing has made DHCP the source | `ip:    none (unset)` (#220; before: wio-lite-ai printed `none (dhcp, no lease)` even when DHCP was never started).  On f746g-disco DHCP is the boot source, so it reads `none (dhcp, no lease)` until a lease, and `none (unset)` only when the DHCP client could not be created at boot |
+| No address and nothing has made DHCP the source | `ip:    none (unset)` (#220; before: wio-lite-ai printed `none (dhcp, no lease)` even when DHCP was never started).  On f746g-disco the configuration thread makes DHCP the source at boot unless `net.mode` says `static` or `manual` (#214; until then DHCP was the fixed boot source), so it reads `none (unset)` until that thread has run and `none (dhcp, no lease)` from then until a lease |
 | `net info` with no IP stack | answers: `ip: none (<the board's reason>)`, then what the board's lines can still say, exit 0 (#219; before: f746g-disco refused it, #217) |
 | N6 the telnet console | resident from boot, nothing to operate, its state two lines of `net info` (#221; before: each board's own code -- on f746g-disco one line, on wio-lite-ai `net shell start` / `stop` / `status`, armed after a successful `net ip` / `net dhcp` and at boot when the KV store said so) |
 | N7 where link operations live | the board's link command, `eth` on f746g-disco and `wifi` on wio-lite-ai; `net` has no link operations (#217; before: f746g-disco's `net link` and the PHY line of `net info`) |
@@ -1210,7 +1215,8 @@ since #220:
   client's mutex, taken by NetX inside `nx_dhcp_*`, then `nx_ip_protection`,
   then the driver's own).  `net_core.c` takes only the address lock, and never
   while it holds anything else.  Only threads that hold no other lock take it:
-  the commands, the worker, and on wio-lite-ai the KV boot thread.  The telnet
+  the commands, the worker, and each board's configuration thread (through
+  `shell/cmds/kv_cfg.c`, issue #214).  The telnet
   console never takes it (since #221; wio-lite-ai's own listener took it to
   print its listening address).  Nothing that runs with a NetX mutex or the board's link lock
   held takes it (f746g-disco's `eth_lock`, wio-lite-ai's rtl_link coarse
@@ -1459,9 +1465,12 @@ both boards; neither board registers a link-status callback of its own.
   the worker, registers the notice, and sets the ready mark last, only when
   all of that succeeded; until then every operation is DOWN in the board's
   words.  It only creates objects: it never waits and does not depend on
-  `HAL_GetTick`.  The boot source is the board's fact: DHCP on f746g-disco
-  (fixed; it has no KV store until #214), none on wio-lite-ai until its KV
-  boot says otherwise.  wio-lite-ai's KV `net.mode=dhcp` calls `net_core_dhcp_source()`,
+  `HAL_GetTick`.  The boot source is the board's fact: none on both boards
+  since #214 (f746g-disco's was DHCP, fixed, until then), and the
+  configuration thread settles it from `net.mode`.  The shared boot step
+  `kv_cfg_net_apply()` (`shell/cmds/kv_cfg.c`) turns `net.mode=dhcp` into
+  `net_core_dhcp_source()` -- on f746g-disco also an absent or unusable
+  `net.mode`, that board's default --
   which only makes DHCP the source and wakes the worker; unlike `net dhcp` it
   is not refused with the link down, because right after the bridge comes up
   the recorded level may not have caught up yet and the order must not rest
@@ -1494,7 +1503,7 @@ way (#221):
 | `net_core.c`'s constant facts, `const struct net_core_facts net_core_board_facts` (#220): the `NX_IP`, the `NX_DHCP`, the interface, the boot source, the board's sentences for LINK and for DOWN before init, and the worker's stack | the same files; the worker's stack is 1 KB on both, in DTCM on wio-lite-ai (`net_worker_stack`, a name `cmake/check_dtcm_residency.py` requires) |
 | `net_tty.c`'s mutable state, `struct net_tty_state net_tty_board_state`, and its constant facts, `const struct net_tty_facts net_tty_board_facts` (#221): the `NX_IP`, the pool, the receive ring (512 B), the extraction buffer (1,500 B), the transmit ring (4,096 B), the listener's stack (2,560 B), the socket's transmit queue depth and retransmit settings, the other console's name | f746g-disco `port/netxduo/nx_glue.c`, all in internal SRAM; wio-lite-ai `src/nx_net.c`, the transmit ring and the stack in DTCM (`net_tty_tx_buf`, `net_tty_stack`, names `cmake/check_dtcm_residency.py` requires), the rest in AXI-SRAM `.bss`.  Until #221 these were `port/netxduo/nx_shell.c` and `src/net_shell.c` |
 | The telnet transport object (`NET_TTY_TRANSPORT_DEFINE()`) and the `CLI_INSTANCE_DEFINE` bound to it | `src/main.c` on each board |
-| The telnet console's port, handed over once (`net_tty_port_set()`) | f746g-disco `src/main.c`, 23; wio-lite-ai `src/kv_boot.c`, `net.shell.port` or 23 (or `src/main.c`, 23, when the KV thread does not run) |
+| The telnet console's port, handed over once (`net_tty_port_set()`) | on both boards the configuration thread (`src/kv_boot.c`) through the shared `kv_cfg_tty_port()` (`shell/cmds/kv_cfg.c`, issue #214): `net.shell.port`, or 23; `src/main.c` hands over 23 itself when that thread does not run (wio-lite-ai also in a build without the store). Until #214 f746g-disco's `src/main.c` handed over 23, fixed |
 | The commands that refuse on the telnet console (`net_tty_guard()`) | f746g-disco `cmds/cmd_blob_board.c`; wio-lite-ai `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c`, `cmds/cmd_xfer.c`, `cmds/cmd_blob_board.c` |
 | The adapter behind `svc/net/net_svc.h` (#219) | f746g-disco `port/netxduo/net_svc_f746.c`; wio-lite-ai `src/net_svc_wio.c` |
 | The properties (#219) | `svc/net_svc_config.h` on each board |
@@ -1551,6 +1560,111 @@ wio-lite-ai's [Commands](../boards/wio-lite-ai/README.md#commands) and
 (written in #222, a map of its files and threads; the description is the
 comments at the top of those files).
 
+## The key-value store and the `kv` command are one implementation (issue #214)
+
+f746g-disco and wio-lite-ai keep their settings in a FlashDB key-value
+database in the first megabyte of the board's external flash (wio-lite-ai's
+NOR on OCTOSPI2, f746g-disco's QSPI NOR); grove-vision-ai-v2 has no store.
+Until issue #214 the store was wio-lite-ai's own (`src/kv.c`,
+`cmds/cmd_kv.c`, `port/flashdb/fdb_cfg.h`).  Since then everything that does
+not touch the hardware is one implementation, and a board gives only its
+device, its storage and its words.
+
+| File | What it holds |
+|---|---|
+| `svc/kv/kv.c`, `svc/kv/kv.h` | The store, the one caller of FlashDB: open (`kv_init()`), `kv_format()`, set / get (and the typed `kv_get_str()` / `kv_get_u32()` / `kv_get_bool()`), descriptions, delete, the walk behind `kv list`, `kv_get_info()`; the state machine (`KV_STATE_*`) and the order of the board's hold around every entry point.  No `tx_api.h`: the hold and its waits are the board's functions. |
+| `svc/kv/kv_record.c`, `svc/kv/kv_record.h` | What is stored under a key (a 12-byte header with the type and the description, then the value, packed byte by byte), which keys and values are accepted.  Pure functions. |
+| `svc/kv/kv_board.h` | What the board gives `kv.c`, declared by fixed name (below). |
+| `svc/kv/fdb_cfg.h` | FlashDB's one build configuration for both boards: the key-value database only, through FAL only, a write granularity of 8 bits (every program targets bytes that still read 0xFF), the key length, and the names of the log and assert hooks the board defines. |
+| `shell/cmds/cmd_kv.c` | The `kv` command: `list [prefix]`, `get`, `set <key> <value> [str\|u32\|bool\|bytes]`, `desc`, `del`, `info`, `format yes`, every line it prints and every refusal.  First line `optional BOARD_HAS_KV`. |
+| `shell/cmds/kv_cfg.c`, `shell/cmds/kv_cfg.h` | The boot-time steps: open the store, hand the telnet console its port from `net.shell.port`, read and apply `net.mode`, and the setting readers behind them.  Under `shell/cmds/` because they call NetX (`net_core.h`), the telnet console (`net_tty.h`) and ThreadX (the 30 s DHCP wait).  First line `optional BOARD_HAS_KV_NETX`, a property each board sets ON exactly when it has both the store and NetX (see `cmake/README.md`). |
+
+What the board defines, by the fixed names the shared files declare `extern`
+(the shape of `net_core_board_state`: the store's FlashDB lock callback takes
+no context argument, and a pointer the shared file remembered would be
+mutable storage in it):
+
+| The board provides | Where |
+|---|---|
+| `struct kv_state kv_board_state`, `kv.c`'s mutable state: FlashDB's database object, the state, the partition's geometry, the mark set when FlashDB's lock callback failed, and the walk's scratch (one record and its decoded form, about 660 B, so a `kv list` does not charge it to the caller's stack) | wio-lite-ai `port/flashdb/fal_nor.c`, f746g-disco `port/flashdb/fal_qspi.c`, plain `.bss` (zero reads as "not initialised yet") |
+| `const struct kv_facts kv_board_facts`: the partition's name, whether the device came up, the hold around a whole operation (waited for without a limit by `kv_init()`, for at most 5 s by every other entry point, which then answer `store busy`), FlashDB's own lock callbacks, and the function every line of the store goes through on its way to the board's log | the same files |
+| `const struct kv_cfg_facts kv_cfg_board_facts`: the boot steps' report function, and what an absent or unusable `net.mode` -- or a store that did not open -- means (`KV_CFG_NET_NONE` on wio-lite-ai: leave the address alone; `KV_CFG_NET_DHCP` on f746g-disco) | `src/kv_boot.c` on each board |
+| The FAL device (its init, read, write and erase) and the partition table | `port/flashdb/fal_cfg.h` with `fal_nor.c` (wio-lite-ai) or `fal_qspi.c` (f746g-disco) |
+| FlashDB's log and assert hooks named in `fdb_cfg.h` (`kv_fdb_print()`, `kv_fdb_assert_failed()`, `kv_fdb_assert_tripped()`) and the line assembler behind them | the same `fal_*.c` |
+| The board's words, `svc/kv_svc_config.h`: `KV_SVC_MEDIUM`, what the store is on (the root's help and the first line of `kv info`: `external NOR` / `QSPI NOR`), and `KV_SVC_FORMAT_SAYS`, what `kv format yes` says before it starts (the part's erase time).  String literals without `%`; a missing one is a build error | `svc/kv_svc_config.h` on each board |
+| The configuration thread: its stack, its priority (15 on both) and the order it calls the boot steps in | `src/kv_boot.c` on each board |
+
+- **[!] `fal_cfg.h` is the one board header the shared code reads.**  FlashDB's
+  `fal.h`, which `kv.c` includes, includes `fal_cfg.h` by name, the way
+  FlashDB includes `fdb_cfg.h`.  It holds the device's and the partition's
+  names, the device and partition tables' declarations and FAL's print hook,
+  and no hardware header.  Each board puts `svc/kv` and its `port/flashdb`
+  ahead of FlashDB's own `inc/` on the include path (FlashDB ships only
+  `fdb_cfg_template.h`).
+- **The shared files write no log.**  `svc/` has no `log.h`, so every line --
+  which step failed, FlashDB's answer, a key ignored and why -- goes through
+  the board's report function at an error, warning or info weight
+  (`KV_REPORT_*`, `KV_CFG_REPORT_*`).  Each board checks at build time that
+  the weights are its log levels and drops what its `LOG_COMPILE_LEVEL`
+  drops.  The store's lines are tagged `kv`, the boot steps' `cfg`.
+- **What the store promises** (`kv.h`): it formats only a partition that is
+  entirely blank; a partition that is neither a database nor blank is
+  reported (`partition is neither a valid database nor blank (<n>) -- run
+  `kv format yes` to discard it`) and left alone for the operator.  Until
+  `kv_init()` succeeded, and after anything went wrong (a failed FlashDB lock,
+  a FlashDB assert), every call is refused with the state, never answered as
+  if the store were empty.  `fdb_kv_get()` is never called (it returns a
+  pointer into one static buffer).  `kv format yes` erases the whole
+  partition first and then lets FlashDB build it, so it works on a partition
+  FlashDB refuses to open and it really removes every key.  FlashDB itself
+  does not report a sector erase that fails while it builds; both ways in
+  (that wipe, and the first boot's check that every byte is 0xFF) have already
+  left those sectors blank, so nothing is then programmed over data.
+- **Secret keys are one table in the command**, for every board: `wifi.psk`.
+  `kv list` masks its value; `kv get <key>` prints it, because the key was
+  asked for by name.  This is not storage protection -- the value is on the
+  flash in the clear.
+- **The boot steps are called by the board's thread, in the board's order**;
+  nothing in them calls back into the board.  `kv_cfg_open()` opens the
+  store; `kv_cfg_tty_port()` hands the telnet console its port once
+  (`net.shell.port`, or 23 when the store is not open or the key is missing,
+  not a u32 or not a port); `kv_cfg_net_mode()` and `kv_cfg_net_apply()`
+  apply `net.mode` once (`dhcp`: make DHCP the source and wait up to 30 s for
+  a lease; `static`: `net.ip`, `net.mask` and `net.gw`, all three; `manual`:
+  nothing).  With the default DHCP, an absent or unusable `net.mode` or a
+  store that did not open becomes DHCP (`no usable net.mode -- DHCP, this
+  board's default`), and a value that cannot be applied is reported and
+  followed by `falling back to DHCP, this board's default`.  With the default
+  NONE they do nothing.  What only one board does between the steps stays in
+  its thread (wio-lite-ai: the radio, and ignoring `net.mode` while the WiFi
+  session is down).  The readers read a key only while the store is open.
+- **The audit.**  `kv.c`, `kv_record.c`, `cmd_kv.c` and `kv_cfg.c` own no
+  mutable storage, checked per board by the build-derived audit like every
+  shared file (the secret-key table is a const array of const pointers).
+- **A plugin may not define the store's writers**: both boards' plugin
+  forbidden tables name FAL's write and erase (`fal_partition_write`,
+  `fal_partition_erase`, `fal_partition_erase_all`) and the entry points that
+  change the partition (`kv_init`, which formats a blank one, `kv_set`,
+  `kv_set_desc`, `kv_del`, `kv_format`); f746g-disco's names the readers too.
+  A check by name, not a proof: a plugin is trusted code.
+
+How each board's device and hold work (wio-lite-ai's NOR mutex, f746g-disco's
+blob busy flag and partition limits) is the board README's:
+[wio-lite-ai](../boards/wio-lite-ai/README.md#the-configuration-store-kv-issue-214),
+[f746g-disco](../boards/f746g-disco/README.md#the-configuration-store-kv-issue-214).
+
+Host tests (`shell/test/run_host_tests.sh`): `test_kv_record` (the record
+format byte for byte, every refusal of the decoder, the key alphabet and
+lengths), `test_kv_store` (the real `kv.c`, FlashDB and FAL under the real
+`fdb_cfg.h` on a flash model in RAM: no program onto a byte that is not 0xFF,
+nothing outside the partition, every access under a hold and every hold given
+back, a failed lock and a corrupt partition; it fails when `lib/flashdb` is not
+fetched), `test_kv_cmd` (every line of the command through the real
+dispatcher, the secret-key table included) and `test_kv_cfg` (the boot steps,
+once with each default: the port handed over exactly once on every path and
+every reported line word for word).  f746g-disco's own side is
+`boards/f746g-disco/test/test_kv_qspi.c` (that board's README).
+
 ## Why the lock and the threads are the board's
 
 `svc/` cannot include `tx_api.h` or any board header: the same object has to
@@ -1570,7 +1684,8 @@ whose callers pass no context -- one the board defines under a name the shared
 file declares `extern` (`nn_model_board_state`; the tflm backend's
 `nn_tflm_board_state`; the Ethos-U cache protocol's `npu_cache_board_state`;
 `shell/cmds/net_core.c`'s `net_core_board_state` and `shell/cmds/net_tty.c`'s
-`net_tty_board_state`, whose NetX callbacks pass no context either). This is enforced per
+`net_tty_board_state`, whose NetX callbacks pass no context either; `kv/kv.c`'s
+`kv_board_state`, whose FlashDB lock callback passes none). This is enforced per
 board by `cmake/check_no_mutable_storage.py` through the build-derived audit in
 `cmake/shared_storage_gate.cmake`, which also covers everything compiled under
 `shell/cmds/` (see `cmake/README.md`; `svc/ymodem.c` is the one exception).

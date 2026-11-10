@@ -985,9 +985,9 @@ What is shared and what is this board's:
 
 | QSPI range | What |
 |---|---|
-| `0x000000 .. 0x100000` | reserved, no slot (kept free to match wio-lite-ai's layout; `qspi erase` / `qspi test` reach it) |
+| `0x000000 .. 0x100000` | the key-value store, `kv` (FlashDB, issue #214; the same place as wio-lite-ai's): see [The configuration store](#the-configuration-store-kv-issue-214).  No slot; until #214 reserved, and `qspi erase` / `qspi test` reached it |
 | `0x100000 .. 0x800000` | the blob store: 13 slots, below |
-| `0x800000 .. 0x1000000` | unallocated, no slot |
+| `0x800000 .. 0x1000000` | unallocated, no slot; the 4 KB at `0x800000` is where `qspi test` is run (issue #214) |
 
 | Slots | Base | Size | Payload |
 |---|---|---|---|
@@ -1027,14 +1027,17 @@ What is this board's:
 - **[!] The store's reads answer busy while its busy flag is held**, unlike
   wio-lite-ai's: `blob list`, `blob info`, `blob read`, `blob verify` and
   `blob free` answer `blob: another QSPI operation is running (...)` while a
-  `blob write` / `blob erase`, a `qspi erase` / `qspi test` or an `nn model
-  load <name>` (lookup to end of read) runs on another console or in the
-  background, rather than describe flash that is being changed.  They only
+  `blob write` / `blob erase`, a `qspi erase` / `qspi test`, an `nn model
+  load <name>` (lookup to end of read) or, since issue #214, any `kv`
+  command (reads included, [below](#the-configuration-store-kv-issue-214))
+  runs on another console or in the background, rather than describe flash
+  that is being changed.  They only
   look at the flag, so two readers do not refuse each other.  `qspi erase` and
   `qspi test` take the flag for their whole run (`qspi: busy -- ...` when they
   cannot); `qspi probe`, `qspi info` and `qspi read` do not look at it.  Every
   refusal names the same holders -- `blob`'s, `qspi`'s and `nn model load`'s
-  BUSY -- from one string, `BLOB_BUSY_HOLDERS` in `src/blob.h`.
+  BUSY -- from one string, `BLOB_BUSY_HOLDERS` in `src/blob.h` (which names
+  "a `kv` command" too since #214).
 - [!] **A read looks at the flag once, when it starts.**  A `blob verify`
   that is already running is not stopped when another console then starts a
   `qspi erase` or `qspi test`: it goes on reading flash that is being erased
@@ -1095,8 +1098,8 @@ What is this board's:
   page, payload, read-back of the whole payload against the CRC of the
   stream, magic page last).  Every program and read-back it is asked for is
   checked to lie inside `0x100000 .. 0x800000` first (wio-lite-ai's writer has
-  no such check), so a wrong address cannot reach the reserved first megabyte
-  or the top.  A program is not read back page by page: `qspi_flash_write()`
+  no such check), so a wrong address cannot reach the key-value store's first
+  megabyte or the top.  A program is not read back page by page: `qspi_flash_write()`
   checks the flag status register after every page, and the body page carries
   its own CRC, so a body that programmed wrongly reads `invalid`.
 - **[!] A plugin may not define the store's writers**: `F746_PLUGIN_FORBIDDEN`
@@ -1104,7 +1107,9 @@ What is this board's:
   `qspi_flash_erase_subsector`, `qspi_flash_erase_chip`, `blob_erase_header`,
   `blob_erase_span`, `blob_svc_erase_header`, `blob_svc_erase_span` and
   `blob_svc_program` to the internal-flash, clock and MPU entries, and the
-  plugin image gate refuses a plugin that defines any of them.
+  plugin image gate refuses a plugin that defines any of them.  Since issue
+  #214 the key-value store's entries are in it too
+  ([below](#the-configuration-store-kv-issue-214)).
 - `empty` means "no header", not "blank flash": the payload underneath may
   still hold old data.
 
@@ -1264,6 +1269,176 @@ the receive):
 | (the four cannot run at once) | MJPEG needs the camera's JPEG format, `nn stream` and the GUIX preview the raster one, so the loaded case is those two configurations; both are far below the 2,047 B pass line |
 | `nn model load --name` of a 1 MB-class blob | about 0.2 s from the command to the refusal, for 1,044,480 B of random bytes in a 1 MB slot (the read, the CRC of the copy and the model check's refusal; a real model adds building the interpreter) |
 | QSPI driver failures after `nn model load --name` / `nn run` | see [the defect](#qspi-operations-failing-after-nn-model-load-issue-194): 3 in 3 loads before the fix, 0 after |
+
+## The configuration store (`kv`, issue #214)
+
+Settings live in a FlashDB key-value database in the QSPI NOR's first
+megabyte: the same store, the same `kv` command and the same boot steps as
+wio-lite-ai's, one implementation for both
+([svc/README.md](../../svc/README.md#the-key-value-store-and-the-kv-command-are-one-implementation-issue-214)).
+`kv list [prefix] | get | set <key> <value> [type] | desc | del | info | format
+yes` mean what they mean there.  What is this board's:
+
+| File | What it holds |
+|---|---|
+| `port/flashdb/fal_cfg.h` | The FAL device `n25q128` (the first megabyte only) and its one partition `kv`, `0x000000 .. 0x100000`, 256 sectors of 4 KB |
+| `port/flashdb/fal_qspi.c` | The FAL device's four operations over `port/qspi`, the hold (kv's own mutex, then the blob store's busy flag), FlashDB's log and assert hooks, `kv_board_state` and `kv_board_facts` |
+| `src/kv_boot.c` | The configuration thread `cfg` and `kv_cfg_board_facts` (the default for `net.mode` is DHCP) |
+| `svc/kv_svc_config.h` | The words: `QSPI NOR`, and what `kv format yes` announces |
+| `svc/log.c`, `svc/log.h` | The line assembler that puts FlashDB's and FAL's printf fragments back together into one `dmesg` line (the same code as wio-lite-ai's) |
+| `test/test_kv_qspi.c` | The host test of `fal_qspi.c` under the real `svc/kv/kv.c`, FlashDB, FAL and blob busy flag, on a 16 MB array (below) |
+
+- **[!] The FAL device is the first megabyte, not the part.**  FlashDB is
+  given a device 1 MB long (`KV_FAL_DEV_LEN`), and the device's own
+  operations refuse any offset or length that reaches `0x100000`, so nothing
+  FlashDB asks for can reach the blob store (FAL checks a range against the
+  partition with an addition that can wrap; the device checks again by
+  subtraction).  An erase is whole 4 KB subsectors only, and a 64 KB erase is
+  issued only on a 64 KB boundary with a whole sector left; the device ends on
+  a 64 KB boundary, so no erase reaches slot 0.  `fal_qspi.c` checks at build
+  time that the device ends where the blob store begins (`BLOB_REGION_BASE`).
+- **[!] Every `kv` operation holds the blob store's busy flag, reads
+  included.**  On this board the QSPI NOR is erased and programmed only under
+  that flag, and FlashDB writes while it reads: it rewrites the state of a
+  record whose length it finds broken, and opening the store resumes an
+  interrupted clean-up.  So every entry point of the store, `kv_init()` at
+  boot included, takes kv's mutex and then the flag for its whole operation.
+  The flag is tried again every 10 ms until the same deadline, 5 s
+  (`KV_HOLD_WAIT_TICKS`); then the command answers `store busy` and nothing
+  was touched.  `kv_init()` at boot waits without a limit (nothing else holds
+  the flag that early).  Nothing that holds the flag takes kv's mutex, so the
+  two never wait on each other in a circle.
+- **Busy in both directions.**  While a `kv` command runs -- `kv format yes`
+  for half a minute or more (below) -- `blob list` / `info` / `read` /
+  `verify` / `free` answer `blob: another QSPI operation is running (...)`,
+  `blob write` / `blob erase` and `nn model load <name>` answer busy, and
+  `qspi erase` / `qspi test` answer `qspi: busy -- ...`.  The other way, while
+  a `blob write` (its whole receive), a `blob erase`, an `nn model load
+  <name>` or a `qspi erase` / `qspi test` holds the flag, every `kv` command,
+  `kv get` and `kv list` included, waits 5 s and answers `store busy`.  A
+  `kv list` prints its rows with the flag held, so a telnet client that stops
+  reading keeps the blob commands busy for as long as that output waits.  A
+  blob read that looked at the flag before a `kv` command took it can still
+  be running alongside it; kv never writes the blob store's interval, so what
+  that read sees does not change.
+- **kv records which thread took the flag**, because the flag records no
+  holder.  FAL's write and erase compare the calling thread with that record
+  and refuse on a mismatch, so a FlashDB call that reached them without the
+  hold cannot use another holder's flag; the refusal is
+  `FAL write at 0x<addr> refused: kv does not hold the QSPI busy flag on this
+  thread` (or `FAL erase ...`) in `dmesg`.  The record is written only after
+  the flag is kv's.  The one way out gives back the record, the flag and the
+  mutex in that order, and a give-back by a thread that does not hold them
+  gives back nothing (`hold given back by a thread that does not hold it --
+  ignored`).  An entry point called from inside the store on the same thread
+  is refused before anything is taken.  FlashDB's own lock callback takes and
+  gives nothing: it only checks the record, and a mismatch latches the store
+  offline (`device lock failed inside FlashDB -- store latched offline`).
+  A FlashDB or FAL print that comes from a thread without the hold goes to
+  `dmesg` as it is, prefixed `(unheld) `.
+- **`qspi erase` and `qspi test` refuse the store's partition**:
+  ``qspi: 0x<addr> is in the kv store (0x000000-0x0fffff) -- `kv format yes`
+  erases it``.  `kv format yes` is the way to erase it.
+- **`qspi test` refuses a subsector that is not blank before it erases
+  anything** (``qspi: 4 KB at 0x<addr> is not blank -- not testing over data;
+  `qspi erase` it first if it is scratch``), and after the pattern test it
+  checks the partial-page programs the store relies on: 14 programs at fixed
+  offsets into the subsector's first two pages (single status bytes one after
+  another, a header, a record, one across the page boundary), both pages read
+  back whole after each, then the subsector erased again.  It prints
+  `partial-page writes ok: 14 writes into 2 pages, both pages checked after
+  each` and ends `PASS: erase/program/verify and partial-page writes, 4 KB at
+  0x<addr> (left blank)`.  It is run at `0x800000`, outside the blob store's
+  interval, which no `blob write` reaches.  Both commands are in the
+  dangerous-commands build only.
+- **The part.**  FlashDB at an 8-bit write granularity (`svc/kv/fdb_cfg.h`)
+  programs single bytes into a page that already holds programmed bytes,
+  never a byte that is not 0xFF.  The Micron N25Q128A datasheet (Rev. S
+  11/14, PROGRAM operations) says that fewer than 256 bytes are programmed at
+  the addresses given and the other bytes of the page are not affected, and
+  names no limit on partial programs of one page and no internal ECC; an
+  erase is good for at least 100,000 cycles per sector.  `qspi test`'s
+  partial-page check passed on this board.  **Still to check: the marking on
+  the fitted part.**  `qspi probe`'s JEDEC ID (`20 BA 18`) is the same for the
+  N25Q128A and the MT25QL128, so the ID cannot say which; if it is an
+  MT25QL128 the same points are to be read in the MT25Q datasheet.
+- **`kv format yes` takes about half a minute to a minute here.**  It erases
+  the megabyte as 16 erases of 64 KB, then FlashDB erases each of the 256 4 KB
+  sectors again while it lays down its headers.  The announcement
+  (`svc/kv_svc_config.h`) is `erasing 1 MB and rebuilding -- about 1 min (up
+  to 4 min)...`: on the board it took about 55 s over the old data and 33.4 s
+  on a partition that was nearly blank, and the datasheet's figures (64 KB
+  erase 0.7 s typical / 3 s at most, 4 KB erase 0.25 s / 0.8 s) give about
+  75 s typical and 4 minutes at most.  Every
+  other `kv` command and the blob commands answer busy until it is done.
+- **The configuration thread** `cfg` (`src/kv_boot.c`, priority 15: above the
+  consoles, 16, below the IWDG, the camera and the IP and DHCP threads; 4 KB
+  stack) opens the store once the scheduler runs, then hands the telnet
+  console its port and settles the address source:
+
+  | Key | Values | When absent or unusable |
+  |---|---|---|
+  | `net.shell.port` | u32, 1..65535 | 23 |
+  | `net.mode` | `dhcp` / `static` (with `net.ip`, `net.mask`, `net.gw`) / `manual` (no address is set) | DHCP, this board's boot default before the store existed |
+
+  A store that does not open gives 23 and DHCP as well.  The port is handed
+  over only when the telnet listener exists, and `net.mode` is applied only
+  when NetX is up, once each.  NetX's boot source is none until then
+  (`port/netxduo/nx_glue.c`).  When the thread cannot be created, `src/main.c`
+  hands over 23 and makes DHCP the source itself (`kv: configuration thread
+  create failed (telnet on 23, DHCP)` at boot).  When kv's mutex cannot be
+  created the thread still runs and takes the defaults (`kv: store lock
+  create failed -- the store stays unavailable`).
+- **[!] The first boot on a blank partition is late.**  Opening a blank
+  partition formats it first, so the telnet port and DHCP come only after
+  that format (about the `kv format yes` time above; the format on a first
+  boot itself has not been timed).  A board updated in place from a firmware
+  before #214 is not blank: its first megabyte still holds what the LevelX
+  volume left, so its first boot reports, in `dmesg`,
+  ``partition is neither a valid database nor blank (2) -- run `kv format yes`
+  to discard it``, then `configuration store unavailable: ...`, then
+  `no usable net.mode -- DHCP, this board's default`, and DHCP takes an
+  address as before.  Type `kv format yes` once.
+- **Lines this board's `dmesg` has since #214**, besides the store's own
+  (`store open: ...`, `blank partition -- creating the store`, `store
+  created: ...`, `store formatted`): `no usable net.mode -- DHCP, this
+  board's default` (an absent or unusable `net.mode`, or no store), and
+  `falling back to DHCP, this board's default` after a `net.mode` that
+  cannot be applied (`net.mode=<v> is not one of dhcp/static/manual`,
+  `net.mode=static needs net.ip, net.mask and net.gw`, ...).  Both lines are
+  the shared boot steps', printed only on a board whose default is DHCP.
+- **A plugin may not define the store's entries**: `F746_PLUGIN_FORBIDDEN`
+  in `board.cmake` adds FAL's `fal_partition_write`, `fal_partition_erase`
+  and `fal_partition_erase_all`, the entries that change the partition
+  (`kv_init`, `kv_set`, `kv_set_desc`, `kv_del`, `kv_format`) and, on this
+  board, the readers too (`kv_get`, `kv_get_str`, `kv_get_u32`,
+  `kv_get_bool`, `kv_foreach`, `kv_get_info`), since every one of them takes
+  the busy flag.
+- **The host test** (`test/test_kv_qspi.c`, run by `test/host_tests.sh`)
+  checks on every access the store makes, reads included, that the flag is
+  held and the record names the calling thread, that the access is inside the
+  first megabyte and that no program targets a byte that is not 0xFF; that
+  every way out of every entry point (success, each failure, busy) leaves the
+  flag, the record and the mutex free; the wait up to the deadline; the
+  refused re-entry; FAL's refusals without the hold; and the order of the
+  give-back.
+
+Measured (`ca2e6a4`, 2026-11-10; the board updated in place, written once
+with the ST-Link):
+
+| | Value |
+|---|---|
+| Internal flash used (`f746-tflm`) | 662,820 B (639,052 B before, +23,768 B) |
+| Internal SRAM used | +5,536 B |
+| `cfg` thread stack | high-water 1,312 of 4,096 B (`thread`) |
+| `kv format yes` | about 55 s over the old data; 33.4 s on a nearly blank partition |
+| The keys | `kv set` / `desc` / `get`, then `reboot`: value and description kept; a bad bool refused |
+| `net.shell.port` | u32 2323: telnet on 2323 (23 does not answer); 0: `net.shell.port=0 is not a port -- telnet stays on 23`; a string: `net.shell.port: ignored (not a u32)` |
+| `net.mode` | `foo` and `static` alone: the reason, `falling back to DHCP, this board's default`, a lease; `static` with the three keys: `static address applied`; `manual`: no address; absent: `no usable net.mode -- DHCP, this board's default` |
+| `qspi erase` / `qspi test` at `0` and at `0xFF000` | refused: the kv store's partition |
+| `qspi test 0x800000` | the partial-page check and PASS; the subsector blank afterwards |
+| Busy | `kv get` / `kv list` from telnet during a `blob write` waiting on the VCP: `store busy`, and `blob list` refused; `blob list` / `blob verify` from telnet during a `kv format` on the VCP: refused, `kv get`: `store busy`; both work again afterwards |
+| The blob store | both stored CRCs as before the flash, `blob verify` PASS on both |
 
 ## Plugin containers (issue #159 = #78 Step 4)
 
@@ -1638,18 +1813,19 @@ TUs. Each audit replays its producer's compile command. See the
 ```
 blob      camera    console   coremark  crash     devmem
 dmesg     echo      eth       free      gui       help
-jobs      kill      lcd       membench  net       nn
-qspi      reboot    sd        sdram     sleep     thread
-touch     uptime    usleep    version   watch     wdt
-xfer
+jobs      kill      kv        lcd       membench  net
+nn        qspi      reboot    sd        sdram     sleep
+thread    touch     uptime    usleep    version   watch
+wdt       xfer
 ```
 
 `help` lists them with one-line descriptions; `help <cmd>` and
 `help <cmd> <sub>` walk the tree.
 
 Subsystems behind them: LTDC + GUIX (`gui`, `lcd`), OV5640 over DCMI
-(`camera`), the QSPI NOR as the asset store (`blob`, `qspi`; a LevelX + FileX
-volume with an `fs` command until issue #194), microSD (`sd`), FT5336 touch
+(`camera`), the QSPI NOR as the asset store and the configuration store
+(`blob`, `qspi`, `kv` since issue #214; a LevelX + FileX volume with an `fs`
+command until issue #194), microSD (`sd`), FT5336 touch
 (`touch`), the Ethernet MAC and PHY (`eth`) with NetX Duo on top (`net`), the
 NN backends (`nn`), and YMODEM
 transfer over the console (`xfer send` to the PC, `blob write` from it).
@@ -2438,8 +2614,11 @@ did not stop the client.
   since issue #221 the board ends it when the link falls (below), and the
   listener stays, so once the lease is back a new connection works with
   nothing typed.  With a static address nothing starts.
-- **Boot.**  DHCP is the boot source, fixed (the KV store that could choose it
-  is issue #214), so the first link up starts the client.
+- **Boot.**  There is no source until the configuration thread sets one from
+  `net.mode`, DHCP when it says nothing usable (issue #214; DHCP was the
+  fixed boot source until then, see
+  [The configuration store](#the-configuration-store-kv-issue-214)), so the
+  first link up after that starts the client.
 - **A failed step** of the worker (a stop, reinitialise or start NetX
   refused) is not retried and is not written to `dmesg` (the shared file
   cannot write the board's log; until issue #220 the hook logged
@@ -2461,14 +2640,17 @@ did not stop the client.
 The telnet console is the shared one, `shell/cmds/net_tty.c` (how it works,
 the lines it prints and the rules it keeps are
 [`svc/README.md`](../../svc/README.md#the-telnet-console-issue-221)).  It
-listens on :23 from boot, whether or not there is an address or a link, with
-nothing to start or stop.  Until issue #221 it was this board's own
+listens on the port the configuration thread hands over at boot
+(`net.shell.port`, or 23; issue #214, [The configuration
+store](#the-configuration-store-kv-issue-214)) from then on, whether or not
+there is an address or a link, with nothing to start or stop.  Until issue #221 it was this board's own
 `port/netxduo/nx_shell.c` / `.h`, which are gone.  This board's side:
 
 | File | What it holds |
 |---|---|
 | `port/netxduo/nx_glue.c` | Its state and facts (`net_tty_board_state`, `net_tty_board_facts`): the receive ring (512 B), the per-packet extraction buffer (1,500 B), the transmit ring (4,096 B) and the listener's stack (2,560 B), all in internal SRAM (only the CPU touches them); the socket's transmit queue depth 8 and first retransmit 2 s (10 retries, shift 1), which the console's 5 s deadline is asserted to exceed; `VCP` as the console a refusal points to |
-| `src/main.c` | `NET_TTY_TRANSPORT_DEFINE(net_tr)` and the `net>` instance bound to it; `net_tty_init()` right after the NetX objects, then the port, 23, at once (`net: telnet console init failed (telnet disabled)` at boot when the init fails) |
+| `src/main.c` | `NET_TTY_TRANSPORT_DEFINE(net_tr)` and the `net>` instance bound to it; `net_tty_init()` right after the NetX objects (`net: telnet console init failed (telnet disabled)` at boot when the init fails); the port, 23, only when the configuration thread cannot be created (until issue #214 always 23, at once) |
+| `src/kv_boot.c` | The port: `net.shell.port`, or 23, handed over once by the configuration thread right after the store opens (issue #214) |
 | `cmds/cmd_blob_board.c` | The YMODEM of `blob write` asks the shared question and is refused on the telnet console with the same words as before: `ymodem: refused on the telnet console -- it would destroy this session. Run it from the VCP console.` (the other YMODEM paths are issue #197) |
 | `port/netxduo/nx_user.h` | `NX_ENABLE_EXTENDED_NOTIFY_SUPPORT` (new in #221) and `NX_ENABLE_TCP_QUEUE_DEPTH_UPDATE_NOTIFY`, which `net_tty.c` requires |
 

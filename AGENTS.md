@@ -185,7 +185,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
 - **raster の DCMI OVR を終端に戻さない**（#137）: 復帰は producer の `cam_stream_resync()` 1 本（`cam_lock` 下・NVIC マスク下、subscriber の close/open 無し）。**teardown は stop とエラーだけ**（#142 で上限は無い）。
 - **DCMI の LINE / VSYNC 割込みを有効に戻さない**（消費者が無く、試した構成では有効だと 40 s 周期 overrun の必要条件だった。`HAL_DCMI_Init` が足すので Init 直後に `dcmi_hal_init()` で切る。#144）
 - **LTDC の pixel-clock 域レジスタ（RM0385 Table 117）を flip / 毎フレーム経路で触らない**（1 アクセスで APB2 が約 1.1 us 止まり SDMMC / DCMI が溢れる。flip は LxCFBAR だけ書く、`HAL_LTDC_SetAddress*` を戻さない、#160）
-- **QSPI の消去・書込みは blob の busy flag の下だけ**（`qspi erase/test`・`nn model load` も取り、保持中の読みは BUSY。64 KB 消去は含む sector を消すので 64 KB 境界でだけ。plugin 禁止表の `qspi_flash_*`・blob 書込みを外さない。受信の後は indirect read のまま置かず、CCR はデータ相のある形でだけ書く（無い形は命令を送り直す）。0x60000000-0x9FFFFFFF は MPU region 3 / 4 で no-access のまま（indirect read のままの QUADSPI が勝手に読みを始めた）。#194）
+- **QSPI の消去・書込みは blob の busy flag の下だけ**（`qspi erase/test`・`nn model load`・`kv` も取り（kv は読みも。FlashDB は読みの途中でも書く）、保持中の読みは BUSY。FAL のデバイスは先頭 1 MB だけ。64 KB 消去は含む sector を消すので 64 KB 境界でだけ。plugin 禁止表の `qspi_flash_*`・blob 書込みを外さない。受信の後は indirect read のまま置かず、CCR はデータ相のある形でだけ書く（無い形は命令を送り直す）。0x60000000-0x9FFFFFFF は MPU region 3 / 4 で no-access のまま（indirect read のままの QUADSPI が勝手に読みを始めた）。#194・#214）
 - **購読者は camera sink（表示 + nn の step）と MJPEG の 2 つ、step の停止は印を落として使用中 0**（`svc/camera/cam_step`）。`camera_frame_put()` は**全 `consume()` の最後の
   文**、`CAM_OWN_DRAINING` は `camera_unsubscribe()` / step の disable の**前**、直列化（PRIMASK）は作業を跨がない。判定は
   `cam_drain.c` / `cam_own.c` の純関数が**唯一の判断点**で**両方 fail-closed**、**`default:` を足さない**。

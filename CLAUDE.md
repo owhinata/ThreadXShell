@@ -34,7 +34,7 @@ shell をボード非依存コアとして統合する当初の目標は達成�
 ## アーキテクチャ / レイヤリング
 
 一方向依存を守る: **HAL/CMSIS/ThreadX（`lib/`）← port（ボード別グルー）← shell ← app**。
-構成は `shell/` / `svc/`（freestanding サービス層: 汎用 + `nn/` `plugin/` `camera/` `blob/`）/ `asset/`（plugin ソースと container ツール）/
+構成は `shell/` / `svc/`（freestanding サービス層: 汎用 + `nn/` `plugin/` `camera/` `blob/` `net/` `kv/`）/ `asset/`（plugin ソースと container ツール）/
 `lib/`（upstream、read-only）/ `cmake/`（共有ビルド規則とゲート）/ `boards/<board>/`（port ldscript
 src cmds svc cmake test README。wio のみ boot も）。
 
@@ -218,7 +218,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   構造的に成立しない。#137）。**teardown は stop とエラーだけ、復帰は producer の in-place resync 1 本。**
 - **DCMI の LINE / VSYNC 割込みを有効に戻さない**（消費者が無く、試した構成では有効だと 40 s 周期 overrun の必要条件だった。`HAL_DCMI_Init` が足すので Init 直後に切る。#144）
 - **LTDC の pixel-clock 域レジスタ（RM0385 Table 117）を flip / 毎フレーム経路で触らない**（1 アクセスで APB2 が約 1.1 us 止まり SDMMC / DCMI が溢れる。flip は LxCFBAR だけ書く、#160）
-- **QSPI の消去・書込みは blob の busy flag の下だけ**（`qspi erase/test`・`nn model load` も取り、保持中の読みは BUSY。64 KB 消去は含む sector を消すので 64 KB 境界でだけ。plugin 禁止表の `qspi_flash_*`・blob 書込みを外さない。受信の後は indirect read のまま置かず、CCR はデータ相のある形でだけ書く（無い形は命令を送り直す）。0x60000000-0x9FFFFFFF は MPU region 3 / 4 で no-access のまま（indirect read のままの QUADSPI が勝手に読みを始めた）。#194）
+- **QSPI の消去・書込みは blob の busy flag の下だけ**（`qspi erase/test`・`nn model load`・`kv` も取り（kv は読みも。FlashDB は読みの途中でも書く）、保持中の読みは BUSY。FAL のデバイスは先頭 1 MB だけ。64 KB 消去は含む sector を消すので 64 KB 境界でだけ。plugin 禁止表の `qspi_flash_*`・blob 書込みを外さない。受信の後は indirect read のまま置かず、CCR はデータ相のある形でだけ書く（無い形は命令を送り直す）。0x60000000-0x9FFFFFFF は MPU region 3 / 4 で no-access のまま（indirect read のままの QUADSPI が勝手に読みを始めた）。#194・#214）
 - **camera sink（表示 + nn の step）と MJPEG の 2 購読者は各自 drain する**（`camera_frame_put()` は全 `consume()` の
   最後の文、購読者の終わりは `_pins == 0 && _callbacks == 0`）。**step の停止は印を落として使用中 0**（`svc/camera/cam_step`）。
 - リファレンス: RM0385 / UM1907（`_ref/f746g-disco/`、read-only）。

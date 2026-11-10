@@ -66,7 +66,12 @@ today the optional files are `fs_cmd_core.c`, on `BOARD_HAS_FILEX`
 (f746g-disco ON, wio-lite-ai from `BSP_ENABLE_SD`, grove-vision-ai-v2 OFF), and
 `cmd_net.c`, `net_core.c` and `net_tty.c`, on `BOARD_HAS_NETX` (issues #219, #220 and #221:
 f746g-disco and wio-lite-ai ON; grove-vision-ai-v2 has no network and declares
-OFF, so the files must be compiled by nothing there). Every board's `board.cmake` must set each such
+OFF, so the files must be compiled by nothing there), `cmd_kv.c`, on
+`BOARD_HAS_KV` (issue #214: f746g-disco ON, wio-lite-ai from `BSP_ENABLE_KV`,
+grove-vision-ai-v2 OFF), and `kv_cfg.c`, on `BOARD_HAS_KV_NETX`, which each
+board sets ON exactly when its `BOARD_HAS_KV` and `BOARD_HAS_NETX` both are and
+registers the file under the same condition (issue #214; grove-vision-ai-v2
+OFF). Every board's `board.cmake` must set each such
 variable to `ON` or `OFF`;
 `shared_storage_gate.cmake` writes every `BOARD_HAS_*` it sees to
 `shared-storage/capabilities.txt`, and a variable a mark names that is unset or

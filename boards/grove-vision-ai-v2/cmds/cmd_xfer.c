@@ -192,11 +192,6 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 	int          rc;
 
 	/* No telnet question here: this board has no telnet console (issue #228). */
-	cli_print(sh, "ymodem: sending '%s' (%lu bytes) over the console\r\n",
-	          src->name, (unsigned long)src->size);
-	cli_print(sh, "ymodem: start the receiver now -- `rb -y` (lrzsz YMODEM; -y "
-	              "replaces an older file of that name) or Ctrl+A Ctrl+R in "
-	              "picocom; Ctrl+C aborts\r\n");
 	switch (cli_console_claim(sh)) {
 	case 0:
 		break;
@@ -208,6 +203,13 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 		cli_error(sh, "ymodem: console busy\r\n");
 		return 1;
 	}
+	/* The notice comes after the claim (issue #228): a transfer that cannot have
+	 * the console says nothing about starting a receiver. */
+	cli_print(sh, "ymodem: sending '%s' (%lu bytes) over the console\r\n",
+	          src->name, (unsigned long)src->size);
+	cli_print(sh, "ymodem: start the receiver now -- `rb -y` (lrzsz YMODEM; -y "
+	              "replaces an older file of that name) or Ctrl+A Ctrl+R in "
+	              "picocom; Ctrl+C aborts\r\n");
 	cli_rx_flush(sh);                /* type-ahead and the command's newline */
 	res = ymodem_send(&io, src);
 	cli_rx_flush(sh);                /* a trailing 'O' / 'C' / garbage tail  */

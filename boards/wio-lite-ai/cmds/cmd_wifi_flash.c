@@ -45,6 +45,7 @@
 #include "rtl_link.h"
 #include "wifi_auto.h"       /* #32: a flash session disarms the host's re-association */
 #include "link_bridge.h"   /* the bridge has to be given back before we take the link */
+#include "net_tty.h"       /* YMODEM is refused on the telnet console (issue #228) */
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -434,6 +435,10 @@ static int cmd_flash_backup(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "wifi: range past the protocol's 16 MB (24-bit offset) limit\r\n");
 		return 1;
 	}
+	/* Before flash_claim(), which takes the WiFi link -- and with it a telnet session --
+	 * down: the transfer helper would refuse too, but only after that (issue #228). */
+	if (net_tty_guard(sh, "ymodem"))
+		return 1;
 	if (flash_claim(sh) != 0)
 		return 1;
 
@@ -563,6 +568,10 @@ static int cmd_flash_imgload(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "wifi: PSRAM is not available -- nowhere to stage the image\r\n");
 		return 1;
 	}
+	/* Before the claim and the self-check, which invalidates the staged image: the
+	 * transfer helper would refuse too, but only after that (issue #228). */
+	if (net_tty_guard(sh, "ymodem"))
+		return 1;
 	if (cli_console_claim(sh) != 0) {
 		cli_error(sh, "wifi: run in the foreground (not `wifi ... &`)\r\n");
 		return 1;

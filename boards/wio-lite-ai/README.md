@@ -2180,7 +2180,7 @@ this board's own `src/net_shell.c`, operated with `net shell start` / `stop` /
 | `src/link_bridge.c` | The bridge session: every path that takes the link away closes the driver's gate (`nx_link_driver_set_link(0)`) and neither stops the console nor waits for it (issues #218 and #221; until issue #222 this was in `src/nx_net.c`) |
 | `src/main.c` | `NET_TTY_TRANSPORT_DEFINE(net_tr)` and the `wio-net>` instance bound to it; `net_tty_init()` right after `nx_net_init()`, and the default port at once when the KV thread will not hand one over |
 | `src/kv_boot.c` | The port: `net.shell.port`, read once, right after the store opens and before the association |
-| `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c`, `cmds/cmd_xfer.c`, `cmds/cmd_blob_board.c` | The commands that ask the shared question and refuse on the telnet console (below) |
+| `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c`, `cmds/cmd_xfer.c`, `cmds/cmd_blob_board.c`, `cmds/cmd_wifi_flash.c` | The commands that ask the shared question and refuse on the telnet console (below) |
 | `port/netxduo/nx_user.h` | `NX_ENABLE_EXTENDED_NOTIFY_SUPPORT` (new in #221) and `NX_ENABLE_TCP_QUEUE_DEPTH_UPDATE_NOTIFY`, which `net_tty.c` requires |
 
 - **The port is `net.shell.port`, read once at boot**, right after the store
@@ -2211,7 +2211,11 @@ this board's own `src/net_shell.c`, operated with `net shell start` / `stop` /
   `on` / `off` / `reset`, `mlperf`, and every YMODEM transfer (`camera send`,
   `blob write`, `wifi flash imgload` / `backup`).  The words are as before:
   `<what>: refused on the telnet console -- it would destroy this session. Run
-  it from the USB CDC console.`
+  it from the USB CDC console.`  Since issue #228 a YMODEM transfer is refused
+  before it touches anything: `camera send` before it prints how to start the
+  receiver, `wifi flash imgload` before the self-check that invalidates the
+  staged image, and `wifi flash backup` before it takes the WiFi link (and so
+  the session) down; until then those three were refused only after.
 - **`net info` has two `telnet:` lines** (above); nothing of the console goes
   to `dmesg` any more (until issue #221 its connect, disconnect, arm and stop
   lines did).

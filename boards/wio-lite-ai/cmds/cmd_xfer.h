@@ -54,7 +54,8 @@ int xfer_send_source_locked(struct cli_instance *sh, const struct ym_source *src
 /**
  * Claim the console, call xfer_send_source_locked(), then release it.  This is
  * the f746 `xfer_send_source()` semantic, for callers that do not already own
- * the console.  Returns 0 on a completed transfer, 1 on any failure / cancel
+ * the console.  On the telnet console it is refused before anything else is
+ * printed (issue #228).  Returns 0 on a completed transfer, 1 on any failure / cancel
  * (including a background-job rejection).
  */
 int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);

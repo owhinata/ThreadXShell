@@ -29,10 +29,10 @@ int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink)
 }
 
 /* YMODEM needs the raw VCP.  The telnet console is told why it is refused
- * (the shared question and words, shell/cmds/net_tty.c; the other ymodem
- * paths are issue #197).  A background job's worker has the foreground's
- * transport, and the shared command refuses it before this matters
- * (op_console_ready). */
+ * (the shared question and words, shell/cmds/net_tty.c), here before the
+ * erase; the receive in cmd_xfer.c asks again (issue #228).  A background
+ * job's worker has the foreground's transport, and the shared command
+ * refuses it before this matters (op_console_ready). */
 int blob_board_raw_console(struct cli_instance *sh)
 {
 	return net_tty_guard(sh, "ymodem") ? -1 : 0;

@@ -67,6 +67,7 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 	struct ym_io io = { sh, io_getc_send, io_put };
 	enum ym_result res;
 
+	/* No telnet question here: this board has no telnet console (issue #228). */
 	cli_print(sh, "ymodem: sending '%s' (%lu bytes) over the console\r\n",
 	          src->name, (unsigned long)src->size);
 	cli_print(sh, "ymodem: start the receiver now -- e.g. `rz` (lrzsz YMODEM); "
@@ -116,6 +117,7 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
 	const struct ym_recv_diag *d;
 	enum ym_result res;
 
+	/* No telnet question here: this board has no telnet console (issue #228). */
 	cli_rx_flush(sh);                /* type-ahead and the command's newline */
 	res = ymodem_recv(&io, sink);
 	cli_rx_flush(sh);                /* a trailing 'O' / CAN / garbage tail  */

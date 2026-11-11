@@ -142,8 +142,10 @@ int xfer_send_source_locked(struct cli_instance *sh, const struct ym_source *src
 	 * Not over telnet.  YMODEM needs a raw, byte-timed console: the telnet path escapes
 	 * 0xFF (IAC) on the way out, hands bytes over in ~250 ms polls, and rides an eRPC link
 	 * whose round-trip dwarfs the protocol's own timeouts -- the transfer would corrupt or
-	 * stall.  Checked here rather than in each caller so every YMODEM user (`camera
-	 * send`, `blob write`, `wifi flash imgload` / `flash backup`) is covered by one rule.
+	 * stall.  Checked here so every YMODEM user (`camera send`, `blob write`, `wifi
+	 * flash imgload` / `flash backup`) is covered by one rule; a caller that would break
+	 * something first (erase a slot, invalidate the staged image, take the WiFi link
+	 * down) asks the same question itself before it does (issue #228).
 	 */
 	if (net_tty_guard(sh, "ymodem"))
 		return 1;
@@ -179,6 +181,11 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 {
 	int rc;
 
+	/* Before the notice (issue #228): a refused transfer says nothing about starting
+	 * a receiver.  xfer_send_source_locked() asks again, for its other callers. */
+	if (net_tty_guard(sh, "ymodem"))
+		return 1;
+
 	cli_print(sh, "ymodem: sending '%s' (%lu bytes) over the console\r\n",
 	          src->name, (unsigned long)src->size);
 	cli_print(sh, "ymodem: start the receiver now -- e.g. `rz` (lrzsz YMODEM); "
@@ -212,8 +219,10 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
 	 * Not over telnet.  YMODEM needs a raw, byte-timed console: the telnet path escapes
 	 * 0xFF (IAC) on the way out, hands bytes over in ~250 ms polls, and rides an eRPC link
 	 * whose round-trip dwarfs the protocol's own timeouts -- the transfer would corrupt or
-	 * stall.  Checked here rather than in each caller so every YMODEM user (`camera
-	 * send`, `blob write`, `wifi flash imgload` / `flash backup`) is covered by one rule.
+	 * stall.  Checked here so every YMODEM user (`camera send`, `blob write`, `wifi
+	 * flash imgload` / `flash backup`) is covered by one rule; a caller that would break
+	 * something first (erase a slot, invalidate the staged image, take the WiFi link
+	 * down) asks the same question itself before it does (issue #228).
 	 */
 	if (net_tty_guard(sh, "ymodem"))
 		return 1;

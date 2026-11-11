@@ -2024,6 +2024,9 @@ camera res | format | fps | set   (this board's own)
   is being written fails the save (`camera: frame changed by a concurrent
   capture (file left partial)`) or the send (`ymodem: source read error`, then
   the same sentence).
+- **`send` is VCP only** (issue #228): from the telnet console it is refused
+  before anything else is printed (`ymodem: refused on the telnet console --
+  it would destroy this session. Run it from the VCP console.`).
 - **`sdram test` claims the frame buffer and the stream ring for its whole run**
   (issue #150, `camera_scratch_claim()` under the camera lock).  It is refused
   while a stream runs or is held; while it runs, `camera capture` and `camera
@@ -2652,7 +2655,8 @@ there is an address or a link, with nothing to start or stop.  Until issue #221 
 | `port/netxduo/nx_glue.c` | Its state and facts (`net_tty_board_state`, `net_tty_board_facts`): the receive ring (512 B), the per-packet extraction buffer (1,500 B), the transmit ring (4,096 B) and the listener's stack (2,560 B), all in internal SRAM (only the CPU touches them); the socket's transmit queue depth 8 and first retransmit 2 s (10 retries, shift 1), which the console's 5 s deadline is asserted to exceed; `VCP` as the console a refusal points to |
 | `src/main.c` | `NET_TTY_TRANSPORT_DEFINE(net_tr)` and the `net>` instance bound to it; `net_tty_init()` right after the NetX objects (`net: telnet console init failed (telnet disabled)` at boot when the init fails); the port, 23, only when the configuration thread cannot be created (until issue #214 always 23, at once) |
 | `src/kv_boot.c` | The port: `net.shell.port`, or 23, handed over once by the configuration thread right after the store opens (issue #214) |
-| `cmds/cmd_blob_board.c` | The YMODEM of `blob write` asks the shared question and is refused on the telnet console with the same words as before: `ymodem: refused on the telnet console -- it would destroy this session. Run it from the VCP console.` (the other YMODEM paths are issue #197) |
+| `cmds/cmd_blob_board.c` | The YMODEM of `blob write` asks the shared question before the erase and is refused on the telnet console with the same words as before: `ymodem: refused on the telnet console -- it would destroy this session. Run it from the VCP console.` |
+| `cmds/cmd_xfer.c` | Both transfer helpers ask the same question as their first statement (issue #228), so `camera send` is refused on the telnet console too, with the same words and before it prints how to start the receiver; until #228 it ran there.  YMODEM over telnet is issue #197 |
 | `port/netxduo/nx_user.h` | `NX_ENABLE_EXTENDED_NOTIFY_SUPPORT` (new in #221) and `NX_ENABLE_TCP_QUEUE_DEPTH_UPDATE_NOTIFY`, which `net_tty.c` requires |
 
 What changed for this board with the shared console:

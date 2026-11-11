@@ -20,6 +20,7 @@
 #include "cli.h"
 #include "cmd_xfer.h"
 #include "log.h"
+#include "net_tty.h"     /* refuse a raw transfer on the telnet console (#228) */
 
 /* ---- YMODEM IO adapter: cli_read_byte / cli_write ------------------------- */
 
@@ -68,6 +69,13 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
 	const struct ym_recv_diag *d;
 	enum ym_result res;
 
+	/* Not over telnet (issue #228): YMODEM needs the raw VCP.  The first
+	 * statement, so a caller that forgot to ask is still refused; one that
+	 * would break something before it gets here (`blob write` erases the
+	 * slot) asks first as well. */
+	if (net_tty_guard(sh, "ymodem"))
+		return 1;
+
 	cli_rx_flush(sh);                /* type-ahead and the command's newline */
 	res = ymodem_recv(&io, sink);
 	cli_rx_flush(sh);                /* a trailing 'O' / CAN / garbage tail  */
@@ -94,6 +102,11 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 {
 	struct ym_io   io = { sh, io_getc, io_put };
 	enum ym_result res;
+
+	/* Not over telnet (issue #228), and before the notice: a refused transfer
+	 * says nothing about starting a receiver. */
+	if (net_tty_guard(sh, "ymodem"))
+		return 1;
 
 	cli_print(sh, "ymodem: sending '%s' (%lu bytes) over the VCP\r\n",
 	          src->name, (unsigned long)src->size);

@@ -115,33 +115,36 @@ static void xfer_drain_until_quiet(struct cli_instance *sh)
 	}
 }
 
-int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
+/* ---- results (one form on the three boards, issue #228) ------------------- *
+ *
+ * Every outcome is written to the log as a word, so `dmesg` reads the same on
+ * every board.  A send also prints its one-line result, while the console is
+ * still held (the caller of the "already held" send cannot print for it).  A
+ * receive prints nothing: its caller says what was stored and why not, and
+ * while a receive runs the PC's terminal still belongs to the sender, so
+ * `dmesg` is where its post-mortem is read.
+ */
+static const char *xfer_result_word(enum ym_result res)
 {
-	struct ym_io io = { sh, io_getc_send, io_put };
-	enum ym_result res;
-
-	/* No telnet question here: this board has no telnet console (issue #228). */
-	cli_print(sh, "ymodem: sending '%s' (%lu bytes) over the console\r\n",
-	          src->name, (unsigned long)src->size);
-	cli_print(sh, "ymodem: start the receiver now -- e.g. `rz` (lrzsz YMODEM); "
-	              "Ctrl+C aborts\r\n");
-	switch (cli_console_claim(sh)) {
-	case 0:
-		break;
-	case -2:
-		cli_error(sh, "ymodem: cannot run in the background -- "
-		              "drop the trailing '&'\r\n");
-		return 1;
-	default:
-		cli_error(sh, "ymodem: console busy\r\n");
-		return 1;
+	switch (res) {
+	case YM_OK:          return "ok";
+	case YM_ERR_CANCEL:  return "cancelled";
+	case YM_ERR_TIMEOUT: return "timeout";
+	case YM_ERR_SOURCE:  return "source read error";
+	case YM_ERR_IO:      return "transport error";
+	case YM_ERR_SINK:    return "rejected by the destination";
+	case YM_ERR_PROTO:   return "protocol error";
+	default:             break;
 	}
-	cli_rx_flush(sh);                /* type-ahead and the command's newline */
-	res = ymodem_send(&io, src);
-	cli_rx_flush(sh);                /* a trailing 'O' / 'C' / garbage tail  */
-	if (res != YM_OK)
-		xfer_drain_until_quiet(sh);  /* the receiver may still be NAKing */
-	cli_console_release(sh);
+	return "unknown result";
+}
+
+static int xfer_send_report(struct cli_instance *sh, const struct ym_source *src,
+                            enum ym_result res)
+{
+	log_write(res == YM_OK ? LOG_LEVEL_INF : LOG_LEVEL_ERR, "xfer",
+	          "send %s: '%s', %lu B", xfer_result_word(res), src->name,
+	          (unsigned long)src->size);
 
 	switch (res) {
 	case YM_OK:
@@ -164,10 +167,59 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 	}
 }
 
+static void xfer_recv_log(enum ym_result res)
+{
+	const struct ym_recv_diag *d = ymodem_recv_diag();
+
+	log_write(res == YM_OK ? LOG_LEVEL_INF : LOG_LEVEL_ERR, "xfer",
+	          "recv %s: blocks=%lu crc=%lu seq=%lu short=%lu tmo=%lu",
+	          xfer_result_word(res), (unsigned long)d->blocks,
+	          (unsigned long)d->bad_crc, (unsigned long)d->bad_seq,
+	          (unsigned long)d->short_read, (unsigned long)d->timeouts);
+	if (d->first_kind >= 0)
+		log_write(LOG_LEVEL_ERR, "xfer",
+		          "first bad blk kind=%02X seq=%d nseq=%d body=%lu/%lu "
+		          "crc=%04X/%04X",
+		          (unsigned)d->first_kind, d->first_seq, d->first_nseq,
+		          (unsigned long)d->first_got, (unsigned long)d->first_want,
+		          (unsigned)d->first_crc_want, (unsigned)d->first_crc_got);
+}
+
+int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
+{
+	struct ym_io io = { sh, io_getc_send, io_put };
+	enum ym_result res;
+	int          rc;
+
+	/* No telnet question here: this board has no telnet console (issue #228). */
+	cli_print(sh, "ymodem: sending '%s' (%lu bytes) over the console\r\n",
+	          src->name, (unsigned long)src->size);
+	cli_print(sh, "ymodem: start the receiver now -- e.g. `rz` (lrzsz YMODEM); "
+	              "Ctrl+C aborts\r\n");
+	switch (cli_console_claim(sh)) {
+	case 0:
+		break;
+	case -2:
+		cli_error(sh, "ymodem: cannot run in the background -- "
+		              "drop the trailing '&'\r\n");
+		return 1;
+	default:
+		cli_error(sh, "ymodem: console busy\r\n");
+		return 1;
+	}
+	cli_rx_flush(sh);                /* type-ahead and the command's newline */
+	res = ymodem_send(&io, src);
+	cli_rx_flush(sh);                /* a trailing 'O' / 'C' / garbage tail  */
+	if (res != YM_OK)
+		xfer_drain_until_quiet(sh);  /* the receiver may still be NAKing */
+	rc = xfer_send_report(sh, src, res);   /* printed while still held */
+	cli_console_release(sh);
+	return rc;
+}
+
 int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
 {
 	struct ym_io io = { sh, io_getc_recv, io_put };
-	const struct ym_recv_diag *d;
 	enum ym_result res;
 
 	/* No telnet question here: this board has no telnet console (issue #228). */
@@ -177,20 +229,6 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
 	if (res != YM_OK)
 		xfer_drain_until_quiet(sh);  /* the sender may still be retrying */
 
-	/* [!] THE POST-MORTEM GOES TO THE LOG, NOT THE CONSOLE.  While a transfer
-	 * runs the PC's terminal belongs to `sb`, so anything printed here is
-	 * swallowed by that program rather than shown; `dmesg` afterwards is
-	 * where an operator can actually read it. */
-	d = ymodem_recv_diag();
-	log_write(res == YM_OK ? LOG_LEVEL_INF : LOG_LEVEL_ERR, "xfer",
-	          "recv rc=%d blk=%lu crc=%lu seq=%lu shrt=%lu tmo=%lu",
-	          (int)res, (unsigned long)d->blocks, (unsigned long)d->bad_crc,
-	          (unsigned long)d->bad_seq, (unsigned long)d->short_read,
-	          (unsigned long)d->timeouts);
-	if (d->first_kind >= 0)
-		log_write(LOG_LEVEL_ERR, "xfer",
-		          "first bad blk kind=%02X seq=%d body=%lu/%lu",
-		          (unsigned)d->first_kind, d->first_seq,
-		          (unsigned long)d->first_got, (unsigned long)d->first_want);
+	xfer_recv_log(res);              /* the caller prints the outcome */
 	return res == YM_OK ? 0 : 1;
 }

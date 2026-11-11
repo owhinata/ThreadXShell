@@ -32,7 +32,9 @@ struct cli_instance;
  *         console (cli_console_claim).
  *
  * Flushes RX, runs ymodem_recv(), flushes again, and drains until the line goes
- * quiet if it failed.  Returns 0 when the batch completed, 1 otherwise.
+ * quiet if it failed.  Prints nothing: the result and the counters go to the
+ * log, and the caller says what was stored (issue #228).  Returns 0 when the
+ * batch completed, 1 otherwise.
  *
  * [!] FOR THE DURATION, THIS FUNCTION IS THE ONLY PERMITTED READER OF THE RX
  * RING.  Nothing in the sink may call cli_cancel_requested(): the poll behind
@@ -56,8 +58,9 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink);
 
 /**
  * @brief  Send @p src to the PC over YMODEM: says what it sends, claims the
- *         console, runs ymodem_send(), releases it and prints the one-line
- *         result -- the same shape as the other boards' xfer_send_source().
+ *         console, runs ymodem_send(), prints the one-line result (and logs
+ *         it) and releases the console -- the same shape as the other boards'
+ *         xfer_send_source().
  *
  * A failed send drains until the line goes quiet before it reports, like the
  * receive above.  A local Ctrl+C aborts (while sending, every byte read back is

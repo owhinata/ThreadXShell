@@ -899,6 +899,17 @@ nn model load <name>         load the blob stored under <name>
   cap is warned about on the console and in `dmesg`.  Until #228 f746g-disco
   and grove-vision-ai-v2 waited 400 ms and stopped at 8 KB, logging nothing
   (grove: only the cap), and f746g-disco did not discard after a failed send.
+- **The board's transfer helper prints nothing about a receive** (issue
+  #228; until then wio-lite-ai's printed one of six result lines); the
+  command's own lines below say what was stored and what was not.  It logs
+  `xfer: recv <result>: blocks=<n> crc=<n> seq=<n> short=<n> tmo=<n>`, the
+  result a word (`ok`, `cancelled`, `timeout`, `rejected by the destination`,
+  `protocol error`, `transport error`), and for the first rejected block
+  `xfer: first bad blk kind=<hex> seq=<n> nseq=<n> body=<got>/<want>
+  crc=<want>/<got>`.  A send (`camera send`, wio-lite-ai's `wifi flash
+  backup`) prints its one-line result before it gives the console back and
+  logs `xfer: send <result>: '<name>', <n> B`; the three boards write the
+  same lines.
 - A finished transfer prints the YMODEM counters, then `rx drops : N (clean)`
   -- with the ring's high-water on a board that reports it (f746g-disco) --
   then `stored :` and `verify : PASS (read back <crc>)`.

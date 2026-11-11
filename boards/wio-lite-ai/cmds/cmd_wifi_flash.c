@@ -635,8 +635,11 @@ static int cmd_flash_imgload(struct cli_instance *sh, int argc, char **argv)
 
 	if (rc != 0) {
 		/* Includes "all the data arrived but the batch never closed" -- not a
-		 * complete image, so it must not be left staged. */
+		 * complete image, so it must not be left staged.  The transfer helper
+		 * prints nothing (issue #228); which way it failed is its `dmesg` line. */
 		rtl_img_invalidate();
+		cli_error(sh, "wifi: the transfer did not complete -- nothing staged "
+		          "(the reason is in `dmesg`)\r\n");
 		goto out;
 	}
 	if (rtl_img_finish() != 0) {

@@ -30,7 +30,7 @@ struct cli_instance;
 /**
  * Send @p src to the PC over the shell's console using YMODEM, assuming the
  * caller ALREADY holds the console (cli_console_claim).  Flushes RX, runs
- * ymodem_send(), flushes RX again and prints a one-line result.
+ * ymodem_send(), flushes RX again and prints a one-line result (also logged).
  *
  * Use this from a command that must keep the console claimed across the whole
  * operation (e.g. `wifi flash backup`, which holds an RTL8720 download session
@@ -63,9 +63,10 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
 /**
  * Receive a YMODEM file from the PC into @p sink over the shell's console,
  * assuming the caller ALREADY holds it (cli_console_claim).  The mirror of
- * xfer_send_source_locked(): flushes RX, runs ymodem_recv(), flushes RX again and
- * prints a one-line result.  Added for owhinata/wio-lite-ai#19 M5 (`wifi flash
- * imgload`).
+ * xfer_send_source_locked(): flushes RX, runs ymodem_recv() and flushes RX again.
+ * Unlike the send it prints nothing (issue #228): the result and the counters go
+ * to the log, and the caller says what was staged or stored and that it was not.
+ * Added for owhinata/wio-lite-ai#19 M5 (`wifi flash imgload`).
  *
  * CRITICAL -- console RX ownership: exactly as on the send side, for the duration
  * of ymodem_recv() the ONLY permitted reader of the console RX ring is this

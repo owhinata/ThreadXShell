@@ -111,6 +111,76 @@ static void xfer_drain_until_quiet(struct cli_instance *sh)
 	}
 }
 
+/* ---- results (one form on the three boards, issue #228) ------------------- *
+ *
+ * Every outcome is written to the log as a word, so `dmesg` reads the same on
+ * every board.  A send also prints its one-line result, while the console is
+ * still held (the caller of the "already held" send cannot print for it).  A
+ * receive prints nothing: its caller says what was stored and why not, and
+ * while a receive runs the PC's terminal still belongs to the sender, so
+ * `dmesg` is where its post-mortem is read.
+ */
+static const char *xfer_result_word(enum ym_result res)
+{
+	switch (res) {
+	case YM_OK:          return "ok";
+	case YM_ERR_CANCEL:  return "cancelled";
+	case YM_ERR_TIMEOUT: return "timeout";
+	case YM_ERR_SOURCE:  return "source read error";
+	case YM_ERR_IO:      return "transport error";
+	case YM_ERR_SINK:    return "rejected by the destination";
+	case YM_ERR_PROTO:   return "protocol error";
+	default:             break;
+	}
+	return "unknown result";
+}
+
+static int xfer_send_report(struct cli_instance *sh, const struct ym_source *src,
+                            enum ym_result res)
+{
+	log_write(res == YM_OK ? LOG_LEVEL_INF : LOG_LEVEL_ERR, "xfer",
+	          "send %s: '%s', %lu B", xfer_result_word(res), src->name,
+	          (unsigned long)src->size);
+
+	switch (res) {
+	case YM_OK:
+		cli_print(sh, "ymodem: sent %lu bytes OK\r\n",
+		          (unsigned long)src->size);
+		return 0;
+	case YM_ERR_CANCEL:
+		cli_warn(sh, "ymodem: cancelled\r\n");
+		return 1;
+	case YM_ERR_TIMEOUT:
+		cli_error(sh, "ymodem: timeout -- no receiver? start `rz` on the PC\r\n");
+		return 1;
+	case YM_ERR_SOURCE:
+		cli_error(sh, "ymodem: source read error\r\n");
+		return 1;
+	case YM_ERR_IO:
+	default:
+		cli_error(sh, "ymodem: transport error\r\n");
+		return 1;
+	}
+}
+
+static void xfer_recv_log(enum ym_result res)
+{
+	const struct ym_recv_diag *d = ymodem_recv_diag();
+
+	log_write(res == YM_OK ? LOG_LEVEL_INF : LOG_LEVEL_ERR, "xfer",
+	          "recv %s: blocks=%lu crc=%lu seq=%lu short=%lu tmo=%lu",
+	          xfer_result_word(res), (unsigned long)d->blocks,
+	          (unsigned long)d->bad_crc, (unsigned long)d->bad_seq,
+	          (unsigned long)d->short_read, (unsigned long)d->timeouts);
+	if (d->first_kind >= 0)
+		log_write(LOG_LEVEL_ERR, "xfer",
+		          "first bad blk kind=%02X seq=%d nseq=%d body=%lu/%lu "
+		          "crc=%04X/%04X",
+		          (unsigned)d->first_kind, d->first_seq, d->first_nseq,
+		          (unsigned long)d->first_got, (unsigned long)d->first_want,
+		          (unsigned)d->first_crc_want, (unsigned)d->first_crc_got);
+}
+
 /* ---- receive (issue #194) ------------------------------------------------- */
 
 static int io_getc_recv(void *ctx, unsigned timeout_ms)
@@ -124,7 +194,6 @@ static int io_getc_recv(void *ctx, unsigned timeout_ms)
 int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
 {
 	struct ym_io io = { sh, io_getc_recv, io_put };
-	const struct ym_recv_diag *d;
 	enum ym_result res;
 
 	/* Not over telnet (issue #228): YMODEM needs the raw VCP.  The first
@@ -140,19 +209,7 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
 	if (res != YM_OK)
 		xfer_drain_until_quiet(sh);    /* the sender may still be retrying */
 
-	/* The post-mortem goes to the log, not the console: while a transfer
-	 * runs the PC's terminal belongs to the sender. */
-	d = ymodem_recv_diag();
-	log_write(res == YM_OK ? LOG_LEVEL_INF : LOG_LEVEL_ERR, "xfer",
-	          "recv rc=%d blk=%lu crc=%lu seq=%lu shrt=%lu tmo=%lu",
-	          (int)res, (unsigned long)d->blocks, (unsigned long)d->bad_crc,
-	          (unsigned long)d->bad_seq, (unsigned long)d->short_read,
-	          (unsigned long)d->timeouts);
-	if (d->first_kind >= 0)
-		log_write(LOG_LEVEL_ERR, "xfer",
-		          "first bad blk kind=%02X seq=%d body=%lu/%lu",
-		          (unsigned)d->first_kind, d->first_seq,
-		          (unsigned long)d->first_got, (unsigned long)d->first_want);
+	xfer_recv_log(res);              /* the caller prints the outcome */
 	return res == YM_OK ? 0 : 1;
 }
 
@@ -160,6 +217,7 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 {
 	struct ym_io   io = { sh, io_getc, io_put };
 	enum ym_result res;
+	int            rc;
 
 	/* Not over telnet (issue #228), and before the notice: a refused transfer
 	 * says nothing about starting a receiver. */
@@ -187,25 +245,7 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 	cli_rx_flush(sh);                  /* drop a trailing 'O'/'C'/garbage tail   */
 	if (res != YM_OK)
 		xfer_drain_until_quiet(sh);    /* the receiver may still be NAKing */
+	rc = xfer_send_report(sh, src, res);   /* printed while still held */
 	cli_console_release(sh);
-
-	switch (res) {
-	case YM_OK:
-		cli_print(sh, "ymodem: sent %lu bytes OK\r\n",
-		          (unsigned long)src->size);
-		return 0;
-	case YM_ERR_CANCEL:
-		cli_warn(sh, "ymodem: cancelled\r\n");
-		return 1;
-	case YM_ERR_TIMEOUT:
-		cli_error(sh, "ymodem: timeout -- no receiver? start `rz` on the PC\r\n");
-		return 1;
-	case YM_ERR_SOURCE:
-		cli_error(sh, "ymodem: source read error\r\n");
-		return 1;
-	case YM_ERR_IO:
-	default:
-		cli_error(sh, "ymodem: transport error\r\n");
-		return 1;
-	}
+	return rc;
 }

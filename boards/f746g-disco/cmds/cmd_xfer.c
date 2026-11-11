@@ -21,6 +21,7 @@
 #include "cmd_xfer.h"
 #include "log.h"
 #include "net_tty.h"     /* refuse a raw transfer on the telnet console (#228) */
+#include "tx_api.h"      /* tx_time_get(): the drain's longest gap */
 
 /* ---- YMODEM IO adapter: cli_read_byte / cli_write ------------------------- */
 
@@ -37,12 +38,80 @@ static int io_put(void *ctx, const uint8_t *buf, size_t len)
 	return cli_write((struct cli_instance *)ctx, buf, len) < 0 ? -1 : 0;
 }
 
-/* ---- receive (issue #194) ------------------------------------------------- */
+/* ---- post-failure drain (one rule on the three boards, issue #228) -------- *
+ *
+ * After a FAILED transfer, keep discarding until the line goes quiet.  One
+ * cli_rx_flush() is not enough (owhinata/wio-lite-ai#10 caught it on hardware):
+ * a peer that has just been sent CAN retries the block it was on a couple of
+ * times before it accepts the cancel, and bytes still arriving when this
+ * returns reach the line editor and are RUN AS A COMMAND -- a rejected
+ * sender's block 0 put its filename on the prompt.  Both directions drain: a
+ * receiver that never saw our CAN goes on NAKing exactly like a sender does.
+ *
+ * The numbers are wio-lite-ai's, the only measured ones (board #2: lrzsz
+ * retried twice well within a second, then quit; 286 B drained, nothing
+ * leaked); until issue #228 f746g-disco and grove-vision-ai-v2 waited 400 ms
+ * and stopped at 8 KB, and f746g-disco did not drain after a send at all.
+ * The byte cap only matters against a peer that never stops: at 115200 baud
+ * 256 KB takes about 23 s, at 921600 about 3 s, over USB CDC a moment.
+ * Hitting it is "stopped discarding while bytes were still coming", which is
+ * said on the console and in the log rather than read as a clean drain.  Nor
+ * is the quiet window a proof that the peer stopped; it is sized against what
+ * was seen, and the longest gap (from the start of the drain or the previous
+ * late byte to the next one) goes to the log so the window can be checked
+ * again.  What keeps that acceptable is that the sender and the console
+ * operator are the same party: this is robustness, not a privilege boundary.
+ *
+ * Only on the failure path: after YM_OK the batch is closed and the peer has
+ * stopped, so the success path keeps its timing.
+ */
+#define XFER_DRAIN_QUIET_MS    1000u
+#define XFER_DRAIN_MAX_BYTES   262144u
 
-/* How long the line must stay quiet after a failed receive, and how much a
- * drain may swallow before it gives up -- grove-vision-ai-v2's numbers. */
-#define XFER_DRAIN_QUIET_MS   400u
-#define XFER_DRAIN_MAX_BYTES  8192u
+/* The gap below is measured in ticks and reported in ms, and cli_read_byte()
+ * takes its timeout in ticks as ms: both need the 1 kHz tick. */
+_Static_assert(TX_TIMER_TICKS_PER_SECOND == 1000,
+               "the drain's quiet window and gap assume 1 tick = 1 ms");
+
+static void xfer_drain_until_quiet(struct cli_instance *sh)
+{
+	uint32_t dropped = 0u;
+	ULONG    last    = tx_time_get();
+	ULONG    gap_max = 0u;
+
+	while (dropped < XFER_DRAIN_MAX_BYTES) {
+		ULONG now;
+
+		/* <0 is the quiet window expiring or the session going away; both
+		 * mean stop.  cli_read_byte() waits on an event flag rather than
+		 * spinning, so the other threads keep running throughout. */
+		if (cli_read_byte(sh, XFER_DRAIN_QUIET_MS) < 0)
+			break;
+		now = tx_time_get();
+		if ((ULONG)(now - last) > gap_max)       /* wrap-safe */
+			gap_max = (ULONG)(now - last);
+		last = now;
+		dropped++;
+	}
+	cli_rx_flush(sh);
+
+	if (dropped >= XFER_DRAIN_MAX_BYTES) {
+		cli_warn(sh, "xfer: the peer is STILL sending -- stopped discarding after "
+		         "%lu B, so stray bytes may reach the prompt and be run as a "
+		         "command. Stop the program on the PC.\r\n",
+		         (unsigned long)dropped);
+		log_write(LOG_LEVEL_WRN, "xfer",
+		          "drain cap hit at %lu B, longest gap %lu ms -- peer did not stop",
+		          (unsigned long)dropped, (unsigned long)gap_max);
+	} else if (dropped != 0u) {
+		log_write(LOG_LEVEL_INF, "xfer",
+		          "drained %lu late byte(s) from the peer after a failed "
+		          "transfer, longest gap %lu ms",
+		          (unsigned long)dropped, (unsigned long)gap_max);
+	}
+}
+
+/* ---- receive (issue #194) ------------------------------------------------- */
 
 static int io_getc_recv(void *ctx, unsigned timeout_ms)
 {
@@ -50,17 +119,6 @@ static int io_getc_recv(void *ctx, unsigned timeout_ms)
 	 * stream is the file, and about one byte in 256 of binary content is
 	 * 0x03.  The send direction maps it (io_getc above); this must not. */
 	return cli_read_byte((struct cli_instance *)ctx, timeout_ms);
-}
-
-static void drain_until_quiet(struct cli_instance *sh)
-{
-	uint32_t dropped = 0u;
-
-	while (dropped < XFER_DRAIN_MAX_BYTES) {
-		if (cli_read_byte(sh, XFER_DRAIN_QUIET_MS) < 0)
-			return;             /* quiet for the whole window */
-		dropped++;
-	}
 }
 
 int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
@@ -80,7 +138,7 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
 	res = ymodem_recv(&io, sink);
 	cli_rx_flush(sh);                /* a trailing 'O' / CAN / garbage tail  */
 	if (res != YM_OK)
-		drain_until_quiet(sh);
+		xfer_drain_until_quiet(sh);    /* the sender may still be retrying */
 
 	/* The post-mortem goes to the log, not the console: while a transfer
 	 * runs the PC's terminal belongs to the sender. */
@@ -127,6 +185,8 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 	cli_rx_flush(sh);                  /* drop type-ahead / the command newline */
 	res = ymodem_send(&io, src);
 	cli_rx_flush(sh);                  /* drop a trailing 'O'/'C'/garbage tail   */
+	if (res != YM_OK)
+		xfer_drain_until_quiet(sh);    /* the receiver may still be NAKing */
 	cli_console_release(sh);
 
 	switch (res) {

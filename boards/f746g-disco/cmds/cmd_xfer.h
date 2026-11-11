@@ -27,8 +27,9 @@ struct cli_instance;
 
 /**
  * Send @p src to the PC over the shell's VCP using YMODEM: claim the console
- * (hold the output lock, enter raw mode), flush RX, run ymodem_send(), then
- * restore the console and print a one-line result.  The caller owns @p src and
+ * (hold the output lock, enter raw mode), flush RX, run ymodem_send(), drain
+ * until the line goes quiet if it failed (issue #228), then restore the
+ * console and print a one-line result.  The caller owns @p src and
  * any underlying resource (frame validity) for the duration.  On the telnet
  * console it is refused before anything else is printed (issue #228).
  * Returns 0 on a completed transfer, 1 on any failure / cancel.

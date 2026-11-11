@@ -59,9 +59,10 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink);
  *         console, runs ymodem_send(), releases it and prints the one-line
  *         result -- the same shape as the other boards' xfer_send_source().
  *
- * A local Ctrl+C aborts (while sending, every byte read back is protocol).  The
- * source's read may refuse (the frame replaced, the camera busy), which ends
- * the transfer as a source error.  A background job is refused: the transfer
+ * A failed send drains until the line goes quiet before it reports, like the
+ * receive above.  A local Ctrl+C aborts (while sending, every byte read back is
+ * protocol).  The source's read may refuse (the frame replaced, the camera
+ * busy), which ends the transfer as a source error.  A background job is refused: the transfer
  * needs the foreground's RX.  Returns 0 on a completed transfer, 1 otherwise.
  */
 int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);

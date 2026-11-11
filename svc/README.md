@@ -890,6 +890,15 @@ nn model load <name>         load the blob stored under <name>
   FAIL -- ... Slot N is left incomplete (not valid); `blob write <name> N`
   sends it again`); a magic program that reports failure says the slot may
   read valid, invalid or incomplete and points at `blob list`.
+- **A failed transfer discards what the PC still sends before it reports**
+  (issue #228; the board's transfer helper, the same for `camera send`): it
+  waits until the line has been quiet for 1 s, at most 256 KB, then empties
+  the receive ring again, so a retried block cannot reach the prompt and run
+  as a command.  `dmesg` gets `xfer: drained <n> late byte(s) from the peer
+  after a failed transfer, longest gap <ms> ms`; a peer still sending at the
+  cap is warned about on the console and in `dmesg`.  Until #228 f746g-disco
+  and grove-vision-ai-v2 waited 400 ms and stopped at 8 KB, logging nothing
+  (grove: only the cap), and f746g-disco did not discard after a failed send.
 - A finished transfer prints the YMODEM counters, then `rx drops : N (clean)`
   -- with the ring's high-water on a board that reports it (f746g-disco) --
   then `stored :` and `verify : PASS (read back <crc>)`.

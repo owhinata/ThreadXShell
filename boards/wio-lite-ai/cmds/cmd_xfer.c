@@ -22,6 +22,7 @@
 #include "cmd_xfer.h"
 #include "net_tty.h"     /* refuse a raw transfer on the telnet console */
 #include "log.h"          /* transfer post-mortem into the dmesg ring -- see below */
+#include "tx_api.h"       /* tx_time_get(): the drain's longest gap */
 
 #include <string.h>
 
@@ -65,55 +66,59 @@ static int io_put(void *ctx, const uint8_t *buf, size_t len)
 	return cli_write((struct cli_instance *)ctx, buf, len) < 0 ? -1 : 0;
 }
 
-/* ---- post-failure drain --------------------------------------------------- *
+/* ---- post-failure drain (one rule on the three boards, issue #228) -------- *
  *
- * After a FAILED transfer, keep discarding until the line goes quiet.
+ * After a FAILED transfer, keep discarding until the line goes quiet.  One
+ * cli_rx_flush() is not enough (owhinata/wio-lite-ai#10 caught it on hardware):
+ * a peer that has just been sent CAN retries the block it was on a couple of
+ * times before it accepts the cancel, and bytes still arriving when this
+ * returns reach the line editor and are RUN AS A COMMAND -- a rejected
+ * sender's block 0 put its filename on the prompt.  Both directions drain: a
+ * receiver that never saw our CAN goes on NAKing exactly like a sender does.
  *
- * ONE cli_rx_flush() IS NOT ENOUGH, and owhinata/wio-lite-ai#10 caught it on hardware:
- * a peer that has just been sent CAN does not stop instantly.  lrzsz retries the block
- * it was on a couple of times before it accepts the cancel, and those retries arrive
- * AFTER the flush -- so they land in the line editor, which echoes them and RUNS
- * THEM AS A COMMAND.  Rejecting an oversized file with `blob write` put the
- * sender's block 0 (filename, size, mtime, mode) on the prompt and executed the
- * filename.  It printed "command not found" that time; the point is that it is the
- * SENDER choosing what the shell executes, which is not a thing to leave in.
+ * The numbers are wio-lite-ai's, the only measured ones (board #2: lrzsz
+ * retried twice well within a second, then quit; 286 B drained, nothing
+ * leaked); until issue #228 f746g-disco and grove-vision-ai-v2 waited 400 ms
+ * and stopped at 8 KB, and f746g-disco did not drain after a send at all.
+ * The byte cap only matters against a peer that never stops: at 115200 baud
+ * 256 KB takes about 23 s, at 921600 about 3 s, over USB CDC a moment.
+ * Hitting it is "stopped discarding while bytes were still coming", which is
+ * said on the console and in the log rather than read as a clean drain.  Nor
+ * is the quiet window a proof that the peer stopped; it is sized against what
+ * was seen, and the longest gap (from the start of the drain or the previous
+ * late byte to the next one) goes to the log so the window can be checked
+ * again.  What keeps that acceptable is that the sender and the console
+ * operator are the same party: this is robustness, not a privilege boundary.
  *
- * Bounded two ways, because the peer might not stop at all: a quiet window that
- * ends as soon as nothing more arrives, and a byte cap so the loop terminates
- * against a peer that never stops.  Both directions drain -- a receiver that never
- * saw our CAN goes on NAKing exactly like a sender does.
- *
- * BE HONEST ABOUT WHAT THE CAP MEANS.  Hitting it is not a clean finish: it is
- * "stopped discarding while bytes were still coming", i.e. the original bug again.
- * So it is set far past anything a real peer emits after a CAN -- lrzsz's retried
- * block 0 is ~133 B, and this is 256 KB, which USB CDC moves in a fraction of a
- * second, because draining bytes is nearly free while returning early is exactly
- * what puts them on the prompt.  If it is ever reached anyway, that is SAID, on the
- * console and in the log, rather than being allowed to read as a clean drain.
- *
- * Nor is the quiet window a proof of quiescence -- nothing available here is.  A
- * peer that goes quiet for a second and then retries can still get bytes to the
- * prompt.  It is a mitigation sized against measured behaviour (on board #2, lrzsz
- * retried twice within well under a second and then quit), not a guarantee.  What
- * keeps that acceptable is that the sender and the console operator are the SAME
- * party: this is robustness, not a privilege boundary being defended.
- *
- * ONLY ON THE FAILURE PATH.  After YM_OK the batch is closed and the peer has
- * stopped by construction, so the proven success path keeps its timing unchanged.
+ * Only on the failure path: after YM_OK the batch is closed and the peer has
+ * stopped, so the success path keeps its timing.
  */
 #define XFER_DRAIN_QUIET_MS    1000u
 #define XFER_DRAIN_MAX_BYTES   262144u
 
+/* The gap below is measured in ticks and reported in ms, and cli_read_byte()
+ * takes its timeout in ticks as ms: both need the 1 kHz tick. */
+_Static_assert(TX_TIMER_TICKS_PER_SECOND == 1000,
+               "the drain's quiet window and gap assume 1 tick = 1 ms");
+
 static void xfer_drain_until_quiet(struct cli_instance *sh)
 {
 	uint32_t dropped = 0u;
+	ULONG    last    = tx_time_get();
+	ULONG    gap_max = 0u;
 
 	while (dropped < XFER_DRAIN_MAX_BYTES) {
-		/* <0 is either the quiet window expiring or the session going away;
-		 * both mean stop.  cli_read_byte() waits on an event flag rather than
-		 * spinning, so the IWDG petter keeps running throughout. */
+		ULONG now;
+
+		/* <0 is the quiet window expiring or the session going away; both
+		 * mean stop.  cli_read_byte() waits on an event flag rather than
+		 * spinning, so the other threads keep running throughout. */
 		if (cli_read_byte(sh, XFER_DRAIN_QUIET_MS) < 0)
 			break;
+		now = tx_time_get();
+		if ((ULONG)(now - last) > gap_max)       /* wrap-safe */
+			gap_max = (ULONG)(now - last);
+		last = now;
 		dropped++;
 	}
 	cli_rx_flush(sh);
@@ -124,12 +129,13 @@ static void xfer_drain_until_quiet(struct cli_instance *sh)
 		         "command. Stop the program on the PC.\r\n",
 		         (unsigned long)dropped);
 		log_write(LOG_LEVEL_WRN, "xfer",
-		          "drain cap hit at %lu B -- peer did not stop",
-		          (unsigned long)dropped);
+		          "drain cap hit at %lu B, longest gap %lu ms -- peer did not stop",
+		          (unsigned long)dropped, (unsigned long)gap_max);
 	} else if (dropped != 0u) {
 		log_write(LOG_LEVEL_INF, "xfer",
-		          "drained %lu late byte(s) from the peer after a failed transfer",
-		          (unsigned long)dropped);
+		          "drained %lu late byte(s) from the peer after a failed "
+		          "transfer, longest gap %lu ms",
+		          (unsigned long)dropped, (unsigned long)gap_max);
 	}
 }
 

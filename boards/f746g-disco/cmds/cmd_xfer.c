@@ -140,8 +140,8 @@ static int xfer_send_report(struct cli_instance *sh, const struct ym_source *src
                             enum ym_result res)
 {
 	log_write(res == YM_OK ? LOG_LEVEL_INF : LOG_LEVEL_ERR, "xfer",
-	          "send %s: '%s', %lu B", xfer_result_word(res), src->name,
-	          (unsigned long)src->size);
+	          "send %s: %lu B, '%s'", xfer_result_word(res),
+	          (unsigned long)src->size, src->name);
 
 	switch (res) {
 	case YM_OK:

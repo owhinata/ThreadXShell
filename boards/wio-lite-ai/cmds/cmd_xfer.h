@@ -30,7 +30,8 @@ struct cli_instance;
 /**
  * Send @p src to the PC over the shell's console using YMODEM, assuming the
  * caller ALREADY holds the console (cli_console_claim).  Flushes RX, runs
- * ymodem_send(), flushes RX again and prints a one-line result (also logged).
+ * ymodem_send(), flushes RX again, drains until the line goes quiet if it
+ * failed, and prints a one-line result (also logged).
  *
  * Use this from a command that must keep the console claimed across the whole
  * operation (e.g. `wifi flash backup`, which holds an RTL8720 download session

@@ -41,9 +41,9 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
  * caller ALREADY holds the console (cli_console_claim).  Flushes RX, runs
  * ymodem_recv(), flushes again, and drains until the line goes quiet if it
  * failed.  Prints nothing: the result and the counters go to the log, and the
- * caller says what was stored (issue #228).  Refused on the telnet console (issue #228; `blob write` asks the
- * same question itself before it erases).  Returns 0 when the batch completed,
- * 1 otherwise.
+ * caller says what was stored (issue #228).  Refused on the telnet console
+ * (issue #228; `blob write` asks the same question itself before it erases).
+ * Returns 0 when the batch completed, 1 otherwise.
  *
  * [!] FOR THE DURATION, THIS FUNCTION IS THE ONLY PERMITTED READER OF THE RX
  * RING: nothing in the sink may call cli_cancel_requested(), whose poll drains

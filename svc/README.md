@@ -917,7 +917,8 @@ nn model load <name>         load the blob stored under <name>
   `xfer: first bad blk kind=<hex> seq=<n> nseq=<n> body=<got>/<want>
   crc=<want>/<got>`.  A send (`camera send`, wio-lite-ai's `wifi flash
   backup`) prints its one-line result before it gives the console back and
-  logs `xfer: send <result>: '<name>', <n> B`; the three boards write the
+  logs `xfer: send <result>: <n> B, '<name>'` (the size first, so a long name
+  cannot push it off the end of the log line); the three boards write the
   same lines.
 - A finished transfer prints the YMODEM counters, then `rx drops : N (clean)`
   -- with the ring's high-water on a board that reports it (f746g-disco) --

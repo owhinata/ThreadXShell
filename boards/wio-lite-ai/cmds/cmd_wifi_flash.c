@@ -407,7 +407,7 @@ static void bak_build_name(char *buf, uint32_t off, uint32_t len)
 
 /* wifi flash backup [offset] [len] (owhinata/wio-lite-ai#19, M4): NON-DESTRUCTIVE full-chip
    backup.
- * Streams the flash to the PC over the console with YMODEM (receive with `rz`).
+ * Streams the flash to the PC over the console with YMODEM (receive with `rb -y`).
  * Defaults to the whole chip as detected by the address-wrap probe. */
 static int cmd_flash_backup(struct cli_instance *sh, int argc, char **argv)
 {
@@ -473,7 +473,7 @@ static int cmd_flash_backup(struct cli_instance *sh, int argc, char **argv)
 	src.ctx = &src_ctx; src.name = name; src.size = len; src.read = bak_src_read;
 
 	cli_print(sh, "wifi: sending '%s' (%lu bytes) -- start the receiver now "
-	          "(`rz`, or Ctrl+A Ctrl+R in picocom)\r\n", name, (unsigned long)len);
+	          "(`rb -y`, or Ctrl+A Ctrl+R in picocom)\r\n", name, (unsigned long)len);
 	/* From here until the transfer ends, io_getc() owns the console RX (see above). */
 	rc = xfer_send_source_locked(sh, &src);
 	if (rc != 0) {

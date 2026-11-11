@@ -942,7 +942,7 @@ image knobs.
   critical section, because the producer rewrites them on its own thread.
 - **`camera send [name]`** sends the last `camera capture` as it is: 230,400
   bytes, the B plane, then G, then R (WDMA3's order; `camera capture`'s
-  `B(plane 0)` / `G(plane 1)` / `R(plane 2)`).  On the PC (`rz -y -b`), make a
+  `B(plane 0)` / `G(plane 1)` / `R(plane 2)`).  On the PC (`rb -y`), make a
   PNG with
   `python3 boards/grove-vision-ai-v2/scripts/planar_bgr_to_png.py frame.raw out.png`.
   That PNG is the raw planes, and it looks darker and flatter than the panel:
@@ -2902,13 +2902,14 @@ wire.  Issue #93 put the chain back as a sender picocom was pointed at; **issue
 
 ```
 cmake --build build/grove-vision-ai-v2 --target asset-blazeface
-picocom -b 921600 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0
+picocom -b 921600 --send-cmd "sb -k" --receive-cmd "rb -y" /dev/ttyACM0
 ```
 
 picocom is now started **one way, forever** -- no `--profile`, no `--slot`, no
-restarting it to change models.  `--receive-cmd "rb"` is inert on this board:
-nothing here sends a file to the PC.  The target prints the path to paste and a
-CRC32 to check afterwards; see **Sending an asset** below.
+restarting it to change models.  `--receive-cmd "rb -y"` is what `camera send`
+asks for (Ctrl+A Ctrl+R); nothing in the asset flow sends a file to the PC.
+The target prints the path to paste and a CRC32 to check afterwards; see
+**Sending an asset** below.
 
 The profile is still declared and never guessed -- it is now a property of the
 `grove_add_asset()` declaration in `board.cmake` rather than something typed at
@@ -6365,7 +6366,7 @@ line.)
 Then, with picocom started the one way it is ever started:
 
 ```
-picocom -b 921600 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0
+picocom -b 921600 --send-cmd "sb -k" --receive-cmd "rb -y" /dev/ttyACM0
 ```
 
 ```

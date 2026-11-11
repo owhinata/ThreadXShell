@@ -16,7 +16,7 @@
  *   camera scan           list every 7-bit SCCB address that ACKs
  *   camera reg <a> <r> .. raw SCCB register read / write
  *
- * plus camera_board_send() (YMODEM, with this board's `rz -y -b` reminder) and,
+ * plus camera_board_send() (YMODEM) and,
  * with the microSD built in, camera_board_medium() (shell/cmds/
  * camera_cmd_board.h).  The notes below are about reading the capture report,
  * which camera_svc_wio.c now writes.
@@ -105,16 +105,16 @@ static void report(struct cli_instance *sh, int rc)
 /* ---- the shell-layer services (shell/cmds/camera_cmd_board.h) ------------ */
 
 /*
- * On the PC side use `rz -y -b`, and `ffmpeg -y` to render.  Without those flags
- * neither tool overwrites an existing file -- YMODEM block 0 carries a name and a
- * size but no mtime, so rz has nothing to compare -- and you quietly keep looking
- * at the PREVIOUS capture, which is indistinguishable from a camera that has
- * stopped producing new frames.  That is exactly what happened during bring-up.
+ * The transfer helper's notice asks for `rb -y` on every board (issue #228; this
+ * board printed its own `rz -y -b` reminder until then).  Without -y lrzsz does
+ * not overwrite an existing file -- YMODEM block 0 carries a name and a size but
+ * no mtime, so it has nothing to compare -- and you quietly keep looking at the
+ * PREVIOUS capture, which is indistinguishable from a camera that has stopped
+ * producing new frames.  That is exactly what happened during bring-up.  Render
+ * with `ffmpeg -y` for the same reason.
  */
 int camera_board_send(struct cli_instance *sh, const struct ym_source *src)
 {
-	cli_print(sh, "camera: receive with `rz -y -b` -- without -y an existing "
-	              "file is kept and you get the previous frame\r\n");
 	return xfer_send_source(sh, src);
 }
 

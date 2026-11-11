@@ -702,6 +702,15 @@ What the contract fixes, on every board:
 - **A frame read checks and copies in one step** under the same exclusion as
   every path that starts overwriting the buffer.  `save` / `send` read the last
   `camera capture`.
+- **`send` says the same on every board** (the board's transfer helper, issue
+  #228): `ymodem: sending '<name>' (<n> bytes) over the console`, then ``ymodem:
+  start the receiver now -- `rb -y` (lrzsz YMODEM; -y replaces an older file
+  of that name) or Ctrl+A Ctrl+R in picocom; Ctrl+C aborts``, and a timeout
+  says ``start `rb -y` on the PC``.  The `-y` matters: YMODEM's block 0 has no
+  modification time, so without it lrzsz keeps the file already there and the
+  previous capture reads like a camera that stopped.  Until #228 f746g-disco
+  said `rb` (and `rz` on a timeout), the other two `rz`, and wio-lite-ai added
+  a line of its own asking for `rz -y -b`.
 - **`camera off` waits for the stream it stopped by its generation**, and leaves
   the power on after a TIMEOUT, any other failed stop, or a Ctrl+C.
 - **The capture reports its warm-up** (frames let go, or ms) on the caller's

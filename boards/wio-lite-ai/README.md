@@ -424,7 +424,7 @@ SD, so no `camera save`); `CAMERA_SVC_OFF_STOPS_STREAM 1`.
 camera probe | on | off | info
 camera capture [test]           snapshot one frame + channel statistics
 camera save [sd] <path>         (BSP_ENABLE_SD builds) the LAST capture, raw
-camera send [name]              the LAST capture over YMODEM (`rz -y -b`)
+camera send [name]              the LAST capture over YMODEM (`rb -y` on the PC)
 camera stream start [test] | stop | stats
 camera scan | reg <addr> <reg> [value] [-16]   (this board's own)
 ```
@@ -1550,7 +1550,7 @@ the M7 has.
 
 ```bash
 cmake --build build/wio-lite-ai --target asset-blazeface
-picocom -b 115200 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0
+picocom -b 115200 --send-cmd "sb -k" --receive-cmd "rb -y" /dev/ttyACM0
 ```
 
 The target fetches the pinned model (the same commit and SHA-256 Grove uses;

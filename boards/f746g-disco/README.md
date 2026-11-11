@@ -18,7 +18,7 @@ cmake -B build/f746g-disco -G Ninja \
       -DBOARD=f746g-disco
 cmake --build build/f746g-disco
 cmake --build build/f746g-disco --target flash   # ST-Link
-picocom -b 115200 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0   # the VCP
+picocom -b 115200 --send-cmd "sb -k" --receive-cmd "rb -y" /dev/ttyACM0   # the VCP
 ```
 
 The first configure downloads the pinned ARM GNU toolchain into `tools/` and

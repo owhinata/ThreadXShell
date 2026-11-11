@@ -100,7 +100,7 @@ static void xfer_drain_until_quiet(struct cli_instance *sh)
 	cli_rx_flush(sh);
 
 	if (dropped >= XFER_DRAIN_MAX_BYTES) {
-		cli_warn(sh, "xfer: the peer is STILL sending -- stopped discarding after "
+		cli_warn(sh, "ymodem: the peer is STILL sending -- stopped discarding after "
 		         "%lu B, so stray bytes may reach the prompt and be run as a "
 		         "command. Stop the program on the PC.\r\n",
 		         (unsigned long)dropped);
@@ -155,7 +155,7 @@ static int xfer_send_report(struct cli_instance *sh, const struct ym_source *src
 		cli_warn(sh, "ymodem: cancelled\r\n");
 		return 1;
 	case YM_ERR_TIMEOUT:
-		cli_error(sh, "ymodem: timeout -- no receiver? start `rz` on the PC\r\n");
+		cli_error(sh, "ymodem: timeout -- no receiver? start `rb -y` on the PC\r\n");
 		return 1;
 	case YM_ERR_SOURCE:
 		cli_error(sh, "ymodem: source read error\r\n");
@@ -194,8 +194,9 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 	/* No telnet question here: this board has no telnet console (issue #228). */
 	cli_print(sh, "ymodem: sending '%s' (%lu bytes) over the console\r\n",
 	          src->name, (unsigned long)src->size);
-	cli_print(sh, "ymodem: start the receiver now -- e.g. `rz` (lrzsz YMODEM); "
-	              "Ctrl+C aborts\r\n");
+	cli_print(sh, "ymodem: start the receiver now -- `rb -y` (lrzsz YMODEM; -y "
+	              "replaces an older file of that name) or Ctrl+A Ctrl+R in "
+	              "picocom; Ctrl+C aborts\r\n");
 	switch (cli_console_claim(sh)) {
 	case 0:
 		break;

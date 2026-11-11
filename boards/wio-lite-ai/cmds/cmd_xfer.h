@@ -7,9 +7,9 @@
  * @brief   Shared YMODEM-over-console send entry point.
  *
  * cmd_xfer.c owns the console hand-over + YMODEM driving for an injected byte
- * source, so every future sender (owhinata/wio-lite-ai#19's `wifi flash backup`,
- * and an `xfer send <path>` once owhinata/wio-lite-ai#6 brings a filesystem)
- * shares one copy of the RX flush / progress messaging / result mapping.
+ * source, so every sender (owhinata/wio-lite-ai#19's `wifi flash backup`, and
+ * `camera send`) shares one copy of the RX flush / progress messaging / result
+ * mapping.  No `xfer` command is planned (issue #227 removed f746g-disco's).
  *
  * Ported from ../stm32f746g-disco (its owhinata/stm32f746g-disco#50) for
  * owhinata/wio-lite-ai#19 M4, minus the FileX-backed `xfer send sd|fs` command --

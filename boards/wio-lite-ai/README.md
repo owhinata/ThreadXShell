@@ -2208,8 +2208,8 @@ this board's own `src/net_shell.c`, operated with `net shell start` / `stop` /
   receive errors.
 - **Refused on the telnet console**, because each would take away the session
   it runs on or needs the raw serial port: `wifi connect` / `disconnect` /
-  `on` / `off` / `reset`, `mlperf`, and every YMODEM transfer (`xfer`, `blob
-  write`, `wifi flash imgload` / `backup`).  The words are as before:
+  `on` / `off` / `reset`, `mlperf`, and every YMODEM transfer (`camera send`,
+  `blob write`, `wifi flash imgload` / `backup`).  The words are as before:
   `<what>: refused on the telnet console -- it would destroy this session. Run
   it from the USB CDC console.`
 - **`net info` has two `telnet:` lines** (above); nothing of the console goes

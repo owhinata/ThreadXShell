@@ -1363,7 +1363,7 @@ returns 0.  Which commands ask is the board's:
 | Board | Refused on the telnet console | `<other>` |
 |---|---|---|
 | f746g-disco | the YMODEM of `blob write` (the other YMODEM paths are issue #197) | `VCP` |
-| wio-lite-ai | `wifi connect` / `disconnect` / `on` / `off` / `reset`, `mlperf`, and every YMODEM transfer (`xfer`, `blob write`, `wifi flash imgload` / `backup`) | `USB CDC` |
+| wio-lite-ai | `wifi connect` / `disconnect` / `on` / `off` / `reset`, `mlperf`, and every YMODEM transfer (`camera send`, `blob write`, `wifi flash imgload` / `backup`) | `USB CDC` |
 
 The two lines of `net info`, every value sampled in one masked section before
 the first is written, and a failed write ends them:

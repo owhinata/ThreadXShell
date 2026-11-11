@@ -4,14 +4,15 @@
  */
 /**
  * @file    cmd_xfer.h
- * @brief   Shared YMODEM-over-VCP send entry point
+ * @brief   Shared YMODEM-over-VCP send and receive entry points
  * (owhinata/stm32f746g-disco#50).
  *
  * cmd_xfer.c owns the console hand-over + YMODEM driving for an injected byte
- * source.  `xfer send sd <path>` builds a FileX source; `camera send`
- * (cmd_camera_board.c) builds a RAM-frame source -- both call xfer_send_source() so
- * the console claim / RX flush / progress messaging / result mapping live in one
- * place.
+ * source or sink.  `camera send` (cmd_camera_board.c) builds a RAM-frame source
+ * and calls xfer_send_source(), so the console claim / RX flush / progress
+ * messaging / result mapping live in one place; `blob write`
+ * (cmd_blob_board.c) receives through xfer_recv_sink_locked().  There is no
+ * `xfer` command (its `xfer send sd <path>` was removed in issue #227).
  */
 #ifndef CMD_XFER_H
 #define CMD_XFER_H
@@ -28,7 +29,7 @@ struct cli_instance;
  * Send @p src to the PC over the shell's VCP using YMODEM: claim the console
  * (hold the output lock, enter raw mode), flush RX, run ymodem_send(), then
  * restore the console and print a one-line result.  The caller owns @p src and
- * any underlying resource (open file / frame validity) for the duration.
+ * any underlying resource (frame validity) for the duration.
  * Returns 0 on a completed transfer, 1 on any failure / cancel.
  */
 int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);

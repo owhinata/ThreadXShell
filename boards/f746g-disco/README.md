@@ -1233,9 +1233,9 @@ assignment below is provisional):
 | `/pinned.tflite` (the bare pinned blazeface) | 189,816 B | 11 (256 KB) | `verify_tflite` it (`--target verify-model`), then `blob erase 11`, `blob write pinned 11` and send it; compare `blob list` with the CRC `verify_tflite` printed |
 | a `stedgeai_reloc` `.bin` | up to 448 KB | one of 3-8 (512 KB) | `blob write <name> <slot>`; the load refuses a blob longer than 448 KB |
 
-A file that is only on the card can be brought to the PC with `xfer send sd
-<path>` first.  The name a blob is loaded by is the one typed at `blob write`,
-not the file's.
+A file that is only on the card is copied to the PC by taking the card out
+(the `xfer send sd <path>` command went with issue #227).  The name a blob is
+loaded by is the one typed at `blob write`, not the file's.
 
 ### Measured
 
@@ -1816,7 +1816,7 @@ dmesg     echo      eth       free      gui       help
 jobs      kill      kv        lcd       membench  net
 nn        qspi      reboot    sd        sdram     sleep
 thread    touch     uptime    usleep    version   watch
-wdt       xfer
+wdt
 ```
 
 `help` lists them with one-line descriptions; `help <cmd>` and
@@ -1828,7 +1828,8 @@ Subsystems behind them: LTDC + GUIX (`gui`, `lcd`), OV5640 over DCMI
 command until issue #194), microSD (`sd`), FT5336 touch
 (`touch`), the Ethernet MAC and PHY (`eth`) with NetX Duo on top (`net`), the
 NN backends (`nn`), and YMODEM
-transfer over the console (`xfer send` to the PC, `blob write` from it).
+transfer over the console (`camera send` to the PC, `blob write` from it;
+there is no `xfer` command since issue #227).
 
 This board runs two shell instances -- `sh>` on the VCP and `net>` on telnet --
 each with its own line editor, history and RX/TX drop counters, so `console`

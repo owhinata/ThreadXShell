@@ -8,15 +8,16 @@
  *
  * The protocol core (svc/ymodem.c) is transport-agnostic; here we wire its IO
  * vtable to the raw-console API (cli_console_claim/cli_read_byte/cli_write/
- * cli_rx_flush).  The source/sink vtable is supplied by the caller -- for issue
- * owhinata/wio-lite-ai#19 M4 that is the RTL8720DN download-protocol flash reader in
- * cmd_wifi.c, and for M5 the PSRAM firmware-image staging buffer in app/rtl8720_img.c.
- * Both directions share one io_getc()/io_put() pair and therefore one set of rules
- * about who may read the console RX ring (see cmd_xfer.h).
+ * cli_rx_flush).  The source/sink vtable is supplied by the caller: `camera send`'s
+ * last capture (cmd_camera_board.c), `wifi flash backup`'s RTL8720DN flash reader
+ * (owhinata/wio-lite-ai#19 M4) and `wifi flash imgload`'s PSRAM staging buffer
+ * (M5, src/rtl8720_img.c), both in cmd_wifi_flash.c, and `blob write`'s slot
+ * (cmd_blob_board.c).  Both directions share one io_put() and one set of rules about
+ * who may read the console RX ring (see cmd_xfer.h).
  *
- * Ported from ../stm32f746g-disco (its owhinata/stm32f746g-disco#50), dropping its
- * FileX-backed `xfer send sd|fs` command: this repo has no filesystem yet, so no
- * command is registered here and only the reusable send helpers live in this file.
+ * Ported from ../stm32f746g-disco (its owhinata/stm32f746g-disco#50) without its
+ * `xfer` command; no command is registered here.  The same wiring is in the other
+ * two boards' cmd_xfer.c (issue #228 made the three say and do the same).
  */
 #include "cli.h"
 #include "cmd_xfer.h"
@@ -215,13 +216,14 @@ int xfer_send_source_locked(struct cli_instance *sh, const struct ym_source *src
 	enum ym_result res;
 
 	/*
-	 * Not over telnet.  YMODEM needs a raw, byte-timed console: the telnet path escapes
-	 * 0xFF (IAC) on the way out, hands bytes over in ~250 ms polls, and rides an eRPC link
-	 * whose round-trip dwarfs the protocol's own timeouts -- the transfer would corrupt or
-	 * stall.  Checked here so every YMODEM user (`camera send`, `blob write`, `wifi
-	 * flash imgload` / `flash backup`) is covered by one rule; a caller that would break
-	 * something first (erase a slot, invalidate the staged image, take the WiFi link
-	 * down) asks the same question itself before it does (issue #228).
+	 * Not over telnet.  YMODEM needs a raw, 8-bit clean console, and the telnet one
+	 * (shell/cmds/net_tty.c) is not: it drops IAC sequences on the way in and doubles
+	 * 0xFF on the way out, does not negotiate BINARY, so the client may rewrite CR,
+	 * and its receive ring is 512 B against a 1,029 B block (YMODEM over telnet is
+	 * issue #197).  Checked here so every YMODEM user (`camera send`, `blob write`,
+	 * `wifi flash imgload` / `flash backup`) is covered by one rule; a caller that
+	 * would break something first (erase a slot, invalidate the staged image, take
+	 * the WiFi link down) asks the same question itself before it does (issue #228).
 	 */
 	if (net_tty_guard(sh, "ymodem"))
 		return 1;
@@ -273,13 +275,14 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
 	enum ym_result res;
 
 	/*
-	 * Not over telnet.  YMODEM needs a raw, byte-timed console: the telnet path escapes
-	 * 0xFF (IAC) on the way out, hands bytes over in ~250 ms polls, and rides an eRPC link
-	 * whose round-trip dwarfs the protocol's own timeouts -- the transfer would corrupt or
-	 * stall.  Checked here so every YMODEM user (`camera send`, `blob write`, `wifi
-	 * flash imgload` / `flash backup`) is covered by one rule; a caller that would break
-	 * something first (erase a slot, invalidate the staged image, take the WiFi link
-	 * down) asks the same question itself before it does (issue #228).
+	 * Not over telnet.  YMODEM needs a raw, 8-bit clean console, and the telnet one
+	 * (shell/cmds/net_tty.c) is not: it drops IAC sequences on the way in and doubles
+	 * 0xFF on the way out, does not negotiate BINARY, so the client may rewrite CR,
+	 * and its receive ring is 512 B against a 1,029 B block (YMODEM over telnet is
+	 * issue #197).  Checked here so every YMODEM user (`camera send`, `blob write`,
+	 * `wifi flash imgload` / `flash backup`) is covered by one rule; a caller that
+	 * would break something first (erase a slot, invalidate the staged image, take
+	 * the WiFi link down) asks the same question itself before it does (issue #228).
 	 */
 	if (net_tty_guard(sh, "ymodem"))
 		return 1;
@@ -292,33 +295,4 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
 
 	xfer_recv_log(res);               /* the caller prints the outcome */
 	return res == YM_OK ? 0 : 1;
-}
-
-int xfer_recv_sink(struct cli_instance *sh, const struct ym_sink *sink)
-{
-	int rc;
-
-	/* NOT "Ctrl+C aborts", which this line claimed until owhinata/wio-lite-ai#10 noticed
-    it
-	 * contradicts the receive contract three functions up: while receiving, 0x03 is
-	 * file data and io_getc_recv() deliberately passes it through, so there is no
-	 * local abort at all.  Telling the operator to press a key that does nothing is
-	 * worse than telling them nothing. */
-	cli_print(sh, "ymodem: start the sender now -- e.g. `sb <file>` (lrzsz "
-	              "YMODEM batch send); abort from the PC, not with Ctrl+C\r\n");
-
-	switch (cli_console_claim(sh)) {
-	case 0:
-		break;
-	case -2:
-		cli_error(sh, "ymodem: cannot run in the background -- "
-		              "drop the trailing '&'\r\n");
-		return 1;
-	default:
-		cli_error(sh, "ymodem: console busy\r\n");
-		return 1;
-	}
-	rc = xfer_recv_sink_locked(sh, sink);
-	cli_console_release(sh);
-	return rc;
 }

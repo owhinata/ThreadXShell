@@ -9,12 +9,12 @@
  * Receive for `blob write`, and since issue #143 send for `camera send` (the
  * last capture's planar B/G/R).  There is no `xfer` command here.
  *
- * [!] THE THIRD COPY OF THIS WIRING, and deliberately so.  f746g-disco and
- * wio-lite-ai each have a cmd_xfer.c and the three are nearly the same twenty
- * lines; sharing them needs a way for a board to say "not over telnet", which
- * wio needs and this board has no concept of.  Inventing that hook is a
- * mechanism, and a mechanism is where the line gets drawn: it belongs in its
- * own issue rather than inside a transfer that has to land first.
+ * f746g-disco and wio-lite-ai each have a cmd_xfer.c that says and does the
+ * same (issue #228).  What differs: those two refuse on their telnet console
+ * (shell/cmds/net_tty.c, shared since issue #221), which this board does not
+ * have or link, and wio-lite-ai also has a send entry for a caller that already
+ * holds the console (`wifi flash backup`).  Making the three one file is issue
+ * #231.
  */
 #ifndef CMD_XFER_H
 #define CMD_XFER_H

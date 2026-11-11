@@ -4,7 +4,7 @@
  */
 /**
  * @file    cmd_xfer.h
- * @brief   Shared YMODEM-over-VCP send and receive entry points
+ * @brief   YMODEM-over-console send and receive entry points
  * (owhinata/stm32f746g-disco#50).
  *
  * cmd_xfer.c owns the console hand-over + YMODEM driving for an injected byte
@@ -26,7 +26,7 @@ extern "C" {
 struct cli_instance;
 
 /**
- * Send @p src to the PC over the shell's VCP using YMODEM: claim the console
+ * Send @p src to the PC over the console using YMODEM: claim the console
  * (hold the output lock, enter raw mode), flush RX, run ymodem_send(), drain
  * until the line goes quiet if it failed (issue #228), print a one-line result
  * and log it, then restore the console.  The caller owns @p src and

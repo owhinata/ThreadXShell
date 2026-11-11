@@ -4,17 +4,17 @@
  */
 /**
  * @file    cmd_xfer.h
- * @brief   Shared YMODEM-over-console send entry point.
+ * @brief   YMODEM-over-console send and receive entry points.
  *
  * cmd_xfer.c owns the console hand-over + YMODEM driving for an injected byte
- * source, so every sender (owhinata/wio-lite-ai#19's `wifi flash backup`, and
- * `camera send`) shares one copy of the RX flush / progress messaging / result
- * mapping.  No `xfer` command is planned (issue #227 removed f746g-disco's).
+ * source or sink, so every sender (owhinata/wio-lite-ai#19's `wifi flash backup`,
+ * and `camera send`) and every receiver (`wifi flash imgload`, `blob write`) shares
+ * one copy of the RX flush / drain / result reporting.  No `xfer` command is
+ * planned (issue #227 removed f746g-disco's).
  *
  * Ported from ../stm32f746g-disco (its owhinata/stm32f746g-disco#50) for
- * owhinata/wio-lite-ai#19 M4, minus the FileX-backed `xfer send sd|fs` command --
- * this repo has no filesystem yet, so only the reusable helper is here and no
- * `xfer` command is registered.
+ * owhinata/wio-lite-ai#19 M4, without its `xfer` command.  The receive side has
+ * only the "already held" entry: both receivers claim the console themselves.
  */
 #ifndef CMD_XFER_H
 #define CMD_XFER_H
@@ -98,12 +98,6 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
  * the prompt.
  */
 int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink);
-
-/**
- * Claim the console, call xfer_recv_sink_locked(), then release it.  Returns 0 on
- * a completed transfer, 1 on any failure / cancel (including a bg-job rejection).
- */
-int xfer_recv_sink(struct cli_instance *sh, const struct ym_sink *sink);
 
 #ifdef __cplusplus
 }

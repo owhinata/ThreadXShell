@@ -6,9 +6,10 @@
  * @file    cmd_xfer.c
  * @brief   YMODEM over the console: receive (#92) and send (#143).
  *
- * Twenty lines of wiring between svc/ymodem.c, which is transport-agnostic, and
- * the shell's raw-console API.  Every rule this file follows is in cmd_xfer.h;
- * the code is the easy part.
+ * The wiring between svc/ymodem.c, which is transport-agnostic, and the shell's
+ * raw-console API.  Every rule this file follows is in cmd_xfer.h; the code is
+ * the easy part.  The other two boards' cmd_xfer.c say and do the same (issue
+ * #228).
  */
 #include "cmd_xfer.h"
 
@@ -19,8 +20,7 @@
 /*
  * SEND direction: everything read back while sending is protocol -- ACK / NAK /
  * 'C' / CAN -- so a 0x03 can only be a person pressing Ctrl+C, and mapping it to
- * an abort is safe (the same rule as the other two boards' cmd_xfer.c).  The
- * receive direction below must not.
+ * an abort is safe.  The receive direction below must not.
  */
 static int io_getc_send(void *ctx, unsigned timeout_ms)
 {
@@ -32,8 +32,8 @@ static int io_getc_send(void *ctx, unsigned timeout_ms)
 static int io_getc_recv(void *ctx, unsigned timeout_ms)
 {
 	/* [!] 0x03 IS NOT AN ABORT HERE.  See cmd_xfer.h: while receiving, the
-	 * stream is the file.  The send direction on the other boards maps it;
-	 * this must not. */
+	 * stream is the file.  The send direction above maps it; this must
+	 * not. */
 	return cli_read_byte((struct cli_instance *)ctx, timeout_ms);
 }
 

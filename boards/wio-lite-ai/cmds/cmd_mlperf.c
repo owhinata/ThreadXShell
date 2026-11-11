@@ -125,9 +125,9 @@ static int cmd_mlperf(struct cli_instance *sh, int argc, char **argv)
 
 	/*
 	 * Not over telnet, for the same reason YMODEM is not (shell/cmds/cmd_xfer.c):
-	 * the runner is a serial program talking to a real port, and the telnet path
-	 * escapes bytes, delivers them in ~250 ms polls and rides an eRPC link whose
-	 * round trip dwarfs the protocol's own patience.
+	 * the runner is a serial program talking to a real port, and the telnet
+	 * console (shell/cmds/net_tty.c) is not one -- it drops IAC sequences on the
+	 * way in, doubles 0xFF on the way out and does not negotiate BINARY.
 	 */
 	if (net_tty_guard(sh, "mlperf"))
 		return 1;

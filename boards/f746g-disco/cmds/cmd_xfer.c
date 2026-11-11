@@ -4,14 +4,15 @@
  */
 /**
  * @file    cmd_xfer.c
- * @brief   YMODEM over the VCP, for this board's commands
+ * @brief   YMODEM over the console, for this board's commands
  * (owhinata/stm32f746g-disco#50).
  *
  * Send for `camera send` (cmd_camera_board.c, the last capture from RAM) and,
- * since issue #194, receive for `blob write` (cmd_blob_board.c), the same shape
- * as grove-vision-ai-v2's cmd_xfer.c.  There is no `xfer` command here: the
- * `xfer send sd <path>` command that streamed a microSD file to the PC was
- * removed in issue #227 (a file on the card is copied by taking the card out).
+ * since issue #194, receive for `blob write` (cmd_blob_board.c).  The other two
+ * boards' cmd_xfer.c say and do the same (issue #228).  There is no `xfer`
+ * command here: the `xfer send sd <path>` command that streamed a microSD file
+ * to the PC was removed in issue #227 (a file on the card is copied by taking
+ * the card out).
  *
  * The protocol core (svc/ymodem.c) is transport-agnostic; here we wire its IO
  * vtable to the raw-console API (cli_console_claim/cli_read_byte/cli_write/

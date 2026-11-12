@@ -21,9 +21,10 @@
  * The transfers' working areas (issue #230).  svc/ymodem.c holds no writable
  * storage; this board owns its one struct ym_xfer and the two areas it points
  * at, and this file is the only caller of ymodem_send() / ymodem_recv(), so
- * every transfer (`camera send`, `blob write`) uses this one.  Ordinary .bss,
- * in DTCM where svc/ymodem.c's buffers were before: only the CPU touches them
- * (io_put() copies the bytes into the UART's TX ring).
+ * every transfer (`camera send`, `blob write`) uses this one.  The areas are
+ * ordinary .bss (the owner, which holds two pointers, is .data), in DTCM where
+ * svc/ymodem.c's buffers were before: only the CPU touches them (io_put()
+ * copies the bytes into the UART's TX ring).
  */
 static struct ym_send_area s_ym_send;
 static struct ym_recv_area s_ym_recv;

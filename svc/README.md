@@ -908,6 +908,15 @@ nn model load <name>         load the blob stored under <name>
   cap is warned about on the console and in `dmesg`.  Until #228 f746g-disco
   and grove-vision-ai-v2 waited 400 ms and stopped at 8 KB, logging nothing
   (grove: only the cap), and f746g-disco did not discard after a failed send.
+- **A second transfer is refused, not queued** (issue #230; one at a time on
+  the board, see [below](#why-the-lock-and-the-threads-are-the-boards)): the
+  command prints `ymodem: another transfer is running -- run it again when that
+  one ends` and returns 1, having sent nothing; the log word is `refused,
+  another transfer is running`.  `camera send` and wio-lite-ai's `wifi flash
+  backup` / `imgload` ask before they print how to start the PC side;
+  `blob write` learns it only after the erase (#197).  No board can start a
+  second transfer today (the telnet console refuses every transfer and
+  grove-vision-ai-v2 has one console), so only the host tests reach it.
 - **The board's transfer helper prints nothing about a receive** (issue
   #228; until then wio-lite-ai's printed one of six result lines); the
   command's own lines below say what was stored and what was not.  It logs
@@ -1727,7 +1736,24 @@ file declares `extern` (`nn_model_board_state`; the tflm backend's
 `kv_board_state`, whose FlashDB lock callback passes none). This is enforced per
 board by `cmake/check_no_mutable_storage.py` through the build-derived audit in
 `cmake/shared_storage_gate.cmake`, which also covers everything compiled under
-`shell/cmds/` (see `cmake/README.md`; `svc/ymodem.c` is the one exception).
+`shell/cmds/` (see `cmake/README.md`).  There is no exception: until issue
+#230 `svc/ymodem.c` owned its send and receive buffers and the last receive's
+counters, and the audit skipped the whole file.
+
+**YMODEM's working areas are the board's** (issue #230).  `svc/ymodem.c` works
+in a `struct ym_xfer` its caller passes to every `ymodem_send()` /
+`ymodem_recv()`: pointers to a send area (one framed block, 1,029 B) and a
+receive area (one block body, 1,024 B), kept apart so the two directions never
+share bytes, and a "transfer running" mark that the two functions take with one atomic
+compare-and-swap before anything else and put back at their one exit.  Each
+board defines exactly one, static in its `cmds/cmd_xfer.c`, the only file that
+calls the two, so **one transfer runs at a time on the whole board**: a send and
+a receive refuse each other too, whichever console started them.  The mark is
+not the console claim, which is counted per console (#229).  The receive's
+counters (`struct ym_recv_diag`) are the caller's, in its own frame, set with
+`ymodem_recv_diag_init()` first.  Where the areas sit is each board's README:
+internal SRAM on f746g-disco, DTCM on grove-vision-ai-v2, AXI-SRAM on
+wio-lite-ai (DTCM had no room).
 
 ## Where the per-board files are described
 

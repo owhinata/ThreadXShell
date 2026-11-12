@@ -981,6 +981,7 @@ What is shared and what is this board's:
 | store side | `src/blob.c`, `src/blob.h`, `src/blob_slots.c` | the interval and the slot table, the header and payload reads, the erases, the name lookup and the busy flag |
 | write side | `src/blob_writer.c` | the functions `blob_svc.h` names: the 1 KB staging buffer, the reservation (the busy flag), the program and the read-back, each held to the store's interval, and the log lines a transfer leaves |
 | console side | `cmds/cmd_blob_board.c` | YMODEM over the VCP, the refusal on the telnet console, the busy and driver-down words, the VCP's RX ring high-water |
+| the transfer | `cmds/cmd_xfer.c` | the board's one YMODEM owner (`s_ym`) and its two working areas (`s_ym_send` 1,029 B, `s_ym_recv` 1,024 B, plain `.bss`; the 12 B owner is `.data`), all in internal SRAM (only the CPU touches them); `blob write` and `camera send` both use it, so one transfer runs at a time and a second is refused (issue #230, [svc/README.md](../../svc/README.md#why-the-lock-and-the-threads-are-the-boards)) |
 | the driver | `port/qspi/qspi_flash.c`, `port/qspi/qspi_idle.h` | indirect-mode reads, page programs and erases, one mutex per call; the controller left idle after every receive, failures recorded and recovered from ([below](#the-qspi-driver-leaves-the-controller-idle-and-recovers-issue-194)) |
 
 | QSPI range | What |

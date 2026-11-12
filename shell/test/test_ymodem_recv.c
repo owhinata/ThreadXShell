@@ -12,8 +12,10 @@
  *      "capture the sender's TX, then replay it into the receiver" scheme could
  *      NOT do this: the sender only advances when it sees the receiver's 'C' and
  *      per-block ACKs, so a canned replay never exercises the real handshake.
- *      This works because the two directions keep SEPARATE static block buffers
- *      (see the banner in svc/ymodem.c) and share no other mutable state.
+ *      This works because each side gets its OWN struct ym_xfer (its own mark
+ *      and areas, see sender_xfer / recv_xfer below) and the two share no other
+ *      mutable state.  The firmware defines one owner, so there a send and a
+ *      receive refuse each other; the single-owner tests below check that.
  *      Asserts byte-exact delivery and YM_OK (i.e. the batch actually closed).
  *
  *   2. SCRIPTED TRANSCRIPTS (single-threaded).  Error paths are driven from a

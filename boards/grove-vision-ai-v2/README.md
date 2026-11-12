@@ -4215,6 +4215,7 @@ is everything that touches this part or this board's facts:
 | `src/blob.c` | The store side, its reads: the lease, the invalidate, a slot turned into an address in the XIP window; checks at build time that the format's 256-byte header page equals `NOR_PROGRAM_PAGE` |
 | `src/blob_writer.c` | The write side, the functions `svc/blob/blob_svc.h` names: the NOR writer reservation, the slot erase, the header erase and the programs, each through `port/nor/nor_write.c` (moved out of `cmds/cmd_blob.c` in issue #194 and still never reaching the seam itself), and the log lines a transfer leaves |
 | `cmds/cmd_blob_board.c` | The console side: YMODEM over UART0, and the holder of a busy NOR or the reason a port is faulted, in `nor`'s words |
+| `cmds/cmd_xfer.c` | The board's one YMODEM owner (`s_ym`) and its two working areas (`s_ym_send` 1,029 B, `s_ym_recv` 1,024 B, plain `.bss`; the 12 B owner is `.data`), all in DTCM (only the CPU touches them); `blob write` and `camera send` both use it, so one transfer runs at a time and a second is refused (issue #230, [svc/README.md](../../svc/README.md#why-the-lock-and-the-threads-are-the-boards)) |
 | `svc/blob_svc_config.h` | The words and limits the shared command prints with: the part's name, the 8-digit address, the erase estimate (1,280 ms per 64 KB, from the ~80 ms per 4 KB sector measured below; no maximum is documented for this part), the sender (`sb -k`), `blob read`'s 256 B |
 | `port/nor/` | The NOR lifecycle, the bounded write transaction and the seam |
 

@@ -34,12 +34,13 @@
  * ymodem_send() / ymodem_recv(), so every transfer (`camera send`, `blob
  * write`, `wifi flash backup` and `imgload`) uses this one.
  *
- * Ordinary .bss, so AXI-SRAM -- where svc/ymodem.c's buffers already were --
- * although only the CPU touches them (io_put() copies the bytes into the
- * console's TX ring) and AXI-SRAM is otherwise kept for what a bus master
- * must see.  DTCM is the home for CPU-only data, but the two areas (2,053 B)
- * are more than it had left at issue #230; the shared nn state (#161) and the
- * telnet state (#221) are placed the same way.
+ * The areas are ordinary .bss (the owner, which holds two pointers, is .data),
+ * so AXI-SRAM -- where svc/ymodem.c's buffers already were.
+ * Only the CPU touches them (io_put() copies the bytes into the console's TX
+ * ring), and CPU-only data goes to DTCM first and to AXI-SRAM when DTCM has
+ * no room (README "Memory map"): the two areas (2,053 B) are more than DTCM
+ * had left at issue #230 (1,848 B).  The shared nn state (#161) and the telnet
+ * state (#221) are placed the same way.
  */
 static struct ym_send_area s_ym_send;
 static struct ym_recv_area s_ym_recv;

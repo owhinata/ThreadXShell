@@ -18,11 +18,12 @@
  *
  * owhinata/wio-lite-ai#19 M5 added the mirror-image RECEIVER at the bottom of this file
  * (the board has to take a firmware image FROM the PC before it may rewrite the
- * RTL8720DN). It shares the framing constants and ymodem_crc16() but has its OWN static
- * block buffer, so the two directions never alias -- which is also what lets the host
- * test drive both concurrently over a pthread loopback.  Nothing above the "RECEIVER"
- * banner was changed by that work: the sender is the code already proven on board #2 in
- * M4.
+ * RTL8720DN). It shares the framing constants and ymodem_crc16() but works in its OWN
+ * area (struct ym_recv_area, separate from the send area; since issue #230 both are
+ * the board's, this file holds no writable storage), so the two directions never
+ * alias.  The host test drives both concurrently over a pthread loopback by giving
+ * each side its own struct ym_xfer.  Nothing above the "RECEIVER" banner was changed by
+ * that work: the sender is the code already proven on board #2 in M4.
  */
 #include "ymodem.h"
 
@@ -66,8 +67,8 @@
  * The send block: [kind | seq | ~seq | data[1024] | crc_hi | crc_lo], in the
  * caller's struct ym_send_area (issue #230: this file holds no writable storage;
  * the board owns the area, see struct ym_xfer).  Not on the 4 KB shell-thread
- * stack.  Not reentrant on one area -- the shell serialises transfers by holding
- * the console output lock for the whole send.
+ * stack.  One transfer at a time on one owner: the running mark below
+ * serialises them (a console lock would not -- it is per console).
  */
 _Static_assert(YM_SEND_AREA_BYTES == YM_HDR + YM_DATA_MAX + YM_CRC,
                "struct ym_send_area must hold exactly one framed 1 KB block");

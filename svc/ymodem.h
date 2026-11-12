@@ -16,9 +16,9 @@
  * Ported verbatim from ../stm32f746g-disco (its owhinata/stm32f746g-disco#50) for
  * owhinata/wio-lite-ai#19 M4: the RTL8720DN full-chip flash backup (`wifi flash
  * backup`) needs to stream megabytes off the board, and this is the shell's designed
- * binary-transfer path. The shell wires @ref ym_io to cli_read_byte()/cli_write()
- * (see shell/cmds/cmd_xfer.c) and @ref ym_source to the RTL8720 download-protocol
- * flash reader.
+ * binary-transfer path. Each board wires @ref ym_io to cli_read_byte()/cli_write()
+ * (see boards/<board>/cmds/cmd_xfer.c) and, on wio, @ref ym_source to the RTL8720
+ * download-protocol flash reader.
  *
  * owhinata/wio-lite-ai#19 M5 added the RECEIVE direction (@ref ymodem_recv / @ref
  * ym_sink): to (re)write the RTL8720DN's firmware the board must be able to take an
@@ -182,10 +182,10 @@ int ymodem_busy(const struct ym_xfer *x);
  * completion or a terminal error.  On ANY non-success result a CAN sequence is
  * emitted so the PC side (rz/rb) tears down cleanly.  At most src->size bytes are
  * sent regardless of what the source returns (block 0's size is authoritative).
- * Frames every block in @p x's send area.  Not reentrant on one @p x: the
- * caller must serialise transfers -- the shell does so by holding the output
- * lock.  Returns YM_ERR_BUSY, having done nothing (no CAN either), when another
- * transfer is running on @p x; see enum ym_result.
+ * Frames every block in @p x's send area.  Transfers on one @p x are
+ * serialised by its running mark, not by any console lock (console locks are
+ * per console): returns YM_ERR_BUSY, having done nothing (no CAN either), when
+ * another transfer is running on @p x; see enum ym_result.
  */
 enum ym_result ymodem_send(struct ym_xfer *x, const struct ym_io *io,
                            const struct ym_source *src);
@@ -209,9 +209,9 @@ enum ym_result ymodem_send(struct ym_xfer *x, const struct ym_io *io,
  * At most the block-0 size is delivered to the sink (that size is authoritative,
  * exactly as on the send side).  A short final block's CPMEOF padding is trimmed.
  * Reads every block into @p x's receive area (separate from the send area).
- * Not reentrant on one @p x: the caller must serialise transfers.  Returns
- * YM_ERR_BUSY, having done nothing but set @p diag, when another transfer is
- * running on @p x; see enum ym_result.
+ * Serialised by @p x's running mark as for ymodem_send(): returns YM_ERR_BUSY,
+ * having done nothing but set @p diag, when another transfer is running on
+ * @p x; see enum ym_result.
  *
  * @p diag is the caller's own record (see struct ym_recv_diag), never NULL.
  * ymodem_recv() sets it to ymodem_recv_diag_init()'s value on entry (before it

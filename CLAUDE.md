@@ -54,7 +54,7 @@ src cmds svc cmake test README。wio のみ boot も）。
 
 - **共有 TU（`svc/` と `shell/cmds/` でコンパイルされる物は全部で nn・camera・blob に限らない）は可変記憶域を 1 バイトも持たない**（状態はアダプタ、バッファは持ち主が配置属性つきで注入）。
   強制は `cmake/check_no_mutable_storage.py` の**ボードごとの監査コンパイル**（ホストの答えは別物）。
-- **ファーム監査は列挙せずビルドから導出する**（`cmake/shared_storage_gate.cmake`。必須かはファイル先頭の印、例外は `svc/ymodem.c` のみ。
+- **ファーム監査は列挙せずビルドから導出する**（`cmake/shared_storage_gate.cmake`。必須かはファイル先頭の印、例外は無い（#230）。
   include した `.c`・許可外の登録・root 名の重複も拒む。#206）。**導出・両方向照合・失敗伝播を弱めない。**
 - **capability マクロは「性質」で「ボード名」ではない**。バックエンド依存は `CONFIG_NN_BACKEND` に従う。
 - **status と claim disposition は別フィールドで `retryable` と `terminal` を畳まない**（**判断できない
@@ -237,7 +237,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - [!] **app はクロックツリーを再設定しない**（system/PLL・FLASH ACR・電源供給選択・VOS）。bus clock
   gate と kernel mux は可。**例外は board README が名指しする 2 つだけ**。`SystemInit` はカスタム版。
 - [!] **オプションバイト / RDP / DBGMCU / SWD 端子は絶対に触らない。**
-- [!] **RAM 配置**: AXI-SRAM = バスマスタから見える必要があるものだけ / DTCM = CPU 専用 / ITCM = ISR。
+- [!] **RAM 配置**: DMA などバスマスタが触る物は必ず AXI-SRAM / CPU だけが触る物は DTCM を優先し、入らなければ AXI-SRAM / ITCM = ISR。
   **DMA は TCM に届かず、fault せず無言で転送されない**。**例外は AXI-SRAM 上端の `.plugin` 予約 1 つ**
   （prelink なので動かすと全 container 無効）で、**4 箇所で独立に宣言**し 1 変数から生成しない。
   heap の天井は `__heap_end` で `__ram_end` を再定義しない（1 シンボルに 2 事実を載せない）。

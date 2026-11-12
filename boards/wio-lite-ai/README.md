@@ -134,9 +134,17 @@ DMA1, DMA2 and the SDMMC1 IDMA cannot reach ITCM or DTCM (RM0468 2.1.2 / 2.1.5
 does not happen, and the buffer keeps whatever was in it.  That is the whole
 reason the placement policy exists:
 
-- **AXI-SRAM**: anything a bus master must see
-- **DTCM**: CPU-private hot data (stacks, the ISR ring)
+- **AXI-SRAM**: anything DMA or another bus master touches, always
+- **DTCM**: what only the CPU touches (stacks, the ISR ring), first choice;
+  when DTCM has no room for it, AXI-SRAM is fine
 - **ITCM**: interrupt service code
+
+CPU-only data in AXI-SRAM today includes the shared nn state
+(`nn_model_board_state`, `nn_tflm_board_state`, #161), the telnet console's
+state (`net_tty_board_state`, #221) and YMODEM's working areas (issue #230:
+`s_ym_send` 1,029 B and `s_ym_recv` 1,024 B, static in `cmds/cmd_xfer.c`,
+plain `.bss`; DTCM had 1,848 B left).  `svc/README.md` says who owns those areas and why there is one
+transfer at a time on the board.
 
 ### [!] The top 32 KB of AXI-SRAM is the plugin reservation (issue #108)
 
@@ -147,9 +155,9 @@ plugin is **prelinked** for that address -- the loader services no relocations -
 so it cannot drift the way a sequential section would the day `.bss` grew, and
 moving it later invalidates every container built for this board.
 
-**It is a stated exception to the placement policy above.**  That policy keeps
-CPU-only *data* out of AXI-SRAM, and it can, because DTCM takes it.  Code cannot
-follow: the Cortex-M7 does not fetch instructions from DTCM.  The alternatives
+**It is a stated exception to the placement policy above.**  That policy puts
+CPU-only *data* in DTCM first.  Code cannot follow: the Cortex-M7 does not
+fetch instructions from DTCM.  The alternatives
 were measured and rejected -- the PSRAM window is execute-never in MPU regions 0
 and 3, and ITCM is read-only in region 1, which is the NULL-write guard.
 AXI-SRAM needs no MPU change: no region covers it, so the default map
@@ -229,8 +237,9 @@ nobody ships. Since issue #117, firmware coverage is derived from the configured
 build, including `plugin_exec.c`, `plugin_paint_budget.c` and `rect_geom.c` when
 the backend enables them. A null-backend build audits only its actual sources;
 it does not create firmware decoder/plugin objects. See the
-[shared storage gate contract](../../cmake/README.md) for scope, the existing
-YMODEM exception, command replay, and negative tests. Since issue #206 the scope
+[shared storage gate contract](../../cmake/README.md) for scope, command
+replay, and negative tests (since issue #230 no file is exempt; until then
+`svc/ymodem.c` was). Since issue #206 the scope
 is every `shell/cmds/` file as well; `fs_cmd_core.c` follows `BOARD_HAS_FILEX`,
 which this board sets from `BSP_ENABLE_SD` (OFF: compiled by nothing).
 
@@ -738,6 +747,7 @@ board's `cmds/cmd_blob.c` before).  What is this board's:
 | store side | `src/blob.c`, `src/blob.h`, `src/blob_slots.c` | the interval and erase unit, the slot table, the indirect NOR reads and erases, the name lookup and the busy flag |
 | write side | `src/blob_writer.c` | the functions `svc/blob/blob_svc.h` names: the 1 KB DTCM staging buffer, the reservation (the busy flag), one `nor_erase()` per 64 KB block, the program and the read-back, and the log lines a transfer leaves |
 | console side | `cmds/cmd_blob_board.c` | YMODEM over the USB CDC console, the refusal on the telnet console, the busy and NOR-down words |
+| the transfer | `cmds/cmd_xfer.c` | the board's one YMODEM owner (`s_ym`) and its two working areas (`s_ym_send` 1,029 B, `s_ym_recv` 1,024 B, plain `.bss`; the 12 B owner is `.data`), all in AXI-SRAM (DTCM had no room, [Memory map](#memory-map)); every transfer -- `blob write`, `camera send`, `wifi flash backup` / `imgload` -- uses it, so one runs at a time and a second is refused (issue #230, [svc/README.md](../../svc/README.md#why-the-lock-and-the-threads-are-the-boards)) |
 | words and limits | `svc/blob_svc_config.h` | the part's name, the address format, the erase estimate (W25Q128JV: 150 ms typical, 2 s at most per 64 KB block), the sender (`sb`), `blob read`'s 1,024 B |
 
 | NOR range | What |

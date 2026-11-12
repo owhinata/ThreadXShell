@@ -2,7 +2,8 @@
 """Audit stateless services using their actual board compile commands (#117).
 
 Coverage is derived twice: CMake's evaluated target sources, and its compile DB.
-Their (producer, source) sets must agree before any exception is applied. We only
+Their (producer, source) sets must agree before any TU is audited. No file is
+exempt (#230 removed the last exception, svc/ymodem.c). We only
 support ordinary single-config Ninja/GCC compiles; unknown command forms fail
 closed. This is a build-integrity check, not a defense against malicious CMake.
 
@@ -127,7 +128,7 @@ def scope_of(path, root):
 
 
 def policy_source(path, root):
-    """Return the in-scope canonical source, without applying exceptions."""
+    """Return whether the canonical source is in an audited scope."""
     return scope_of(Path(path).resolve(), root) is not None
 
 

@@ -44,7 +44,8 @@
  *      line editor already handed over.
  *   5. receive.  The sink accumulates into the staging buffer and programs a
  *      chunk at a time; a program that does not report OK latches, and no
- *      further program or header follows it.
+ *      further program or header follows it.  A receive refused because another
+ *      transfer runs (YM_ERR_BUSY, #230) comes after the erase (#197).
  *   6. release the console, then write the body page.  Whether the board
  *      writer reads it back depends on the board (issue #194):
  *        grove-vision-ai-v2  yes -- every program is one port/nor/nor_write.c

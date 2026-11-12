@@ -6,9 +6,9 @@ the repository's `svc/` and `shell/cmds/` trees (#206; before that, a list of
 four `shell/cmds/` files). There is no list of files: a source is in scope when
 its real path is under one of the two trees, and a path written under one must
 resolve under that same tree -- a symlink out of it is refused, both in the
-build's inventory and in a walk of `shell/cmds/` on disk. The exact
-`svc/ymodem.c` path is the sole existing exception: it owns non-reentrant send
-and receive staging buffers and last-run diagnostics. This is not a stateless
+build's inventory and in a walk of `shell/cmds/` on disk. No file is exempt:
+`svc/ymodem.c`, the last exception, now takes its send and receive areas and its
+receive record from the caller (#230; `svc/README.md`). This is not a stateless
 rule for the entire shell; instances and job pools intentionally own state.
 
 `shared_storage_gate.cmake` recursively discovers normal CMake targets and
@@ -130,9 +130,7 @@ not a defence against a hostile change; these are left to diff review:
   root name differs from the record's `.name` (rule (c) reads section names);
 - a change of a mark from `required` to `optional`;
 - a copy of an optional shared command placed in `boards/<board>/cmds/` on a
-  board where its property is `OFF`;
-- the `svc/ymodem.c` exception covers the whole translation unit, so a new
-  static added to it passes as well (#210 removes the exception itself).
+  board where its property is `OFF`.
 
 An object the link takes that a custom command makes, rather than a compile in
 `compile_commands.json`, is not among these: the audit refuses that form (above).
@@ -146,10 +144,14 @@ differing target contexts, direct ARM-only/optimized storage, failure
 persistence, C++ services (a clean `.cc` passes; a static object, a global
 constructor, an unknown or unconfigured driver, a suffix/driver mismatch and a
 contradicting `-x` fail), the `shell/cmds/` marks and link rules, and rules
-(a) to (c), each refused on the first build of a clean tree. Optional `--board-build
-<configured-consumer-build>` mutates temporary copies of the three shared
-regression sources and of `shell/cmds/cmd_builtin.c` using the selected Grove or
-Wio consumer's actual compile context. When that consumer compiles the shared TFLM backend
+(a) to (c), each refused on the first build of a clean tree. The project's own
+`svc/ymodem.c` has no storage: the first build must audit it and report no
+exception at all, and the same path with an injected `static` is refused
+(#230). Optional `--board-build <configured-consumer-build>` mutates temporary copies of the three shared
+regression sources, of `shell/cmds/cmd_builtin.c` and of the real `svc/ymodem.c`
+using the selected Grove or Wio consumer's actual compile context; for
+`svc/ymodem.c` the unmodified file must also pass in that context. When that
+consumer compiles the shared TFLM backend
 (`svc/nn/tflm/nn_tflm.cc`, Wio Lite AI or STM32F746G-DISCO with the `tflm`
 backend), a copy of it with one injected `static` is replayed through the C++
 driver in that real context and must be refused, and the unmodified file must

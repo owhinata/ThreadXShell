@@ -40,8 +40,8 @@
   boot は**参照ビルドとしてのみ**ビルドし、**セクタ0 に書けるターゲットも `dfu-boot` も新設しない**。
   boot は app のヘッダを include せず LTO 有効化も不可。boot ソース / ROM ldscript の変更は manifest と
   golden hash の更新とレビュー済み例外を要する。
-- **[!] RAM 配置ポリシー**: AXI-SRAM = バスマスタから見える必要があるものだけ（**DMA が届く唯一の
-  RAM**）/ DTCM = CPU 専用 / ITCM = ISR コード。**DMA1/DMA2・SDMMC1 IDMA は TCM に届かず、DTCM の
+- **[!] RAM 配置ポリシー**: DMA などバスマスタが触る物は必ず AXI-SRAM（**DMA が届く唯一の RAM**）/
+  CPU だけが触る物は DTCM を優先し、入らなければ AXI-SRAM / ITCM = ISR コード。**DMA1/DMA2・SDMMC1 IDMA は TCM に届かず、DTCM の
   DMA バッファは fault せず無言で転送されない。** **唯一の明文化した例外は AXI-SRAM 上端の `.plugin`
   予約**（prelink なので動かすと既存 plugin が全て無効）。heap の天井は `__heap_end` で `__ram_end` を
   再定義しない。予約は ldscript / `plugin_memory.ld` / board.cmake のゲート引数 /
@@ -64,7 +64,7 @@
   `cmake/check_no_mutable_storage.py` を**ボードごとの監査コンパイル**で当てること — **ホストの結果は
   当てにならない**（host ではコマンド表が `.data.rel.ro` に落ちて偽陽性になる）。
 - **ファーム監査は列挙せずビルドから導出する**（`cmake/shared_storage_gate.cmake`。対象は実際にコンパイルする `svc/` と `shell/cmds/` の
-  TU 全部、必須かはファイル先頭の印、唯一の既存例外は `svc/ymodem.c`。include した `.c`・許可外の登録・root 名の重複も拒む）。評価済み CMake
+  TU 全部、必須かはファイル先頭の印、例外は無い（#230）。include した `.c`・許可外の登録・root 名の重複も拒む）。評価済み CMake
   target/source と compile DB を両方向照合し実引数で監査コンパイルする。**導出・照合・失敗伝播を
   弱めない。** plugin の実オブジェクト監査は別に維持する。詳細は `cmake/README.md`。
 - **capability マクロは性質であってボード名ではない**（バックエンド依存は `CONFIG_NN_BACKEND` に従う）。

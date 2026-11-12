@@ -27,7 +27,7 @@ struct cli_instance;
 
 /**
  * Send @p src to the PC over the console using YMODEM: claim the console
- * (hold the output lock, enter raw mode), flush RX, run ymodem_send(), drain
+ * (hold this console's output lock, enter raw mode), flush RX, run ymodem_send(), drain
  * until the line goes quiet if it failed (issue #228), print a one-line result
  * and log it, then restore the console.  The caller owns @p src and
  * any underlying resource (frame validity) for the duration.  On the telnet

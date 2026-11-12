@@ -102,17 +102,22 @@ void cli_out_end(struct cli_instance *sh)
  * Kept here, not in cli_core.c: it reaches ThreadX only through cli_lock /
  * cli_unlock, so the host tests run these and not a stand-in (issue #229). */
 
-/* Set for the duration of a raw binary transfer (owhinata/stm32f746g-disco#50);
-   see cli_internal.h. */
-volatile uint8_t cli_xfer_active;
-
 /*
  * Console hand-over for a binary transfer (owhinata/stm32f746g-disco#50).  Take the
  * output lock for the WHOLE transfer (so a background job's output cannot interleave
  * into the YMODEM byte stream -- it blocks and, per owhinata/stm32f746g-disco#25,
- * drops on its wedge deadline) and raise cli_xfer_active so cli_tx_send_blocking
- * stops draining RX and _write drops printf output.  Returns 0 on success, -2 if
- * called from a background job, -1 if the lock could not be acquired.
+ * drops on its wedge deadline) and count one claim on this console, so
+ * cli_tx_send_blocking stops draining its RX and _write drops printf bound for it.
+ * Returns 0 on success, -2 if called from a background job, -1 if the lock could
+ * not be acquired, -3 if the count is at its limit.
+ *
+ * Counted, not a flag (issue #229): each console has its own count, so one
+ * console's release never ends another's transfer, and a nested claim on the
+ * same console is ended only by its matching release.  The count moves together
+ * with the lock: +1 only with a lock taken here, -1 just before the lock is given
+ * back, and a refusal after the lock gives that one take back.  It does not wrap:
+ * at its limit the claim is refused, and cli_console_claimable() says so before
+ * anything is taken.
  *
  * A bg-job worker (sh->fg != NULL) is REFUSED: the RX ring is a strict SPSC pipe
  * owned by the foreground thread, and the USART RX ISR posts CLI_EVT_RX to the
@@ -121,19 +126,39 @@ volatile uint8_t cli_xfer_active;
  * drains the bytes.  A binary transfer must run in the foreground
  * (owhinata/stm32f746g-disco#50/#25).
  */
-int cli_console_claim(struct cli_instance *sh)
+int cli_console_claimable(struct cli_instance *sh)
 {
 	if (sh->fg != NULL)
 		return -2;
-	if (cli_lock(sh) != 0)
-		return -1;
-	cli_xfer_active = 1;
+	if (sh->console_claims == UINT16_MAX)
+		return -3;
 	return 0;
 }
 
+int cli_console_claim(struct cli_instance *sh)
+{
+	int rc;
+
+	if (sh->fg != NULL)
+		return -2;              /* before the lock, as it always was */
+	if (cli_lock(sh) != 0)
+		return -1;
+	rc = cli_console_claimable(sh);
+	if (rc != 0) {
+		cli_unlock(sh);
+		return rc;
+	}
+	sh->console_claims++;
+	return 0;
+}
+
+/* A release with no claim counted does nothing: the lock it would give back is
+ * not one a claim took. */
 void cli_console_release(struct cli_instance *sh)
 {
-	cli_xfer_active = 0;
+	if (sh->console_claims == 0u)
+		return;
+	sh->console_claims--;
 	cli_unlock(sh);
 }
 

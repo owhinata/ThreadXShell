@@ -422,12 +422,15 @@ static int op_program(void *ctx, uint32_t token, uint32_t addr,
 static int op_console_ready(void *ctx)
 {
 	struct wr_ctx *c = (struct wr_ctx *)ctx;
+	int rc;
 
-	/* The same condition cli_console_claim() refuses on, asked without
-	 * claiming anything: a background job's worker does not own the RX ring,
-	 * and finding that out after the erase would destroy a slot to say so. */
-	if (c->sh->fg != NULL) {
-		c->console_bg = 1;
+	/* The same function cli_console_claim() decides by (issue #229), asked
+	 * without claiming anything: a background job's worker does not own the
+	 * RX ring, a console at its claim limit cannot take another, and finding
+	 * either out after the erase would destroy a slot to say so. */
+	rc = cli_console_claimable(c->sh);
+	if (rc != 0) {
+		c->console_bg = (rc == -2);
 		return -1;
 	}
 	return 0;

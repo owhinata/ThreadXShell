@@ -234,6 +234,10 @@ int  cli_sleep(struct cli_instance *sh, unsigned ticks);
  */
 int  cli_console_claim(struct cli_instance *sh);
 void cli_console_release(struct cli_instance *sh);
+/* Could a claim of @p sh succeed, short of the lock (issue #229)?  0 yes, -2 a
+ * background job, -3 the claim count is at its limit.  cli_console_claim()
+ * decides by this same function, and returns -3 for the limit too. */
+int  cli_console_claimable(struct cli_instance *sh);
 int  cli_read_byte(struct cli_instance *sh, unsigned timeout_ms);
 void cli_rx_flush(struct cli_instance *sh);
 

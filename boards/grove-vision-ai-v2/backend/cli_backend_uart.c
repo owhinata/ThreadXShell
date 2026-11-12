@@ -18,7 +18,7 @@
  * _write routes through it.
  */
 #include "cli_backend_uart.h"
-#include "cli_internal.h"    /* cli_out_begin/cli_out_end + cli_xfer_active */
+#include "cli_internal.h"    /* cli_out_begin/cli_out_end */
 
 #include "WE2_device.h"
 #include "WE2_core.h"        /* EPII_NVIC_SetVector (cache-maintaining) */
@@ -372,17 +372,31 @@ const struct cli_transport_api cli_grove_uart_api = {
 /*
  * Push one byte into the TX ring, spinning (bounded) until it fits while the
  * TX-done callback drains in the background.  Returns 1 on success, 0 if TX
- * stayed wedged past the spin cap.  Only used once the console is enabled.
+ * stayed wedged past the spin cap or @p to (the console the byte is for) is
+ * claimed for a binary transfer.  Only used once the console is enabled.
+ * Always inlined, as it was before it took @p to: printf's stack under _write
+ * stays what it was (issue #229).
+ *
+ * The claim is asked again for every byte INSIDE the section that puts it into
+ * the ring (issue #229): a transfer's bytes enter the same ring under the same
+ * section and its count is raised before the first of them, so a byte put here
+ * while the count read 0 is ahead of every transfer byte.
  */
-static int tx_putc_spin(struct cli_grove_uart *u, uint8_t b, uint32_t *stall)
+static inline __attribute__((always_inline))
+int tx_putc_spin(struct cli_grove_uart *u, uint8_t b, uint32_t *stall,
+                 const struct cli_instance *to)
 {
 	for (;;) {
-		int ok;
+		int ok = 0, claimed;
 		CLI_UART_CRIT_ENTER();
-		ok = cli_uart_ring_put(&u->tx_ring, b);
+		claimed = (to != NULL && cli_console_claimed(to));
+		if (!claimed)
+			ok = cli_uart_ring_put(&u->tx_ring, b);
 		tx_start_locked(u);
 		CLI_UART_CRIT_EXIT();
 
+		if (claimed)
+			return 0;               /* claimed: drop the rest */
 		if (ok) {
 			*stall = 0;
 			return 1;
@@ -408,6 +422,22 @@ static struct cli_grove_uart *uart_ctx_from_instance(struct cli_instance *sh)
 	return (u != NULL && u->enabled) ? u : NULL;
 }
 
+/* Phase 2: enqueue one byte without waiting, unless @p to is claimed.  Returns
+ * 0 when claimed (drop the rest), 1 otherwise -- a full ring drops the byte. */
+static inline __attribute__((always_inline))
+int ring_put_nowait(struct cli_grove_uart *u, uint8_t b,
+                    const struct cli_instance *to)
+{
+	int claimed;
+
+	CLI_UART_CRIT_ENTER();
+	claimed = (to != NULL && cli_console_claimed(to));
+	if (!claimed)
+		(void)cli_uart_ring_put(&u->tx_ring, b);
+	CLI_UART_CRIT_EXIT();
+	return !claimed;
+}
+
 /*
  * printf retarget.  Three phases (reviewed M-G1 plan):
  *   1. before cli_init (no console bound):     drop -- there is nowhere to go
@@ -421,28 +451,36 @@ static struct cli_grove_uart *uart_ctx_from_instance(struct cli_instance *sh)
  * Bare LF is translated to CR+LF so a raw terminal shows printf output
  * without staircasing.  Line-atomicity: when the calling thread owns a shell
  * instance on this backend, the drain is bracketed by cli_out_begin/end (the
- * same lock cli_print takes).  During a raw transfer (cli_xfer_active) printf
- * output is dropped so it cannot corrupt the byte stream.
+ * same lock cli_print takes).  During a raw transfer printf output bound for
+ * the claimed console is dropped so it cannot corrupt the byte stream (issue
+ * #229: asked per console, and again for every byte inside the section that
+ * puts it into the ring).  A lock that cannot be taken drops the output.
  */
 int _write(int file, char *ptr, int len)
 {
-	struct cli_instance   *sh = cli_current_instance();
-	struct cli_grove_uart *u  = uart_ctx_from_instance(sh);
+	struct cli_instance       *sh = cli_current_instance();
+	struct cli_grove_uart     *u  = uart_ctx_from_instance(sh);
+	const struct cli_instance *to;
 	int locked = 0;
 	(void)file;
 
 	if (len <= 0)
 		return len;
-	if (cli_xfer_active)
-		return len;
 
-	if (u == NULL)
+	if (u == NULL) {
 		u = g_uart_console;     /* ISR / pre-kernel / non-shell thread */
-	else
-		locked = (cli_out_begin(sh) == 0);
-
-	if (u == NULL) {                /* phase 1: no console bound yet */
-		return len;
+		if (u == NULL)          /* phase 1: no console bound yet */
+			return len;
+		to = u->sh;
+		if (to != NULL && cli_console_claimed(to))
+			return len;
+	} else {
+		to = sh;
+		if (cli_console_claimed(to))
+			return len;
+		if (cli_out_begin(sh) != 0)
+			return len;
+		locked = 1;
 	}
 
 	{
@@ -456,22 +494,20 @@ int _write(int file, char *ptr, int len)
 
 			if (b == (uint8_t)'\n' && prev != (uint8_t)'\r') {
 				if (u->enabled) {
-					if (!tx_putc_spin(u, (uint8_t)'\r', &stall))
+					if (!tx_putc_spin(u, (uint8_t)'\r', &stall, to))
 						break;
 				} else {
-					CLI_UART_CRIT_ENTER();
-					(void)cli_uart_ring_put(&u->tx_ring, (uint8_t)'\r');
-					CLI_UART_CRIT_EXIT();
+					if (!ring_put_nowait(u, (uint8_t)'\r', to))
+						break;
 				}
 			}
 			if (u->enabled) {
-				if (!tx_putc_spin(u, b, &stall))
-					break;          /* wedged: drop the rest */
+				if (!tx_putc_spin(u, b, &stall, to))
+					break;          /* wedged / claimed: drop the rest */
 			} else {
 				/* phase 2: enqueue what fits, never wait. */
-				CLI_UART_CRIT_ENTER();
-				(void)cli_uart_ring_put(&u->tx_ring, b);
-				CLI_UART_CRIT_EXIT();
+				if (!ring_put_nowait(u, b, to))
+					break;          /* claimed: drop the rest */
 			}
 			prev = b;
 		}

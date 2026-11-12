@@ -221,10 +221,35 @@ struct cli_instance {
 	                                  *   (owhinata/stm32f746g-disco#16); set by cli_cancel_poll, cleared each dispatch */
 
 	enum cli_state state;
+	/* Claims of this console for a binary transfer (issue #229), counted:
+	 * cli_console_claim() adds one with the output lock held, and
+	 * cli_console_release() takes one away before giving the lock back.  Only
+	 * the claiming thread writes it; an ISR or another thread reads it through
+	 * cli_console_claimed().  A halfword at an even offset is one access on
+	 * Armv7-M and Armv8-M, so a reader never sees half of a change. */
+	volatile uint16_t console_claims;
 	int            last_result;      /**< return value of the most recent command */
 	uint32_t       rx_dropped;       /**< RX-overflow drop count (incremented in owhinata/stm32f746g-disco#7) */
 	uint32_t       tx_dropped;       /**< bytes dropped on TX timeout (owhinata/stm32f746g-disco#5) */
 };
+
+/**
+ * Is the console @p sh writes to claimed for a binary transfer (issue #229)?
+ * For a background-job worker that is its foreground's: the worker's output
+ * goes to the foreground's transport.  Safe from any thread or ISR (one
+ * halfword read); the answer is only as fresh as the read, so a writer that
+ * must not interleave with a transfer asks again inside the section that puts
+ * its byte into the transmit ring.  Always inlined: that section must not
+ * gain a call, and the stack under _write must not grow (LTO on wio made it a
+ * function of its own otherwise).
+ */
+static inline __attribute__((always_inline))
+int cli_console_claimed(const struct cli_instance *sh)
+{
+	const struct cli_instance *o = sh->fg != NULL ? sh->fg : sh;
+
+	return o->console_claims != 0u;
+}
 
 /**
  * Statically define a shell instance @p _name bound to transport @p _transport_ptr

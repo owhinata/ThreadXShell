@@ -237,8 +237,13 @@ int rtl_abort_cb(void *ctx)
  * both held; on failure nothing is held and the reason has been printed. */
 static int link_claim_common(struct cli_instance *sh)
 {
-	if (cli_console_claim(sh) != 0) {               /* bg-reject / single owner */
-		cli_error(sh, "wifi: run in the foreground (not `... &`)\r\n");
+	int rc = cli_console_claim(sh);
+
+	if (rc != 0) {                                  /* bg-reject / no claim */
+		if (rc == -2)
+			cli_error(sh, "wifi: run in the foreground (not `... &`)\r\n");
+		else
+			cli_error(sh, "wifi: the console could not be claimed (%d)\r\n", rc);
 		return -1;
 	}
 	if (rtl_link_claim(RTL_LINK_CLAIM_WAIT_MS) != 0) {

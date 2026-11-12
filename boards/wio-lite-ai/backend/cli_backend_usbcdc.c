@@ -184,8 +184,16 @@ static int usbcdc_write_other(struct cli_instance *sh, const char *ptr, int len)
 	uint8_t prev = 0;
 	int i;
 
+	/* Claimed for a transfer (issue #229): drop, before waiting on the lock
+	 * and again once it is held -- the claimant's own thread takes it. */
+	if (cli_console_claimed(sh))
+		return len;
 	if (cli_out_begin(sh) != 0)
 		return len;             /* lock unavailable: drop, as the CDC path does */
+	if (cli_console_claimed(sh)) {
+		cli_out_end(sh);
+		return len;
+	}
 	for (i = 0; i < len; i++) {
 		uint8_t b = (uint8_t)ptr[i];
 
@@ -212,19 +220,13 @@ static int usbcdc_write_other(struct cli_instance *sh, const char *ptr, int len)
  */
 int _write(int file, char *ptr, int len)
 {
-	struct cli_instance *sh = cli_current_instance();
-	struct cli_usbcdc   *u  = usbcdc_ctx_from_instance(sh);
+	struct cli_instance       *sh = cli_current_instance();
+	struct cli_usbcdc         *u  = usbcdc_ctx_from_instance(sh);
+	const struct cli_instance *to;
 	int locked = 0;
 	(void)file;
 
 	if (len <= 0)
-		return len;
-
-	/* A raw binary transfer (owhinata/wio-lite-ai#50) owns the console: drop printf so it
-    cannot
-	 * splice into the byte stream (its own bytes go via the transport write() path,
-	 * not _write).  Matches the UART backend. */
-	if (cli_xfer_active)
 		return len;
 
 	/* Owned by another backend's console (owhinata/wio-lite-ai#21): hand it over rather than
@@ -232,10 +234,29 @@ int _write(int file, char *ptr, int len)
 	if (sh != NULL && sh->tr != NULL && sh->tr->api != &cli_usbcdc_api)
 		return usbcdc_write_other(sh, ptr, len);
 
-	if (u == NULL)
-		u = g_usbcdc_console;   /* usb thread / ISR / pre-kernel / non-shell thread */
-	else
-		locked = (cli_out_begin(sh) == 0);   /* serialise with cli_print + editor */
+	/* A raw binary transfer (owhinata/wio-lite-ai#50) owns its console: printf bound for
+	 * THAT console is dropped so it cannot splice into the byte stream (issue #229:
+	 * per console, so a telnet `wifi ...` does not silence this one, nor end a
+	 * transfer here when it releases).  The console is the calling instance's, or --
+	 * usb thread, ISR, pre-kernel, non-shell thread -- the one g_usbcdc_console
+	 * belongs to.  Its own bytes go via the transport write() path, not _write.
+	 * Matches the UART backend. */
+	if (u == NULL) {
+		u  = g_usbcdc_console;  /* usb thread / ISR / pre-kernel / non-shell thread */
+		to = (u != NULL) ? u->sh : NULL;
+		if (to != NULL && cli_console_claimed(to))
+			return len;
+	} else {
+		to = sh;
+		if (cli_console_claimed(to))
+			return len;
+		/* serialise with cli_print + editor; a lock not taken drops the output
+		 * (issue #229), and one taken by the claimant's own thread is caught by the
+		 * per-byte check below. */
+		if (cli_out_begin(sh) != 0)
+			return len;
+		locked = 1;
+	}
 
 	if (u != NULL && u->enabled) {
 		const uint8_t *d = (const uint8_t *)ptr;
@@ -244,12 +265,22 @@ int _write(int file, char *ptr, int len)
 
 		for (i = 0; i < len; i++) {
 			uint8_t b = (uint8_t)d[i];
+			int claimed;
 
+			/* Asked again for every byte inside the section that puts it into the
+			 * ring (issue #229): a transfer's bytes enter the same ring under the
+			 * same section and its count is raised before the first of them, so a
+			 * byte put while the count read 0 is ahead of every transfer byte. */
 			CLI_USBCDC_CRIT_ENTER();
-			if (b == (uint8_t)'\n' && prev != (uint8_t)'\r')
-				(void)cli_uart_ring_put(&u->tx_ring, (uint8_t)'\r');
-			(void)cli_uart_ring_put(&u->tx_ring, b);   /* best-effort: drop if full */
+			claimed = (to != NULL && cli_console_claimed(to));
+			if (!claimed) {
+				if (b == (uint8_t)'\n' && prev != (uint8_t)'\r')
+					(void)cli_uart_ring_put(&u->tx_ring, (uint8_t)'\r');
+				(void)cli_uart_ring_put(&u->tx_ring, b);   /* best-effort: drop if full */
+			}
 			CLI_USBCDC_CRIT_EXIT();
+			if (claimed)
+				break;                  /* claimed: drop the rest */
 			prev = b;
 		}
 	}

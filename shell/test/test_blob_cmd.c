@@ -354,6 +354,29 @@ static void t_write(void)
 	expect("an occupied slot is refused, with the way out",
 	       has("`blob erase <slot>` first, on purpose (`blob list` shows "
 	           "what is where)") && blob_stub.erase_spans == 0u);
+
+	/* [!] A CONSOLE AT ITS CLAIM LIMIT (issue #229) cannot take the claim the
+	 * receive needs.  The question before the erase is the claim's own, so
+	 * it is refused before anything -- not after a slot was destroyed -- and
+	 * the lock is left as it was.  The count is placed there, not reached. */
+	reset();
+	sh0.console_claims = UINT16_MAX;
+	{
+		unsigned g0 = cli_test_lock_gets(), p0 = cli_test_lock_puts();
+
+		run("blob write model 5\r");
+		expect("a console at its claim limit is refused before the erase",
+		       blob_stub.reserves == 0u && blob_stub.erase_spans == 0u &&
+		       blob_stub.erase_headers == 0u && blob_stub.receives == 0u &&
+		       blob_stub.programs == 0u && blob_stub.state[5] == BLOB_EMPTY);
+		expect("... not as a background job",
+		       !has("cannot run in the background"));
+		expect("... the count is left at the limit",
+		       sh0.console_claims == UINT16_MAX);
+		expect("... and every lock taken was given back",
+		       cli_test_lock_gets() - g0 == cli_test_lock_puts() - p0);
+	}
+	sh0.console_claims = 0u;
 }
 
 /*

@@ -543,7 +543,7 @@ int cli_tx_send_blocking(struct cli_instance *sh, const uint8_t *data, size_t le
      to the
 		 * YMODEM protocol, so do NOT wake on / drain it for a Ctrl+C here -- that
 		 * would eat an ACK/'C'/NAK.  Wait only on TX space / kill. */
-		int   raw  = cli_xfer_active;
+		int   raw  = cli_console_claimed(sh);
 		ULONG mask = CLI_EVT_TX | CLI_EVT_KILL |
 		             ((sh->dispatching && !raw) ? CLI_EVT_RX : 0u);
 

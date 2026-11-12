@@ -194,15 +194,14 @@ void cli_unlock(struct cli_instance *sh);
 int  cli_tx_send_blocking(struct cli_instance *sh, const uint8_t *data, size_t len);
 
 /*
- * Raw binary transfer in progress (owhinata/stm32f746g-disco#50): set by cli_console_claim() for the
- * whole duration of a YMODEM send and cleared by cli_console_release().  Two
- * effects: (1) cli_tx_send_blocking() stops draining RX / polling for Ctrl+C while
- * blocked on a full TX ring, so the transfer's own ACK/'C'/NAK bytes are never
- * eaten; (2) the _write retarget drops printf output (which would otherwise reach
- * g_uart_console unlocked from a non-shell thread / ISR and corrupt the stream).
- * Single global -- transfers are serialised by the output lock the claim holds.
+ * Raw binary transfer in progress (owhinata/stm32f746g-disco#50): counted per
+ * console (struct cli_instance::console_claims, issue #229) and asked through
+ * cli_console_claimed() (cli_instance.h).  Two effects, each on the console
+ * whose bytes it concerns: (1) cli_tx_send_blocking() stops draining RX /
+ * polling for Ctrl+C while blocked on a full TX ring, so the transfer's own
+ * ACK/'C'/NAK bytes are never eaten; (2) the _write retarget drops printf
+ * output bound for that console.
  */
-extern volatile uint8_t cli_xfer_active;
 
 /*
  * Output bracket (owhinata/stm32f746g-disco#5 lock + owhinata/stm32f746g-disco#25 bg line-break).

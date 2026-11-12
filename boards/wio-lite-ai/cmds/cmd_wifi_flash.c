@@ -572,8 +572,12 @@ static int cmd_flash_imgload(struct cli_instance *sh, int argc, char **argv)
 	 * transfer helper would refuse too, but only after that (issue #228). */
 	if (net_tty_guard(sh, "ymodem"))
 		return 1;
-	if (cli_console_claim(sh) != 0) {
-		cli_error(sh, "wifi: run in the foreground (not `wifi ... &`)\r\n");
+	rc = cli_console_claim(sh);
+	if (rc != 0) {
+		if (rc == -2)
+			cli_error(sh, "wifi: run in the foreground (not `wifi ... &`)\r\n");
+		else
+			cli_error(sh, "wifi: the console could not be claimed (%d)\r\n", rc);
 		return 1;
 	}
 	/* Hold the OCTOSPI1 guard for the WHOLE transfer so a backgrounded psram/membench

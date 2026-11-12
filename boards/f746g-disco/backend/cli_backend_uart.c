@@ -252,18 +252,30 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 /*
  * Push one byte into the TX ring, spinning (bounded) until it fits while the TX
  * ISR drains in the background, and keep TX running.  Returns 1 on success, 0 if
- * TX stayed wedged past the spin cap.  *stall carries the idle-iteration count
- * and resets on progress.  Used by _write for byte-granular LF->CRLF translation.
+ * TX stayed wedged past the spin cap or @p to (the console the byte is for) is
+ * claimed for a binary transfer.  *stall carries the idle-iteration count and
+ * resets on progress.  Used by _write for byte-granular LF->CRLF translation.
+ *
+ * The claim is asked again for every byte INSIDE the section that puts it into
+ * the ring (issue #229).  A transfer's bytes enter the same ring under the same
+ * section, and its count is raised before the first of them, so a byte put here
+ * while the count read 0 is ahead of every transfer byte -- a check made once
+ * before the loop would leave the gap between it and the put open.
  */
-static int tx_putc_spin(struct cli_uart *u, uint8_t b, uint32_t *stall)
+static int tx_putc_spin(struct cli_uart *u, uint8_t b, uint32_t *stall,
+                        const struct cli_instance *to)
 {
 	for (;;) {
-		int ok;
+		int ok = 0, claimed;
 		CLI_UART_CRIT_ENTER();
-		ok = cli_uart_ring_put(&u->tx_ring, b);
+		claimed = (to != NULL && cli_console_claimed(to));
+		if (!claimed)
+			ok = cli_uart_ring_put(&u->tx_ring, b);
 		tx_start_locked(u);
 		CLI_UART_CRIT_EXIT();
 
+		if (claimed)
+			return 0;               /* claimed: drop the rest */
 		if (ok) {
 			*stall = 0;
 			return 1;
@@ -335,8 +347,16 @@ static int uart_write_other(struct cli_instance *sh, const char *ptr, int len)
 	uint8_t prev = 0;
 	int i;
 
+	/* Claimed for a transfer (issue #229): drop, before waiting on the lock
+	 * and again once it is held -- the claimant's own thread takes it. */
+	if (cli_console_claimed(sh))
+		return len;
 	if (cli_out_begin(sh) != 0)
 		return len;             /* lock unavailable: drop, as the ring path does */
+	if (cli_console_claimed(sh)) {
+		cli_out_end(sh);
+		return len;
+	}
 	for (i = 0; i < len; i++) {
 		uint8_t b = (uint8_t)ptr[i];
 
@@ -383,20 +403,13 @@ static int uart_write_other(struct cli_instance *sh, const char *ptr, int len)
  */
 int _write(int file, char *ptr, int len)
 {
-	struct cli_instance *sh = cli_current_instance();
-	struct cli_uart     *u  = uart_ctx_from_instance(sh);
+	struct cli_instance       *sh = cli_current_instance();
+	struct cli_uart           *u  = uart_ctx_from_instance(sh);
+	const struct cli_instance *to;
 	int locked = 0;
 	(void)file;
 
 	if (len <= 0)
-		return len;
-
-	/* During a raw binary transfer (owhinata/stm32f746g-disco#50) this UART is owned by the
-    YMODEM
-	 * byte stream; drop printf output -- it would otherwise reach g_uart_console
-	 * unlocked (from a non-shell thread / ISR) and corrupt the transfer.  The
-	 * transfer's own bytes go via the transport write() path, not _write. */
-	if (cli_xfer_active)
 		return len;
 
 	/* Owned by another backend's console (the telnet instance): hand it over
@@ -406,11 +419,28 @@ int _write(int file, char *ptr, int len)
 	if (sh != NULL && sh->tr != NULL && sh->tr->api != &cli_uart_api)
 		return uart_write_other(sh, ptr, len);
 
-	if (u == NULL)
-		u = g_uart_console;   /* ISR / pre-kernel / non-shell thread */
-	else
-		/* serialise with cli_print + editor (owhinata/stm32f746g-disco#25) */
-		locked = (cli_out_begin(sh) == 0);
+	/* During a raw binary transfer (owhinata/stm32f746g-disco#50) a console is owned
+	 * by the YMODEM byte stream; printf bound for THAT console is dropped (issue
+	 * #229: per console, so a claim elsewhere does not silence this one).  The
+	 * console is the calling instance's, or -- ISR, pre-kernel, non-shell thread
+	 * -- the one g_uart_console belongs to.  The transfer's own bytes go via the
+	 * transport write() path, not _write. */
+	if (u == NULL) {
+		u  = g_uart_console;  /* ISR / pre-kernel / non-shell thread */
+		to = (u != NULL) ? u->sh : NULL;
+		if (to != NULL && cli_console_claimed(to))
+			return len;
+	} else {
+		to = sh;
+		if (cli_console_claimed(to))
+			return len;
+		/* serialise with cli_print + editor (owhinata/stm32f746g-disco#25); a lock
+		 * not taken drops the output (issue #229), and one taken by the claimant's
+		 * own thread is caught by the per-byte check below. */
+		if (cli_out_begin(sh) != 0)
+			return len;
+		locked = 1;
+	}
 
 	if (u != NULL && u->enabled) {
 		const uint8_t *d = (const uint8_t *)ptr;
@@ -422,11 +452,11 @@ int _write(int file, char *ptr, int len)
 			uint8_t b = (uint8_t)d[i];
 
 			if (b == (uint8_t)'\n' && prev != (uint8_t)'\r') {
-				if (!tx_putc_spin(u, (uint8_t)'\r', &stall))
-					break;          /* wedged: drop the rest */
+				if (!tx_putc_spin(u, (uint8_t)'\r', &stall, to))
+					break;          /* wedged / claimed: drop the rest */
 			}
-			if (!tx_putc_spin(u, b, &stall))
-				break;                  /* wedged: drop the rest */
+			if (!tx_putc_spin(u, b, &stall, to))
+				break;                  /* wedged / claimed: drop the rest */
 			prev = b;
 		}
 		if (locked)

@@ -171,6 +171,16 @@ struct blob_write_ops {
 	 * effects, and the order used to be: reserve, choose, ERASE THE SLOT,
 	 * then discover it.  `blob write existing 0 &` destroyed two megabytes
 	 * and printed "drop the trailing '&'".
+	 *
+	 * [!] THE SAME ANSWER AS THE CLAIM, AND IT STAYS THE SAME UNTIL THE CLAIM
+	 * (issue #229).  The command asks cli_console_claimable(), the function
+	 * cli_console_claim() itself decides by (a background job, a claim count
+	 * at its limit).  The count changes only when this thread claims or
+	 * releases, and nothing called between this question and claim_console()
+	 * -- slot_count, reserve, the state and position reads, the notice, the
+	 * erase -- claims or releases a console; keep it so, or this question
+	 * stops speaking for the claim.  What it cannot ask is the lock itself
+	 * failing, as before.
 	 */
 	int  (*console_ready)(void *ctx);
 	/** Claim the console for raw byte IO.  0, or <0 (background / busy). */

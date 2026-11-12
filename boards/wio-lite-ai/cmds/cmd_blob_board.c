@@ -18,9 +18,10 @@
 #include "cmd_xfer.h"
 #include "net_tty.h"       /* refuse a raw transfer on the telnet console */
 
-int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink)
+int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,
+                       struct ym_recv_diag *diag)
 {
-	return xfer_recv_sink_locked(sh, sink);
+	return xfer_recv_sink_locked(sh, sink, diag);
 }
 
 /* YMODEM needs the raw USB CDC console; the telnet one says why it refuses. */

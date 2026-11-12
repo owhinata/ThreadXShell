@@ -33,8 +33,10 @@ struct cli_instance;
  *
  * Flushes RX, runs ymodem_recv(), flushes again, and drains until the line goes
  * quiet if it failed.  Prints nothing: the result and the counters go to the
- * log, and the caller says what was stored (issue #228).  Returns 0 when the
- * batch completed, 1 otherwise.
+ * log, and the caller says what was stored (issue #228).  The counters are
+ * written to @p diag, the caller's record, which it has set with
+ * ymodem_recv_diag_init() (issue #230).  Returns 0 when the batch completed,
+ * 1 otherwise.
  *
  * [!] FOR THE DURATION, THIS FUNCTION IS THE ONLY PERMITTED READER OF THE RX
  * RING.  Nothing in the sink may call cli_cancel_requested(): the poll behind
@@ -54,7 +56,8 @@ struct cli_instance;
  * not a proof: a peer that pauses past the quiet window can still get bytes to
  * the prompt.
  */
-int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink);
+int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink,
+                          struct ym_recv_diag *diag);
 
 /**
  * @brief  Send @p src to the PC over YMODEM: says what it sends, claims the

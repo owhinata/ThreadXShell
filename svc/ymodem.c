@@ -63,12 +63,17 @@
 #define YM_BLOCK_RETRIES        10
 
 /*
- * Single block staging buffer: [kind | seq | ~seq | data[1024] | crc_hi | crc_lo].
- * File-scope (not on the 4 KB shell-thread stack).  Not reentrant -- the shell
- * serialises transfers by holding the console output lock for the whole send.
+ * The send block: [kind | seq | ~seq | data[1024] | crc_hi | crc_lo], in the
+ * caller's struct ym_send_area (issue #230: this file holds no writable storage;
+ * the board owns the area, see struct ym_xfer).  Not on the 4 KB shell-thread
+ * stack.  Not reentrant on one area -- the shell serialises transfers by holding
+ * the console output lock for the whole send.
  */
-static uint8_t s_block[YM_HDR + YM_DATA_MAX + YM_CRC];
-#define S_DATA (s_block + YM_HDR)
+_Static_assert(YM_SEND_AREA_BYTES == YM_HDR + YM_DATA_MAX + YM_CRC,
+               "struct ym_send_area must hold exactly one framed 1 KB block");
+_Static_assert(YM_RECV_AREA_BYTES == YM_DATA_MAX,
+               "struct ym_recv_area must hold exactly one 1 KB block body");
+#define BLK_DATA(blk) ((blk) + YM_HDR)
 
 uint16_t ymodem_crc16(const uint8_t *p, size_t n)
 {
@@ -110,28 +115,29 @@ static int is_double_can(const struct ym_io *io)
 }
 
 /*
- * Frame S_DATA[0..datalen) as block @p seq of @p kind, append the CRC, send it,
- * and wait for ACK -- retrying on NAK / 'C' / timeout up to YM_BLOCK_RETRIES.
- * The caller has already filled S_DATA (and padded to datalen).
+ * Frame BLK_DATA(blk)[0..datalen) as block @p seq of @p kind, append the CRC,
+ * send it, and wait for ACK -- retrying on NAK / 'C' / timeout up to
+ * YM_BLOCK_RETRIES.  The caller has already filled the data (and padded to
+ * datalen).
  */
-static enum ym_result send_block(const struct ym_io *io, uint8_t kind,
-                                 uint8_t seq, uint16_t datalen)
+static enum ym_result send_block(const struct ym_io *io, uint8_t *blk,
+                                 uint8_t kind, uint8_t seq, uint16_t datalen)
 {
 	uint16_t crc;
 	size_t   total;
 	int      attempts = 0;
 
-	s_block[0] = kind;
-	s_block[1] = seq;
-	s_block[2] = (uint8_t)~seq;
-	crc = ymodem_crc16(S_DATA, datalen);
-	s_block[YM_HDR + datalen]     = (uint8_t)(crc >> 8);
-	s_block[YM_HDR + datalen + 1] = (uint8_t)(crc & 0xFFu);
+	blk[0] = kind;
+	blk[1] = seq;
+	blk[2] = (uint8_t)~seq;
+	crc = ymodem_crc16(BLK_DATA(blk), datalen);
+	blk[YM_HDR + datalen]     = (uint8_t)(crc >> 8);
+	blk[YM_HDR + datalen + 1] = (uint8_t)(crc & 0xFFu);
 	total = YM_HDR + datalen + YM_CRC;
 
 	for (;;) {
 		int b;
-		if (io->put(io->ctx, s_block, total) < 0)
+		if (io->put(io->ctx, blk, total) < 0)
 			return YM_ERR_IO;
 		b = io->getc(io->ctx, YM_ACK_TIMEOUT_MS);
 		if (b == (int)YM_ACK)
@@ -204,27 +210,29 @@ static enum ym_result send_eot(const struct ym_io *io)
 	}
 }
 
-/* Build block 0 into S_DATA: "name\0" "size(decimal)\0", zero-padded to 128. */
-static void build_block0(const struct ym_source *src)
+/* Build block 0 into @p data: "name\0" "size(decimal)\0", zero-padded to 128. */
+static void build_block0(uint8_t *data, const struct ym_source *src)
 {
 	const char *n = (src->name && src->name[0]) ? src->name : "file.bin";
 	size_t i = 0;
 	char   num[10];
 	int    nl;
 
-	memset(S_DATA, 0, YM_BLOCK0_LEN);
+	memset(data, 0, YM_BLOCK0_LEN);
 	while (*n && i < 100)
-		S_DATA[i++] = (uint8_t)*n++;
-	S_DATA[i++] = 0;                        /* NUL after the name */
+		data[i++] = (uint8_t)*n++;
+	data[i++] = 0;                          /* NUL after the name */
 	nl = u32_to_dec(src->size, num);
 	for (int k = 0; k < nl && i < YM_BLOCK0_LEN - 1; k++)
-		S_DATA[i++] = (uint8_t)num[k];
+		data[i++] = (uint8_t)num[k];
 	/* the NUL after the size and the rest are already zero from memset */
 }
 
 /* Run the batch; teardown on error is centralised in ymodem_send() below. */
-static enum ym_result ym_run(const struct ym_io *io, const struct ym_source *src)
+static enum ym_result ym_run(const struct ym_io *io, const struct ym_source *src,
+                             uint8_t *blk)
 {
+	uint8_t       *data = BLK_DATA(blk);
 	enum ym_result rc;
 	uint32_t       remaining = src->size;   /* exact size is authoritative */
 	uint8_t        seq;
@@ -235,8 +243,8 @@ static enum ym_result ym_run(const struct ym_io *io, const struct ym_source *src
 		return rc;
 
 	/* 2. block 0: filename + exact size. */
-	build_block0(src);
-	rc = send_block(io, YM_SOH, 0, YM_BLOCK0_LEN);
+	build_block0(data, src);
+	rc = send_block(io, blk, YM_SOH, 0, YM_BLOCK0_LEN);
 	if (rc != YM_OK)
 		return rc;
 
@@ -254,7 +262,7 @@ static enum ym_result ym_run(const struct ym_io *io, const struct ym_source *src
 		uint16_t datalen;
 
 		while (filled < want) {
-			int sr = src->read(src->ctx, S_DATA + filled, want - filled,
+			int sr = src->read(src->ctx, data + filled, want - filled,
 			                   &got);
 			if (sr < 0)
 				return YM_ERR_SOURCE;
@@ -268,9 +276,9 @@ static enum ym_result ym_run(const struct ym_io *io, const struct ym_source *src
 		datalen = (filled <= YM_BLOCK0_LEN) ? (uint16_t)YM_BLOCK0_LEN
 		                                    : (uint16_t)YM_DATA_MAX;
 		for (uint32_t i = filled; i < datalen; i++)
-			S_DATA[i] = YM_CPMEOF;          /* pad the short final block */
+			data[i] = YM_CPMEOF;            /* pad the short final block */
 
-		rc = send_block(io, datalen == YM_BLOCK0_LEN ? YM_SOH : YM_STX,
+		rc = send_block(io, blk, datalen == YM_BLOCK0_LEN ? YM_SOH : YM_STX,
 		                seq, datalen);
 		if (rc != YM_OK)
 			return rc;
@@ -289,13 +297,14 @@ static enum ym_result ym_run(const struct ym_io *io, const struct ym_source *src
 	rc = wait_c(io);
 	if (rc != YM_OK)
 		return rc;
-	memset(S_DATA, 0, YM_BLOCK0_LEN);
-	return send_block(io, YM_SOH, 0, YM_BLOCK0_LEN);
+	memset(data, 0, YM_BLOCK0_LEN);
+	return send_block(io, blk, YM_SOH, 0, YM_BLOCK0_LEN);
 }
 
-enum ym_result ymodem_send(const struct ym_io *io, const struct ym_source *src)
+enum ym_result ymodem_send(struct ym_xfer *x, const struct ym_io *io,
+                           const struct ym_source *src)
 {
-	enum ym_result rc = ym_run(io, src);
+	enum ym_result rc = ym_run(io, src, x->send->block);
 	if (rc != YM_OK)
 		send_cancel(io);                /* one teardown for every error exit */
 	return rc;
@@ -313,31 +322,38 @@ enum ym_result ymodem_send(const struct ym_io *io, const struct ym_source *src)
  * Interoperates with ymodem_send() above and with lrzsz `sb` on the PC.
  */
 
-/* Own block buffer -- deliberately NOT s_block (see the file banner). */
-static uint8_t s_rdata[YM_DATA_MAX];
+/*
+ * What one receive works in, both owned by the caller (issue #230): the block
+ * body in the board's struct ym_recv_area -- deliberately not the send area, so
+ * the two directions never alias -- and the caller's record.
+ */
+struct ym_rx {
+	uint8_t             *data;   /* YM_DATA_MAX bytes */
+	struct ym_recv_diag *diag;
+};
 
-/* Diagnostics for the last run (see ymodem_recv_diag).  Single static because the
- * receiver is already documented as non-reentrant. */
-static struct ym_recv_diag s_diag;
-
-const struct ym_recv_diag *ymodem_recv_diag(void)
+void ymodem_recv_diag_init(struct ym_recv_diag *d)
 {
-	return &s_diag;
+	memset(d, 0, sizeof *d);
+	d->first_kind = -1;
+	d->first_seq = -1;
+	d->first_nseq = -1;
 }
 
 /* Record the first rejected block; later rejections do not overwrite it. */
-static void diag_first(int kind, int seq, int nseq, uint32_t got, uint32_t want,
-                       uint16_t crc_want, uint16_t crc_got)
+static void diag_first(struct ym_recv_diag *d, int kind, int seq, int nseq,
+                       uint32_t got, uint32_t want, uint16_t crc_want,
+                       uint16_t crc_got)
 {
-	if (s_diag.first_kind >= 0)
+	if (d->first_kind >= 0)
 		return;
-	s_diag.first_kind = kind;
-	s_diag.first_seq = seq;
-	s_diag.first_nseq = nseq;
-	s_diag.first_got = got;
-	s_diag.first_want = want;
-	s_diag.first_crc_want = crc_want;
-	s_diag.first_crc_got = crc_got;
+	d->first_kind = kind;
+	d->first_seq = seq;
+	d->first_nseq = nseq;
+	d->first_got = got;
+	d->first_want = want;
+	d->first_crc_want = crc_want;
+	d->first_crc_got = crc_got;
 }
 
 /* wait_hdr() results that are not a protocol byte (both outside 0..255). */
@@ -360,7 +376,8 @@ static void recv_drain(const struct ym_io *io)
  * Wait for a block-start byte, discarding line noise.  Returns YM_SOH / YM_STX /
  * YM_EOT, or YM_IO_TIMEOUT / YM_IO_ABORT / YM_HDR_CANCEL.
  */
-static int wait_hdr(const struct ym_io *io, unsigned timeout_ms)
+static int wait_hdr(const struct ym_rx *rx, const struct ym_io *io,
+                    unsigned timeout_ms)
 {
 	for (int i = 0; i < YM_RECV_DISCARD_MAX; i++) {
 		int b = io->getc(io->ctx, timeout_ms);
@@ -368,7 +385,7 @@ static int wait_hdr(const struct ym_io *io, unsigned timeout_ms)
 		if (b == (int)YM_SOH || b == (int)YM_STX || b == (int)YM_EOT)
 			return b;
 		if (b == YM_IO_TIMEOUT)
-			s_diag.timeouts++;
+			rx->diag->timeouts++;
 		if (b == YM_IO_ABORT || b == YM_IO_TIMEOUT)
 			return b;
 		if (b == (int)YM_CAN && is_double_can(io))
@@ -380,12 +397,13 @@ static int wait_hdr(const struct ym_io *io, unsigned timeout_ms)
 
 /*
  * Read the body of a block whose header byte @p kind was already consumed:
- * seq, ~seq, data[128|1024], crc16.  Fills s_rdata + @p seq + @p datalen.
+ * seq, ~seq, data[128|1024], crc16.  Fills rx->data + @p seq + @p datalen.
  * Returns 0 on a good block, -1 on a corrupt one (caller NAKs), -2 on abort.
  */
-static int read_body(const struct ym_io *io, uint8_t kind, uint8_t *seq,
-                     uint16_t *datalen)
+static int read_body(const struct ym_rx *rx, const struct ym_io *io,
+                     uint8_t kind, uint8_t *seq, uint16_t *datalen)
 {
+	struct ym_recv_diag *d = rx->diag;
 	uint16_t n = (kind == YM_STX) ? (uint16_t)YM_DATA_MAX : (uint16_t)YM_BLOCK0_LEN;
 	uint16_t crc, got;
 	int      b, nseq;
@@ -394,8 +412,8 @@ static int read_body(const struct ym_io *io, uint8_t kind, uint8_t *seq,
 	if (b == YM_IO_ABORT)
 		return -2;
 	if (b < 0) {
-		s_diag.short_read++;
-		diag_first(kind, -1, -1, 0, n, 0, 0);
+		d->short_read++;
+		diag_first(d, kind, -1, -1, 0, n, 0, 0);
 		return -1;
 	}
 	*seq = (uint8_t)b;
@@ -404,13 +422,13 @@ static int read_body(const struct ym_io *io, uint8_t kind, uint8_t *seq,
 	if (nseq == YM_IO_ABORT)
 		return -2;
 	if (nseq < 0) {
-		s_diag.short_read++;
-		diag_first(kind, *seq, -1, 0, n, 0, 0);
+		d->short_read++;
+		diag_first(d, kind, *seq, -1, 0, n, 0, 0);
 		return -1;
 	}
 	if ((uint8_t)nseq != (uint8_t)~*seq) {
-		s_diag.bad_seq++;
-		diag_first(kind, *seq, nseq, 0, n, 0, 0);
+		d->bad_seq++;
+		diag_first(d, kind, *seq, nseq, 0, n, 0, 0);
 		return -1;
 	}
 
@@ -421,11 +439,11 @@ static int read_body(const struct ym_io *io, uint8_t kind, uint8_t *seq,
 		if (b < 0) {
 			/* The distinguishing case: the sender is mid-block and bytes
 			 * simply stopped arriving -> the transport lost them. */
-			s_diag.short_read++;
-			diag_first(kind, *seq, nseq, i, n, 0, 0);
+			d->short_read++;
+			diag_first(d, kind, *seq, nseq, i, n, 0, 0);
 			return -1;
 		}
-		s_rdata[i] = (uint8_t)b;
+		rx->data[i] = (uint8_t)b;
 	}
 
 	crc = 0;
@@ -434,22 +452,22 @@ static int read_body(const struct ym_io *io, uint8_t kind, uint8_t *seq,
 		if (b == YM_IO_ABORT)
 			return -2;
 		if (b < 0) {
-			s_diag.short_read++;
-			diag_first(kind, *seq, nseq, n + (uint32_t)i, n, 0, 0);
+			d->short_read++;
+			diag_first(d, kind, *seq, nseq, n + (uint32_t)i, n, 0, 0);
 			return -1;
 		}
 		crc = (uint16_t)((crc << 8) | (uint8_t)b);
 	}
 
-	got = ymodem_crc16(s_rdata, n);
+	got = ymodem_crc16(rx->data, n);
 	if (got != crc) {
-		s_diag.bad_crc++;
-		diag_first(kind, *seq, nseq, n, n, crc, got);
+		d->bad_crc++;
+		diag_first(d, kind, *seq, nseq, n, n, crc, got);
 		return -1;
 	}
 
 	*datalen = n;
-	s_diag.blocks++;
+	d->blocks++;
 	return 0;
 }
 
@@ -463,16 +481,17 @@ static int read_body(const struct ym_io *io, uint8_t kind, uint8_t *seq,
  * size is the value every downstream bound is derived from -- a wrapped size would
  * understate the file and slip past the sink's capacity check.
  */
-static int parse_block0(char *name, size_t cap, uint32_t *size, int *have_size)
+static int parse_block0(const uint8_t *data, char *name, size_t cap,
+                        uint32_t *size, int *have_size)
 {
 	size_t i = 0, n = 0;
 
 	*size = 0;
 	*have_size = 0;
 
-	while (i < YM_BLOCK0_LEN && s_rdata[i] != 0) {
+	while (i < YM_BLOCK0_LEN && data[i] != 0) {
 		if (n + 1 < cap)
-			name[n++] = (char)s_rdata[i];
+			name[n++] = (char)data[i];
 		i++;
 	}
 	name[n] = '\0';
@@ -480,8 +499,8 @@ static int parse_block0(char *name, size_t cap, uint32_t *size, int *have_size)
 		return -1;                      /* name field ran off the block: malformed */
 	i++;                                    /* past the NUL */
 
-	while (i < YM_BLOCK0_LEN && s_rdata[i] >= '0' && s_rdata[i] <= '9') {
-		uint32_t d = (uint32_t)(s_rdata[i] - '0');
+	while (i < YM_BLOCK0_LEN && data[i] >= '0' && data[i] <= '9') {
+		uint32_t d = (uint32_t)(data[i] - '0');
 
 		if (*size > (0xFFFFFFFFu - d) / 10u)
 			return -1;              /* decimal size overflows 32 bits */
@@ -499,7 +518,8 @@ static int put1(const struct ym_io *io, uint8_t b)
 }
 
 /* Run the receive batch; teardown on error is centralised in ymodem_recv(). */
-static enum ym_result ym_recv_run(const struct ym_io *io, const struct ym_sink *sink)
+static enum ym_result ym_recv_run(const struct ym_rx *rx, const struct ym_io *io,
+                                  const struct ym_sink *sink)
 {
 	char     name[YM_BLOCK0_LEN];
 	uint32_t size = 0, remaining = 0;
@@ -514,7 +534,7 @@ static enum ym_result ym_recv_run(const struct ym_io *io, const struct ym_sink *
 
 		if (put1(io, YM_CRC_C) < 0)
 			return YM_ERR_IO;
-		h = wait_hdr(io, YM_HANDSHAKE_TIMEOUT_MS);
+		h = wait_hdr(rx, io, YM_HANDSHAKE_TIMEOUT_MS);
 		if (h == YM_IO_ABORT || h == YM_HDR_CANCEL)
 			return YM_ERR_CANCEL;
 		if (h == YM_IO_TIMEOUT) {
@@ -526,7 +546,7 @@ static enum ym_result ym_recv_run(const struct ym_io *io, const struct ym_sink *
 			(void)put1(io, YM_ACK);
 			continue;
 		}
-		rc = read_body(io, (uint8_t)h, &seq, &datalen);
+		rc = read_body(rx, io, (uint8_t)h, &seq, &datalen);
 		if (rc == -2)
 			return YM_ERR_CANCEL;
 		if (rc != 0 || seq != 0) {      /* corrupt or not block 0: re-'C' */
@@ -538,7 +558,7 @@ static enum ym_result ym_recv_run(const struct ym_io *io, const struct ym_sink *
 		break;
 	}
 
-	if (parse_block0(name, sizeof name, &size, &have_size) != 0)
+	if (parse_block0(rx->data, name, sizeof name, &size, &have_size) != 0)
 		return YM_ERR_PROTO;
 	if (name[0] == '\0') {
 		/* An immediate null block 0 = the sender closed the batch without ever
@@ -563,7 +583,7 @@ static enum ym_result ym_recv_run(const struct ym_io *io, const struct ym_sink *
 
 		attempts = 0;
 		for (;;) {
-			h = wait_hdr(io, YM_ACK_TIMEOUT_MS);
+			h = wait_hdr(rx, io, YM_ACK_TIMEOUT_MS);
 			if (h != YM_IO_TIMEOUT)
 				break;
 			if (++attempts > YM_BLOCK_RETRIES)
@@ -586,7 +606,7 @@ static enum ym_result ym_recv_run(const struct ym_io *io, const struct ym_sink *
 			break;                          /* file complete */
 		}
 
-		rc = read_body(io, (uint8_t)h, &seq, &datalen);
+		rc = read_body(rx, io, (uint8_t)h, &seq, &datalen);
 		if (rc == -2)
 			return YM_ERR_CANCEL;
 		if (rc != 0) {
@@ -617,7 +637,7 @@ static enum ym_result ym_recv_run(const struct ym_io *io, const struct ym_sink *
 					take = remaining;
 				remaining -= take;
 			}
-			if (take > 0u && sink->write(sink->ctx, s_rdata, take) < 0)
+			if (take > 0u && sink->write(sink->ctx, rx->data, take) < 0)
 				return YM_ERR_SINK;
 		}
 		expect++;
@@ -632,7 +652,7 @@ static enum ym_result ym_recv_run(const struct ym_io *io, const struct ym_sink *
 		return YM_ERR_IO;
 	attempts = 0;
 	for (;;) {
-		int h = wait_hdr(io, YM_ACK_TIMEOUT_MS);
+		int h = wait_hdr(rx, io, YM_ACK_TIMEOUT_MS);
 
 		if (h == YM_IO_ABORT || h == YM_HDR_CANCEL)
 			return YM_ERR_CANCEL;
@@ -648,7 +668,7 @@ static enum ym_result ym_recv_run(const struct ym_io *io, const struct ym_sink *
 				return YM_ERR_IO;
 			continue;
 		}
-		rc = read_body(io, (uint8_t)h, &seq, &datalen);
+		rc = read_body(rx, io, (uint8_t)h, &seq, &datalen);
 		if (rc == -2)
 			return YM_ERR_CANCEL;
 		if (rc != 0) {
@@ -659,23 +679,21 @@ static enum ym_result ym_recv_run(const struct ym_io *io, const struct ym_sink *
 				return YM_ERR_IO;
 			continue;
 		}
-		if (seq != 0 || s_rdata[0] != 0)
+		if (seq != 0 || rx->data[0] != 0)
 			return YM_ERR_PROTO;            /* a second file: batches unsupported */
 		(void)put1(io, YM_ACK);
 		return YM_OK;
 	}
 }
 
-enum ym_result ymodem_recv(const struct ym_io *io, const struct ym_sink *sink)
+enum ym_result ymodem_recv(struct ym_xfer *x, const struct ym_io *io,
+                           const struct ym_sink *sink, struct ym_recv_diag *diag)
 {
-	enum ym_result rc;
+	const struct ym_rx rx = { x->recv->data, diag };
+	enum ym_result     rc;
 
-	memset(&s_diag, 0, sizeof s_diag);
-	s_diag.first_kind = -1;
-	s_diag.first_seq = -1;
-	s_diag.first_nseq = -1;
-
-	rc = ym_recv_run(io, sink);
+	ymodem_recv_diag_init(diag);
+	rc = ym_recv_run(&rx, io, sink);
 	if (rc != YM_OK)
 		send_cancel(io);                /* one teardown for every error exit */
 	return rc;

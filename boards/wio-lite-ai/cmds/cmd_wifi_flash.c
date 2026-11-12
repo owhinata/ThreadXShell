@@ -559,10 +559,12 @@ static int img_report(struct cli_instance *sh)
 static int cmd_flash_imgload(struct cli_instance *sh, int argc, char **argv)
 {
 	const struct rtl_img *im;
+	struct ym_recv_diag   d;    /* this transfer's counters, in this frame (#230) */
 	uint32_t              drops0;
 	int                   rc, ok = 0;
 
 	(void)argc; (void)argv;
+	ymodem_recv_diag_init(&d);
 
 	if (!psram_ready()) {
 		cli_error(sh, "wifi: PSRAM is not available -- nowhere to stage the image\r\n");
@@ -606,25 +608,23 @@ static int cmd_flash_imgload(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "wifi: start the sender now -- `sb <file>` (lrzsz YMODEM batch send; "
 	          "`sz` will NOT work), or Ctrl+A Ctrl+S in picocom; cancel the sender on "
 	          "the PC to abort\r\n");
-	rc = xfer_recv_sink_locked(sh, rtl_img_sink());
+	rc = xfer_recv_sink_locked(sh, rtl_img_sink(), &d);
 
 	/* Print the transfer post-mortem BEFORE branching, so a failure is as
 	 * informative as a success -- the counters say which layer broke (see
 	 * struct ym_recv_diag). */
 	{
-		const struct ym_recv_diag *d = ymodem_recv_diag();
-
 		cli_print(sh, "  ymodem: %lu blocks ok, %lu bad-crc, %lu bad-seq, "
 		          "%lu short-read, %lu header-timeouts\r\n",
-		          (unsigned long)d->blocks, (unsigned long)d->bad_crc,
-		          (unsigned long)d->bad_seq, (unsigned long)d->short_read,
-		          (unsigned long)d->timeouts);
-		if (d->first_kind >= 0)
+		          (unsigned long)d.blocks, (unsigned long)d.bad_crc,
+		          (unsigned long)d.bad_seq, (unsigned long)d.short_read,
+		          (unsigned long)d.timeouts);
+		if (d.first_kind >= 0)
 			cli_print(sh, "  first bad block: kind 0x%02X seq %d ~seq %d, "
 			          "body %lu/%lu B, crc want %04X got %04X\r\n",
-			          (unsigned)d->first_kind, d->first_seq, d->first_nseq,
-			          (unsigned long)d->first_got, (unsigned long)d->first_want,
-			          d->first_crc_want, d->first_crc_got);
+			          (unsigned)d.first_kind, d.first_seq, d.first_nseq,
+			          (unsigned long)d.first_got, (unsigned long)d.first_want,
+			          d.first_crc_want, d.first_crc_got);
 		/* The console backend drops -- and counts -- a byte when its RX ring
 		 * overruns.  A non-zero count here means the loss is below YMODEM. */
 		cli_print(sh, "  rx drops during the transfer: %lu%s\r\n",

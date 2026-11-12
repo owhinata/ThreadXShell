@@ -20,9 +20,10 @@
 #include "nor_cmd.h"      /* nor_cmd_say_busy -- the holder, in `nor`'s words */
 #include "nor_flash.h"    /* nor_fail_reason */
 
-int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink)
+int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,
+                       struct ym_recv_diag *diag)
 {
-	return xfer_recv_sink_locked(sh, sink);
+	return xfer_recv_sink_locked(sh, sink, diag);
 }
 
 /* One console, the UART: there is nothing a raw transfer could be refused on. */

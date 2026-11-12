@@ -41,7 +41,9 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
  * caller ALREADY holds the console (cli_console_claim).  Flushes RX, runs
  * ymodem_recv(), flushes again, and drains until the line goes quiet if it
  * failed.  Prints nothing: the result and the counters go to the log, and the
- * caller says what was stored (issue #228).  Refused on the telnet console
+ * caller says what was stored (issue #228).  The counters are written to
+ * @p diag, the caller's record, which it has set with ymodem_recv_diag_init()
+ * (issue #230): a refusal here leaves it at that value.  Refused on the telnet console
  * (issue #228; `blob write` asks the same question itself before it erases).
  * Returns 0 when the batch completed, 1 otherwise.
  *
@@ -54,7 +56,8 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
  * protocol core honours).  grove-vision-ai-v2's cmd_xfer.h tells how
  * wio-lite-ai learned this.
  */
-int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink);
+int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink,
+                          struct ym_recv_diag *diag);
 
 #ifdef __cplusplus
 }

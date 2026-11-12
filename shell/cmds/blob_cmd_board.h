@@ -26,8 +26,11 @@ extern "C" {
 struct cli_instance;
 
 /** Run one YMODEM receive into @p sink on @p sh, whose console the caller has
- *  claimed.  0 when the batch completed. */
-int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink);
+ *  claimed, writing the transfer's counters to @p diag -- the caller's record,
+ *  set with ymodem_recv_diag_init() before the call (issue #230).  0 when the
+ *  batch completed. */
+int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,
+                       struct ym_recv_diag *diag);
 
 /** May this console carry a raw transfer?  0 yes; -1 no, having told the
  *  operator why (a telnet console, for one). */

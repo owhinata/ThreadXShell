@@ -374,6 +374,11 @@ struct wr_ctx {
 	int      stat_failed;
 	unsigned stat_slot;
 	int      stat_rc;
+	/* The receive's counters (issue #230): the board's receiver writes them
+	 * here, in this command's own frame, so the `ymodem   :` line after the
+	 * transfer reads this transfer and nothing later can overwrite it.  Set
+	 * to the "nothing received" value before the coordinator runs. */
+	struct ym_recv_diag diag;
 };
 
 /* Before each erase unit.  The console has not been handed to the protocol
@@ -452,7 +457,9 @@ static void op_release_console(void *ctx)
 
 static int op_receive(void *ctx, const struct ym_sink *sink)
 {
-	return blob_board_receive(((struct wr_ctx *)ctx)->sh, sink);
+	struct wr_ctx *c = (struct wr_ctx *)ctx;
+
+	return blob_board_receive(c->sh, sink, &c->diag);
 }
 
 static int op_read_back(void *ctx, uint32_t addr, void *buf, uint32_t len)
@@ -547,7 +554,7 @@ static int op_geometry(void *ctx, unsigned slot, uint32_t *base,
  */
 static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 {
-	struct wr_ctx ctx = { sh, 0, BLOB_OK, 0, 0u, BLOB_OK };
+	struct wr_ctx ctx = { .sh = sh, .reserve_rc = BLOB_OK, .stat_rc = BLOB_OK };
 	const struct blob_write_ops ops = {
 		&ctx, op_reserve, op_unreserve, op_erase, op_program,
 		op_console_ready, op_claim_console, op_release_console,
@@ -583,6 +590,7 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 	/* Nothing is printed here: that a slot is about to be erased is only true
 	 * once one has been CHOSEN, under the reservation; op_announce() says it
 	 * at that moment. */
+	ymodem_recv_diag_init(&ctx.diag);
 	stage = blob_svc_stage(&stage_len);
 #if BLOB_SVC_HAS_RX_LEVEL
 	blob_board_rx_level_clear(sh);   /* this transfer's high-water only */
@@ -616,7 +624,7 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 	    res == BLOB_WRITE_PROG_FAILED || res == BLOB_WRITE_VERIFY_FAILED) {
 		/* A transfer ran: the YMODEM counters say which layer broke, and
 		 * the RX drop count is the one loss they cannot see. */
-		const struct ym_recv_diag *d = ymodem_recv_diag();
+		const struct ym_recv_diag *d = &ctx.diag;
 
 		cli_print(sh, "ymodem   : %lu blocks ok, %lu bad-crc, %lu bad-seq, "
 		              "%lu short-read, %lu header-timeouts\r\n",

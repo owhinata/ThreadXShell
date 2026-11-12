@@ -234,11 +234,16 @@ uint8_t *blob_svc_stage(uint32_t *len)
 
 /* ---- the board's console pieces ------------------------------------------- */
 
-int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink)
+int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,
+                       struct ym_recv_diag *diag)
 {
 	static uint8_t block[1024];
 	uint32_t off;
 
+	/* What the firmware's receiver does with the caller's record (issue
+	 * #230): it starts from the "nothing received" value and counts. */
+	ymodem_recv_diag_init(diag);
+	diag->blocks = 3u;
 	blob_stub.receives++;
 	sh->rx_dropped += blob_stub.drops;
 	if (sink->begin(sink->ctx, "sent.bin", blob_stub.send) != 0)
@@ -300,14 +305,7 @@ int blob_board_rx_level(struct cli_instance *sh, uint32_t *high,
 	return 0;
 }
 
-/* ---- what the firmware's protocol provides (the console hand-over is real) */
-
-const struct ym_recv_diag *ymodem_recv_diag(void)
-{
-	static const struct ym_recv_diag d = { .blocks = 3u, .first_kind = -1,
-	                                       .first_seq = -1, .first_nseq = -1 };
-	return &d;
-}
+/* ---- what the firmware provides (the console hand-over is real) ---------- */
 
 static char logbuf[4096];
 static size_t loglen;

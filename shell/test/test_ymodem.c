@@ -192,11 +192,17 @@ static int parse_frames(const uint8_t *tx, size_t len, struct frame *out, int ma
 }
 
 /* ---- shared run helper ---------------------------------------------------- */
+
+/* The working areas a board would own (issue #230); this test is the board. */
+static struct ym_send_area t_send;
+static struct ym_recv_area t_recv;
+static struct ym_xfer      t_xfer = { &t_send, &t_recv };
+
 static enum ym_result run(struct mock *m, struct src_ctx *s, const char *name)
 {
 	struct ym_io io = { m, mock_getc, mock_put };
 	struct ym_source src = { s, name, s->size, src_read };
-	return ymodem_send(&io, &src);
+	return ymodem_send(&t_xfer, &io, &src);
 }
 
 int main(void)

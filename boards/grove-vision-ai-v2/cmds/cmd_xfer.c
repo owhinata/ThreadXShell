@@ -18,6 +18,18 @@
 #include "tx_api.h"   /* tx_time_get(): the drain's longest gap */
 
 /*
+ * The transfers' working areas (issue #230).  svc/ymodem.c holds no writable
+ * storage; this board owns its one struct ym_xfer and the two areas it points
+ * at, and this file is the only caller of ymodem_send() / ymodem_recv(), so
+ * every transfer (`camera send`, `blob write`) uses this one.  Ordinary .bss,
+ * in DTCM where svc/ymodem.c's buffers were before: only the CPU touches them
+ * (io_put() copies the bytes into the UART's TX ring).
+ */
+static struct ym_send_area s_ym_send;
+static struct ym_recv_area s_ym_recv;
+static struct ym_xfer      s_ym = { &s_ym_send, &s_ym_recv };
+
+/*
  * SEND direction: everything read back while sending is protocol -- ACK / NAK /
  * 'C' / CAN -- so a 0x03 can only be a person pressing Ctrl+C, and mapping it to
  * an abort is safe.  The receive direction below must not.
@@ -167,10 +179,8 @@ static int xfer_send_report(struct cli_instance *sh, const struct ym_source *src
 	}
 }
 
-static void xfer_recv_log(enum ym_result res)
+static void xfer_recv_log(enum ym_result res, const struct ym_recv_diag *d)
 {
-	const struct ym_recv_diag *d = ymodem_recv_diag();
-
 	log_write(res == YM_OK ? LOG_LEVEL_INF : LOG_LEVEL_ERR, "xfer",
 	          "recv %s: blocks=%lu crc=%lu seq=%lu short=%lu tmo=%lu",
 	          xfer_result_word(res), (unsigned long)d->blocks,
@@ -211,7 +221,7 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 	              "replaces an older file of that name) or Ctrl+A Ctrl+R in "
 	              "picocom; Ctrl+C aborts\r\n");
 	cli_rx_flush(sh);                /* type-ahead and the command's newline */
-	res = ymodem_send(&io, src);
+	res = ymodem_send(&s_ym, &io, src);
 	cli_rx_flush(sh);                /* a trailing 'O' / 'C' / garbage tail  */
 	if (res != YM_OK)
 		xfer_drain_until_quiet(sh);  /* the receiver may still be NAKing */
@@ -220,18 +230,19 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 	return rc;
 }
 
-int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
+int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink,
+                          struct ym_recv_diag *diag)
 {
 	struct ym_io io = { sh, io_getc_recv, io_put };
 	enum ym_result res;
 
 	/* No telnet question here: this board has no telnet console (issue #228). */
 	cli_rx_flush(sh);                /* type-ahead and the command's newline */
-	res = ymodem_recv(&io, sink);
+	res = ymodem_recv(&s_ym, &io, sink, diag);
 	cli_rx_flush(sh);                /* a trailing 'O' / CAN / garbage tail  */
 	if (res != YM_OK)
 		xfer_drain_until_quiet(sh);  /* the sender may still be retrying */
 
-	xfer_recv_log(res);              /* the caller prints the outcome */
+	xfer_recv_log(res, diag);        /* the caller prints the outcome */
 	return res == YM_OK ? 0 : 1;
 }

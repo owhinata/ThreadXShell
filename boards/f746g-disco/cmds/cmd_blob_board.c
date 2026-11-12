@@ -23,9 +23,10 @@
 #include "cmd_xfer.h"
 #include "net_tty.h"           /* net_tty_guard(): the telnet console (#221) */
 
-int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink)
+int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,
+                       struct ym_recv_diag *diag)
 {
-	return xfer_recv_sink_locked(sh, sink);
+	return xfer_recv_sink_locked(sh, sink, diag);
 }
 
 /* YMODEM needs the raw VCP.  The telnet console is told why it is refused

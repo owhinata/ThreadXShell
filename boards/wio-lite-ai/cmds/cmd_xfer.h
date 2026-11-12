@@ -69,7 +69,9 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
  * xfer_send_source_locked(): flushes RX, runs ymodem_recv() and flushes RX again.
  * Unlike the send it prints nothing (issue #228): the result and the counters go
  * to the log, and the caller says what was staged or stored and that it was not.
- * Added for owhinata/wio-lite-ai#19 M5 (`wifi flash imgload`).
+ * The counters are written to @p diag, the caller's record, which it has set
+ * with ymodem_recv_diag_init() (issue #230): a refusal here leaves it at that
+ * value.  Added for owhinata/wio-lite-ai#19 M5 (`wifi flash imgload`).
  *
  * CRITICAL -- console RX ownership: exactly as on the send side, for the duration
  * of ymodem_recv() the ONLY permitted reader of the console RX ring is this
@@ -100,7 +102,8 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
  * still talking at the byte cap (which says so, loudly), can still get bytes to
  * the prompt.
  */
-int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink);
+int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink,
+                          struct ym_recv_diag *diag);
 
 #ifdef __cplusplus
 }

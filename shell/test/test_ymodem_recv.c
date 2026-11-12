@@ -191,6 +191,16 @@ static int ep_put(void *ctx, const uint8_t *buf, size_t len)
 	return chan_put(((struct endpoint *)ctx)->tx, buf, len);
 }
 
+/*
+ * The working areas a board would own (issue #230).  The loopback runs a send
+ * and a receive AT THE SAME TIME, so it needs two owners -- one per side, each
+ * with its own areas -- where a board defines exactly one.
+ */
+static struct ym_send_area s_send_a, r_send_a;
+static struct ym_recv_area s_recv_a, r_recv_a;
+static struct ym_xfer      sender_xfer = { &s_send_a, &s_recv_a };
+static struct ym_xfer      recv_xfer = { &r_send_a, &r_recv_a };
+
 struct send_arg {
 	struct endpoint  ep;
 	struct pat_src   src;
@@ -204,7 +214,7 @@ static void *run_sender(void *arg)
 	struct ym_io     io = { &a->ep, ep_getc, ep_put };
 	struct ym_source src = { &a->src, a->name, a->src.size, pat_read };
 
-	a->rc = ymodem_send(&io, &src);
+	a->rc = ymodem_send(&sender_xfer, &io, &src);
 	return NULL;
 }
 
@@ -217,6 +227,7 @@ static void loopback(uint32_t size, const char *name)
 	struct cap_sink    sink;
 	struct ym_io       rio;
 	struct ym_sink     vs = { &sink, cap_begin, cap_write };
+	struct ym_recv_diag diag;
 	pthread_t          th;
 	enum ym_result     rrc;
 
@@ -237,11 +248,13 @@ static void loopback(uint32_t size, const char *name)
 	rio.ctx = &rep; rio.getc = ep_getc; rio.put = ep_put;
 
 	assert(pthread_create(&th, NULL, run_sender, &sa) == 0);
-	rrc = ymodem_recv(&rio, &vs);
+	rrc = ymodem_recv(&recv_xfer, &rio, &vs, &diag);
 	pthread_join(th, NULL);
 
 	assert(sa.rc == YM_OK);
 	assert(rrc == YM_OK);                          /* batch actually closed */
+	assert(diag.blocks >= 2u && diag.bad_crc == 0u && diag.bad_seq == 0u &&
+	       diag.short_read == 0u && diag.first_kind == -1);
 	assert(sink.begins == 1);
 	assert(strcmp(sink.name, name) == 0);
 	assert(sink.declared == size);
@@ -327,12 +340,18 @@ static int count_byte(const struct script *s, uint8_t b)
 	return n;
 }
 
+/* The record the last run_script() wrote: the caller's, not the protocol's. */
+static struct ym_recv_diag last_diag;
+
 static enum ym_result run_script(struct script *s, struct cap_sink *sink)
 {
 	struct ym_io   io = { s, script_getc, script_put };
 	struct ym_sink vs = { sink, cap_begin, cap_write };
 
-	return ymodem_recv(&io, &vs);
+	/* Garbage first: ymodem_recv() must set the caller's record on entry
+	 * (issue #230), so nothing of this survives into the counts. */
+	memset(&last_diag, 0xA5, sizeof last_diag);
+	return ymodem_recv(&recv_xfer, &io, &vs, &last_diag);
 }
 
 int main(void)
@@ -362,6 +381,19 @@ int main(void)
 	}
 	memset(nullb0, 0, sizeof nullb0);
 
+	/* ---- K. the "nothing received" value (issue #230) ---- */
+	{
+		struct ym_recv_diag z;
+
+		memset(&z, 0xA5, sizeof z);
+		ymodem_recv_diag_init(&z);
+		assert(z.blocks == 0u && z.bad_crc == 0u && z.bad_seq == 0u &&
+		       z.short_read == 0u && z.timeouts == 0u);
+		assert(z.first_kind == -1 && z.first_seq == -1 && z.first_nseq == -1);
+		assert(z.first_got == 0u && z.first_want == 0u &&
+		       z.first_crc_want == 0u && z.first_crc_got == 0u);
+	}
+
 #define SCRIPT_BEGIN()  do {                                    \
 		memset(&s, 0, sizeof s);                        \
 		s.in = in; s.inlen = 0;                         \
@@ -385,6 +417,14 @@ int main(void)
 		assert(sink.len == 1024);
 		assert(memcmp(sink.buf, data, 1024) == 0);     /* exactly once */
 		assert(count_byte(&s, NAK) == 1);              /* the bad block was NAKed */
+		/* The record came back to the caller: block 0, the resend and the
+		 * closing block 0 accepted, the first rejection is the damaged STX. */
+		assert(last_diag.blocks == 3u && last_diag.bad_crc == 1u);
+		assert(last_diag.bad_seq == 0u && last_diag.short_read == 0u);
+		assert(last_diag.first_kind == STX && last_diag.first_seq == 1 &&
+		       last_diag.first_nseq == 0xFE);
+		assert(last_diag.first_got == 1024u && last_diag.first_want == 1024u);
+		assert(last_diag.first_crc_want != last_diag.first_crc_got);
 	}
 
 	/* ---- M. duplicate block (our ACK was lost) -> re-ACKed and dropped ---- */
@@ -485,6 +525,8 @@ int main(void)
 
 		assert(run_script(&s, &sink) == YM_ERR_CANCEL);
 		assert(sink.begins == 0);
+		assert(last_diag.blocks == 1u && last_diag.first_kind == -1 &&
+		       last_diag.timeouts == 0u);
 	}
 
 	/* ---- T. EOT before the declared size is delivered -> NOT success ----
@@ -534,6 +576,9 @@ int main(void)
 		s.inlen = 0;
 		assert(run_script(&s, &sink) == YM_ERR_TIMEOUT);
 		assert(count_byte(&s, CRC_C) > 1);             /* it kept poking with 'C' */
+		/* Every 'C' waited out its header timeout, and nothing arrived. */
+		assert(last_diag.timeouts == 41u && last_diag.blocks == 0u &&
+		       last_diag.first_kind == -1);
 	}
 
 	printf("test_ymodem_recv: all assertions passed\n");

@@ -93,6 +93,39 @@ struct ym_sink {
 	int  (*write)(void *ctx, const uint8_t *data, uint32_t len);
 };
 
+/** Bytes in one framed send block: kind, seq, ~seq, 1024 data bytes, CRC-16. */
+#define YM_SEND_AREA_BYTES (3u + 1024u + 2u)
+/** Bytes in one received block body (the largest, an STX block's data). */
+#define YM_RECV_AREA_BYTES 1024u
+
+/**
+ * The sender's working area: the one block it frames and puts on the wire.
+ * Its layout is visible so that a board can define one, but only svc/ymodem.c
+ * reads or writes the bytes.  CPU only: io->put() copies them out.
+ */
+struct ym_send_area {
+	uint8_t block[YM_SEND_AREA_BYTES];
+};
+
+/** The receiver's working area: one block body as it arrives.  As above, the
+ *  board only places it; svc/ymodem.c alone touches the bytes. */
+struct ym_recv_area {
+	uint8_t data[YM_RECV_AREA_BYTES];
+};
+
+/**
+ * Who the transfers' working areas belong to (issue #230).  svc/ymodem.c holds
+ * no writable storage of its own; the board defines ONE of these, with its
+ * own send and receive areas, and passes it to every ymodem_send() and
+ * ymodem_recv().  The two areas are separate, so a send and a receive never
+ * share bytes.  Where the board places them is its decision (the board README
+ * says where and why).
+ */
+struct ym_xfer {
+	struct ym_send_area *send;   /**< used by ymodem_send() only */
+	struct ym_recv_area *recv;   /**< used by ymodem_recv() only */
+};
+
 /** ymodem_send() / ymodem_recv() outcome. */
 enum ym_result {
 	YM_OK = 0,       /**< file transferred and the batch was closed */
@@ -109,10 +142,12 @@ enum ym_result {
  * completion or a terminal error.  On ANY non-success result a CAN sequence is
  * emitted so the PC side (rz/rb) tears down cleanly.  At most src->size bytes are
  * sent regardless of what the source returns (block 0's size is authoritative).
- * Not reentrant (uses a single static block buffer): the caller must serialise
- * transfers -- the shell does so by holding the output lock.
+ * Frames every block in @p x's send area.  Not reentrant on one @p x: the
+ * caller must serialise transfers -- the shell does so by holding the output
+ * lock.
  */
-enum ym_result ymodem_send(const struct ym_io *io, const struct ym_source *src);
+enum ym_result ymodem_send(struct ym_xfer *x, const struct ym_io *io,
+                           const struct ym_source *src);
 
 /**
  * Drive one full YMODEM batch RECEIVE of a single file into @p sink.  Blocking;
@@ -132,13 +167,21 @@ enum ym_result ymodem_send(const struct ym_io *io, const struct ym_source *src);
  *
  * At most the block-0 size is delivered to the sink (that size is authoritative,
  * exactly as on the send side).  A short final block's CPMEOF padding is trimmed.
- * Not reentrant (single static block buffer, separate from the sender's): the
- * caller must serialise transfers.
+ * Reads every block into @p x's receive area (separate from the send area).
+ * Not reentrant on one @p x: the caller must serialise transfers.
+ *
+ * @p diag is the caller's own record (see struct ym_recv_diag), never NULL.
+ * ymodem_recv() sets it to ymodem_recv_diag_init()'s value on entry and fills
+ * it as the transfer runs; nothing else writes it, so it still holds this
+ * transfer's counts when the caller reads them.
  */
-enum ym_result ymodem_recv(const struct ym_io *io, const struct ym_sink *sink);
+struct ym_recv_diag;
+enum ym_result ymodem_recv(struct ym_xfer *x, const struct ym_io *io,
+                           const struct ym_sink *sink,
+                           struct ym_recv_diag *diag);
 
 /**
- * Why the last ymodem_recv() went the way it did.  A failed receive on real
+ * Why a ymodem_recv() went the way it did.  A failed receive on real
  * hardware looks the same from the outside whichever layer broke, so this records
  * enough to tell them apart without another round trip:
  *
@@ -151,7 +194,8 @@ enum ym_result ymodem_recv(const struct ym_io *io, const struct ym_sink *sink);
  *   blocks == 0      nothing was ever accepted, not even block 0.
  *
  * @ref first_* snapshot the FIRST rejected block, so a cascade of retries does not
- * bury the original cause.  Valid until the next ymodem_recv() call.
+ * bury the original cause.  The caller owns it (issue #230): ymodem_recv()
+ * writes the one it is given and keeps no copy.
  */
 struct ym_recv_diag {
 	uint32_t blocks;       /**< blocks accepted (block 0 included) */
@@ -168,8 +212,15 @@ struct ym_recv_diag {
 	uint16_t first_crc_got;
 };
 
-/** Diagnostics from the last ymodem_recv() (never NULL). */
-const struct ym_recv_diag *ymodem_recv_diag(void);
+/**
+ * Set @p d to the value a record has before any block was read: every count 0
+ * and the first_* fields at their "none" values (first_kind, first_seq and
+ * first_nseq -1).  A caller sets its record with this before it hands it on,
+ * so a path that fails before ymodem_recv() runs (a refused console, for one)
+ * still reads as "nothing received" rather than an earlier transfer's counts or
+ * whatever the stack held.
+ */
+void ymodem_recv_diag_init(struct ym_recv_diag *d);
 
 /**
  * CRC-16/CCITT (XMODEM variant: poly 0x1021, init 0x0000).  Exposed for the

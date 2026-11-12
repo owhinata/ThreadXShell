@@ -1281,6 +1281,7 @@ for shape in FULL RXLEVEL NOSTORE NORECV; do
         "$here/test_blob_cmd.c" "$here/blob_svc_stub.c" \
         "$here/../cmds/cmd_blob.c" "$svc/blob/blob_write.c" \
         "$svc/blob/blob_state.c" "$svc/blob/blob_map.c" "$svc/crc32.c" \
+        "$svc/ymodem.c" \
         "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
         "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
         $glue \

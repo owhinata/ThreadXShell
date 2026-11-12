@@ -105,8 +105,9 @@ void cli_out_end(struct cli_instance *sh)
 /*
  * Console hand-over for a binary transfer (owhinata/stm32f746g-disco#50).  Take the
  * output lock for the WHOLE transfer (so a background job's output cannot interleave
- * into the YMODEM byte stream -- it blocks and, per owhinata/stm32f746g-disco#25,
- * drops on its wedge deadline) and count one claim on this console, so
+ * into the YMODEM byte stream -- it blocks behind the transfer; with a
+ * CLI_TX_MUTEX_WAIT deadline configured it drops at the deadline instead,
+ * owhinata/stm32f746g-disco#25) and count one claim on this console, so
  * cli_tx_send_blocking stops draining its RX and _write drops printf bound for it.
  * Returns 0 on success, -2 if called from a background job, -1 if the lock could
  * not be acquired, -3 if the count is at its limit.

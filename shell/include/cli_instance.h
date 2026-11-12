@@ -237,6 +237,11 @@ struct cli_instance {
 	uint32_t       tx_dropped;       /**< bytes dropped on TX timeout (owhinata/stm32f746g-disco#5) */
 };
 
+/* cli_console_claimed() reads the count from ISRs with no lock: it must be one
+ * access, which a halfword is only at an even offset (issue #229). */
+_Static_assert(offsetof(struct cli_instance, console_claims) % 2u == 0u,
+               "console_claims must be halfword-aligned: it is read without a lock");
+
 /**
  * Is the console @p sh writes to claimed for a binary transfer (issue #229)?
  * For a background-job worker that is its foreground's: the worker's output

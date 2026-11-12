@@ -233,7 +233,12 @@ int  cli_sleep(struct cli_instance *sh, unsigned ticks);
  *   release.  A release with no claim counted does nothing at all -- it gives no
  *   lock back.  [!] Release only from the thread whose claim succeeded: the
  *   count cannot tell who calls, and a release from another thread lowers the
- *   count without giving that thread's lock back (it holds none).
+ *   count without giving that thread's lock back (it holds none).  [!] Every
+ *   successful claim must be released: a claim left counted stays on this
+ *   console until reboot (its printf dropped, no Ctrl+C while TX is blocked),
+ *   where the one global mark before issue #229 was cleared by the next
+ *   release anywhere.  Nothing resets the count, because the lock it pairs
+ *   with would still be held.
  * cli_console_claimable(): could a claim succeed, short of the lock itself?  0
  *   yes, -2 a background job, -3 at the limit.  cli_console_claim() decides by
  *   this same function, so a command can ask it before doing anything it cannot

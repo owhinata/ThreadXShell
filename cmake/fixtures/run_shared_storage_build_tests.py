@@ -3,7 +3,7 @@
 
 Uses a small real CMake/Ninja project and the supplied ARM C and C++ compilers
 (C++ services since #161). Optional
---board-build replays copies of the four shared regression TUs using the
+--board-build replays copies of the five shared regression TUs using the
 selected consumer's actual compile context (any board build that loads plugins:
 Grove, Wio, or f746g-disco with CONFIG_NN_BACKEND=tflm; the others do not
 compile those TUs), without editing or building any firmware tree.  The
@@ -64,6 +64,8 @@ def write(root, file, text):
 
 
 REQUIRED = "/* shared-command: required */\n"
+# issue #230: the path the audit used to exempt; now an ordinary service.
+YMODEM = "int transfer(int x) { return x + 1; }\n"
 # What CLI_CMD_REGISTER leaves in an object: a used constant in a section named
 # after the root command (the fixture has no cli.h).
 REGISTER_MACRO = ('#define REGISTER(name, id) __attribute__((used, section(".shell_root_cmds." name)))'
@@ -88,7 +90,7 @@ def project(root, args):
     for name, text in COMMANDS.items():
         write(root, name, text)
     write(root, "svc/pure.c", "int pure(void) { return 1; }\n")
-    write(root, "svc/ymodem.c", "static volatile int state; int transfer(void) { return ++state; }\n")
+    write(root, "svc/ymodem.c", YMODEM)
     write(root, "svc/header_only.c", "#error not compiled\n")
     write(root, "include dir/context.h", "#define CONTEXT 1\n")
     write(root, "svc/conditional.c", "#if !defined(CONTEXT) || !defined(__OPTIMIZE__)\n#error lost context\n#endif\nint conditional(void) { return 0; }\n")
@@ -181,9 +183,11 @@ def replay_mutations(args):
     database = json.loads((Path(args.board_build) / "compile_commands.json").read_text())
     root = CMAKE.parent.resolve()
     # issue #206: shell/cmds/ is audited as svc/ is; a shared command's copy too.
+    # issue #230: svc/ymodem.c too, the file the audit once exempted.
     names = ("svc/rect_geom.c", "svc/plugin/plugin_exec.c", "svc/plugin/plugin_paint_budget.c",
-             "shell/cmds/cmd_builtin.c")
-    guards = ("defined(__arm__)", "defined(__OPTIMIZE__)", "__INCLUDE_LEVEL__ == 0", "defined(__arm__)")
+             "shell/cmds/cmd_builtin.c", "svc/ymodem.c")
+    guards = ("defined(__arm__)", "defined(__OPTIMIZE__)", "__INCLUDE_LEVEL__ == 0", "defined(__arm__)",
+              "defined(__arm__)")
     for name, guard in zip(names, guards):
         source = root / name
         entries = [e for e in database if Path(e["file"]).resolve() == source]
@@ -204,6 +208,17 @@ def replay_mutations(args):
                 run([sys.executable, str(CMAKE / "check_no_mutable_storage.py"),
                      "--objdump", args.objdump, "--nm", args.nm, str(tmp / "bad.o")], False,
                     "owns mutable storage")
+                if name == "svc/ymodem.c":
+                    # issue #230: the unmodified file in the same context passes,
+                    # so the refusal is the injection, and the real file now
+                    # owns no mutable storage of its own.
+                    clean = gate.replay_argv(gate.entry_argv(entry), source, entry["directory"],
+                                             Path(args.cc).resolve(), tmp / "good.o",
+                                             Path(args.cxx).resolve())
+                    run(clean, cwd=entry["directory"])
+                    run([sys.executable, str(CMAKE / "check_no_mutable_storage.py"),
+                         "--objdump", args.objdump, "--nm", args.nm, str(tmp / "good.o")], True,
+                        "owns no mutable storage")
             print("ok board source mutation:", name, guard)
 
     # [!] The C++ path of the audit in a REAL board context (#161): a copy of the
@@ -535,10 +550,15 @@ def main():
         project(root, args)
         configure(root, build, args)
         shell = ["cmake", "--build", str(build), "--target", "shell"]
-        run(shell, contains="coverage verified")
+        text = run(shell, contains="coverage verified")
         report = json.loads((build / "shared-storage/last-audit.json").read_text())
         assert report["status"] == "passed"
-        assert any(e.get("exception") for e in report["entries"])
+        # issue #230: the audit has no exception at all, and svc/ymodem.c is
+        # one of the entries it compiled and checked.
+        assert "shared_storage: EXEMPT" not in text, text
+        assert not [e for e in report["entries"] if "exception" in e], report["entries"]
+        assert [e for e in report["entries"] if e["source"].endswith("/svc/ymodem.c")
+                and "audit" in e], report["entries"]
         for entry in report["entries"]:
             if "original" not in entry:
                 continue
@@ -557,6 +577,12 @@ def main():
         write(root, "svc/pure.c", "int pure(void) { return 1; }\n")
         run(shell, contains="coverage verified")
         print("ok direct ARM/optimized source mutation, repeated failure, recovery")
+        # issue #230: the path that used to be exempt is refused like any other.
+        write(root, "svc/ymodem.c", YMODEM + bad)
+        run(shell, False, "services: svc/ymodem.c owns mutable storage")
+        write(root, "svc/ymodem.c", YMODEM)
+        run(shell, contains="coverage verified")
+        print("ok svc/ymodem.c with storage refused (no exception for its path)")
         commands(root, build, args, shell, bad)
         rules(root, Path(tmp), args)
         configure(root, Path(tmp) / "no-export", args, "-DDISABLE_EXPORT=ON", expected=False, contains="must export compile commands")
@@ -627,7 +653,7 @@ def main():
         configure(root, build, args, "-DEXTRA_SOURCE=")
         run(shell, contains="coverage verified")
         print("ok canonical alias and escaping symlink")
-        # New TUs are discovered with no audit declaration; exact exception only.
+        # New TUs are discovered with no audit declaration, whatever their name.
         write(root, "svc/nested/ymodem_extra.c", bad)
         configure(root, build, args, "-DEXTRA_SOURCE=svc/nested/ymodem_extra.c")
         run(shell, False, "owns mutable storage")

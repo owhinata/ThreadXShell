@@ -65,11 +65,6 @@ CAPABILITY_RE = re.compile(r"(BOARD_HAS_[A-Z0-9_]+)=(.*)")
 # Rules (a)(b)(c) (#206).
 REGISTRATION = ".shell_root_cmds"
 INCLUDED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx"}
-# Existing protocol staging buffers and last-run diagnostics; moving these out
-# would change ownership/reentrancy and is not part of the stateless nn contract.
-# [!] The exception covers the whole TU: a new static added to ymodem.c passes
-# too. #210 removes the exception rather than narrowing it to symbols.
-EXCEPTIONS = {"svc/ymodem.c": "existing s_block, s_rdata and s_diag (non-reentrant protocol)"}
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".s", ".S"}
 # Which suffixes each driver may compile. Together these are SOURCE_SUFFIXES.
 # The C driver keeps the assembly suffixes it always accepted (CMake's ASM
@@ -614,11 +609,6 @@ def audit(args):
               f"{rules['roots']} distinct root commands")
         for index, ((target, source), entry, argv) in enumerate(selected):
             relative = source.relative_to(root).as_posix()
-            if relative in EXCEPTIONS:
-                print(f"shared_storage: EXEMPT {target}: {relative}: {EXCEPTIONS[relative]}")
-                report["entries"].append({"target": target, "source": str(source),
-                                          "exception": EXCEPTIONS[relative]})
-                continue
             obj = Path(scratch) / f"{index}.o"
             cwd = entry["directory"]
             command = replay_argv(argv, source, cwd, cc, obj, cxx)

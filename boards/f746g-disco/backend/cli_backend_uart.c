@@ -400,6 +400,12 @@ static int uart_write_other(struct cli_instance *sh, const char *ptr, int len)
  * before the scheduler, or from a non-shell thread there is no instance at all,
  * no lock is taken and we fall back to g_uart_console (byte-for-byte as before).
  * The TX ring itself is always intact regardless (PRIMASK-guarded dual producer).
+ *
+ * Binary transfers (issue #229): output is dropped while the console it is bound
+ * for -- the calling instance's, or g_uart_console's for a thread with none -- is
+ * claimed, asked of that console's claim count and again for every byte inside
+ * the section that puts it into the ring.  A lock that cannot be taken drops the
+ * output too.  A claim on another console does not silence this one.
  */
 int _write(int file, char *ptr, int len)
 {

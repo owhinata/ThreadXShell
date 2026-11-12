@@ -219,12 +219,27 @@ int  cli_sleep(struct cli_instance *sh, unsigned ticks);
  * for the duration of the transfer, bypassing the line editor / echo / Ctrl+C poll.
  *
  * cli_console_claim(): hold the output lock for the whole transfer (so background
- *   output cannot interleave into the byte stream) and enter raw mode (printf
- *   output is dropped; cli_tx_send_blocking stops draining RX).  Returns 0 on
- *   success, -2 if called from a background job (a transfer must run in the
- *   foreground -- it owns the shared RX), -1 if the lock could not be acquired.
- *   Pair with cli_console_release().  cli_write() is still the binary-raw,
- *   flow-controlled TX path to use for protocol bytes (the lock is reentrant).
+ *   output cannot interleave into the byte stream) and count one claim on this
+ *   console, which puts it in raw mode: printf output bound for THIS console is
+ *   dropped, and cli_tx_send_blocking stops draining THIS console's RX.  Other
+ *   consoles are not affected (issue #229).  Returns 0 on success, -2 if called
+ *   from a background job (a transfer must run in the foreground -- it owns the
+ *   shared RX), -1 if the lock could not be acquired, -3 if this console's claim
+ *   count is at its limit (65,535).  On any refusal nothing is held and the
+ *   count is unchanged.
+ * cli_console_release(): give one claim back.  Claims are COUNTED, so claiming
+ *   again on a console that is already claimed (a helper inside a command that
+ *   holds it) is allowed, and the console stays in raw mode until the last
+ *   release.  A release with no claim counted does nothing at all -- it gives no
+ *   lock back.  [!] Release only from the thread whose claim succeeded: the
+ *   count cannot tell who calls, and a release from another thread lowers the
+ *   count without giving that thread's lock back (it holds none).
+ * cli_console_claimable(): could a claim succeed, short of the lock itself?  0
+ *   yes, -2 a background job, -3 at the limit.  cli_console_claim() decides by
+ *   this same function, so a command can ask it before doing anything it cannot
+ *   undo (`blob write` asks it before the erase).
+ *   cli_write() is still the binary-raw, flow-controlled TX path to use for
+ *   protocol bytes (the lock is reentrant).
  * cli_read_byte(): timed raw RX read -- returns 0..255 on a byte, -1 on timeout
  *   (timeout_ms; 0 = poll once), -2 if the instance is stopping.  Does NOT treat
  *   0x03 specially (the protocol decides what a Ctrl+C means).
@@ -234,9 +249,6 @@ int  cli_sleep(struct cli_instance *sh, unsigned ticks);
  */
 int  cli_console_claim(struct cli_instance *sh);
 void cli_console_release(struct cli_instance *sh);
-/* Could a claim of @p sh succeed, short of the lock (issue #229)?  0 yes, -2 a
- * background job, -3 the claim count is at its limit.  cli_console_claim()
- * decides by this same function, and returns -3 for the limit too. */
 int  cli_console_claimable(struct cli_instance *sh);
 int  cli_read_byte(struct cli_instance *sh, unsigned timeout_ms);
 void cli_rx_flush(struct cli_instance *sh);

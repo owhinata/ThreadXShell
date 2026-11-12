@@ -46,13 +46,9 @@
  * could be read afterwards anyway.  cli_init() without cli_start(): there is
  * nothing to read, so the instance needs no thread of its own.
  *
- * One known wart in that arrangement: the association claims the console through
- * rtl_link_begin(), and cli_console_claim() raises a GLOBAL cli_xfer_active, not a
- * per-instance one.  So for the length of a boot association every console's
- * TX-wait path stops draining RX -- a Ctrl+C typed on USB CDC during those seconds
- * is noticed late.  It is bounded and it only happens when autoconnect is on, so it
- * is accepted here rather than fixed by changing what that flag means; if a second
- * unattended claimant ever appears, that is the point to make the flag per-console.
+ * The association claims this log instance through rtl_link_begin(); since issue
+ * #229 that claim is counted on this instance alone, so USB CDC printf and Ctrl+C
+ * stay live during a boot association (it used to be one global flag).
  *
  * Priority 15: above the shell (16) so the configuration is settled before a user
  * can reasonably type, but below the USB pump (8) and the IWDG petter (5), neither

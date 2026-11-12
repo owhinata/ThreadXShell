@@ -23,7 +23,7 @@
 3. **upstream（`lib/` の submodule と、ボードが commit 固定で取る ST Cube の組 `boards/<board>/lib/`）と Grove の Himax SDK ツリーは read-only**（調整は port 側で。取得済みツリーは検査だけで直さない）。
 4. **shell の常設状態は静的割当**で、init / dispatch / 出力経路は heap を要求しない。board 固有コマンドの
    ペイロードは board が bounded heap・排他・失敗処理を明示的に提供する場合のみ heap 可。スタック
-   サイズ・優先度は `cli_config.h` で `_Static_assert` を通すこと。
+   サイズ・優先度は `cli_config.h` で `_Static_assert` を通すこと。コンソールを借りている印もコンソールごとの回数で、全体の 1 つに戻さない（#229）。
 5. **ビルドは `_ref/` を読まない**（git 管理外なので参照するとクローンしただけでは configure できない）。
 
 ### 6. Wio Lite AI（ブリックリスク。提案は特に厳格に）

@@ -216,7 +216,13 @@ static int usbcdc_write_other(struct cli_instance *sh, const char *ptr, int len)
  * running thread owns a CDC shell instance, bracket the drain with cli_out_begin/
  * cli_out_end to serialise with cli_print + the line editor; from the usb thread /
  * ISR / pre-kernel, cli_current_instance() is NULL and we fall back to the global
- * console with no lock.
+ * console with no lock.  A lock that cannot be taken drops the output.
+ *
+ * Binary transfers (issue #229): output is dropped while the console it is bound
+ * for -- the calling instance's, or g_usbcdc_console's for a thread with none --
+ * is claimed, asked of that console's claim count and again for every byte inside
+ * the section that puts it into the ring.  A claim on the telnet console (a
+ * `wifi ...` there, or the boot association's log instance) does not touch this one.
  */
 int _write(int file, char *ptr, int len)
 {

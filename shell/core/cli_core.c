@@ -542,7 +542,10 @@ int cli_tx_send_blocking(struct cli_instance *sh, const uint8_t *data, size_t le
 		/* During a raw binary transfer (owhinata/stm32f746g-disco#50) the RX ring belongs
      to the
 		 * YMODEM protocol, so do NOT wake on / drain it for a Ctrl+C here -- that
-		 * would eat an ACK/'C'/NAK.  Wait only on TX space / kill. */
+		 * would eat an ACK/'C'/NAK.  Wait only on TX space / kill.  Asked of THIS
+		 * console's claim count (issue #229): the lock is held here, so the count
+		 * is the holder's own, and a claim on another console says nothing about
+		 * this RX ring. */
 		int   raw  = cli_console_claimed(sh);
 		ULONG mask = CLI_EVT_TX | CLI_EVT_KILL |
 		             ((sh->dispatching && !raw) ? CLI_EVT_RX : 0u);

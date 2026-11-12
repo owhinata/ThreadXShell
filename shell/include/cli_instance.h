@@ -148,8 +148,12 @@ struct cli_transport {
 /**
  * One shell instance: all per-transport state, statically allocated (no heap).
  * The command tree is read-only data shared by every instance; the core keeps
- * no mutable globals, so several instances run concurrently without interfering
- * (requirements §10).
+ * no mutable globals that belong to one instance, so several instances run
+ * concurrently without interfering (requirements §10).  The claim of a console
+ * for a binary transfer is part of this struct too (console_claims, issue #229;
+ * it was a global until then).  What the core does keep globally is shared by
+ * all instances on purpose, each behind its own lock: the thread -> instance
+ * registry (cli_core.c) and the background-job pool (cli_job.c).
  */
 struct cli_instance {
 	/* ThreadX primitives (created by cli_init / cli_start). */

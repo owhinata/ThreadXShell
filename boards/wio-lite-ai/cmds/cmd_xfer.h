@@ -35,10 +35,12 @@ struct cli_instance;
  *
  * Use this from a command that must keep the console claimed across the whole
  * operation (e.g. `wifi flash backup`, which holds an RTL8720 download session
- * open around the transfer): cli_console_claim() is NOT reentrant -- it sets the
- * plain `cli_xfer_active` flag that cli_console_release() unconditionally clears
- * (shell/core/cli_printf.c), so a nested claim/release pair would drop raw mode
- * while the outer caller still needs it.
+ * open around the transfer).  This entry was needed because a nested
+ * claim/release pair used to drop raw mode while the outer caller still needed
+ * it (one global flag that every release cleared).  Since issue #229 claims are
+ * counted per console, so nesting is safe and xfer_send_source() would do; this
+ * entry and xfer_recv_sink_locked() are kept as they are here, and removing
+ * them is issue #231.
  *
  * CRITICAL -- console RX ownership: for the duration of ymodem_send() the ONLY
  * permitted reader of the console RX ring is this function's io_getc().  A data

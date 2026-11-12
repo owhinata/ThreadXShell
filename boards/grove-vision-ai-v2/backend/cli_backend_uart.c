@@ -453,8 +453,10 @@ int ring_put_nowait(struct cli_grove_uart *u, uint8_t b,
  * instance on this backend, the drain is bracketed by cli_out_begin/end (the
  * same lock cli_print takes).  During a raw transfer printf output bound for
  * the claimed console is dropped so it cannot corrupt the byte stream (issue
- * #229: asked per console, and again for every byte inside the section that
- * puts it into the ring).  A lock that cannot be taken drops the output.
+ * #229: asked of the claim count of the console the output is bound for -- the
+ * calling instance's, or g_uart_console's for a thread with none -- and again
+ * for every byte inside the section that puts it into the ring).  A lock that
+ * cannot be taken drops the output.
  */
 int _write(int file, char *ptr, int len)
 {

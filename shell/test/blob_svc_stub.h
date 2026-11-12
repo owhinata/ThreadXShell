@@ -35,11 +35,15 @@ struct blob_stub {
 	int fail_magic;          /* the magic page's program fails */
 	uint32_t send;           /* bytes the receive delivers */
 	uint32_t drops;          /* bytes the receive "drops" (sh->rx_dropped) */
+	int      recv_early;     /* the receive fails before the protocol runs
+	                           (a refused console), writing no counters */
 	int      level_rc;       /* blob_board_rx_level()'s answer */
 	uint32_t level_high, level_size;
 	/* what happened */
 	unsigned reserves, unreserves, erase_headers, erase_spans, programs;
 	unsigned receives, says;
+	int      diag_was_init;  /* the record arrived at the "nothing received"
+	                           value (issue #230) */
 	unsigned level_clears;   /* blob_board_rx_level_clear() calls */
 	unsigned erases_at_clear;/* erase spans already run at the last clear */
 	unsigned level_reads;

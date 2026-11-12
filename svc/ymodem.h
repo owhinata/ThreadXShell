@@ -124,6 +124,23 @@ struct ym_recv_area {
 struct ym_xfer {
 	struct ym_send_area *send;   /**< used by ymodem_send() only */
 	struct ym_recv_area *recv;   /**< used by ymodem_recv() only */
+	/**
+	 * "A transfer is running on this owner": 0 when idle, which is what the
+	 * board initialises it to.  Only svc/ymodem.c touches it, and only with
+	 * the compiler's atomic operations (no library call, no ThreadX, no
+	 * interrupt masking): ymodem_send() / ymodem_recv() set it from 0 to 1 in
+	 * one step before anything else and put it back to 0 at their one exit;
+	 * ymodem_busy() reads it.  Taken from threads only, never from an ISR.
+	 *
+	 * This makes "one transfer at a time" hold for the whole firmware because
+	 * a board defines exactly ONE struct ym_xfer and passes it to every
+	 * transfer (issue #230): a send and a receive refuse each other too, not
+	 * just two of a kind.  It is not the console claim (cli_console_claim(),
+	 * counted per console, #229): that one is per console, this one is
+	 * global.  The order is claim the console -> this -> ... -> this back ->
+	 * release the console; neither waits, so the two cannot deadlock.
+	 */
+	unsigned char running;
 };
 
 /** ymodem_send() / ymodem_recv() outcome. */
@@ -135,7 +152,30 @@ enum ym_result {
 	YM_ERR_IO,       /**< put() returned <0 (transport failure) */
 	YM_ERR_SINK,     /**< sink->begin()/write() returned <0 (recv only) */
 	YM_ERR_PROTO,    /**< unrecoverable framing error, e.g. an out-of-order block */
+	/**
+	 * Refused before it started: another transfer is running on the same
+	 * struct ym_xfer (issue #230).  Nothing was done -- not one byte put or
+	 * read on @p io, no CAN sequence, the source / sink never called, and the
+	 * running transfer's state and record untouched.  (A receive's own
+	 * @p diag is still set to the "nothing received" value.)  That promise is
+	 * about the protocol core only: the board's wiring still drains ITS OWN
+	 * console afterwards, as after any failure, since a PC the operator had
+	 * already started may be sending to it.
+	 */
+	YM_ERR_BUSY,
 };
+
+/**
+ * Would a ymodem_send() / ymodem_recv() on @p x started now be refused with
+ * YM_ERR_BUSY?  1 while a transfer is running on @p x, 0 otherwise (an atomic
+ * read of the mark, issue #230).  For a caller that prints a notice to the
+ * operator ("start the receiver now") before it starts a transfer: asking
+ * first keeps that notice from going out for a transfer that will be refused.
+ * It is only an early answer -- another console can start a transfer between
+ * this and the call -- and what decides is the atomic take inside
+ * ymodem_send() / ymodem_recv().
+ */
+int ymodem_busy(const struct ym_xfer *x);
 
 /**
  * Drive one full YMODEM batch send of a single file.  Blocking; runs to
@@ -144,7 +184,8 @@ enum ym_result {
  * sent regardless of what the source returns (block 0's size is authoritative).
  * Frames every block in @p x's send area.  Not reentrant on one @p x: the
  * caller must serialise transfers -- the shell does so by holding the output
- * lock.
+ * lock.  Returns YM_ERR_BUSY, having done nothing (no CAN either), when another
+ * transfer is running on @p x; see enum ym_result.
  */
 enum ym_result ymodem_send(struct ym_xfer *x, const struct ym_io *io,
                            const struct ym_source *src);
@@ -168,10 +209,13 @@ enum ym_result ymodem_send(struct ym_xfer *x, const struct ym_io *io,
  * At most the block-0 size is delivered to the sink (that size is authoritative,
  * exactly as on the send side).  A short final block's CPMEOF padding is trimmed.
  * Reads every block into @p x's receive area (separate from the send area).
- * Not reentrant on one @p x: the caller must serialise transfers.
+ * Not reentrant on one @p x: the caller must serialise transfers.  Returns
+ * YM_ERR_BUSY, having done nothing but set @p diag, when another transfer is
+ * running on @p x; see enum ym_result.
  *
  * @p diag is the caller's own record (see struct ym_recv_diag), never NULL.
- * ymodem_recv() sets it to ymodem_recv_diag_init()'s value on entry and fills
+ * ymodem_recv() sets it to ymodem_recv_diag_init()'s value on entry (before it
+ * asks for the mark, so a refused receive reads "nothing received") and fills
  * it as the transfer runs; nothing else writes it, so it still holds this
  * transfer's counts when the caller reads them.
  */

@@ -472,6 +472,11 @@ static int cmd_flash_backup(struct cli_instance *sh, int argc, char **argv)
 	bak_build_name(name, offset, len);
 	src.ctx = &src_ctx; src.name = name; src.size = len; src.read = bak_src_read;
 
+	/* Right before the notice (issue #230): a transfer that would be refused
+	 * does not tell the operator to start `rb`.  The link is already down by
+	 * now; reserving the transfer before that is issue #197. */
+	if (xfer_refuse_if_busy(sh))
+		goto recover;
 	cli_print(sh, "wifi: sending '%s' (%lu bytes) -- start the receiver now "
 	          "(`rb -y`, or Ctrl+A Ctrl+R in picocom)\r\n", name, (unsigned long)len);
 	/* From here until the transfer ends, io_getc() owns the console RX (see above). */
@@ -597,6 +602,12 @@ static int cmd_flash_imgload(struct cli_instance *sh, int argc, char **argv)
 		goto out;
 	}
 
+	/* Right before the notices (issue #230): a transfer that would be refused
+	 * does not tell the operator to start `sb`.  The self-check above has
+	 * already invalidated the staged image; reserving the transfer before
+	 * that is issue #197. */
+	if (xfer_refuse_if_busy(sh))
+		goto out;
 	drops0 = sh->rx_dropped;
 	cli_print(sh, "wifi: staging an RTL8720 image in PSRAM @0x%08lX (max %lu bytes). "
 	          "NOTHING is written to the module.\r\n",

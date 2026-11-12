@@ -248,6 +248,19 @@ static void t_write(void)
 	              "3000 B received"));
 	expect("reserved and given back once",
 	       blob_stub.reserves == 1u && blob_stub.unreserves == 1u);
+	expect("the receive got a record set to \"nothing received\" (#230)",
+	       blob_stub.diag_was_init);
+
+	/* [!] A RECEIVE THAT STOPS BEFORE THE PROTOCOL RUNS (issue #230): the
+	 * line after the transfer reads this write's record as the command set
+	 * it -- nothing received -- not an earlier transfer's counts. */
+	reset();
+	blob_stub.recv_early = 1;
+	run("blob write model 12\r");
+	expect("a receive stopped before the protocol prints zero counters",
+	       has("ymodem   : 0 blocks ok, 0 bad-crc, 0 bad-seq, 0 short-read, "
+	           "0 header-timeouts\r\n") && blob_stub.diag_was_init &&
+	       blob_stub.receives == 1u && !has("stored   :"));
 
 	/* [!] REFUSED BEFORE A SLOT WAS CHOSEN: no slot number anywhere. */
 	reset();

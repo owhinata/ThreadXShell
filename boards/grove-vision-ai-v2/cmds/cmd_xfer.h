@@ -73,6 +73,18 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink,
  */
 int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
 
+/**
+ * Would a transfer started now be refused because another one is running
+ * (issue #230)?  0 when it may start; 1 when it would be refused, having
+ * printed "ymodem: another transfer is running -- run it again when that one
+ * ends".  Ask it right before printing a notice that tells the operator to
+ * start the PC side, so a refused transfer does not tell them to.  Only an
+ * early answer: the protocol core decides, and a refusal it makes later (a
+ * transfer started on another console in between) prints the same sentence
+ * and is handled as any other failure.
+ */
+int xfer_refuse_if_busy(struct cli_instance *sh);
+
 #ifdef __cplusplus
 }
 #endif

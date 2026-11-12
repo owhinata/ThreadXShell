@@ -240,6 +240,18 @@ int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,
 	static uint8_t block[1024];
 	uint32_t off;
 
+	struct ym_recv_diag init;
+
+	/* The caller must have set its record before the call (issue #230). */
+	memset(&init, 0x5A, sizeof init);
+	ymodem_recv_diag_init(&init);
+	blob_stub.diag_was_init = memcmp(&init, diag, sizeof init) == 0;
+	if (blob_stub.recv_early) {
+		/* A board receiver that stops before ymodem_recv() (the telnet
+		 * refusal) leaves the record as the caller set it. */
+		blob_stub.receives++;
+		return 1;
+	}
 	/* What the firmware's receiver does with the caller's record (issue
 	 * #230): it starts from the "nothing received" value and counts. */
 	ymodem_recv_diag_init(diag);

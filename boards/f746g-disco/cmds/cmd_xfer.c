@@ -35,7 +35,7 @@
  */
 static struct ym_send_area s_ym_send;
 static struct ym_recv_area s_ym_recv;
-static struct ym_xfer      s_ym = { &s_ym_send, &s_ym_recv };
+static struct ym_xfer      s_ym = { .send = &s_ym_send, .recv = &s_ym_recv };
 
 /* ---- YMODEM IO adapter: cli_read_byte / cli_write ------------------------- */
 
@@ -125,6 +125,27 @@ static void xfer_drain_until_quiet(struct cli_instance *sh)
 	}
 }
 
+/* ---- one transfer at a time (issue #230) --------------------------------- *
+ *
+ * svc/ymodem.c refuses a transfer while another runs on s_ym (YM_ERR_BUSY,
+ * having touched nothing).  These say so in one sentence on every path:
+ * asked before a notice that tells the operator to start the PC side, and
+ * again when the protocol core itself refused.
+ */
+static void xfer_say_busy(struct cli_instance *sh)
+{
+	cli_error(sh, "ymodem: another transfer is running -- run it again when "
+	              "that one ends\r\n");
+}
+
+int xfer_refuse_if_busy(struct cli_instance *sh)
+{
+	if (!ymodem_busy(&s_ym))
+		return 0;
+	xfer_say_busy(sh);
+	return 1;
+}
+
 /* ---- results (one form on the three boards, issue #228) ------------------- *
  *
  * Every outcome is written to the log as a word, so `dmesg` reads the same on
@@ -144,6 +165,7 @@ static const char *xfer_result_word(enum ym_result res)
 	case YM_ERR_IO:      return "transport error";
 	case YM_ERR_SINK:    return "rejected by the destination";
 	case YM_ERR_PROTO:   return "protocol error";
+	case YM_ERR_BUSY:    return "refused, another transfer is running";
 	default:             break;
 	}
 	return "unknown result";
@@ -169,6 +191,11 @@ static int xfer_send_report(struct cli_instance *sh, const struct ym_source *src
 		return 1;
 	case YM_ERR_SOURCE:
 		cli_error(sh, "ymodem: source read error\r\n");
+		return 1;
+	case YM_ERR_BUSY:
+		/* Only when another console started one after xfer_refuse_if_busy()
+		 * said no (issue #230). */
+		xfer_say_busy(sh);
 		return 1;
 	case YM_ERR_IO:
 	default:
@@ -218,6 +245,12 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink,
 
 	cli_rx_flush(sh);                /* type-ahead and the command's newline */
 	res = ymodem_recv(&s_ym, &io, sink, diag);
+	/* Refused (issue #230): said here, since this prints nothing else, and
+	 * then handled as any failure -- the drain below empties THIS console,
+	 * where a sender the operator already started may be talking; the
+	 * transfer that is running is on another one and is not touched. */
+	if (res == YM_ERR_BUSY)
+		xfer_say_busy(sh);
 	cli_rx_flush(sh);                /* a trailing 'O' / CAN / garbage tail  */
 	if (res != YM_OK)
 		xfer_drain_until_quiet(sh);    /* the sender may still be retrying */
@@ -246,6 +279,12 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 		return 1;
 	default:
 		cli_error(sh, "ymodem: console busy\r\n");
+		return 1;
+	}
+	/* Nor one that another transfer would refuse (issue #230): asked after
+	 * the claim and before the notice. */
+	if (xfer_refuse_if_busy(sh)) {
+		cli_console_release(sh);
 		return 1;
 	}
 	/* The notice comes after the claim (issue #228): a transfer that cannot have

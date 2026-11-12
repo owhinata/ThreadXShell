@@ -198,8 +198,8 @@ static int ep_put(void *ctx, const uint8_t *buf, size_t len)
  */
 static struct ym_send_area s_send_a, r_send_a;
 static struct ym_recv_area s_recv_a, r_recv_a;
-static struct ym_xfer      sender_xfer = { &s_send_a, &s_recv_a };
-static struct ym_xfer      recv_xfer = { &r_send_a, &r_recv_a };
+static struct ym_xfer      sender_xfer = { .send = &s_send_a, .recv = &s_recv_a };
+static struct ym_xfer      recv_xfer = { .send = &r_send_a, .recv = &r_recv_a };
 
 struct send_arg {
 	struct endpoint  ep;
@@ -352,6 +352,429 @@ static enum ym_result run_script(struct script *s, struct cap_sink *sink)
 	 * (issue #230), so nothing of this survives into the counts. */
 	memset(&last_diag, 0xA5, sizeof last_diag);
 	return ymodem_recv(&recv_xfer, &io, &vs, &last_diag);
+}
+
+/* ======================================================================== *
+ *  3. one transfer at a time (issue #230)
+ * ======================================================================== *
+ *
+ * A board defines ONE struct ym_xfer and passes it to every transfer, so
+ * these share one owner, one_xfer.  A second transfer is started from inside
+ * the running one's io callback -- the same thread, so the refusal is
+ * deterministic, and what it proves is the same as from another console:
+ * while the mark is held, a send or a receive on that owner is refused with
+ * YM_ERR_BUSY having touched nothing.  Checks count failures instead of
+ * aborting, so one run lists every one that fails.
+ */
+
+static struct ym_send_area one_send_a;
+static struct ym_recv_area one_recv_a;
+static struct ym_xfer      one_xfer = { .send = &one_send_a, .recv = &one_recv_a };
+
+static int one_failures;
+
+static void one_check(const char *what, const char *detail, int ok)
+{
+	if (!ok) {
+		printf("  FAIL %s: %s\n", what, detail);
+		one_failures++;
+	}
+}
+
+/* An io / sink / source that only counts: a refused transfer must leave all
+ * of it at zero. */
+struct probe { int getcs, puts, begins, writes, reads; };
+
+static int probe_getc(void *ctx, unsigned timeout_ms)
+{
+	(void)timeout_ms;
+	((struct probe *)ctx)->getcs++;
+	return YM_IO_TIMEOUT;
+}
+
+static int probe_put(void *ctx, const uint8_t *buf, size_t len)
+{
+	(void)buf; (void)len;
+	((struct probe *)ctx)->puts++;
+	return 0;
+}
+
+static int probe_begin(void *ctx, const char *name, uint32_t size)
+{
+	(void)name; (void)size;
+	((struct probe *)ctx)->begins++;
+	return 0;
+}
+
+static int probe_write(void *ctx, const uint8_t *data, uint32_t len)
+{
+	(void)data; (void)len;
+	((struct probe *)ctx)->writes++;
+	return 0;
+}
+
+static int probe_read(void *ctx, uint8_t *dst, uint32_t want, uint32_t *got)
+{
+	(void)dst; (void)want;
+	((struct probe *)ctx)->reads++;
+	*got = 0;
+	return 0;
+}
+
+static int diag_is_init(const struct ym_recv_diag *d)
+{
+	struct ym_recv_diag z;
+
+	memset(&z, 0x5A, sizeof z);
+	ymodem_recv_diag_init(&z);
+	return memcmp(&z, d, sizeof z) == 0;
+}
+
+/* A receive started on one_xfer now must be refused and touch nothing. */
+static void refused_recv(const char *what)
+{
+	struct probe        p;
+	struct ym_io        io = { &p, probe_getc, probe_put };
+	struct ym_sink      sk = { &p, probe_begin, probe_write };
+	struct ym_recv_diag d;
+	enum ym_result      rc;
+
+	memset(&p, 0, sizeof p);
+	memset(&d, 0xA5, sizeof d);
+	rc = ymodem_recv(&one_xfer, &io, &sk, &d);
+	one_check(what, "a second receive is refused with YM_ERR_BUSY",
+	          rc == YM_ERR_BUSY);
+	one_check(what, "the refused receive reads and writes no byte on its io",
+	          p.getcs == 0 && p.puts == 0);
+	one_check(what, "the refused receive never calls its sink",
+	          p.begins == 0 && p.writes == 0);
+	one_check(what, "(f) the refused receive's record is the "
+	          "nothing-received value", diag_is_init(&d));
+}
+
+/* A send started on one_xfer now must be refused and touch nothing. */
+static void refused_send(const char *what)
+{
+	struct probe     p;
+	struct ym_io     io = { &p, probe_getc, probe_put };
+	struct ym_source src = { &p, "x.bin", 10u, probe_read };
+	enum ym_result   rc;
+
+	memset(&p, 0, sizeof p);
+	rc = ymodem_send(&one_xfer, &io, &src);
+	one_check(what, "a second send is refused with YM_ERR_BUSY",
+	          rc == YM_ERR_BUSY);
+	one_check(what, "the refused send reads and writes no byte on its io "
+	          "(not even the CAN teardown)", p.getcs == 0 && p.puts == 0);
+	one_check(what, "the refused send never reads its source", p.reads == 0);
+}
+
+/* ---- (a) (c) (e): refusals while a SEND runs ------------------------------ */
+
+/* The sender's endpoint, which fires the refusals once, at its Nth read. */
+struct hooked_ep {
+	struct endpoint ep;
+	int             calls, fire_at;
+	void          (*fire)(void);
+};
+
+static int hooked_getc(void *ctx, unsigned timeout_ms)
+{
+	struct hooked_ep *h = ctx;
+
+	if (++h->calls == h->fire_at)
+		h->fire();
+	return chan_getc(h->ep.rx, timeout_ms);
+}
+
+static int hooked_put(void *ctx, const uint8_t *buf, size_t len)
+{
+	return chan_put(((struct hooked_ep *)ctx)->ep.tx, buf, len);
+}
+
+static int fired;
+
+static void fire_during_send(void)
+{
+	const char *what = "(a)(c)(e) while a send runs";
+
+	fired++;
+	one_check(what, "(e) the question says a start now would be refused",
+	          ymodem_busy(&one_xfer) == 1);
+	refused_recv("(a) a receive while a send runs");
+	refused_send("(c) a second send while a send runs");
+	one_check(what, "the refusals did not give the running send's mark away",
+	          ymodem_busy(&one_xfer) == 1);
+}
+
+/* The PC side of the send: an ordinary receive on its own owner. */
+struct pc_recv_arg {
+	struct endpoint ep;
+	struct cap_sink sink;
+	enum ym_result  rc;
+};
+
+static void *run_pc_receiver(void *arg)
+{
+	struct pc_recv_arg *a = arg;
+	struct ym_io        io = { &a->ep, ep_getc, ep_put };
+	struct ym_sink      vs = { &a->sink, cap_begin, cap_write };
+	struct ym_recv_diag d;
+
+	a->rc = ymodem_recv(&recv_xfer, &io, &vs, &d);
+	return NULL;
+}
+
+static void one_during_send(void)
+{
+	static struct chan        a2b, b2a;
+	static struct pc_recv_arg pc;
+	static uint8_t            buf[5000];
+	struct hooked_ep          h;
+	struct pat_src            ps = { 0u, sizeof buf };
+	struct ym_io              io = { &h, hooked_getc, hooked_put };
+	struct ym_source          src = { &ps, "send.bin", sizeof buf, pat_read };
+	pthread_t                 th;
+	enum ym_result            rc;
+	int                       same = 1;
+
+	chan_init(&a2b);
+	chan_init(&b2a);
+	memset(&pc, 0, sizeof pc);
+	pc.ep.rx = &a2b; pc.ep.tx = &b2a;
+	pc.sink.buf = buf; pc.sink.cap = sizeof buf;
+	memset(&h, 0, sizeof h);
+	h.ep.rx = &b2a; h.ep.tx = &a2b;
+	h.fire_at = 3;              /* after block 0's ACK: mid-transfer */
+	h.fire = fire_during_send;
+	fired = 0;
+
+	assert(pthread_create(&th, NULL, run_pc_receiver, &pc) == 0);
+	rc = ymodem_send(&one_xfer, &io, &src);
+	pthread_join(th, NULL);
+
+	one_check("(a) while a send runs", "the refusals were made", fired == 1);
+	for (uint32_t i = 0; i < sizeof buf && pc.sink.len == sizeof buf; i++)
+		if (buf[i] != pat_byte(i))
+			same = 0;
+	one_check("(a) while a send runs", "the running send still succeeds, "
+	          "byte for byte", rc == YM_OK && pc.rc == YM_OK &&
+	          pc.sink.len == sizeof buf && same);
+	one_check("(e) after the send", "the question says a start now may go",
+	          ymodem_busy(&one_xfer) == 0);
+}
+
+/* ---- (b) (c) (e) (f): refusals while a RECEIVE runs ----------------------- */
+
+struct hooked_script {
+	struct script s;
+	int           calls, fire_at;
+	void        (*fire)(void);
+};
+
+static int hooked_script_getc(void *ctx, unsigned timeout_ms)
+{
+	struct hooked_script *h = ctx;
+
+	if (++h->calls == h->fire_at)
+		h->fire();
+	return script_getc(&h->s, timeout_ms);
+}
+
+static int hooked_script_put(void *ctx, const uint8_t *buf, size_t len)
+{
+	return script_put(&((struct hooked_script *)ctx)->s, buf, len);
+}
+
+static struct ym_recv_diag one_running_diag;
+
+static void fire_during_recv(void)
+{
+	const char         *what = "(b)(c)(e)(f) while a receive runs";
+	struct ym_recv_diag before = one_running_diag;
+
+	fired++;
+	one_check(what, "fired mid-transfer (block 0 already counted)",
+	          before.blocks == 1u);
+	one_check(what, "(e) the question says a start now would be refused",
+	          ymodem_busy(&one_xfer) == 1);
+	refused_send("(b) a send while a receive runs");
+	refused_recv("(c) a second receive while a receive runs");
+	one_check(what, "the refusals did not give the running receive's mark "
+	          "away", ymodem_busy(&one_xfer) == 1);
+	one_check(what, "(f) the running receive's record is untouched",
+	          memcmp(&before, &one_running_diag, sizeof before) == 0);
+}
+
+/* A good one-file batch of @p len (<= 1024) pattern bytes into @p in. */
+static size_t one_good_batch(uint8_t *in, uint32_t len)
+{
+	uint8_t b0[128], blk[1024], nullb0[128];
+	char    num[16];
+	size_t  n = 0;
+
+	snprintf(num, sizeof num, "%lu", (unsigned long)len);
+	build_b0(b0, "one.bin", num);
+	for (uint32_t i = 0; i < 1024u; i++)
+		blk[i] = i < len ? pat_byte(i) : CPMEOF;
+	memset(nullb0, 0, sizeof nullb0);
+	n = put_block(in, n, SOH, 0, b0, 128, 0);
+	n = put_block(in, n, STX, 1, blk, 1024, 0);
+	in[n++] = EOT;
+	n = put_block(in, n, SOH, 0, nullb0, 128, 0);
+	return n;
+}
+
+static void one_during_recv(void)
+{
+	static uint8_t              in[4096];
+	static uint8_t              buf[1024];
+	static struct hooked_script h;
+	struct cap_sink             sink;
+	struct ym_io                io = { &h, hooked_script_getc, hooked_script_put };
+	struct ym_sink              vs = { &sink, cap_begin, cap_write };
+	enum ym_result              rc;
+	int                         same = 1;
+
+	memset(&h, 0, sizeof h);
+	h.s.in = in;
+	h.s.inlen = one_good_batch(in, 1000u);
+	h.fire_at = 200;            /* in block 1's body, block 0 accepted */
+	h.fire = fire_during_recv;
+	memset(&sink, 0, sizeof sink);
+	sink.buf = buf; sink.cap = sizeof buf;
+	fired = 0;
+
+	rc = ymodem_recv(&one_xfer, &io, &vs, &one_running_diag);
+
+	one_check("(b) while a receive runs", "the refusals were made", fired == 1);
+	for (uint32_t i = 0; i < 1000u && sink.len == 1000u; i++)
+		if (buf[i] != pat_byte(i))
+			same = 0;
+	one_check("(b) while a receive runs", "the running receive still "
+	          "succeeds, byte for byte", rc == YM_OK && sink.len == 1000u &&
+	          same && one_running_diag.blocks == 3u);
+	one_check("(e) after the receive", "the question says a start now may go",
+	          ymodem_busy(&one_xfer) == 0);
+}
+
+/* ---- (d): every way a transfer fails gives the mark back ------------------ */
+
+static int fail_read(void *ctx, uint8_t *dst, uint32_t want, uint32_t *got)
+{
+	(void)ctx; (void)dst; (void)want;
+	*got = 0;
+	return -1;
+}
+
+static int fail_put(void *ctx, const uint8_t *buf, size_t len)
+{
+	(void)ctx; (void)buf; (void)len;
+	return -1;
+}
+
+/* After a failed transfer: the question says go, and a good receive runs. */
+static void one_after(const char *what, enum ym_result want, enum ym_result got)
+{
+	static uint8_t      in[4096];
+	static uint8_t      buf[1024];
+	struct script       s;
+	struct cap_sink     sink;
+	struct ym_io        io = { &s, script_getc, script_put };
+	struct ym_sink      vs = { &sink, cap_begin, cap_write };
+	struct ym_recv_diag d;
+
+	one_check(what, "failed the way it should", got == want);
+	one_check(what, "(d) the question says the next one may start",
+	          ymodem_busy(&one_xfer) == 0);
+	memset(&s, 0, sizeof s);
+	s.in = in;
+	s.inlen = one_good_batch(in, 100u);
+	memset(&sink, 0, sizeof sink);
+	sink.buf = buf; sink.cap = sizeof buf;
+	one_check(what, "(d) the next transfer starts and completes",
+	          ymodem_recv(&one_xfer, &io, &vs, &d) == YM_OK && sink.len == 100u);
+}
+
+static void one_failures_give_back(void)
+{
+	static uint8_t   in[2048];
+	static uint8_t   buf[1024];
+	struct script    s;
+	struct cap_sink  sink;
+	struct ym_io     io = { &s, script_getc, script_put };
+	struct ym_io     bad_io = { &s, script_getc, fail_put };
+	struct ym_sink   vs = { &sink, cap_begin, cap_write };
+	struct pat_src   ps = { 0u, 3000u };
+	struct ym_source src = { &ps, "s.bin", 3000u, pat_read };
+	struct ym_source bad_src = { &ps, "s.bin", 3000u, fail_read };
+	struct ym_recv_diag d;
+	uint8_t          b0[128], blk[1024];
+	size_t           n;
+
+#define ONE_RESET(...) do {                                             \
+		static const uint8_t bytes_[] = { 0, __VA_ARGS__ };     \
+		memset(&s, 0, sizeof s);                                \
+		memcpy(in, bytes_ + 1, sizeof bytes_ - 1);              \
+		s.in = in; s.inlen = sizeof bytes_ - 1;                 \
+		memset(&sink, 0, sizeof sink);                          \
+		sink.buf = buf; sink.cap = sizeof buf;                  \
+		ps.pos = 0u;                                            \
+	} while (0)
+
+	ONE_RESET(CAN, CAN);
+	one_after("(d) a send the receiver cancels", YM_ERR_CANCEL,
+	          ymodem_send(&one_xfer, &io, &src));
+	ONE_RESET();
+	one_after("(d) a send that times out", YM_ERR_TIMEOUT,
+	          ymodem_send(&one_xfer, &io, &src));
+	ONE_RESET(CRC_C, ACK, CRC_C);
+	one_after("(d) a send whose source fails", YM_ERR_SOURCE,
+	          ymodem_send(&one_xfer, &io, &bad_src));
+	ONE_RESET(CRC_C);
+	one_after("(d) a send whose transport fails", YM_ERR_IO,
+	          ymodem_send(&one_xfer, &bad_io, &src));
+	ONE_RESET(CAN, CAN);
+	one_after("(d) a receive the sender cancels", YM_ERR_CANCEL,
+	          ymodem_recv(&one_xfer, &io, &vs, &d));
+	ONE_RESET();
+	one_after("(d) a receive that times out", YM_ERR_TIMEOUT,
+	          ymodem_recv(&one_xfer, &io, &vs, &d));
+	ONE_RESET();
+	one_after("(d) a receive whose transport fails", YM_ERR_IO,
+	          ymodem_recv(&one_xfer, &bad_io, &vs, &d));
+
+	ONE_RESET();
+	build_b0(b0, "a.bin", "1024");
+	memset(blk, 0x5A, sizeof blk);
+	n = put_block(in, 0, SOH, 0, b0, 128, 0);
+	s.inlen = n;
+	sink.rejects = 1;
+	one_after("(d) a receive the sink refuses", YM_ERR_SINK,
+	          ymodem_recv(&one_xfer, &io, &vs, &d));
+
+	ONE_RESET();
+	n = put_block(in, 0, SOH, 0, b0, 128, 0);
+	n = put_block(in, n, STX, 7, blk, 1024, 0);    /* out of order */
+	s.inlen = n;
+	one_after("(d) a receive with a protocol error", YM_ERR_PROTO,
+	          ymodem_recv(&one_xfer, &io, &vs, &d));
+#undef ONE_RESET
+}
+
+static int one_at_a_time(void)
+{
+	one_check("(e) before anything", "the question says a start now may go",
+	          ymodem_busy(&one_xfer) == 0);
+	one_during_send();
+	one_during_recv();
+	one_failures_give_back();
+	if (one_failures) {
+		printf("  one transfer at a time: %d check(s) FAILED\n", one_failures);
+		return 1;
+	}
+	printf("  one transfer at a time: ok\n");
+	return 0;
 }
 
 int main(void)
@@ -580,6 +1003,10 @@ int main(void)
 		assert(last_diag.timeouts == 41u && last_diag.blocks == 0u &&
 		       last_diag.first_kind == -1);
 	}
+
+	/* ---- 3. one transfer at a time (issue #230) ---- */
+	if (one_at_a_time() != 0)
+		return 1;
 
 	printf("test_ymodem_recv: all assertions passed\n");
 	return 0;

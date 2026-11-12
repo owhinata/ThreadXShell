@@ -301,12 +301,47 @@ static enum ym_result ym_run(const struct ym_io *io, const struct ym_source *src
 	return send_block(io, blk, YM_SOH, 0, YM_BLOCK0_LEN);
 }
 
+/* ---- one transfer at a time (issue #230) ------------------------------- *
+ *
+ * The mark lives in the caller's struct ym_xfer (this file holds no writable
+ * storage).  The compiler's atomics, so no library call and nothing from
+ * ThreadX: with the repository's Arm GNU toolchain at -O2 the take is
+ * ldrexb/strexb + dmb on Cortex-M7 and ldaexb/strexb on Cortex-M55, retried
+ * when an interrupt clears the exclusive monitor, and the give is a release
+ * store (dmb + strb / stlb).  Never waits: a mark that is held is a refusal.
+ */
+static int xfer_take(struct ym_xfer *x)
+{
+	unsigned char idle = 0u;
+
+	return __atomic_compare_exchange_n(&x->running, &idle, (unsigned char)1u,
+	                                   0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+
+static void xfer_give(struct ym_xfer *x)
+{
+	__atomic_store_n(&x->running, (unsigned char)0u, __ATOMIC_RELEASE);
+}
+
+int ymodem_busy(const struct ym_xfer *x)
+{
+	return __atomic_load_n(&x->running, __ATOMIC_ACQUIRE) != 0u;
+}
+
 enum ym_result ymodem_send(struct ym_xfer *x, const struct ym_io *io,
                            const struct ym_source *src)
 {
-	enum ym_result rc = ym_run(io, src, x->send->block);
+	enum ym_result rc;
+
+	/* Refused before anything: not one byte, not even the CAN teardown, since
+	 * the peer on this io belongs to nobody yet and the running transfer is
+	 * someone else's. */
+	if (!xfer_take(x))
+		return YM_ERR_BUSY;
+	rc = ym_run(io, src, x->send->block);
 	if (rc != YM_OK)
 		send_cancel(io);                /* one teardown for every error exit */
+	xfer_give(x);                           /* the one exit, after the CAN */
 	return rc;
 }
 
@@ -692,9 +727,15 @@ enum ym_result ymodem_recv(struct ym_xfer *x, const struct ym_io *io,
 	const struct ym_rx rx = { x->recv->data, diag };
 	enum ym_result     rc;
 
+	/* The caller's record first, so even a refused receive reads "nothing
+	 * received"; then the mark, and refused means no byte on @p io and no
+	 * sink call (see ymodem_send()). */
 	ymodem_recv_diag_init(diag);
+	if (!xfer_take(x))
+		return YM_ERR_BUSY;
 	rc = ym_recv_run(&rx, io, sink);
 	if (rc != YM_OK)
 		send_cancel(io);                /* one teardown for every error exit */
+	xfer_give(x);                           /* the one exit, after the CAN */
 	return rc;
 }

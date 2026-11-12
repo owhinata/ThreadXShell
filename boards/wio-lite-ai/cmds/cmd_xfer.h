@@ -37,7 +37,7 @@ struct cli_instance;
  * operation (e.g. `wifi flash backup`, which holds an RTL8720 download session
  * open around the transfer): cli_console_claim() is NOT reentrant -- it sets the
  * plain `cli_xfer_active` flag that cli_console_release() unconditionally clears
- * (shell/core/cli_core.c), so a nested claim/release pair would drop raw mode
+ * (shell/core/cli_printf.c), so a nested claim/release pair would drop raw mode
  * while the outer caller still needs it.
  *
  * CRITICAL -- console RX ownership: for the duration of ymodem_send() the ONLY

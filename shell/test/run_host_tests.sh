@@ -161,6 +161,17 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_output"
 "$out/test_output"
 
+# issue #229 -- the console hand-over of a binary transfer (cli_console_claim /
+# cli_console_release, cli_printf.c) over the host output lock, which counts its
+# takes and releases and can be made to fail: the mark follows the claim, a
+# background job is refused, a lock that cannot be taken leaves nothing behind.
+gcc $CFLAGS -DCLI_USE_COLOR=0 \
+    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" \
+    "$here/test_console_claim.c" "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_session.c" \
+    $glue \
+    $LDFLAGS -o "$out/test_console_claim"
+"$out/test_console_claim"
+
 # dummy backend end-to-end: input -> execute -> output driven THROUGH the transport
 # (cli_dummy_inject -> read() -> state machine -> write() -> capture), flow control
 # (backpressure completes / timeout drops / immediate fail), abnormal cases and

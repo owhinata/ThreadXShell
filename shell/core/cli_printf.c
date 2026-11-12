@@ -98,6 +98,45 @@ void cli_out_end(struct cli_instance *sh)
 	cli_unlock(sh);
 }
 
+/* ---- console hand-over for a binary transfer -------------------------- *
+ * Kept here, not in cli_core.c: it reaches ThreadX only through cli_lock /
+ * cli_unlock, so the host tests run these and not a stand-in (issue #229). */
+
+/* Set for the duration of a raw binary transfer (owhinata/stm32f746g-disco#50);
+   see cli_internal.h. */
+volatile uint8_t cli_xfer_active;
+
+/*
+ * Console hand-over for a binary transfer (owhinata/stm32f746g-disco#50).  Take the
+ * output lock for the WHOLE transfer (so a background job's output cannot interleave
+ * into the YMODEM byte stream -- it blocks and, per owhinata/stm32f746g-disco#25,
+ * drops on its wedge deadline) and raise cli_xfer_active so cli_tx_send_blocking
+ * stops draining RX and _write drops printf output.  Returns 0 on success, -2 if
+ * called from a background job, -1 if the lock could not be acquired.
+ *
+ * A bg-job worker (sh->fg != NULL) is REFUSED: the RX ring is a strict SPSC pipe
+ * owned by the foreground thread, and the USART RX ISR posts CLI_EVT_RX to the
+ * FOREGROUND's event group (u->sh == fg), not the worker's -- so a worker's
+ * cli_read_byte() would never wake on an ACK while the foreground line editor
+ * drains the bytes.  A binary transfer must run in the foreground
+ * (owhinata/stm32f746g-disco#50/#25).
+ */
+int cli_console_claim(struct cli_instance *sh)
+{
+	if (sh->fg != NULL)
+		return -2;
+	if (cli_lock(sh) != 0)
+		return -1;
+	cli_xfer_active = 1;
+	return 0;
+}
+
+void cli_console_release(struct cli_instance *sh)
+{
+	cli_xfer_active = 0;
+	cli_unlock(sh);
+}
+
 /* ---- public API -------------------------------------------------------- */
 
 /* Bracket a formatted call with lock + autoflush; @p color is "" for cli_print

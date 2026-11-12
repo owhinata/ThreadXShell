@@ -300,17 +300,7 @@ int blob_board_rx_level(struct cli_instance *sh, uint32_t *high,
 	return 0;
 }
 
-/* ---- what the firmware's shell and protocol provide ------------------------ */
-
-int cli_console_claim(struct cli_instance *sh)
-{
-	return sh->fg != NULL ? -2 : 0;
-}
-
-void cli_console_release(struct cli_instance *sh)
-{
-	(void)sh;
-}
+/* ---- what the firmware's protocol provides (the console hand-over is real) */
 
 const struct ym_recv_diag *ymodem_recv_diag(void)
 {

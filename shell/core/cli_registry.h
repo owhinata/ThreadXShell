@@ -19,7 +19,7 @@
  * These helpers are deterministic and ThreadX/hardware-free, but NOT pure: they
  * write the caller's table.  The caller owns the mutual exclusion.
  *
- * Unrelated to cli_console_claim() / cli_console_release() (cli_core.c), which
+ * Unrelated to cli_console_claim() / cli_console_release() (cli_printf.c), which
  * are about OWNING the console for a binary transfer.
  */
 #ifndef CLI_REGISTRY_H

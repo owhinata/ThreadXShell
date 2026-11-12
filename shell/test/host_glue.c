@@ -31,9 +31,28 @@
 #define CLI_TEST_TX_MAX_STALLS 2
 #endif
 
-/* ---- output lock: no-op on the single-threaded host --------------------- */
+/* ---- output lock: no mutex on the single-threaded host ------------------ *
+ * No mutex, but the lock COUNTS and can be made to fail: the console hand-over
+ * (cli_printf.c, issue #229) must give back exactly the takes it made, and must
+ * refuse without a mark when the lock cannot be taken.  A refused take is not
+ * counted, as a failed tx_mutex_get() takes nothing. */
 
-int  cli_lock(struct cli_instance *sh)   { (void)sh; return 0; }
+static int      g_lock_fail;
+static unsigned g_lock_gets;
+static unsigned g_lock_puts;
+
+int cli_lock(struct cli_instance *sh)
+{
+	(void)sh;
+	if (g_lock_fail)
+		return -1;
+	g_lock_gets++;
+	return 0;
+}
+
+void     cli_test_set_lock_fail(int fail) { g_lock_fail = fail; }
+unsigned cli_test_lock_gets(void)         { return g_lock_gets; }
+unsigned cli_test_lock_puts(void)         { return g_lock_puts; }
 
 /* No mutex on the host, but the END-OF-UNIT signal is real behaviour, not locking:
  * cli_core.c calls the backend's flush() from here, and a backend that transmits
@@ -43,6 +62,7 @@ void cli_unlock(struct cli_instance *sh)
 	struct cli_instance  *o  = sh->fg ? sh->fg : sh;
 	struct cli_transport *tr = o->tr;
 
+	g_lock_puts++;
 	if (tr != NULL && tr->api->flush != NULL)
 		tr->api->flush(tr);
 }

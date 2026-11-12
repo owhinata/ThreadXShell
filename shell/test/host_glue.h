@@ -10,7 +10,8 @@
  * On target, cli_core.c owns the instance thread, the TX mutex, the
  * CLI_EVT_RX/TX event flags and the backend notify functions.  None of that
  * exists on the host, so host_glue.c provides ThreadX-free replacements:
- *   - cli_lock/cli_unlock           -> no-ops (single-threaded host)
+ *   - cli_lock/cli_unlock           -> no mutex (single-threaded host); they
+ *                                      count, and the take can be made to fail
  *   - cli_transport_notify_rx/tx    -> no-ops (the pump drives RX synchronously)
  *   - cli_tx_send_blocking          -> faithful flow control over tr->api->write
  *   - cli_test_pump                 -> mirrors cli_core.c's RX drain loop
@@ -55,5 +56,15 @@ void cli_test_set_sleep_hook(cli_test_tx_wait_fn fn, void *arg);
  * to sleep (issue #219: the shared `net` command measures its waits in ticks).
  */
 unsigned cli_test_sleep_ticks(void);
+
+/**
+ * Output lock (issue #229).  With @p fail non-zero every cli_lock() returns -1
+ * and takes nothing, until it is cleared again.  The two counters are the
+ * successful takes and the releases since the program started; a test compares
+ * their change across what it does, not their values.
+ */
+void     cli_test_set_lock_fail(int fail);
+unsigned cli_test_lock_gets(void);
+unsigned cli_test_lock_puts(void);
 
 #endif /* HOST_GLUE_H */

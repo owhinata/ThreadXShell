@@ -24,10 +24,12 @@
  *   - "another transfer is running" is said after the claim and before the
  *     notice, and the claim is given back;
  *   - every exit after a claim gives it back exactly once (each protocol
- *     result), and a refused claim gives nothing back; the receive and the
- *     "already held" send never claim or release;
+ *     result), and a refused claim gives nothing back; the receive never
+ *     claims or releases;
+ *   - a send from a caller that already holds the console leaves the
+ *     caller's claim as it was, on every path (issue #231);
  *   - with a field of the table empty, the telnet question, the busy question,
- *     both sends and the receive all refuse, touching nothing (no claim, no
+ *     the send and the receive all refuse, touching nothing (no claim, no
  *     flush, no read, no protocol call);
  *   - the "no telnet" answer never refuses and prints nothing;
  *   - while sending a 0x03 is an abort, while receiving it is a data byte.
@@ -382,11 +384,6 @@ static void test_ctrl_c(void)
 	check("send: the core reads YM_IO_ABORT", t_getc_seen == YM_IO_ABORT);
 
 	reset();
-	rx(3);
-	xfer_send_source_locked(t_sh, &t_src);
-	check("send (held): the core reads YM_IO_ABORT", t_getc_seen == YM_IO_ABORT);
-
-	reset();
 	rx(4);
 	xfer_send_source(t_sh, &t_src);
 	check("send: another byte passes", t_getc_seen == 4);
@@ -432,11 +429,55 @@ static void test_recv(void)
 	xfer_recv_sink_locked(t_sh, &t_sink, &d);
 	check("a refusal by the core is said",
 	      at("error:ymodem: another transfer is running") > at("ym_recv|"));
+}
+
+/*
+ * issue #231: a caller that already holds the console (wio-lite-ai's `wifi
+ * flash backup`) calls the one send entry.  The claim it makes is one more
+ * on top of the caller's, and every path gives back exactly that one: the
+ * count after the call is the count before it.
+ */
+static void test_send_nested(void)
+{
+	static const enum ym_result res[] = {
+		YM_OK, YM_ERR_CANCEL, YM_ERR_TIMEOUT, YM_ERR_SOURCE, YM_ERR_IO,
+		YM_ERR_BUSY,
+	};
+	char what[112];
+	unsigned i;
+
+	printf("send from a caller that already holds the console\n");
+	for (i = 0; i < sizeof res / sizeof res[0]; i++) {
+		int rc;
+
+		reset();
+		t_held = 1;                     /* the caller's own claim */
+		t_result = res[i];
+		rc = xfer_send_source(t_sh, &t_src);
+		snprintf(what, sizeof what, "result %d: rc %d, the caller's claim is "
+		         "as it was (1), one claim and one release of its own",
+		         (int)res[i], rc);
+		check(what, rc == (res[i] == YM_OK ? 0 : 1) && t_held == 1 &&
+		            count("claim|") == 1 && count("release|") == 1 &&
+		            at(NOTICE) >= 0);
+	}
 
 	reset();
-	check("the held send never claims",
-	      xfer_send_source_locked(t_sh, &t_src) == 0 && count("claim|") == 0 &&
-	      count("release|") == 0 && at("ym_send|") >= 0 && at(NOTICE) < 0);
+	t_held = 1;
+	t_busy = 1;
+	check("another transfer: refused before the notice, the caller's claim "
+	      "as it was",
+	      xfer_send_source(t_sh, &t_src) == 1 && t_held == 1 &&
+	      count("release|") == 1 && at(NOTICE) < 0);
+
+	reset();
+	t_held = 1;
+	t_claim_rc = -3;                    /* the claim count at its limit */
+	check("a claim refused at the limit: nothing given back, the caller's "
+	      "claim as it was",
+	      xfer_send_source(t_sh, &t_src) == 1 && t_held == 1 &&
+	      count("release|") == 0 && at(NOTICE) < 0 &&
+	      at("error:ymodem: console busy") >= 0);
 }
 #endif
 
@@ -454,12 +495,6 @@ static void test_telnet(void)
 	      xfer_send_source(t_sh, &t_src) == 1 && at("guard:ymodem|") == 0 &&
 	      at("claim|") < 0 && at(NOTICE) < 0 && at("ym_send|") < 0 &&
 	      at("flush|") < 0 && at("read|") < 0);
-
-	reset();
-	t_telnet_refuses = 1;
-	check("held send: refused, nothing touched",
-	      xfer_send_source_locked(t_sh, &t_src) == 1 &&
-	      at("guard:ymodem|") == 0 && at("ym_send|") < 0 && at("flush|") < 0);
 
 	reset();
 	t_telnet_refuses = 1;
@@ -531,10 +566,6 @@ static void test_empty_field(void)
 	      at("claim|") < 0 && at("flush|") < 0 && at("read|") < 0 &&
 	      at(NOTICE) < 0 && at("ym_send|") < 0 && at("guard:") < 0);
 	reset();
-	check("held send refuses, touching nothing",
-	      xfer_send_source_locked(t_sh, &t_src) == 1 && at(say) == 0 &&
-	      at("flush|") < 0 && at("ym_send|") < 0);
-	reset();
 	ymodem_recv_diag_init(&d);
 	check("receive refuses, touching nothing, the record left as initialised",
 	      xfer_recv_sink_locked(t_sh, &t_sink, &d) == 1 && at(say) == 0 &&
@@ -552,6 +583,7 @@ int main(void)
 	test_send_refusals();
 	test_ctrl_c();
 	test_recv();
+	test_send_nested();
 	test_telnet();
 #elif defined(XFER_TEST_SHAPE_NOTELNET)
 	printf("test_xfer_console (NOTELNET)\n");
@@ -559,6 +591,7 @@ int main(void)
 	test_send_refusals();
 	test_ctrl_c();
 	test_recv();
+	test_send_nested();
 	test_no_telnet();
 #else
 	printf("test_xfer_console (%s)\n",

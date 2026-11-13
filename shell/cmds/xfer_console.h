@@ -79,14 +79,19 @@ int xfer_refuse_if_telnet(struct cli_instance *sh);
 
 /**
  * Send @p src to the PC over the console using YMODEM: refused on the telnet
- * console before anything else is printed; claim the console (counted per
- * console, cli.h) and refuse a background job; refuse when another transfer
- * is running; then print the two-line notice, flush RX, run ymodem_send(),
- * flush again, drain until the line goes quiet if it failed (issue #228),
- * print a one-line result and log it, and release the console.  The caller
+ * console before anything else is printed; claim the console and refuse a
+ * background job; refuse when another transfer is running; then print the
+ * two-line notice, flush RX, run ymodem_send(), flush again, drain until the
+ * line goes quiet if it failed (issue #228), print a one-line result and log
+ * it, and release the console.  The caller
  * owns @p src and any underlying resource (frame validity) for the duration.
  * A local Ctrl+C aborts: while sending, every byte read back is protocol.
  * Returns 0 on a completed transfer, 1 on any failure / cancel / refusal.
+ *
+ * A caller that already holds the console may call it (wio-lite-ai's `wifi
+ * flash backup`): claims are counted per console (cli.h, issue #229), so this
+ * takes one more and gives back only that one -- the caller's claim is as it
+ * was when this returns, on every path.
  *
  * [!] FOR THE DURATION, THIS FUNCTION IS THE ONLY PERMITTED READER OF THE RX
  * RING: a source must not call cli_cancel_requested(), whose poll drains the
@@ -94,18 +99,6 @@ int xfer_refuse_if_telnet(struct cli_instance *sh);
  * 'C' / CAN.
  */
 int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
-
-/**
- * xfer_send_source() for a caller that ALREADY holds the console (wio-lite-ai's
- * `wifi flash backup`): refused on the telnet console, then flush RX, run
- * ymodem_send(), flush again, drain if it failed, and print the one-line
- * result.  No claim, no notice, no "another transfer is running" question
- * (the caller asks it before its own notice).  Kept only until that caller
- * uses xfer_send_source() too, which is safe since claims are counted per
- * console (issue #229); removing this entry is a later step of issue #231.
- * Returns 0 on a completed transfer, 1 otherwise.
- */
-int xfer_send_source_locked(struct cli_instance *sh, const struct ym_source *src);
 
 /**
  * Receive one YMODEM file into @p sink.  The caller ALREADY holds the console

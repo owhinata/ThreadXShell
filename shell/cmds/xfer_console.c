@@ -215,8 +215,8 @@ int xfer_refuse_if_busy(struct cli_instance *sh)
  *
  * Every outcome is written to the log as a word, so `dmesg` reads the same on
  * every board.  A send also prints its one-line result, while the console is
- * still held (the caller of the "already held" send cannot print for it).  A
- * receive prints nothing: its caller says what was stored and why not, and
+ * still held.  A receive prints nothing: its caller says what was stored and
+ * why not, and
  * while a receive runs the PC's terminal still belongs to the sender, so
  * `dmesg` is where its post-mortem is read.
  */
@@ -287,34 +287,17 @@ static void xfer_recv_log(enum ym_result res, const struct ym_recv_diag *d)
 
 /* ---- send ----------------------------------------------------------------- */
 
-/* The send itself, on a console the caller holds: the body both send entries
- * share while wio-lite-ai's `wifi flash backup` still has its own entry.
- * Inlined into each, so the send entry keeps one frame. */
-static inline __attribute__((always_inline))
-int xfer_send_held(struct cli_instance *sh, struct ym_xfer *owner,
-                   const struct ym_source *src)
+/*
+ * The one send entry.  A caller that already holds the console (wio-lite-ai's
+ * `wifi flash backup`, which keeps the RTL8720 download session open around
+ * the transfer) calls it too: claims are counted per console (issue #229), so
+ * the claim here is a second one and its release gives back only that one.
+ */
+int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 {
 	struct ym_io   io = { sh, io_getc_send, io_put };
 	enum ym_result res;
-
-	cli_rx_flush(sh);                  /* drop type-ahead / the command newline */
-	res = ymodem_send(owner, &io, src);
-	cli_rx_flush(sh);                  /* drop a trailing 'O'/'C'/garbage tail   */
-	if (res != YM_OK)
-		xfer_drain_until_quiet(sh);    /* the receiver may still be NAKing */
-	return xfer_send_report(sh, src, res);   /* printed while still held */
-}
-
-int xfer_send_source_locked(struct cli_instance *sh, const struct ym_source *src)
-{
-	if (xfer_refuse_if_telnet(sh))
-		return 1;
-	return xfer_send_held(sh, xfer_console_board_facts.owner, src);
-}
-
-int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
-{
-	int rc;
+	int            rc;
 
 	/* Before the notice: a refused transfer says nothing about starting a
 	 * receiver. */
@@ -349,7 +332,12 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 	cli_print(sh, "ymodem: start the receiver now -- `rb -y` (lrzsz YMODEM; -y "
 	              "replaces an older file of that name) or Ctrl+A Ctrl+R in "
 	              "picocom; Ctrl+C aborts\r\n");
-	rc = xfer_send_held(sh, xfer_console_board_facts.owner, src);
+	cli_rx_flush(sh);                  /* drop type-ahead / the command newline */
+	res = ymodem_send(xfer_console_board_facts.owner, &io, src);
+	cli_rx_flush(sh);                  /* drop a trailing 'O'/'C'/garbage tail   */
+	if (res != YM_OK)
+		xfer_drain_until_quiet(sh);    /* the receiver may still be NAKing */
+	rc = xfer_send_report(sh, src, res);   /* printed while still held */
 	cli_console_release(sh);
 	return rc;
 }

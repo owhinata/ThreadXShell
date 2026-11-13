@@ -472,15 +472,14 @@ static int cmd_flash_backup(struct cli_instance *sh, int argc, char **argv)
 	bak_build_name(name, offset, len);
 	src.ctx = &src_ctx; src.name = name; src.size = len; src.read = bak_src_read;
 
-	/* Right before the notice (issue #230): a transfer that would be refused
-	 * does not tell the operator to start `rb`.  The link is already down by
-	 * now; reserving the transfer before that is issue #197. */
-	if (xfer_refuse_if_busy(sh))
-		goto recover;
-	cli_print(sh, "wifi: sending '%s' (%lu bytes) -- start the receiver now "
-	          "(`rb -y`, or Ctrl+A Ctrl+R in picocom)\r\n", name, (unsigned long)len);
-	/* From here until the transfer ends, io_getc() owns the console RX (see above). */
-	rc = xfer_send_source_locked(sh, &src);
+	/* The shared send (issue #231): it claims the console once more over
+	 * flash_claim()'s claim and gives back only its own (claims are counted,
+	 * issue #229), refuses "another transfer is running" before it prints the
+	 * notice that tells the operator to start `rb` (issue #230), and prints that
+	 * notice in the words of every board.  The link is already down by now;
+	 * reserving the transfer before that is issue #197.  From here until the
+	 * transfer ends, the helper's reader owns the console RX (see above). */
+	rc = xfer_send_source(sh, &src);
 	if (rc != 0) {
 		if (src_ctx.failed)
 			cli_error(sh, "wifi: flash read failed %lu bytes in\r\n",

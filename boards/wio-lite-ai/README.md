@@ -142,8 +142,9 @@ reason the placement policy exists:
 CPU-only data in AXI-SRAM today includes the shared nn state
 (`nn_model_board_state`, `nn_tflm_board_state`, #161), the telnet console's
 state (`net_tty_board_state`, #221) and YMODEM's working areas (issue #230:
-`s_ym_send` 1,029 B and `s_ym_recv` 1,024 B, static in `cmds/cmd_xfer.c`,
-plain `.bss`; DTCM had 1,848 B left).  `svc/README.md` says who owns those areas and why there is one
+`s_ym_send` 1,029 B and `s_ym_recv` 1,024 B, static in `cmds/cmd_xfer_board.c`
+since issue #231 and in `cmds/cmd_xfer.c` before, plain `.bss`; DTCM had
+1,848 B left).  `svc/README.md` says who owns those areas and why there is one
 transfer at a time on the board.
 
 ### [!] The top 32 KB of AXI-SRAM is the plugin reservation (issue #108)
@@ -746,8 +747,8 @@ board's `cmds/cmd_blob.c` before).  What is this board's:
 |---|---|---|
 | store side | `src/blob.c`, `src/blob.h`, `src/blob_slots.c` | the interval and erase unit, the slot table, the indirect NOR reads and erases, the name lookup and the busy flag |
 | write side | `src/blob_writer.c` | the functions `svc/blob/blob_svc.h` names: the 1 KB DTCM staging buffer, the reservation (the busy flag), one `nor_erase()` per 64 KB block, the program and the read-back, and the log lines a transfer leaves |
-| console side | `cmds/cmd_blob_board.c` | YMODEM over the USB CDC console, the refusal on the telnet console, the busy and NOR-down words |
-| the transfer | `cmds/cmd_xfer.c` | the board's one YMODEM owner (`s_ym`) and its two working areas (`s_ym_send` 1,029 B, `s_ym_recv` 1,024 B, plain `.bss`; the 12 B owner is `.data`), all in AXI-SRAM (DTCM had no room, [Memory map](#memory-map)); every transfer -- `blob write`, `camera send`, `wifi flash backup` / `imgload` -- uses it, so one runs at a time and a second is refused (issue #230, [svc/README.md](../../svc/README.md#why-the-lock-and-the-threads-are-the-boards)) |
+| console side | `cmds/cmd_blob_board.c` | the busy and NOR-down words (the receive over the USB CDC console and the telnet refusal are the shared wiring's, below) |
+| the transfer | `shell/cmds/xfer_console.c` (shared, issue #231) and `cmds/cmd_xfer_board.c` | the one YMODEM wiring of all three boards (the console hand-over, the flushes and the drain, each stopped at 256 KB, the result words), and this board's part of it: the table `xfer_console_board_facts` with the board's one YMODEM owner (`s_ym`) and its telnet question `net_tty_guard`.  The owner and its two working areas (`s_ym_send` 1,029 B, `s_ym_recv` 1,024 B, plain `.bss`; the 12 B owner is `.data`), all in AXI-SRAM (DTCM had no room, [Memory map](#memory-map)); every transfer -- `blob write`, `camera send`, `wifi flash backup` / `imgload` -- uses it, so one runs at a time and a second is refused (issue #230, [svc/README.md](../../svc/README.md#why-the-lock-and-the-threads-are-the-boards)).  Until #231 this was `cmds/cmd_xfer.c`, and `wifi flash backup` had a send entry of its own for a console it already held and printed its own notice; it now calls the one send entry over its claim (claims are counted, #229) and prints the two lines every board prints ([svc/README.md](../../svc/README.md)) |
 | words and limits | `svc/blob_svc_config.h` | the part's name, the address format, the erase estimate (W25Q128JV: 150 ms typical, 2 s at most per 64 KB block), the sender (`sb`), `blob read`'s 1,024 B |
 
 | NOR range | What |
@@ -2190,7 +2191,8 @@ this board's own `src/net_shell.c`, operated with `net shell start` / `stop` /
 | `src/link_bridge.c` | The bridge session: every path that takes the link away closes the driver's gate (`nx_link_driver_set_link(0)`) and neither stops the console nor waits for it (issues #218 and #221; until issue #222 this was in `src/nx_net.c`) |
 | `src/main.c` | `NET_TTY_TRANSPORT_DEFINE(net_tr)` and the `wio-net>` instance bound to it; `net_tty_init()` right after `nx_net_init()`, and the default port at once when the KV thread will not hand one over |
 | `src/kv_boot.c` | The port: `net.shell.port`, read once, right after the store opens and before the association |
-| `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c`, `cmds/cmd_xfer.c`, `cmds/cmd_blob_board.c`, `cmds/cmd_wifi_flash.c` | The commands that ask the shared question and refuse on the telnet console (below) |
+| `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c` | The commands that ask `net_tty_guard()` and refuse on the telnet console (below) |
+| `cmds/cmd_xfer_board.c`, `cmds/cmd_wifi_flash.c` | The YMODEM transfers: the table's telnet field is `net_tty_guard`, which the shared wiring (`shell/cmds/xfer_console.c`) and the shared `blob write` ask through `xfer_refuse_if_telnet()`, and `wifi flash imgload` / `backup` ask the same before they touch anything (issue #231; until then `cmds/cmd_xfer.c` and `cmds/cmd_blob_board.c` called `net_tty_guard()` themselves) |
 | `port/netxduo/nx_user.h` | `NX_ENABLE_EXTENDED_NOTIFY_SUPPORT` (new in #221) and `NX_ENABLE_TCP_QUEUE_DEPTH_UPDATE_NOTIFY`, which `net_tty.c` requires |
 
 - **The port is `net.shell.port`, read once at boot**, right after the store
@@ -2310,6 +2312,17 @@ store](#the-configuration-store-kv-issue-214); clean builds):
 | `shell.bin` | 378,812 B after the move (378,700 B before) |
 | Internal flash free (app partition) | **14,404 B** after the move (14,516 B before: the store -40 B, the boot steps -72 B, the command 0 B); **14,396 B** after f746g-disco's port (`ca2e6a4`, -8 B here, no printed string changed) |
 | DTCM free (`_smsp_stack - _dtcm_used_end`) | **1,848 B**, unchanged |
+
+Measured for issue #231 (the YMODEM wiring moved to the shared
+`shell/cmds/xfer_console.c`, one send entry, every discard stopped at 256 KB;
+from `2164edb`, incremental builds per step):
+
+| What | Value |
+|---|---|
+| `shell.bin` | 379,600 B at `2164edb`; 379,848 B with the wiring shared, 379,832 B without the board forwarders, 379,416 B with one send entry, **379,600 B** with the 256 KB cap (+184 B) |
+| Internal flash free (app partition) | **13,616 B**, as at `2164edb` |
+| DTCM free | unchanged (`.dtcm_bss` 59,528 B); the owner and the two areas stay in AXI-SRAM |
+| Console stack on the send paths | `camera send` 560 B and `wifi flash backup` 248 B down to the protocol core, as at `2164edb` (from the frames in the shipped ELF) |
 
 ## Flashing and recovery
 

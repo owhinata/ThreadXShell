@@ -18,7 +18,7 @@
  *
  * Layering: this is app-level resource management (it owns a hardware-backed buffer), so
  * it sits next to psram.c, below the shell.  The shell wires rtl_img_sink() into the
- * YMODEM receiver (shell/cmds/cmd_xfer.c) and hands rtl_img_data() to
+ * YMODEM receiver (shell/cmds/xfer_console.c) and hands rtl_img_data() to
  * rtl_dl_flash_program().
  *
  * CONCURRENCY: every entry point here assumes the caller holds the OCTOSPI1 guard

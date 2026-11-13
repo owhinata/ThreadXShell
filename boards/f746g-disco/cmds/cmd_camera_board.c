@@ -5,7 +5,7 @@
 /**
  * @file    cmd_camera_board.c
  * @brief   This board's half of the `camera` command: the OV5640 controls,
- *          and the two shell-layer services the shared command needs
+ *          and the shell-layer service the shared command needs
  *          (owhinata/stm32f746g-disco#39/#41/#42, issue #143).
  *
  * The command itself -- probe / on / off / info / capture / save / send /

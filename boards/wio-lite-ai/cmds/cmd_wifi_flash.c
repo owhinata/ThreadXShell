@@ -318,11 +318,11 @@ recover:
  * reach (owhinata/wio-lite-ai#46).  `wifi flash backup` is now 8x more read commands over a
  * 6 Mbaud link and nobody will notice; the camera needed the bytes.
  *
- * NOTE the NULL abort hook in bak_src_read(): while ymodem_send() runs, its io_getc()
- * is the ONLY permitted reader of the console RX ring.  rtl_abort_cb() would call
- * cli_cancel_poll(), which drains that ring and discards every non-0x03 byte -- it
- * would eat the receiver's ACK/'C'/CAN and break the transfer.  Ctrl+C during the
- * transfer is handled by io_getc() instead (cmd_xfer.c).
+ * NOTE the NULL abort hook in bak_src_read(): while ymodem_send() runs, the shared
+ * wiring's reader is the ONLY permitted reader of the console RX ring.  rtl_abort_cb()
+ * would call cli_cancel_poll(), which drains that ring and discards every non-0x03
+ * byte -- it would eat the receiver's ACK/'C'/CAN and break the transfer.  Ctrl+C
+ * during the transfer is handled by that reader instead (shell/cmds/xfer_console.c).
  */
 #define RTL_BACKUP_CHUNK  4096u
 
@@ -435,8 +435,8 @@ static int cmd_flash_backup(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 	/* Before flash_claim(), which takes the WiFi link -- and with it a telnet session --
-	 * down: the transfer helper would refuse too, but only after that (issue #228).
-	 * The shared question, the same one the helper asks (issue #231). */
+	 * down: the shared wiring would refuse too, but only after that (issue #228).
+	 * The shared question, the same one the wiring asks (issue #231). */
 	if (xfer_refuse_if_telnet(sh))
 		return 1;
 	if (flash_claim(sh) != 0)
@@ -556,9 +556,9 @@ static int img_report(struct cli_instance *sh)
  * the host-to-board transfer, and it is what makes the stock backup restorable.
  *
  * Console RX ownership: from cli_console_claim() until xfer_recv_sink_locked() returns,
- * the ONLY reader of the console RX ring is that helper's io_getc().  The sink must not
- * poll cli_cancel_requested() (see cmd_xfer.h) -- here it physically cannot, since
- * rtl_img_sink() has no abort hook to pass.
+ * the ONLY reader of the console RX ring is that helper's reader.  The sink must not
+ * poll cli_cancel_requested() (see shell/cmds/xfer_console.h) -- here it physically
+ * cannot, since rtl_img_sink() has no abort hook to pass.
  */
 static int cmd_flash_imgload(struct cli_instance *sh, int argc, char **argv)
 {
@@ -575,8 +575,8 @@ static int cmd_flash_imgload(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 	/* Before the claim and the self-check, which invalidates the staged image: the
-	 * transfer helper would refuse too, but only after that (issue #228).  The
-	 * shared question, the same one the helper asks (issue #231). */
+	 * shared wiring would refuse too, but only after that (issue #228).  The
+	 * shared question, the same one the wiring asks (issue #231). */
 	if (xfer_refuse_if_telnet(sh))
 		return 1;
 	rc = cli_console_claim(sh);
@@ -614,7 +614,7 @@ static int cmd_flash_imgload(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)PSRAM_BASE_ADDR, (unsigned long)RTL_IMG_MAX);
 	/* xfer_recv_sink_locked() does not print this (its caller owns the console), but
 	 * the handshake budget is only long enough if the operator starts now. */
-	/* Not "Ctrl+C aborts": a receive has no local abort (cmd_xfer.h) -- 0x03 is
+	/* Not "Ctrl+C aborts": a receive has no local abort (xfer_console.h) -- 0x03 is
 	 * ordinary file data and cannot be told apart from a keypress. */
 	cli_print(sh, "wifi: start the sender now -- `sb <file>` (lrzsz YMODEM batch send; "
 	          "`sz` will NOT work), or Ctrl+A Ctrl+S in picocom; cancel the sender on "
@@ -650,7 +650,7 @@ static int cmd_flash_imgload(struct cli_instance *sh, int argc, char **argv)
 
 	if (rc != 0) {
 		/* Includes "all the data arrived but the batch never closed" -- not a
-		 * complete image, so it must not be left staged.  The transfer helper
+		 * complete image, so it must not be left staged.  The shared wiring
 		 * prints nothing (issue #228); which way it failed is its `dmesg` line. */
 		rtl_img_invalidate();
 		cli_error(sh, "wifi: the transfer did not complete -- nothing staged "

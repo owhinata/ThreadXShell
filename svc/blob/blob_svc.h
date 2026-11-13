@@ -22,7 +22,8 @@
  *
  *   BLOB_SVC_HAS_STORE    1 when the functions below exist on this build
  *   BLOB_SVC_HAS_RECEIVE  1 when the console can receive a file into a slot
- *                         (the board's blob_board_receive())
+ *                         (over the shared YMODEM wiring, shell/cmds/
+ *                         xfer_console.h, which the command calls)
  *
  * `blob` is registered only when both are 1: a store that cannot be filled
  * from the console would offer `blob erase` with no way back.  With either 0

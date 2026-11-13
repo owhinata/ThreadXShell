@@ -17,7 +17,8 @@
 #else
 #define BLOB_SVC_HAS_STORE    0
 #endif
-/** The USB CDC console receives YMODEM (cmds/cmd_xfer.c). */
+/** The USB CDC console receives YMODEM over the shared wiring
+ *  (shell/cmds/xfer_console.c). */
 #define BLOB_SVC_HAS_RECEIVE  1
 
 #define BLOB_SVC_PART         "NOR"

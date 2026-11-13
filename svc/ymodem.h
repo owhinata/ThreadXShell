@@ -16,9 +16,11 @@
  * Ported verbatim from ../stm32f746g-disco (its owhinata/stm32f746g-disco#50) for
  * owhinata/wio-lite-ai#19 M4: the RTL8720DN full-chip flash backup (`wifi flash
  * backup`) needs to stream megabytes off the board, and this is the shell's designed
- * binary-transfer path. Each board wires @ref ym_io to cli_read_byte()/cli_write()
- * (see boards/<board>/cmds/cmd_xfer.c) and, on wio, @ref ym_source to the RTL8720
- * download-protocol flash reader.
+ * binary-transfer path. One wiring for every board, shell/cmds/xfer_console.c,
+ * connects @ref ym_io to cli_read_byte()/cli_write() and is the only caller of
+ * ymodem_send() / ymodem_recv() (issue #231; until then each board had its own
+ * cmds/cmd_xfer.c); on wio a @ref ym_source is the RTL8720 download-protocol
+ * flash reader.
  *
  * owhinata/wio-lite-ai#19 M5 added the RECEIVE direction (@ref ymodem_recv / @ref
  * ym_sink): to (re)write the RTL8720DN's firmware the board must be able to take an
@@ -116,7 +118,9 @@ struct ym_recv_area {
 /**
  * Who the transfers' working areas belong to (issue #230).  svc/ymodem.c holds
  * no writable storage of its own; the board defines ONE of these, with its
- * own send and receive areas, and passes it to every ymodem_send() and
+ * own send and receive areas, static in its cmds/cmd_xfer_board.c, and names
+ * it in its xfer_console_board_facts (shell/cmds/xfer_console.h, issue #231),
+ * through which the one wiring passes it to every ymodem_send() and
  * ymodem_recv().  The two areas are separate, so a send and a receive never
  * share bytes.  Where the board places them is its decision (the board README
  * says where and why).

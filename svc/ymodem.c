@@ -58,7 +58,8 @@
  * and overrunning it fails confusingly: the send ends, the console goes back to the line
  * editor, and the receiver's 'C' is then ECHOED back to it, so lrzsz reports "Got 0103
  * sector header" (octal 103 = 'C') rather than anything about a timeout.  Two minutes
- * removes the race; Ctrl+C still aborts the wait at any point (io_getc maps it).
+ * removes the race; Ctrl+C still aborts the wait at any point (the wiring's
+ * send-direction reader maps it, shell/cmds/xfer_console.c).
  */
 #define YM_HANDSHAKE_RETRIES    40
 #define YM_BLOCK_RETRIES        10

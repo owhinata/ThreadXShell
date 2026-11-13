@@ -376,7 +376,7 @@ struct wr_ctx {
 	int      stat_failed;
 	unsigned stat_slot;
 	int      stat_rc;
-	/* The receive's counters (issue #230): the board's receiver writes them
+	/* The receive's counters (issue #230): the shared receive writes them
 	 * here, in this command's own frame, so the `ymodem   :` line after the
 	 * transfer reads this transfer and nothing later can overwrite it.  Set
 	 * to the "nothing received" value before the coordinator runs. */

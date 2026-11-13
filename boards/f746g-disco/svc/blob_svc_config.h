@@ -13,8 +13,9 @@
 
 /** The store is the QSPI NOR (src/blob.c). */
 #define BLOB_SVC_HAS_STORE    1
-/** The VCP (USART1) receives YMODEM (cmds/cmd_xfer.c); telnet is refused
- *  (cmds/cmd_blob_board.c). */
+/** The VCP (USART1) receives YMODEM over the shared wiring
+ *  (shell/cmds/xfer_console.c); telnet is refused by the table's question
+ *  (cmds/cmd_xfer_board.c). */
 #define BLOB_SVC_HAS_RECEIVE  1
 /** The VCP's RX ring reports its high-water (backend/cli_backend_uart.c), and
  *  `blob write` prints it next to the drops (decision D6). */

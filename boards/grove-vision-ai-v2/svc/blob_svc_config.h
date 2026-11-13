@@ -13,7 +13,7 @@
 
 /** The store is the external NOR's blob region (src/blob.c, src/blob_writer.c). */
 #define BLOB_SVC_HAS_STORE    1
-/** UART0 receives YMODEM (cmds/cmd_xfer.c). */
+/** UART0 receives YMODEM over the shared wiring (shell/cmds/xfer_console.c). */
 #define BLOB_SVC_HAS_RECEIVE  1
 
 #define BLOB_SVC_PART         "NOR"

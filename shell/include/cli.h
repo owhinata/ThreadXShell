@@ -238,7 +238,11 @@ int  cli_sleep(struct cli_instance *sh, unsigned ticks);
  *   console until reboot (its printf dropped, no Ctrl+C while TX is blocked),
  *   where the one global mark before issue #229 was cleared by the next
  *   release anywhere.  Nothing resets the count, because the lock it pairs
- *   with would still be held.
+ *   with would still be held.  The holder itself may go on writing to and
+ *   reading from its own console while it holds the claim (cli_print() and
+ *   friends, cli_write(), cli_read_byte(); wio-lite-ai's `wifi` commands do
+ *   around their RTL8720 sessions, issue #231 D8): keeping that apart from a
+ *   binary stream on the same console is the holder's responsibility.
  * cli_console_claimable(): could a claim succeed, short of the lock itself?  0
  *   yes, -2 a background job, -3 at the limit.  cli_console_claim() decides by
  *   this same function, so a command can ask it before doing anything it cannot
@@ -249,7 +253,10 @@ int  cli_sleep(struct cli_instance *sh, unsigned ticks);
  *   (timeout_ms; 0 = poll once), -2 if the instance is stopping.  Does NOT treat
  *   0x03 specially (the protocol decides what a Ctrl+C means).
  * cli_rx_flush(): discard buffered RX (call before and after a transfer so stray
- *   protocol bytes do not land on the prompt).
+ *   protocol bytes do not land on the prompt).  [!] It reads until the ring is
+ *   empty, with no bound, so against a peer that never stops it does not
+ *   return; the YMODEM wiring (shell/cmds/xfer_console.c) counts its own
+ *   discards and stops at 256 KB instead (issue #231).
  * Thread-context only; never call from an ISR.
  */
 int  cli_console_claim(struct cli_instance *sh);

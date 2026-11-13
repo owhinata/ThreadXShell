@@ -406,15 +406,15 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
     "${BOARD_DIR}/cmds/cmd_nor.c"
     # The shared `blob` command (#194) and this board's console pieces of it
-    # (UART receive, who holds the NOR, why the port is faulted).
+    # (who may erase, who holds the NOR, why the port is faulted).
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_blob.c"
     "${BOARD_DIR}/cmds/cmd_blob_board.c"
-    # YMODEM receive over the console (issue #92).  The protocol core is the
-    # shared svc/ one; cmd_xfer.c is the twenty lines that wire it to the raw
-    # console API.  Receive only -- nothing on this board produces a file to
-    # send -- and a third copy of that wiring on purpose: sharing it needs a
-    # board hook for "not over telnet", which is a mechanism and a separate
-    # issue.
+    # YMODEM over the console: receive for `blob write` (issue #92) and send
+    # for `camera send` (issue #143).  The protocol core is the shared svc/
+    # one and so, since issue #231, is the wiring to the raw console API
+    # (shell/cmds/xfer_console.c); this board keeps only its transfer owner
+    # and its answer to the telnet question, which is the shared "no telnet"
+    # one (cmds/cmd_xfer_board.c).
     "${CMAKE_SOURCE_DIR}/shell/cmds/xfer_console.c"
     "${BOARD_DIR}/cmds/cmd_xfer_board.c"
     "${CMAKE_SOURCE_DIR}/svc/ymodem.c"

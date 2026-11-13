@@ -662,8 +662,10 @@ shell/cmds/cmd_camera.c                  one command: grammar, usage, refusals,
         |                                CAMERA_SVC_HAS_* is 0 is not registered;
         |                                the board's own subcommands are
         |                                appended (CAMERA_SVC_BOARD_SUBCMDS)
-        |   shell/cmds/camera_cmd_board.h  the two shell-layer services a board
-        |                                gives it: YMODEM send, the save medium
+        |   shell/cmds/camera_cmd_board.h  the shell-layer service a board
+        |                                gives it: the save medium (the
+        |                                YMODEM send is the shared
+        |                                shell/cmds/xfer_console.c, #231)
         v
 svc/camera/camera_svc.h                  the contract: the camera_svc_*() calls
 svc/camera/camera_svc_adapter.h          static-inline result / line helpers
@@ -702,15 +704,18 @@ What the contract fixes, on every board:
 - **A frame read checks and copies in one step** under the same exclusion as
   every path that starts overwriting the buffer.  `save` / `send` read the last
   `camera capture`.
-- **`send` says the same on every board** (the board's transfer helper, issue
-  #228): `ymodem: sending '<name>' (<n> bytes) over the console`, then ``ymodem:
+- **`send` says the same on every board** (issue #228; since issue #231 the
+  one wiring `shell/cmds/xfer_console.c`, which wio-lite-ai's `wifi flash
+  backup` uses too): `ymodem: sending '<name>' (<n> bytes) over the console`, then ``ymodem:
   start the receiver now -- `rb -y` (lrzsz YMODEM; -y replaces an older file
   of that name) or Ctrl+A Ctrl+R in picocom; Ctrl+C aborts``, and a timeout
   says ``start `rb -y` on the PC``.  The `-y` matters: YMODEM's block 0 has no
   modification time, so without it lrzsz keeps the file already there and the
   previous capture reads like a camera that stopped.  Until #228 f746g-disco
   said `rb` (and `rz` on a timeout), the other two `rz`, and wio-lite-ai added
-  a line of its own asking for `rz -y -b`.
+  a line of its own asking for `rz -y -b`.  Until #231 `wifi flash backup`
+  printed its own one line instead (`wifi: sending '<name>' (<n> bytes) --
+  start the receiver now (`rb -y`, or Ctrl+A Ctrl+R in picocom)`).
 - **`camera off` waits for the stream it stopped by its generation**, and leaves
   the power on after a TIMEOUT, any other failed stop, or a Ctrl+C.
 - **The capture reports its warm-up** (frames let go, or ms) on the caller's
@@ -811,7 +816,8 @@ What a board provides, and how:
 | The writable interval and the erase unit | Arguments to `blob_map_check()` and the payload arithmetic, and `blob_svc_interval()`; nothing here states a boundary (grove-vision-ai-v2: the NOR seam's limits; wio-lite-ai and f746g-disco: `src/blob.h`) |
 | The reads (`blob_stat`, `blob_read`, `blob_verify`, `blob_check_map`, `blob_slot_geometry`, `blob_svc_ready`) | The board's store side, `src/blob.c`; each read takes and gives back what its board needs for one call (grove-vision-ai-v2: a NOR lease; wio-lite-ai: nothing; f746g-disco: nothing, but it answers BUSY while the busy flag is held) |
 | The write side: the reservation, the erases, the program, the read-back, the stat under the reservation, the staging buffer (`blob_svc_*`) | The board's `src/blob_writer.c`.  The shared command turns them into the coordinator's `struct blob_write_ops`.  The reservation is grove-vision-ai-v2's NOR writer reservation and the other two boards' busy flag; the erase is one `nor_write.c` transaction (grove-vision-ai-v2), one `nor_erase()` per 64 KB block (wio-lite-ai) or one QSPI sector erase per 64 KB (f746g-disco); the staging buffer is grove-vision-ai-v2's 64 KB `blob_stage_buf`, a 1 KB buffer on the other two |
-| The console pieces (receive, may this console carry a raw transfer, the board's own sentence for a result, the RX ring's high-water) | `shell/cmds/blob_cmd_board.h`, defined in the board's `cmds/cmd_blob_board.c` |
+| The console pieces (may this console erase, the board's own sentence for a result, the RX ring's high-water) | `shell/cmds/blob_cmd_board.h`, defined in the board's `cmds/cmd_blob_board.c` |
+| The receive and "may this console carry a raw transfer" | the shared YMODEM wiring `shell/cmds/xfer_console.c` (`xfer_recv_sink_locked()`, `xfer_refuse_if_telnet()`), which the command calls directly; the board's part is its `cmds/cmd_xfer_board.c` (issue #231; until then `blob_board_receive()` / `blob_board_raw_console()` in `cmds/cmd_blob_board.c`) |
 | The words and numbers the command prints | `boards/<board>/svc/blob_svc_config.h` (the part's name, the address format, the erase estimate, the part's word for the 4 KB header unit -- `sector` on the two NORs, `4 KB subsector` on f746g-disco's QSPI part, whose sectors are 64 KB -- the sender, `blob read`'s limit, the listing's note; `BLOB_SVC_HAS_RX_LEVEL` where the console reports its ring) |
 
 **Whether a program is read back is the board writer's** (`blob_write.h` step
@@ -900,10 +906,15 @@ nn model load <name>         load the blob stored under <name>
   sends it again`); a magic program that reports failure says the slot may
   read valid, invalid or incomplete and points at `blob list`.
 - **A failed transfer discards what the PC still sends before it reports**
-  (issue #228; the board's transfer helper, the same for `camera send`): it
-  waits until the line has been quiet for 1 s, at most 256 KB, then empties
-  the receive ring again, so a retried block cannot reach the prompt and run
-  as a command.  `dmesg` gets `xfer: drained <n> late byte(s) from the peer
+  (issue #228; the shared YMODEM wiring `shell/cmds/xfer_console.c`, the same
+  for `camera send`): it waits until the line has been quiet for 1 s, at most
+  256 KB, then empties the receive ring again within the same 256 KB, so a
+  retried block cannot reach the prompt and run as a command.  Since issue
+  #231 the flushes before and after every transfer stop at 256 KB too (the
+  shell core's `cli_rx_flush()` reads until the ring is empty, which against
+  a peer that never stops is never), and a cap hit there is said the same
+  way, with `xfer: drain cap hit at <n> B before|after the transfer -- peer
+  did not stop` in `dmesg`; the transfer and its result are unchanged.  `dmesg` gets `xfer: drained <n> late byte(s) from the peer
   after a failed transfer, longest gap <ms> ms`; a peer still sending at the
   cap is warned about on the console and in `dmesg`.  Until #228 f746g-disco
   and grove-vision-ai-v2 waited 400 ms and stopped at 8 KB, logging nothing
@@ -917,7 +928,7 @@ nn model load <name>         load the blob stored under <name>
   `blob write` learns it only after the erase (#197).  No board can start a
   second transfer today (the telnet console refuses every transfer and
   grove-vision-ai-v2 has one console), so only the host tests reach it.
-- **The board's transfer helper prints nothing about a receive** (issue
+- **The shared wiring prints nothing about a receive** (issue
   #228; until then wio-lite-ai's printed one of six result lines); the
   command's own lines below say what was stored and what was not.  It logs
   `xfer: recv <result>: blocks=<n> crc=<n> seq=<n> short=<n> tmo=<n>`, the
@@ -1404,14 +1415,23 @@ returns 0.  Which commands ask is the board's:
 | f746g-disco | every YMODEM transfer (`camera send`, `blob write`) | `VCP` |
 | wio-lite-ai | `wifi connect` / `disconnect` / `on` / `off` / `reset`, `mlperf`, and every YMODEM transfer (`camera send`, `blob write`, `wifi flash imgload` / `backup`) | `USB CDC` |
 
-grove-vision-ai-v2 has no telnet console and asks nothing.  On both boards
-with one, the board's transfer helper (`cmds/cmd_xfer.c`) asks before
-anything else -- before `camera send` prints how to start the receiver --
-so a YMODEM user cannot be missed; a command that would break something
-before it reaches the helper asks first as well (`blob write` before the
-erase, wio-lite-ai's `wifi flash imgload` before the self-check that
-invalidates the staged image and `wifi flash backup` before it takes the
-WiFi link down; issue #228).  The refusal is printed once.
+grove-vision-ai-v2 has no telnet console and refuses nothing.  The YMODEM
+transfers ask through one shared question, `xfer_refuse_if_telnet()` in the
+one YMODEM wiring `shell/cmds/xfer_console.c` (issue #231; until then each
+board had its own `cmds/cmd_xfer.c`).  It calls the telnet field of the
+board's table `xfer_console_board_facts` (`cmds/cmd_xfer_board.c`):
+`net_tty_guard` on f746g-disco and wio-lite-ai, and the shared
+`xfer_console_no_telnet` -- which never refuses -- on grove-vision-ai-v2.  A
+table with either field left empty refuses every transfer.  The wiring asks
+before anything else -- before `camera send` prints how to start the
+receiver -- so a YMODEM user cannot be missed; a command that would break
+something before it reaches the wiring asks the same question first (`blob
+write` before the erase, wio-lite-ai's `wifi flash imgload` before the
+self-check that invalidates the staged image and `wifi flash backup` before
+it takes the WiFi link down; issue #228).  The refusal is printed once.
+Nothing checks that a board with a telnet console did not name the "no
+telnet" answer: that is read back from the shipped ELF and tried on the
+board.
 
 The two lines of `net info`, every value sampled in one masked section before
 the first is written, and a failed write ends them:
@@ -1552,7 +1572,7 @@ way (#221):
 | `net_tty.c`'s mutable state, `struct net_tty_state net_tty_board_state`, and its constant facts, `const struct net_tty_facts net_tty_board_facts` (#221): the `NX_IP`, the pool, the receive ring (512 B), the extraction buffer (1,500 B), the transmit ring (4,096 B), the listener's stack (2,560 B), the socket's transmit queue depth and retransmit settings, the other console's name | f746g-disco `port/netxduo/nx_glue.c`, all in internal SRAM; wio-lite-ai `src/nx_net.c`, the transmit ring and the stack in DTCM (`net_tty_tx_buf`, `net_tty_stack`, names `cmake/check_dtcm_residency.py` requires), the rest in AXI-SRAM `.bss`.  Until #221 these were `port/netxduo/nx_shell.c` and `src/net_shell.c` |
 | The telnet transport object (`NET_TTY_TRANSPORT_DEFINE()`) and the `CLI_INSTANCE_DEFINE` bound to it | `src/main.c` on each board |
 | The telnet console's port, handed over once (`net_tty_port_set()`) | on both boards the configuration thread (`src/kv_boot.c`) through the shared `kv_cfg_tty_port()` (`shell/cmds/kv_cfg.c`, issue #214): `net.shell.port`, or 23; `src/main.c` hands over 23 itself when that thread does not run (wio-lite-ai also in a build without the store). Until #214 f746g-disco's `src/main.c` handed over 23, fixed |
-| The commands that refuse on the telnet console (`net_tty_guard()`) | f746g-disco `cmds/cmd_xfer.c`, `cmds/cmd_blob_board.c`; wio-lite-ai `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c`, `cmds/cmd_xfer.c`, `cmds/cmd_blob_board.c`, `cmds/cmd_wifi_flash.c` |
+| The commands that refuse on the telnet console (`net_tty_guard()`) | the YMODEM transfers through the telnet field of `xfer_console_board_facts` (`cmds/cmd_xfer_board.c` on both boards; the shared wiring and `blob write` ask it, issue #231); wio-lite-ai also `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c`, and `cmds/cmd_wifi_flash.c` through the shared question |
 | The adapter behind `svc/net/net_svc.h` (#219) | f746g-disco `port/netxduo/net_svc_f746.c`; wio-lite-ai `src/net_svc_wio.c` |
 | The properties (#219) | `svc/net_svc_config.h` on each board |
 | The lines of `net info` after the address | f746g-disco `port/netxduo/net_svc_f746.c` (`net_svc_board_lines()`); wio-lite-ai `src/nx_net.c` (`nx_net_write_status()`, reached through its adapter) |
@@ -1746,8 +1766,12 @@ in a `struct ym_xfer` its caller passes to every `ymodem_send()` /
 receive area (one block body, 1,024 B), kept apart so the two directions never
 share bytes, and a "transfer running" mark that the two functions take with one atomic
 compare-and-swap before anything else and put back at their one exit.  Each
-board defines exactly one, static in its `cmds/cmd_xfer.c`, the only file that
-calls the two, so **one transfer runs at a time on the whole board**: a send and
+board defines exactly one, static in its `cmds/cmd_xfer_board.c`, and names it
+in its constant table `xfer_console_board_facts` (`shell/cmds/xfer_console.h`,
+issue #231).  The one wiring, `shell/cmds/xfer_console.c`, is the only file
+that calls the two and reaches the owner only through that table (it owns no
+storage itself; until #231 the owner and the calls were in each board's
+`cmds/cmd_xfer.c`), so **one transfer runs at a time on the whole board**: a send and
 a receive refuse each other too, whichever console started them.  The mark is
 not the console claim, which is counted per console (#229).  The receive's
 counters (`struct ym_recv_diag`) are the caller's, in its own frame, set with

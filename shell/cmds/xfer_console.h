@@ -8,9 +8,10 @@
  *
  * shell/cmds/xfer_console.c wires the protocol core (svc/ymodem.c, transport-
  * agnostic) to the raw-console API (cli_console_claim / cli_read_byte /
- * cli_write / cli_rx_flush) for a source or sink the caller supplies: the
- * console hand-over, the RX flushes, the drain after a failed transfer, the
- * one-line result of a send and the log lines of both directions.  It is not
+ * cli_write) for a source or sink the caller supplies: the console hand-over,
+ * the RX flushes before and after a transfer and the drain after a failed one
+ * (each counted and stopped at 256 KB, issue #231), the one-line result of a
+ * send and the log lines of both directions.  It is not
  * a command (there is no `xfer` command; issue #227 removed f746g-disco's).
  * Until issue #231 each board had its own cmds/cmd_xfer.c saying and doing the
  * same (issue #228 made the three alike).

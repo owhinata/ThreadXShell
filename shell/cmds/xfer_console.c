@@ -9,8 +9,8 @@
  *          see xfer_console.h).
  *
  * The protocol core (svc/ymodem.c) is transport-agnostic; here its IO vtable is
- * wired to the raw-console API (cli_console_claim / cli_read_byte / cli_write /
- * cli_rx_flush).  The caller supplies the source or sink: `camera send`'s last
+ * wired to the raw-console API (cli_console_claim / cli_read_byte / cli_write;
+ * every discard is its own counted read, see the drain below).  The caller supplies the source or sink: `camera send`'s last
  * capture and `blob write`'s slot on every board, and on wio-lite-ai `wifi
  * flash backup`'s RTL8720DN flash reader and `wifi flash imgload`'s PSRAM
  * staging buffer.  Ported from ../stm32f746g-disco (its
@@ -137,9 +137,45 @@ static int io_put(void *ctx, const uint8_t *buf, size_t len)
  *
  * Only on the failure path: after YM_OK the batch is closed and the peer has
  * stopped, so the success path keeps its timing.
+ *
+ * [!] EVERY DISCARD HERE IS COUNTED AND STOPS AT THE SAME CAP (issue #231,
+ * D7): the flush before a transfer and after it as well as this drain.  The
+ * shell core's cli_rx_flush() reads until the ring is empty, which against a
+ * peer that never stops is never, and the command would not return; so the
+ * wiring does not use it.  Hitting the cap is said the same way in all three
+ * places, and nothing else changes: the transfer still runs, the result is
+ * still returned and printed.
  */
 #define XFER_DRAIN_QUIET_MS    1000u
 #define XFER_DRAIN_MAX_BYTES   262144u
+
+static void xfer_say_still_sending(struct cli_instance *sh, uint32_t dropped)
+{
+	cli_warn(sh, "ymodem: the peer is STILL sending -- stopped discarding after "
+	         "%lu B, so stray bytes may reach the prompt and be run as a "
+	         "command. Stop the program on the PC.\r\n",
+	         (unsigned long)dropped);
+}
+
+/*
+ * What the ring holds now, discarded without waiting -- what cli_rx_flush()
+ * does, but at most XFER_DRAIN_MAX_BYTES.  @p where is "before" or "after"
+ * (the transfer), for the log.
+ */
+static void xfer_flush(struct cli_instance *sh, const char *where)
+{
+	uint32_t dropped = 0u;
+
+	/* cli_read_byte(sh, 0) polls the ring once: a byte, or -1 when empty. */
+	while (dropped < XFER_DRAIN_MAX_BYTES && cli_read_byte(sh, 0u) >= 0)
+		dropped++;
+	if (dropped >= XFER_DRAIN_MAX_BYTES) {
+		xfer_say_still_sending(sh, dropped);
+		log_write(LOG_LEVEL_WRN, "xfer",
+		          "drain cap hit at %lu B %s the transfer -- peer did not stop",
+		          (unsigned long)dropped, where);
+	}
+}
 
 /* The gap below is measured in ticks and reported in ms, and cli_read_byte()
  * takes its timeout in ticks as ms: both need the 1 kHz tick. */
@@ -166,13 +202,12 @@ static void xfer_drain_until_quiet(struct cli_instance *sh)
 		last = now;
 		dropped++;
 	}
-	cli_rx_flush(sh);
+	/* What arrived as the window closed, within the same cap. */
+	while (dropped < XFER_DRAIN_MAX_BYTES && cli_read_byte(sh, 0u) >= 0)
+		dropped++;
 
 	if (dropped >= XFER_DRAIN_MAX_BYTES) {
-		cli_warn(sh, "ymodem: the peer is STILL sending -- stopped discarding after "
-		         "%lu B, so stray bytes may reach the prompt and be run as a "
-		         "command. Stop the program on the PC.\r\n",
-		         (unsigned long)dropped);
+		xfer_say_still_sending(sh, dropped);
 		log_write(LOG_LEVEL_WRN, "xfer",
 		          "drain cap hit at %lu B, longest gap %lu ms -- peer did not stop",
 		          (unsigned long)dropped, (unsigned long)gap_max);
@@ -332,9 +367,9 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 	cli_print(sh, "ymodem: start the receiver now -- `rb -y` (lrzsz YMODEM; -y "
 	              "replaces an older file of that name) or Ctrl+A Ctrl+R in "
 	              "picocom; Ctrl+C aborts\r\n");
-	cli_rx_flush(sh);                  /* drop type-ahead / the command newline */
+	xfer_flush(sh, "before");          /* drop type-ahead / the command newline */
 	res = ymodem_send(xfer_console_board_facts.owner, &io, src);
-	cli_rx_flush(sh);                  /* drop a trailing 'O'/'C'/garbage tail   */
+	xfer_flush(sh, "after");           /* drop a trailing 'O'/'C'/garbage tail   */
 	if (res != YM_OK)
 		xfer_drain_until_quiet(sh);    /* the receiver may still be NAKing */
 	rc = xfer_send_report(sh, src, res);   /* printed while still held */
@@ -353,7 +388,7 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink,
 	if (xfer_refuse_if_telnet(sh))
 		return 1;
 
-	cli_rx_flush(sh);                  /* drop type-ahead / the command newline */
+	xfer_flush(sh, "before");          /* drop type-ahead / the command newline */
 	res = ymodem_recv(xfer_console_board_facts.owner, &io, sink, diag);
 	/* Refused (issue #230): said here, since this prints nothing else, and
 	 * then handled as any failure -- the drain below empties THIS console,
@@ -361,7 +396,7 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink,
 	 * transfer that is running is on another one and is not touched. */
 	if (res == YM_ERR_BUSY)
 		xfer_say_busy(sh);
-	cli_rx_flush(sh);                  /* drop a trailing 'O'/CAN/garbage tail   */
+	xfer_flush(sh, "after");           /* drop a trailing 'O'/CAN/garbage tail   */
 	if (res != YM_OK)
 		xfer_drain_until_quiet(sh);    /* the sender may still be retrying */
 

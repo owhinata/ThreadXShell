@@ -32,7 +32,10 @@
  *     the send and the receive all refuse, touching nothing (no claim, no
  *     flush, no read, no protocol call);
  *   - the "no telnet" answer never refuses and prints nothing;
- *   - while sending a 0x03 is an abort, while receiving it is a data byte.
+ *   - while sending a 0x03 is an abort, while receiving it is a data byte;
+ *   - against a peer that never stops, each discard (before, after, the
+ *     drain after a failure) stops at 256 KB and says so, and the flow goes
+ *     on (issue #231, D7).
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -101,8 +104,33 @@ static struct cli_instance *const t_sh = (struct cli_instance *)&t_console_obj;
 
 static int t_claim_rc;            /* what cli_console_claim() answers */
 static int t_held;                /* claims not yet given back */
-static int t_rx[16];              /* bytes cli_read_byte() returns, then -1 */
+static int t_rx[16];              /* bytes the peer sends while the core runs */
 static int t_rx_n, t_rx_i;
+
+/*
+ * Where the transfer is: before the protocol core runs, inside it, after it.
+ * The queued bytes above arrive only while the core runs (the ring is empty
+ * before and after).  A peer that never stops (t_endless) has a byte ready
+ * on every read, in every phase; its reads are counted per phase and not
+ * written to the record, which would not hold them.
+ */
+enum { T_BEFORE, T_CORE, T_AFTER };
+static int t_phase;
+static int t_endless;
+static unsigned long t_reads[3];
+static int t_flush_cut;           /* the stand-in flush stopped an endless peer */
+
+/* One byte from the peer, or -1: the ring as cli_read_byte() and
+ * cli_rx_flush() both see it. */
+static int peer_byte(void)
+{
+	t_reads[t_phase]++;
+	if (t_endless)
+		return 0x43;
+	if (t_phase == T_CORE && t_rx_i < t_rx_n)
+		return t_rx[t_rx_i++];
+	return -1;
+}
 
 int cli_console_claim(struct cli_instance *sh)
 {
@@ -124,8 +152,9 @@ int cli_read_byte(struct cli_instance *sh, unsigned timeout_ms)
 {
 	(void)sh;
 	(void)timeout_ms;
-	rec("read");
-	return (t_rx_i < t_rx_n) ? t_rx[t_rx_i++] : -1;
+	if (!t_endless)
+		rec("read");
+	return peer_byte();
 }
 
 int cli_write(struct cli_instance *sh, const void *data, size_t len)
@@ -136,10 +165,22 @@ int cli_write(struct cli_instance *sh, const void *data, size_t len)
 	return (int)len;
 }
 
+/* The core's flush reads until the ring is empty, with no bound
+ * (shell/core/cli_core.c).  Against an endless peer that would not return;
+ * this stand-in stops at 4 MiB and says so, so a wiring that still uses it
+ * there fails the cap cases instead of hanging the run. */
 void cli_rx_flush(struct cli_instance *sh)
 {
+	unsigned long n = 0;
+
 	(void)sh;
 	rec("flush");
+	while (peer_byte() >= 0) {
+		if (++n >= 4ul * 1024ul * 1024ul) {
+			t_flush_cut = 1;
+			break;
+		}
+	}
 }
 
 static void out(const char *kind, const char *fmt, va_list ap)
@@ -185,10 +226,15 @@ int cli_warn(struct cli_instance *sh, const char *fmt, ...)
 
 void log_write(unsigned level, const char *tag, const char *fmt, ...)
 {
+	char line[256];
+	va_list ap;
+
 	(void)level;
 	(void)tag;
-	(void)fmt;
-	rec("log");
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof line, fmt, ap);
+	va_end(ap);
+	rec("log:%s", line);
 }
 
 ULONG tx_time_get(void)
@@ -217,7 +263,9 @@ enum ym_result ymodem_send(struct ym_xfer *x, const struct ym_io *io,
 	(void)src;
 	rec("ym_send");
 	t_owner_seen = x;
+	t_phase = T_CORE;
 	t_getc_seen = io->getc(io->ctx, 10u);
+	t_phase = T_AFTER;
 	return t_result;
 }
 
@@ -237,7 +285,9 @@ enum ym_result ymodem_recv(struct ym_xfer *x, const struct ym_io *io,
 	rec("ym_recv");
 	t_owner_seen = x;
 	diag->blocks = 7u;
+	t_phase = T_CORE;
 	t_getc_seen = io->getc(io->ctx, 10u);
+	t_phase = T_AFTER;
 	return t_result;
 }
 
@@ -293,6 +343,10 @@ static void reset(void)
 	t_getc_seen = 99;
 	t_owner_seen = NULL;
 	t_telnet_refuses = 0;
+	t_phase = T_BEFORE;
+	t_endless = 0;
+	t_reads[0] = t_reads[1] = t_reads[2] = 0;
+	t_flush_cut = 0;
 }
 
 __attribute__((unused)) static void rx(int byte)
@@ -301,6 +355,19 @@ __attribute__((unused)) static void rx(int byte)
 }
 
 #define NOTICE "print:ymodem: sending '"
+
+/* Where the first discard of the RX ring is in the record: a flush, or a
+ * read before the protocol core (the wiring may do either). */
+__attribute__((unused)) static int discard_at(void)
+{
+	int f = at("flush|"), r = at("read|");
+
+	if (f < 0)
+		return r;
+	if (r < 0)
+		return f;
+	return f < r ? f : r;
+}
 
 /* ---- the shapes with a whole table ---------------------------------------- */
 
@@ -421,7 +488,8 @@ static void test_recv(void)
 		         "board owner", (int)res[i], rc);
 		check(what, rc == (res[i] == YM_OK ? 0 : 1) && count("claim|") == 0 &&
 		            count("release|") == 0 && t_owner_seen == &t_owner &&
-		            at("flush|") < at("ym_recv|") && count("log|") >= 1);
+		            discard_at() >= 0 && discard_at() < at("ym_recv|") &&
+		            count("log:") >= 1);
 	}
 	reset();
 	t_result = YM_ERR_BUSY;
@@ -478,6 +546,76 @@ static void test_send_nested(void)
 	      xfer_send_source(t_sh, &t_src) == 1 && t_held == 1 &&
 	      count("release|") == 0 && at(NOTICE) < 0 &&
 	      at("error:ymodem: console busy") >= 0);
+}
+#endif
+
+#if defined(XFER_TEST_SHAPE_FULL) || defined(XFER_TEST_SHAPE_NOTELNET)
+/*
+ * issue #231 (D7): every discard in the wiring -- before the transfer, after
+ * it, and the drain after a failure -- stops at 256 KB against a peer that
+ * never stops, says so on the console and in the log, and the flow goes on
+ * as before: the transfer still runs, the result is still returned, the claim
+ * is still given back.
+ */
+#define T_CAP 262144ul
+
+static void test_discard_cap(void)
+{
+	struct ym_recv_diag d;
+	const char *warn = "warn:ymodem: the peer is STILL sending -- stopped "
+	                   "discarding after 262144 B";
+	int rc;
+
+	printf("a peer that never stops: every discard stops at 256 KB\n");
+
+	reset();
+	t_endless = 1;
+	rc = xfer_send_source(t_sh, &t_src);
+	check("send OK: the transfer runs and its result is returned",
+	      rc == 0 && at("ym_send|") >= 0 && at("print:ymodem: sent ") >= 0);
+	check("send OK: 256 KB discarded before the transfer, then it stopped",
+	      t_reads[T_BEFORE] == T_CAP && !t_flush_cut);
+	check("send OK: 256 KB discarded after the transfer, then it stopped",
+	      t_reads[T_AFTER] == T_CAP);
+	check("send OK: said twice on the console and twice in the log",
+	      count(warn) == 2 && count("log:drain cap hit at 262144 B") == 2);
+	check("send OK: the claim given back", t_held == 0 &&
+	      count("release|") == 1);
+
+	reset();
+	t_endless = 1;
+	t_result = YM_ERR_TIMEOUT;
+	rc = xfer_send_source(t_sh, &t_src);
+	check("send failed: 256 KB after the transfer, 256 KB more in the drain",
+	      rc == 1 && t_reads[T_BEFORE] == T_CAP &&
+	      t_reads[T_AFTER] == 2ul * T_CAP && !t_flush_cut);
+	check("send failed: said three times, the result still printed",
+	      count(warn) == 3 && count("log:drain cap hit at 262144 B") == 3 &&
+	      at("error:ymodem: timeout") >= 0 && t_held == 0);
+
+	reset();
+	t_endless = 1;
+	ymodem_recv_diag_init(&d);
+	rc = xfer_recv_sink_locked(t_sh, &t_sink, &d);
+	check("receive OK: 256 KB before, 256 KB after, said twice, result kept",
+	      rc == 0 && at("ym_recv|") >= 0 && t_reads[T_BEFORE] == T_CAP &&
+	      t_reads[T_AFTER] == T_CAP && count(warn) == 2 && !t_flush_cut);
+
+	reset();
+	t_endless = 1;
+	t_result = YM_ERR_CANCEL;
+	ymodem_recv_diag_init(&d);
+	rc = xfer_recv_sink_locked(t_sh, &t_sink, &d);
+	check("receive failed: 256 KB before, 512 KB after, said three times",
+	      rc == 1 && t_reads[T_BEFORE] == T_CAP &&
+	      t_reads[T_AFTER] == 2ul * T_CAP && count(warn) == 3 &&
+	      count("log:drain cap hit at 262144 B") == 3 && !t_flush_cut);
+
+	/* A quiet line: nothing said, the core's timing kept. */
+	reset();
+	check("a quiet line: nothing said",
+	      xfer_send_source(t_sh, &t_src) == 0 && count("warn:") == 0 &&
+	      count("cap hit") == 0);
 }
 #endif
 
@@ -584,6 +722,7 @@ int main(void)
 	test_ctrl_c();
 	test_recv();
 	test_send_nested();
+	test_discard_cap();
 	test_telnet();
 #elif defined(XFER_TEST_SHAPE_NOTELNET)
 	printf("test_xfer_console (NOTELNET)\n");
@@ -592,6 +731,7 @@ int main(void)
 	test_ctrl_c();
 	test_recv();
 	test_send_nested();
+	test_discard_cap();
 	test_no_telnet();
 #else
 	printf("test_xfer_console (%s)\n",

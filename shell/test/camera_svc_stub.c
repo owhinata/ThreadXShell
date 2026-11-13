@@ -2,9 +2,10 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * A stub camera adapter (svc/camera/camera_svc.h) and stub board services
- * (shell/cmds/camera_cmd_board.h, FileX) for the shared `camera` command's
- * host tests (issue #143).  The test sets what each call answers through
+ * A stub camera adapter (svc/camera/camera_svc.h), stub board services
+ * (shell/cmds/camera_cmd_board.h, FileX) and a stub of the shared YMODEM
+ * send (shell/cmds/xfer_console.h, issue #231) for the shared `camera`
+ * command's host tests (issue #143).  The test sets what each call answers through
  * camera_stub (camera_svc_stub.h) and reads back what was called.
  *
  * Shared by shell/test/test_camera_cmd.c (stand-in configs) and the boards'
@@ -17,6 +18,7 @@
 #include "camera_svc_config.h"
 #include "camera_cmd_board.h"
 #include "camera_svc_stub.h"
+#include "xfer_console.h"
 #include "ymodem.h"
 
 #if CAMERA_SVC_HAS_SAVE
@@ -260,9 +262,9 @@ void camera_svc_stream_report(struct camera_op_result *res,
 	stub_line(write, ctx, "\r\n");
 }
 
-/* ---- the board's shell-layer services ------------------------------------ */
+/* ---- the shared YMODEM send, and the board's shell-layer service --------- */
 
-int camera_board_send(struct cli_instance *sh, const struct ym_source *src)
+int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 {
 	(void)sh;
 	camera_stub.calls_send++;

@@ -4,34 +4,22 @@
  */
 /**
  * @file    cmd_blob_board.c
- * @brief   This board's three console pieces of the shared `blob` command
+ * @brief   This board's console pieces of the shared `blob` command
  *          (shell/cmds/blob_cmd_board.h, issue #194).
  *
  * The command itself is shell/cmds/cmd_blob.c and the store src/blob.c (reads)
  * and src/blob_writer.c (the reservation, the erase and the program); what is
- * left here is what only this board's console can do or say: receive over
- * UART0, and name who holds the NOR or why its port is faulted.
+ * left here is what only this board's console can do or say: which console
+ * may erase, and who holds the NOR or why its port is faulted.  The receive
+ * over UART0 is the shared YMODEM wiring's (shell/cmds/xfer_console.c, issue
+ * #231).
  */
 #include "cli.h"
 #include "cli_instance.h" /* sh->fg: a background job's view (#203) */
 #include "blob_cmd_board.h"
 #include "blob_err.h"
-#include "xfer_console.h"
 #include "nor_cmd.h"      /* nor_cmd_say_busy -- the holder, in `nor`'s words */
 #include "nor_flash.h"    /* nor_fail_reason */
-
-int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,
-                       struct ym_recv_diag *diag)
-{
-	return xfer_recv_sink_locked(sh, sink, diag);
-}
-
-/* One console, the UART: there is nothing a raw transfer could be refused on. */
-int blob_board_raw_console(struct cli_instance *sh)
-{
-	(void)sh;
-	return 0;
-}
 
 /*
  * [!] FOREGROUND ONLY (issue #203), in the words `blob write` uses.  The NOR

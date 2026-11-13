@@ -36,7 +36,7 @@
  * rather than assumed to be zero. */
 #include "cli_instance.h"
 #include "cmd_wifi_priv.h"
-#include "xfer_console.h"
+#include "xfer_console.h"   /* YMODEM over the console, and its telnet question */
 #include "rtl8720.h"
 #include "rtl8720_flash.h"
 #include "rtl8720_img.h"     /* #19 M5: PSRAM staging for a host-supplied image */
@@ -45,7 +45,6 @@
 #include "rtl_link.h"
 #include "wifi_auto.h"       /* #32: a flash session disarms the host's re-association */
 #include "link_bridge.h"   /* the bridge has to be given back before we take the link */
-#include "net_tty.h"       /* YMODEM is refused on the telnet console (issue #228) */
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -436,8 +435,9 @@ static int cmd_flash_backup(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 	/* Before flash_claim(), which takes the WiFi link -- and with it a telnet session --
-	 * down: the transfer helper would refuse too, but only after that (issue #228). */
-	if (net_tty_guard(sh, "ymodem"))
+	 * down: the transfer helper would refuse too, but only after that (issue #228).
+	 * The shared question, the same one the helper asks (issue #231). */
+	if (xfer_refuse_if_telnet(sh))
 		return 1;
 	if (flash_claim(sh) != 0)
 		return 1;
@@ -576,8 +576,9 @@ static int cmd_flash_imgload(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 	/* Before the claim and the self-check, which invalidates the staged image: the
-	 * transfer helper would refuse too, but only after that (issue #228). */
-	if (net_tty_guard(sh, "ymodem"))
+	 * transfer helper would refuse too, but only after that (issue #228).  The
+	 * shared question, the same one the helper asks (issue #231). */
+	if (xfer_refuse_if_telnet(sh))
 		return 1;
 	rc = cli_console_claim(sh);
 	if (rc != 0) {

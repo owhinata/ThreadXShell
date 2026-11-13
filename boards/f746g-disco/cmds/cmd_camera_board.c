@@ -19,10 +19,10 @@
  *   camera fps <15|30>                     frame rate (owhinata/stm32f746g-disco#67)
  *   camera set [<setting> <value>]         ISP quality (owhinata/stm32f746g-disco#44)
  *
- * and the two functions of shell/cmds/camera_cmd_board.h: the YMODEM send
- * (cmds/cmd_xfer.c, owhinata/stm32f746g-disco#50) and the FileX medium a
+ * and the one function of shell/cmds/camera_cmd_board.h: the FileX medium a
  * `camera save` names (sd = microSD FAT32, whose fs_device gates the save
- * shares with the `sd` command).
+ * shares with the `sd` command).  `camera send` goes over the shared YMODEM
+ * wiring (shell/cmds/xfer_console.c, issue #231; owhinata/stm32f746g-disco#50).
  *
  * Clean-room design; no third-party code reused.
  */
@@ -33,19 +33,13 @@
 #include "camera_cmd_board.h"
 #include "fs_cmd_core.h"
 #include "fs_devices.h"       /* fs_sd_device() (camera save) */
-#include "xfer_console.h"
 
 #include <string.h>
 
 /* What the shared table expands; declared once, there and here. */
 CAMERA_SVC_BOARD_DECLS
 
-/* ---- the two shell-layer services (shell/cmds/camera_cmd_board.h) --------- */
-
-int camera_board_send(struct cli_instance *sh, const struct ym_source *src)
-{
-	return xfer_send_source(sh, src);
-}
+/* ---- the shell-layer service (shell/cmds/camera_cmd_board.h) ------------- */
 
 const struct fs_device *camera_board_medium(const char *name)
 {

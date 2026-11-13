@@ -232,6 +232,12 @@ static void t_write(void)
 	expect("a stored write says so",
 	       has("stored   : 'model' in slot 12, 3000 B, crc32 ") &&
 	       has("verify   : PASS (read back "));
+	/* issue #231: the command asks the shared telnet question itself, once,
+	 * before the reservation and the erase (the real receive asks it again;
+	 * the stub receive does not). */
+	expect("the telnet question is asked once, before the reservation",
+	       blob_stub.raw_asks == 1u && blob_stub.reserves_at_ask == 0u &&
+	       blob_stub.erase_spans_at_ask == 0u && blob_stub.erase_spans > 0u);
 	expect("the announcement keeps the colon column for slot 12",
 	       has("slot 12  : 0x7c0000, 256 KB -- erasing it first, so "
 	           "whatever is there\r\n") &&
@@ -352,8 +358,11 @@ static void t_write(void)
 	reset();
 	blob_stub.raw_refuse = 1;
 	run("blob write model 5\r");
-	expect("a console that may not carry it is refused before anything",
-	       has("test: not on this console") && blob_stub.reserves == 0u);
+	expect("a console that may not carry it (telnet) is refused before anything",
+	       has("test: not on this console") && blob_stub.reserves == 0u &&
+	       blob_stub.erase_spans == 0u && blob_stub.erase_headers == 0u &&
+	       blob_stub.programs == 0u && blob_stub.receives == 0u &&
+	       !has("erasing it first"));
 
 	reset();
 	blob_stub.ready = 0;

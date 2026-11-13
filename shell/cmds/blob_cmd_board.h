@@ -7,34 +7,24 @@
  * @brief   The shell-layer pieces of the shared `blob` command that a board
  *          provides (issue #194).
  *
- * The store itself is svc/blob/blob_svc.h and takes no console.  These three
- * take one, because what they do is about the console: receiving a file over
- * it, whether this console may carry a raw transfer at all, and a sentence only
- * the board can say.  Each board defines them in boards/<board>/cmds/
- * (cmd_blob_board.c), next to its YMODEM receiver -- the same split as
- * shell/cmds/camera_cmd_board.h.
+ * The store itself is svc/blob/blob_svc.h and takes no console.  These take
+ * one, because what they do is about the console: whether this console may
+ * run `blob erase`, a sentence only the board can say, and the RX ring's
+ * high-water.  Each board defines them in boards/<board>/cmds/
+ * (cmd_blob_board.c).  Receiving a file and whether this console may carry a
+ * raw transfer at all are the shared YMODEM wiring's (shell/cmds/
+ * xfer_console.h, issue #231), which the shared command calls directly.
  */
 #ifndef BLOB_CMD_BOARD_H
 #define BLOB_CMD_BOARD_H
 
-#include "ymodem.h"   /* struct ym_sink */
+#include <stdint.h>   /* uint32_t */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 struct cli_instance;
-
-/** Run one YMODEM receive into @p sink on @p sh, whose console the caller has
- *  claimed, writing the transfer's counters to @p diag -- the caller's record,
- *  set with ymodem_recv_diag_init() before the call (issue #230).  0 when the
- *  batch completed. */
-int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,
-                       struct ym_recv_diag *diag);
-
-/** May this console carry a raw transfer?  0 yes; -1 no, having told the
- *  operator why (a telnet console, for one). */
-int blob_board_raw_console(struct cli_instance *sh);
 
 /**
  * May @p sh run `blob erase`?  0 yes; -1 no, having told the operator why

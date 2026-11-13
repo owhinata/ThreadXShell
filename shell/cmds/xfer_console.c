@@ -339,7 +339,11 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 		return 1;
 	}
 	/* The notice comes after the claim (issue #228): a transfer that cannot have
-	 * the console says nothing about starting a receiver. */
+	 * the console says nothing about starting a receiver.  It asks for `rb -y`
+	 * on every board: without -y lrzsz does not overwrite an existing file --
+	 * block 0 carries a name and a size but no mtime -- and you quietly keep
+	 * looking at the PREVIOUS capture, which reads like a camera that stopped
+	 * producing frames (it happened during wio-lite-ai's bring-up). */
 	cli_print(sh, "ymodem: sending '%s' (%lu bytes) over the console\r\n",
 	          src->name, (unsigned long)src->size);
 	cli_print(sh, "ymodem: start the receiver now -- `rb -y` (lrzsz YMODEM; -y "

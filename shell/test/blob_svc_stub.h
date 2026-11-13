@@ -28,7 +28,7 @@ struct blob_stub {
 	unsigned stat_reserved_from;
 	uint32_t stage_len;      /* blob_svc_stage()'s length when non-zero */
 	int ready;               /* blob_svc_ready() */
-	int raw_refuse;          /* blob_board_raw_console() refuses */
+	int raw_refuse;          /* xfer_refuse_if_telnet() refuses */
 	int say_rc;              /* blob_board_say() speaks for this rc, or 0 */
 	uint32_t verify_crc;     /* what blob_verify() computes */
 	int corrupt_read_back;   /* the write's verify disagrees */
@@ -42,6 +42,8 @@ struct blob_stub {
 	/* what happened */
 	unsigned reserves, unreserves, erase_headers, erase_spans, programs;
 	unsigned receives, says;
+	unsigned raw_asks;       /* xfer_refuse_if_telnet() calls */
+	unsigned reserves_at_ask, erase_spans_at_ask;  /* at the last of them */
 	int      diag_was_init;  /* the record arrived at the "nothing received"
 	                           value (issue #230) */
 	unsigned level_clears;   /* blob_board_rx_level_clear() calls */

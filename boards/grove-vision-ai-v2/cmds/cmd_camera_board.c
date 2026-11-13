@@ -11,8 +11,8 @@
  * shell/cmds/cmd_camera.c, shared with the other boards, over this board's
  * adapter port/camera/camera_svc_grove.c.  What stays here is appended to that
  * table by CAMERA_SVC_BOARD_SUBCMDS (svc/camera_svc_config.h): `raw`,
- * `profile`, `vts`, `bench`, and the image knobs -- plus camera_board_send(),
- * the YMODEM half of `camera send`.
+ * `profile`, `vts`, `bench`, and the image knobs.  `camera send` goes over the
+ * shared YMODEM wiring (shell/cmds/xfer_console.c, issue #231).
  *
  * The questions, in the order you would ask them when nothing works yet:
  *
@@ -51,8 +51,6 @@
 #include "camera_svc.h"
 #include "camera_svc_config.h" /* CAMERA_SVC_BOARD_DECLS: the names declared */
 #include "camera_svc_grove.h"  /* the profile lines, shared with the adapter */
-#include "camera_cmd_board.h"  /* camera_board_send() */
-#include "xfer_console.h"      /* xfer_send_source(): YMODEM over the console */
 
 /* What the shared table expands; declared once, there and here. */
 CAMERA_SVC_BOARD_DECLS
@@ -358,16 +356,6 @@ int camera_board_cmd_profile(struct cli_instance *sh, int argc, char **argv)
 	camera_stream_stats(&st);
 	camera_grove_profile_write(&o, &st);
 	return o.failed ? 1 : 0;
-}
-
-/* ---- send (shell/cmds/camera_cmd_board.h) ------------------------------- */
-
-/* The last capture to the PC over YMODEM: the console is claimed here, in the
-   shell layer, and the frame is read through the adapter (one hold of the
-   camera API per block, never across the transfer). */
-int camera_board_send(struct cli_instance *sh, const struct ym_source *src)
-{
-	return xfer_send_source(sh, src);
 }
 
 /* ---- exposure / gain / white balance ------------------------------------- */

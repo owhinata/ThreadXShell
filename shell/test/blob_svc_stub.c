@@ -20,6 +20,7 @@
 #include "blob_svc.h"
 #include "blob_svc_stub.h"
 #include "log.h"
+#include "xfer_console.h"
 #include "ymodem.h"
 
 struct blob_stub blob_stub;
@@ -232,10 +233,10 @@ uint8_t *blob_svc_stage(uint32_t *len)
 	return stage;
 }
 
-/* ---- the board's console pieces ------------------------------------------- */
+/* ---- the shared YMODEM wiring, and the board's console pieces ------------ */
 
-int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,
-                       struct ym_recv_diag *diag)
+int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink,
+                          struct ym_recv_diag *diag)
 {
 	static uint8_t block[1024];
 	uint32_t off;
@@ -273,11 +274,17 @@ int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,
 	return 0;
 }
 
-int blob_board_raw_console(struct cli_instance *sh)
+/* The shared telnet question (shell/cmds/xfer_console.c): 1 refused, having
+ * said why.  When it was asked is recorded, so a test can see it came before
+ * the reservation and the erase. */
+int xfer_refuse_if_telnet(struct cli_instance *sh)
 {
+	blob_stub.raw_asks++;
+	blob_stub.reserves_at_ask = blob_stub.reserves;
+	blob_stub.erase_spans_at_ask = blob_stub.erase_spans;
 	if (blob_stub.raw_refuse) {
 		cli_error(sh, "test: not on this console\r\n");
-		return -1;
+		return 1;
 	}
 	return 0;
 }

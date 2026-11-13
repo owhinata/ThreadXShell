@@ -9,10 +9,10 @@
  *
  * The command itself is shell/cmds/cmd_blob.c and the store src/blob.c and
  * src/blob_writer.c; what is left here is what only this board's consoles can
- * do or say: receive over the VCP, refuse a raw transfer on the telnet console
- * (decision D7; the telnet case is issue #197), say who can hold the busy flag
- * and where to look when the QSPI driver is down, and report the VCP's RX ring
- * high-water (decision D6).
+ * do or say: who can hold the busy flag and where to look when the QSPI
+ * driver is down, and the VCP's RX ring high-water (decision D6).  The receive
+ * and the telnet refusal (decision D7; the telnet case is issue #197) are the
+ * shared YMODEM wiring's (shell/cmds/xfer_console.c, issue #231).
  */
 #include "cli.h"
 #include "cli_instance.h"      /* sh->tr: which console this is */
@@ -20,24 +20,6 @@
 #include "blob.h"             /* BLOB_BUSY_HOLDERS */
 #include "blob_err.h"
 #include "cli_backend_uart.h"  /* the VCP's RX ring high-water */
-#include "xfer_console.h"
-#include "net_tty.h"           /* net_tty_guard(): the telnet console (#221) */
-
-int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,
-                       struct ym_recv_diag *diag)
-{
-	return xfer_recv_sink_locked(sh, sink, diag);
-}
-
-/* YMODEM needs the raw VCP.  The telnet console is told why it is refused
- * (the shared question and words, shell/cmds/net_tty.c), here before the
- * erase; the receive in cmd_xfer.c asks again (issue #228).  A background
- * job's worker has the foreground's transport, and the shared command
- * refuses it before this matters (op_console_ready). */
-int blob_board_raw_console(struct cli_instance *sh)
-{
-	return net_tty_guard(sh, "ymodem") ? -1 : 0;
-}
 
 /* Any console, foreground or background: the busy flag is what orders an
  * erase against everything else on this board. */

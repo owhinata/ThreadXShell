@@ -4,31 +4,18 @@
  */
 /**
  * @file    cmd_blob_board.c
- * @brief   This board's three console pieces of the shared `blob` command
+ * @brief   This board's console pieces of the shared `blob` command
  *          (shell/cmds/blob_cmd_board.h, issue #194).
  *
  * The command itself is shell/cmds/cmd_blob.c and the store src/blob.c; what is
- * left here is what only this board's console can do or say: receive over the
- * USB CDC console, refuse a raw transfer on telnet, and say which operations
- * hold the busy flag and where to look when the NOR is down.
+ * left here is what only this board's console can do or say: which operations
+ * hold the busy flag and where to look when the NOR is down.  The receive over
+ * the USB CDC console and the telnet refusal are the shared YMODEM wiring's
+ * (shell/cmds/xfer_console.c, issue #231).
  */
 #include "cli.h"
 #include "blob_cmd_board.h"
 #include "blob_err.h"
-#include "xfer_console.h"
-#include "net_tty.h"       /* refuse a raw transfer on the telnet console */
-
-int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,
-                       struct ym_recv_diag *diag)
-{
-	return xfer_recv_sink_locked(sh, sink, diag);
-}
-
-/* YMODEM needs the raw USB CDC console; the telnet one says why it refuses. */
-int blob_board_raw_console(struct cli_instance *sh)
-{
-	return net_tty_guard(sh, "ymodem") ? -1 : 0;
-}
 
 /* Any console, foreground or background: the busy flag is what orders an
  * erase against everything else on this board. */

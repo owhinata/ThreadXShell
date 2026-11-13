@@ -21,10 +21,10 @@
  * The same layering as `nn` (shell/cmds/cmd_nn.c): this file owns the frame --
  * the grammar, the usage, what a refusal looks like, the holders line, the
  * save / send loops -- and speaks only svc/camera/camera_svc.h.  Each board puts its
- * camera behind that contract in boards/<board>/port/camera/camera_svc_<b>.c,
- * and the two things only the shell layer can do (send over YMODEM, resolve a
- * FileX medium) come from the board's cmds/ through shell/cmds/
- * camera_cmd_board.h.
+ * camera behind that contract in boards/<board>/port/camera/camera_svc_<b>.c.
+ * The send goes over the shared YMODEM wiring (shell/cmds/xfer_console.h,
+ * issue #231), and the FileX medium comes from the board's cmds/ through
+ * shell/cmds/camera_cmd_board.h.
  *
  * [!] THIS FILE OWNS NO STORAGE.  Line buffers, results and frame cursors are
  * on the caller's stack; whatever has to outlive a call is the adapter's.  A
@@ -74,7 +74,7 @@
 #include "fs_cmd_core.h"         /* struct fs_device, fs_core_mount, FileX */
 #endif
 #if CAMERA_SVC_HAS_SEND
-#include "ymodem.h"              /* struct ym_source */
+#include "xfer_console.h"        /* xfer_send_source(), struct ym_source */
 #endif
 
 /* The board's own subcommand handlers (see CAMERA_SVC_BOARD_SUBCMDS). */
@@ -636,7 +636,7 @@ static int cmd_camera_send(struct cli_instance *sh, int argc, char **argv)
 	src.name = (argc >= 2) ? argv[1] : "frame.raw";
 	src.size = f.len;
 	src.read = cam_send_read;
-	rc = camera_board_send(sh, &src);
+	rc = xfer_send_source(sh, &src);
 	/* The transfer's own line said "source read error"; this says why, in
 	   the board's words (the frame was replaced, the camera was busy). */
 	if (c.read_failed)

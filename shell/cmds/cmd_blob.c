@@ -17,9 +17,10 @@
  *
  * Until issue #194 wio-lite-ai and grove-vision-ai-v2 each had their own copy of
  * this file; the words are wio-lite-ai's.  The store is reached through
- * svc/blob/blob_svc.h, the board's three console pieces through
- * shell/cmds/blob_cmd_board.h, and the order of one write is
- * svc/blob/blob_write.c.
+ * svc/blob/blob_svc.h, the board's console pieces through
+ * shell/cmds/blob_cmd_board.h, the receive and the telnet question through
+ * the shared YMODEM wiring (shell/cmds/xfer_console.h, issue #231), and the
+ * order of one write is svc/blob/blob_write.c.
  *
  * [!] THE NAME IS THE OPERATOR'S, NOT THE SENDER'S.  `blob write <name> [slot]`
  * stores what was typed; the YMODEM filename only goes to the log.  A name
@@ -75,6 +76,7 @@
 #include "blob_svc.h"
 #include "blob_write.h"
 #include "log.h"
+#include "xfer_console.h" /* the shared YMODEM wiring and its telnet question */
 #include "ymodem.h"
 
 /* One `blob read` piece on the stack; the whole read is at most
@@ -459,7 +461,7 @@ static int op_receive(void *ctx, const struct ym_sink *sink)
 {
 	struct wr_ctx *c = (struct wr_ctx *)ctx;
 
-	return blob_board_receive(c->sh, sink, &c->diag);
+	return xfer_recv_sink_locked(c->sh, sink, &c->diag);
 }
 
 static int op_read_back(void *ctx, uint32_t addr, void *buf, uint32_t len)
@@ -582,7 +584,10 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 			return 1;
 		want = (int)slot;
 	}
-	if (blob_board_raw_console(sh) != 0)
+	/* Before the erase (issue #228): the receive asks again, but by then a
+	 * slot would be gone.  The shared question, which also refuses when the
+	 * board's transfer table has a field left empty (issue #231). */
+	if (xfer_refuse_if_telnet(sh))
 		return 1;
 	if (!blob_svc_ready())
 		return blob_complain(sh, BLOB_ERR_STATE);

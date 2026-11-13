@@ -592,7 +592,8 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_lcd.c"
     "${BOARD_DIR}/cmds/cmd_touch.c"
     "${BOARD_DIR}/cmds/cmd_gui.c"
-    "${BOARD_DIR}/cmds/cmd_xfer.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/xfer_console.c"  # YMODEM over the console (#231)
+    "${BOARD_DIR}/cmds/cmd_xfer_board.c"          # ...and this board's owner
     "${BOARD_DIR}/cmds/cmd_sdram.c"
     "${BOARD_DIR}/cmds/cmd_eth.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_net.c"    # the one shared command (#219)
@@ -710,7 +711,7 @@ target_include_directories(shell PRIVATE
     # quoted includes.  Nothing else is in there, so no existing include can be
     # shadowed by adding it.
     "${CMAKE_SOURCE_DIR}/shell/cmds"
-    "${CMAKE_SOURCE_DIR}/svc"      # shared svc: ymodem.h (cmd_xfer.c, cmd_camera_board.c)
+    "${CMAKE_SOURCE_DIR}/svc"      # shared svc: ymodem.h (xfer_console.c, cmd_xfer_board.c)
     "${CMAKE_SOURCE_DIR}/svc/nn"
     "${CMAKE_SOURCE_DIR}/svc/plugin"
     "${CMAKE_SOURCE_DIR}/svc/camera"

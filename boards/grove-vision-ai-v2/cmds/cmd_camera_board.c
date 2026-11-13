@@ -52,7 +52,7 @@
 #include "camera_svc_config.h" /* CAMERA_SVC_BOARD_DECLS: the names declared */
 #include "camera_svc_grove.h"  /* the profile lines, shared with the adapter */
 #include "camera_cmd_board.h"  /* camera_board_send() */
-#include "cmd_xfer.h"          /* xfer_send_source(): YMODEM over the console */
+#include "xfer_console.h"      /* xfer_send_source(): YMODEM over the console */
 
 /* What the shared table expands; declared once, there and here. */
 CAMERA_SVC_BOARD_DECLS

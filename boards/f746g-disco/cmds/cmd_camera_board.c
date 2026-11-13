@@ -33,7 +33,7 @@
 #include "camera_cmd_board.h"
 #include "fs_cmd_core.h"
 #include "fs_devices.h"       /* fs_sd_device() (camera save) */
-#include "cmd_xfer.h"
+#include "xfer_console.h"
 
 #include <string.h>
 

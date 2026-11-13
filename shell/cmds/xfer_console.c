@@ -1,80 +1,105 @@
+/* shared-command: required */
 /*
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /**
- * @file    cmd_xfer.c
- * @brief   Shared YMODEM-over-console send/receive helpers (see cmd_xfer.h).
+ * @file    xfer_console.c
+ * @brief   YMODEM over the console, the one wiring for every board (issue #231;
+ *          see xfer_console.h).
  *
- * The protocol core (svc/ymodem.c) is transport-agnostic; here we wire its IO
- * vtable to the raw-console API (cli_console_claim/cli_read_byte/cli_write/
- * cli_rx_flush).  The source/sink vtable is supplied by the caller: `camera send`'s
- * last capture (cmd_camera_board.c), `wifi flash backup`'s RTL8720DN flash reader
- * (owhinata/wio-lite-ai#19 M4) and `wifi flash imgload`'s PSRAM staging buffer
- * (M5, src/rtl8720_img.c), both in cmd_wifi_flash.c, and `blob write`'s slot
- * (cmd_blob_board.c).  Both directions share one io_put() and one set of rules about
- * who may read the console RX ring (see cmd_xfer.h).
+ * The protocol core (svc/ymodem.c) is transport-agnostic; here its IO vtable is
+ * wired to the raw-console API (cli_console_claim / cli_read_byte / cli_write /
+ * cli_rx_flush).  The caller supplies the source or sink: `camera send`'s last
+ * capture and `blob write`'s slot on every board, and on wio-lite-ai `wifi
+ * flash backup`'s RTL8720DN flash reader and `wifi flash imgload`'s PSRAM
+ * staging buffer.  Ported from ../stm32f746g-disco (its
+ * owhinata/stm32f746g-disco#50); until issue #231 each board had a copy of
+ * this in its cmds/cmd_xfer.c.  Clean-room.
  *
- * Ported from ../stm32f746g-disco (its owhinata/stm32f746g-disco#50) without its
- * `xfer` command; no command is registered here.  The same wiring is in the other
- * two boards' cmd_xfer.c (issue #228 made the three say and do the same).
+ * [!] A SHARED TRANSLATION UNIT OWNS NO MUTABLE STORAGE
+ * (cmake/check_no_mutable_storage.py, per board).  The transfer owner and its
+ * two working areas are the board's (xfer_console_board_facts, in its
+ * cmds/cmd_xfer_board.c), and so is the answer to the telnet question.
  */
+#include "xfer_console.h"
+
 #include "cli.h"
-#include "cmd_xfer.h"
-#include "net_tty.h"     /* refuse a raw transfer on the telnet console */
-#include "log.h"          /* transfer post-mortem into the dmesg ring -- see below */
-#include "tx_api.h"       /* tx_time_get(): the drain's longest gap */
+#include "log.h"
+#include "tx_api.h"      /* tx_time_get(): the drain's longest gap */
 
-#include <string.h>
-
-/* ---- the transfers' working areas (issue #230) ---------------------------- *
+/* ---- the board's table ---------------------------------------------------- *
  *
- * svc/ymodem.c holds no writable storage; this board owns its one struct
- * ym_xfer and the two areas it points at, and this file is the only caller of
- * ymodem_send() / ymodem_recv(), so every transfer (`camera send`, `blob
- * write`, `wifi flash backup` and `imgload`) uses this one.
- *
- * The areas are ordinary .bss (the owner, which holds two pointers, is .data),
- * so AXI-SRAM -- where svc/ymodem.c's buffers already were.
- * Only the CPU touches them (io_put() copies the bytes into the console's TX
- * ring), and CPU-only data goes to DTCM first and to AXI-SRAM when DTCM has
- * no room (README "Memory map"): the two areas (2,053 B) are more than DTCM
- * had left at issue #230 (1,848 B).  The shared nn state (#161) and the telnet
- * state (#221) are placed the same way.
+ * Read on every entry.  A field left NULL refuses before the console is
+ * touched (xfer_console.h): the alternative directions are a transfer with no
+ * owner (a NULL dereference in the protocol core) and a board whose telnet
+ * refusal vanished because a field was forgotten.
  */
-static struct ym_send_area s_ym_send;
-static struct ym_recv_area s_ym_recv;
-static struct ym_xfer      s_ym = { .send = &s_ym_send, .recv = &s_ym_recv };
+static const struct xfer_console_facts *xfer_facts(void)
+{
+	const struct xfer_console_facts *f = &xfer_console_board_facts;
+
+	return (f->owner != NULL && f->telnet != NULL) ? f : NULL;
+}
+
+static void xfer_say_unwired(struct cli_instance *sh)
+{
+	cli_error(sh, "ymodem: refused -- this firmware's transfer table "
+	              "(xfer_console_board_facts) has an empty field\r\n");
+}
+
+int xfer_console_no_telnet(struct cli_instance *sh, const char *what)
+{
+	(void)sh;
+	(void)what;
+	return 0;
+}
+
+/*
+ * Not over telnet (issue #228).  YMODEM needs a raw, 8-bit clean console, and
+ * the telnet one (shell/cmds/net_tty.c) is not: it drops IAC sequences on the
+ * way in and doubles 0xFF on the way out, does not negotiate BINARY, so the
+ * client may rewrite CR, and its receive ring is 512 B against a 1,029 B
+ * block (YMODEM over telnet is issue #197).  Asked as the first statement of
+ * every entry below, so a caller that forgot to ask is still refused; a caller
+ * that would break something first (erase a slot, invalidate a staged image,
+ * take the WiFi link down) asks it itself before it does.
+ */
+int xfer_refuse_if_telnet(struct cli_instance *sh)
+{
+	const struct xfer_console_facts *f = xfer_facts();
+
+	if (f == NULL) {
+		xfer_say_unwired(sh);
+		return 1;
+	}
+	return f->telnet(sh, "ymodem") != 0;
+}
 
 /* ---- YMODEM IO adapter: cli_read_byte / cli_write ------------------------- */
 
 /*
- * SEND direction only.  Everything the board reads back while SENDING is protocol
- * -- ACK / NAK / 'C' / CAN -- so a 0x03 can only be a human pressing Ctrl+C, and
- * mapping it to an abort is safe.
- *
- * THIS IS WRONG FOR RECEIVING, and using it there was the bug that broke `wifi
- * imgload` on the first try: while receiving, the incoming stream is the FILE, in
- * which 0x03 is just another data byte (~1 in 256 of binary content, and it can
- * equally land in a block's CRC).  Treating those as Ctrl+C aborted the transfer
- * almost immediately.  See io_getc_recv().
+ * SEND direction only.  Everything read back while SENDING is protocol -- ACK /
+ * NAK / 'C' / CAN -- so a 0x03 can only be a person pressing Ctrl+C, and
+ * mapping it to an abort is safe.  -1 / -2 already match YM_IO_TIMEOUT /
+ * YM_IO_ABORT.
  */
-static int io_getc(void *ctx, unsigned timeout_ms)
+static int io_getc_send(void *ctx, unsigned timeout_ms)
 {
 	int r = cli_read_byte((struct cli_instance *)ctx, timeout_ms);
-	/* -1/-2 already match YM_IO_TIMEOUT/YM_IO_ABORT. */
+
 	return (r == 3) ? YM_IO_ABORT : r;
 }
 
 /*
- * RECEIVE direction: pass every byte through untouched, 0x03 included.
+ * RECEIVE direction: every byte passes untouched, 0x03 included.
  *
- * The cost is that a local Ctrl+C cannot abort a receive -- there is no way to tell
- * it apart from file data, and guessing wrong corrupts the image.  Aborting is done
- * from the PC instead (cancel the sender; lrzsz emits the CAN sequence, which the
- * protocol core honours), and the handshake gives up on its own if no sender ever
- * appears.  cli_read_byte() itself never interprets 0x03, so this is simply the
- * transport's raw byte.
+ * [!] 0x03 IS NOT AN ABORT HERE.  While receiving, the incoming stream is the
+ * FILE, in which 0x03 is just another data byte (about 1 in 256 of binary
+ * content, and it can equally land in a block's CRC).  Mapping it, as the
+ * send direction does, was the bug that broke wio-lite-ai's `wifi flash
+ * imgload` on the first try.  cli_read_byte() itself never interprets 0x03,
+ * so this is simply the transport's raw byte.
  */
 static int io_getc_recv(void *ctx, unsigned timeout_ms)
 {
@@ -161,10 +186,10 @@ static void xfer_drain_until_quiet(struct cli_instance *sh)
 
 /* ---- one transfer at a time (issue #230) --------------------------------- *
  *
- * svc/ymodem.c refuses a transfer while another runs on s_ym (YM_ERR_BUSY,
- * having touched nothing).  These say so in one sentence on every path:
- * asked before a notice that tells the operator to start the PC side, and
- * again when the protocol core itself refused.
+ * svc/ymodem.c refuses a transfer while another runs on the board's owner
+ * (YM_ERR_BUSY, having touched nothing).  These say so in one sentence on
+ * every path: asked before a notice that tells the operator to start the PC
+ * side, and again when the protocol core itself refused.
  */
 static void xfer_say_busy(struct cli_instance *sh)
 {
@@ -174,7 +199,13 @@ static void xfer_say_busy(struct cli_instance *sh)
 
 int xfer_refuse_if_busy(struct cli_instance *sh)
 {
-	if (!ymodem_busy(&s_ym))
+	const struct xfer_console_facts *f = xfer_facts();
+
+	if (f == NULL) {
+		xfer_say_unwired(sh);
+		return 1;
+	}
+	if (!ymodem_busy(f->owner))
 		return 0;
 	xfer_say_busy(sh);
 	return 1;
@@ -254,39 +285,40 @@ static void xfer_recv_log(enum ym_result res, const struct ym_recv_diag *d)
 		          (unsigned)d->first_crc_want, (unsigned)d->first_crc_got);
 }
 
-int xfer_send_source_locked(struct cli_instance *sh, const struct ym_source *src)
+/* ---- send ----------------------------------------------------------------- */
+
+/* The send itself, on a console the caller holds: the body both send entries
+ * share while wio-lite-ai's `wifi flash backup` still has its own entry.
+ * Inlined into each, so the send entry keeps one frame. */
+static inline __attribute__((always_inline))
+int xfer_send_held(struct cli_instance *sh, struct ym_xfer *owner,
+                   const struct ym_source *src)
 {
-	struct ym_io   io = { sh, io_getc, io_put };
+	struct ym_io   io = { sh, io_getc_send, io_put };
 	enum ym_result res;
 
-	/*
-	 * Not over telnet.  YMODEM needs a raw, 8-bit clean console, and the telnet one
-	 * (shell/cmds/net_tty.c) is not: it drops IAC sequences on the way in and doubles
-	 * 0xFF on the way out, does not negotiate BINARY, so the client may rewrite CR,
-	 * and its receive ring is 512 B against a 1,029 B block (YMODEM over telnet is
-	 * issue #197).  Checked here so every YMODEM user (`camera send`, `blob write`,
-	 * `wifi flash imgload` / `flash backup`) is covered by one rule; a caller that
-	 * would break something first (erase a slot, invalidate the staged image, take
-	 * the WiFi link down) asks the same question itself before it does (issue #228).
-	 */
-	if (net_tty_guard(sh, "ymodem"))
-		return 1;
-
 	cli_rx_flush(sh);                  /* drop type-ahead / the command newline */
-	res = ymodem_send(&s_ym, &io, src);
+	res = ymodem_send(owner, &io, src);
 	cli_rx_flush(sh);                  /* drop a trailing 'O'/'C'/garbage tail   */
 	if (res != YM_OK)
 		xfer_drain_until_quiet(sh);    /* the receiver may still be NAKing */
-	return xfer_send_report(sh, src, res);
+	return xfer_send_report(sh, src, res);   /* printed while still held */
+}
+
+int xfer_send_source_locked(struct cli_instance *sh, const struct ym_source *src)
+{
+	if (xfer_refuse_if_telnet(sh))
+		return 1;
+	return xfer_send_held(sh, xfer_console_board_facts.owner, src);
 }
 
 int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 {
 	int rc;
 
-	/* Before the notice (issue #228): a refused transfer says nothing about starting
-	 * a receiver.  xfer_send_source_locked() asks again, for its other callers. */
-	if (net_tty_guard(sh, "ymodem"))
+	/* Before the notice: a refused transfer says nothing about starting a
+	 * receiver. */
+	if (xfer_refuse_if_telnet(sh))
 		return 1;
 
 	switch (cli_console_claim(sh)) {
@@ -313,12 +345,12 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 	cli_print(sh, "ymodem: start the receiver now -- `rb -y` (lrzsz YMODEM; -y "
 	              "replaces an older file of that name) or Ctrl+A Ctrl+R in "
 	              "picocom; Ctrl+C aborts\r\n");
-	rc = xfer_send_source_locked(sh, src);
+	rc = xfer_send_held(sh, xfer_console_board_facts.owner, src);
 	cli_console_release(sh);
 	return rc;
 }
 
-/* ---- receive direction (owhinata/wio-lite-ai#19 M5) ------------------------------ */
+/* ---- receive (owhinata/wio-lite-ai#19 M5, issue #194) --------------------- */
 
 int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink,
                           struct ym_recv_diag *diag)
@@ -326,21 +358,11 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink,
 	struct ym_io   io = { sh, io_getc_recv, io_put };
 	enum ym_result res;
 
-	/*
-	 * Not over telnet.  YMODEM needs a raw, 8-bit clean console, and the telnet one
-	 * (shell/cmds/net_tty.c) is not: it drops IAC sequences on the way in and doubles
-	 * 0xFF on the way out, does not negotiate BINARY, so the client may rewrite CR,
-	 * and its receive ring is 512 B against a 1,029 B block (YMODEM over telnet is
-	 * issue #197).  Checked here so every YMODEM user (`camera send`, `blob write`,
-	 * `wifi flash imgload` / `flash backup`) is covered by one rule; a caller that
-	 * would break something first (erase a slot, invalidate the staged image, take
-	 * the WiFi link down) asks the same question itself before it does (issue #228).
-	 */
-	if (net_tty_guard(sh, "ymodem"))
+	if (xfer_refuse_if_telnet(sh))
 		return 1;
 
 	cli_rx_flush(sh);                  /* drop type-ahead / the command newline */
-	res = ymodem_recv(&s_ym, &io, sink, diag);
+	res = ymodem_recv(xfer_console_board_facts.owner, &io, sink, diag);
 	/* Refused (issue #230): said here, since this prints nothing else, and
 	 * then handled as any failure -- the drain below empties THIS console,
 	 * where a sender the operator already started may be talking; the
@@ -351,6 +373,6 @@ int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink,
 	if (res != YM_OK)
 		xfer_drain_until_quiet(sh);    /* the sender may still be retrying */
 
-	xfer_recv_log(res, diag);         /* the caller prints the outcome */
+	xfer_recv_log(res, diag);          /* the caller prints the outcome */
 	return res == YM_OK ? 0 : 1;
 }

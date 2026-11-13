@@ -86,7 +86,7 @@
 #include "fs_cmd_core.h"  /* struct fs_device */
 #include "fs_devices.h"   /* fs_sd_device(): the microSD media + its ownership gates */
 #endif
-#include "cmd_xfer.h"     /* xfer_send_source(): YMODEM over the console */
+#include "xfer_console.h" /* xfer_send_source(): YMODEM over the console */
 
 #include <stdint.h>
 #include <string.h>

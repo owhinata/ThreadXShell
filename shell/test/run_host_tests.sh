@@ -288,6 +288,23 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
     $LDFLAGS -pthread -o "$out/test_ymodem_recv"
 "$out/test_ymodem_recv"
 
+# issue #231 -- the one YMODEM-over-console wiring (shell/cmds/xfer_console.c)
+# as the boards compile it, over fakes of the console and of the protocol core
+# that record every call in order, once per shape of the board's table: FULL
+# (a telnet question, f746g-disco / wio-lite-ai), NOTELNET (the shared "no
+# telnet" answer, grove-vision-ai-v2) and a field left empty (NOOWNER,
+# NOGUARD).  Nothing typed at a console shows the order: the telnet and
+# "another transfer" refusals before the notice, the claim given back on every
+# exit, every entry refusing on an empty field before it touches the console,
+# 0x03 an abort only while sending.  The log stand-in is blob_cfg/log.h's.
+for shape in FULL NOTELNET NOOWNER NOGUARD; do
+    gcc $CFLAGS -DCLI_USE_COLOR=0 -DXFER_TEST_SHAPE_$shape -DTX_TIMER_TICKS_PER_SECOND=1000 \
+        -I "$here/shim" -I "$here/blob_cfg" -I "$inc" -I "$here/../cmds" -I "$svc" \
+        "$here/test_xfer_console.c" "$here/../cmds/xfer_console.c" \
+        $LDFLAGS -o "$out/test_xfer_console_$shape"
+    "$out/test_xfer_console_$shape"
+done
+
 # owhinata/wio-lite-ai#8 phase 3a -- camera frame pipeline core (svc/camera/frame_pipeline.c): ring
 # slot acquire/publish, refcount pin/put, DROP/LATEST policy + pending transfer, detach
 # in-flight count, read_latest generation, and an N=4 ring cycling under a counting

@@ -415,7 +415,8 @@ set(SHELL_SOURCES
     # send -- and a third copy of that wiring on purpose: sharing it needs a
     # board hook for "not over telnet", which is a mechanism and a separate
     # issue.
-    "${BOARD_DIR}/cmds/cmd_xfer.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/xfer_console.c"
+    "${BOARD_DIR}/cmds/cmd_xfer_board.c"
     "${CMAKE_SOURCE_DIR}/svc/ymodem.c"
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
     # CRC-32/ISO-HDLC (issue #92).  The blob store stamps every asset with the

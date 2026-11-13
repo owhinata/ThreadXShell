@@ -36,7 +36,7 @@
  * rather than assumed to be zero. */
 #include "cli_instance.h"
 #include "cmd_wifi_priv.h"
-#include "cmd_xfer.h"
+#include "xfer_console.h"
 #include "rtl8720.h"
 #include "rtl8720_flash.h"
 #include "rtl8720_img.h"     /* #19 M5: PSRAM staging for a host-supplied image */

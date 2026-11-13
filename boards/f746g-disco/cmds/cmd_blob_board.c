@@ -20,7 +20,7 @@
 #include "blob.h"             /* BLOB_BUSY_HOLDERS */
 #include "blob_err.h"
 #include "cli_backend_uart.h"  /* the VCP's RX ring high-water */
-#include "cmd_xfer.h"
+#include "xfer_console.h"
 #include "net_tty.h"           /* net_tty_guard(): the telnet console (#221) */
 
 int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,

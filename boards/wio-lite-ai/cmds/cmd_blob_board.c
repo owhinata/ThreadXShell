@@ -15,7 +15,7 @@
 #include "cli.h"
 #include "blob_cmd_board.h"
 #include "blob_err.h"
-#include "cmd_xfer.h"
+#include "xfer_console.h"
 #include "net_tty.h"       /* refuse a raw transfer on the telnet console */
 
 int blob_board_receive(struct cli_instance *sh, const struct ym_sink *sink,

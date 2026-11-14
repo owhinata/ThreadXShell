@@ -311,6 +311,11 @@ list(FILTER FX_CORE EXCLUDE REGEX "simulat")            # RAM-disk demo drivers
 # The property shell/cmds/fs_cmd_core.c is optional on (issue #206): this board
 # always has FileX, so the shared storage audit wants that file shipped.
 set(BOARD_HAS_FILEX ON)
+# The property shell/cmds/cmd_sd.c is optional on (issue #232): this board always
+# has the microSD slot and its driver, so the shared storage audit wants that
+# file shipped.  A separate property from BOARD_HAS_FILEX: the filesystem and
+# the card are two things, although on this board both are always there.
+set(BOARD_HAS_SD ON)
 # The property shell/cmds/cmd_net.c is optional on (issue #219): this board
 # always has NetX Duo, so the shared storage audit wants that file shipped.
 set(BOARD_HAS_NETX ON)
@@ -582,7 +587,7 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_wdt.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_jobs.c"
     "${BOARD_DIR}/cmds/cmd_qspi.c"
-    "${BOARD_DIR}/cmds/cmd_sd.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_sd.c"     # the one shared `sd` (#232)
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_camera.c"  # the one shared command (#143)
     # The shared `blob` command (#194) and this board's console pieces of it:
     # receive over the VCP, refuse telnet, the RX ring's high-water.  In every
@@ -707,7 +712,7 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/shell/backend"   # CLI_BACKEND_*_DEFINE macros
     "${BOARD_DIR}/backend"                # cli_backend_uart.h
     # The shared commands' own headers.  This board's cmds/ live in a different
-    # directory from shell/cmds/ now, so cmd_sd.c / cmd_camera_board.c can no
+    # directory from shell/cmds/ now, so cmd_camera_board.c can no
     # longer reach fs_cmd_core.h through the "same directory first" rule for
     # quoted includes.  Nothing else is in there, so no existing include can be
     # shadowed by adding it.

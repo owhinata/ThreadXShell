@@ -107,7 +107,8 @@ void fx_sd_set_format_mode(int on);
 /* ---- the medium, for other commands ---------------------------------------- */
 
 /** The microSD media (SDMMC + FileX).  Defined by the `sd` command
- *  (cmds/cmd_sd.c); `camera save` writes through it (cmd_camera_board.c). */
+ *  (shell/cmds/cmd_sd.c); `camera save` writes through it (the board's
+ *  cmds/cmd_camera_board.c). */
 const struct fs_device *fs_sd_device(void);
 
 #ifdef __cplusplus

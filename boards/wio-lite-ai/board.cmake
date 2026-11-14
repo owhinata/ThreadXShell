@@ -707,13 +707,16 @@ endif()
 # FX_MEDIA / FX_FILE layout.  --gc-sections drops the feature paths nothing calls.
 #
 # fs_cmd_core.c is board-independent (it talks FileX, not SDMMC) and so lives in the
-# shared tree; cmd_sd.c is this board's, and names the device through its own
-# cmds/fs_devices.h.
+# shared tree, and so does the `sd` command itself, shell/cmds/cmd_sd.c (issue
+# #232), which reaches this board's card driver through its sd_card_board_ops
+# table (port/sd/sd_card.c) and the glue through shell/cmds/sd_cmd_board.h.
 # BOARD_HAS_FILEX is the property shell/cmds/fs_cmd_core.c is optional on (issue
-# #206): the shared storage audit wants that file shipped when ON and compiled by
-# nothing when OFF.  Spelled ON / OFF here whatever truth value BSP_ENABLE_SD has.
+# #206), and BOARD_HAS_SD the one shell/cmds/cmd_sd.c is (issue #232): the shared
+# storage audit wants each file shipped when ON and compiled by nothing when OFF.
+# Spelled ON / OFF here whatever truth value BSP_ENABLE_SD has.
 if(BSP_ENABLE_SD)
     set(BOARD_HAS_FILEX ON)
+    set(BOARD_HAS_SD ON)
     set(FX_DIR "${CMAKE_SOURCE_DIR}/lib/filex")
     file(GLOB FX_CORE "${FX_DIR}/common/src/*.c")
     list(FILTER FX_CORE EXCLUDE REGEX "simulat")     # RAM-disk demo drivers
@@ -722,10 +725,11 @@ if(BSP_ENABLE_SD)
         "${BOARD_DIR}/port/filex/fx_sd_driver.c"
         "${BOARD_DIR}/port/filex/sd_fs_glue.c"
         "${CMAKE_SOURCE_DIR}/shell/cmds/fs_cmd_core.c"
-        "${BOARD_DIR}/cmds/cmd_sd.c"
+        "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_sd.c"
         ${FX_CORE})
 else()
     set(BOARD_HAS_FILEX OFF)
+    set(BOARD_HAS_SD OFF)
 endif()
 
 # The FPC-40 RGB LCD over LTDC + DMA2D.  ON builds the display driver
@@ -1126,7 +1130,7 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/shell/core"
     "${CMAKE_SOURCE_DIR}/shell/backend"
     # The shared commands' own headers: this board's cmds/ live in a different
-    # directory now, so cmd_sd.c / cmd_camera_board.c can no longer reach fs_cmd_core.h
+    # directory now, so cmd_camera_board.c can no longer reach fs_cmd_core.h
     # through the "same directory first" rule for quoted includes.  Nothing else
     # is in there, so no existing include can be shadowed by adding it.
     "${CMAKE_SOURCE_DIR}/shell/cmds"

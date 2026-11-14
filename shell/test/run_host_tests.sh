@@ -305,6 +305,29 @@ for shape in FULL NOTELNET NOOWNER NOGUARD; do
     "$out/test_xfer_console_$shape"
 done
 
+# issue #232 -- the one shared `sd` command (shell/cmds/cmd_sd.c) through the
+# REAL dispatcher, over stand-ins of the board's mount glue, its FileX media
+# driver, fx_media_format() (fx_shim/), the filesystem bodies and the card
+# driver table, which record every call in order and whether an ownership slot
+# was held at it.  Once per shape of the table: FULL, and each of its four
+# fields left empty (NOPROBE, NOSTATUS, NOINFO, NOREAD).  Nothing typed at a
+# console shows the order: `sd format` remounts and reads the FAT32 answer
+# before it gives the slot back (the stand-in that gives it back marks the
+# media "not FAT32"), every exit gives it back once and leaves format mode
+# off, `info` / `read` touch the card only under the slot, and an empty field
+# refuses before any slot or card call.
+for shape in FULL NOPROBE NOSTATUS NOINFO NOREAD; do
+    gcc $CFLAGS -DCLI_USE_COLOR=0 -DSD_TEST_SHAPE_$shape \
+        $glue_inc -I "$here/shim" -I "$here/fx_shim" \
+        -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" -I "$svc/fs" \
+        "$here/test_sd_cmd.c" "$here/../cmds/cmd_sd.c" \
+        "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
+        "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
+        $glue \
+        $LDFLAGS -o "$out/test_sd_cmd_$shape"
+    "$out/test_sd_cmd_$shape"
+done
+
 # owhinata/wio-lite-ai#8 phase 3a -- camera frame pipeline core (svc/camera/frame_pipeline.c): ring
 # slot acquire/publish, refcount pin/put, DROP/LATEST policy + pending transfer, detach
 # in-flight count, read_latest generation, and an N=4 ring cycling under a counting

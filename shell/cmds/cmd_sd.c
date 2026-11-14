@@ -1,14 +1,17 @@
+/* shared-command: optional BOARD_HAS_SD */
 /*
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /**
  * @file    cmd_sd.c
- * @brief   `sd` shell command: microSD card + FileX filesystem
- * (owhinata/stm32f746g-disco#33/#34).
+ * @brief   The one `sd` shell command, for every board with a microSD slot:
+ *          the card + its FileX FAT filesystem (owhinata/stm32f746g-disco#33/#34,
+ *          owhinata/wio-lite-ai#6; shared since issue #232).
  *
  *   sd info            card type, capacity, block geometry, bus width, CID/CSD
  *   sd read <lba>      hexdump one 512 B block (LBA addressing)
+ *   sd format yes      format the whole card as a FAT32 superfloppy (destructive)
  *   sd ls [path]       list a directory (default /)
  *   sd cat <path>      print a file
  *   sd write <p> <txt> create/overwrite a file
@@ -17,18 +20,29 @@
  *   sd df              filesystem capacity / free / FAT type
  *   sd umount          flush + unmount
  *
- * The filesystem commands are the shared fs_cmd_core.c bodies, bound via sd_dev.  The
- * low-level `info`/`read` may re-probe the card (HAL_SD_DeInit + re-identify,
- * when it is not already usable), which would corrupt a mounted FileX media, so
- * they take the raw ownership slot (refused while the SD filesystem is mounted
- * -- run `sd umount` first).
+ * What it needs from the board comes through two headers and nothing else:
+ * the card driver as the board's table under a fixed name (svc/fs/
+ * sd_card_svc.h), and the FileX mount glue and media driver, still each
+ * board's own and called by name (shell/cmds/sd_cmd_board.h).
+ *
+ * The filesystem subcommands are thin binders over the media-independent bodies
+ * in fs_cmd_core.c, parameterized by sd_dev.  The low-level `info`/`read` may
+ * re-probe the card (de-initialise and re-identify it), which would corrupt a
+ * mounted FX_MEDIA underneath it, so they take the raw ownership slot --
+ * refused while the filesystem is mounted, with `sd umount` as the way out.
+ * How a board learns that the slot is empty (a card-detect pin, or no card
+ * answering a probe) is its driver's and its glue's; this file only prints the
+ * answer.
+ *
+ * [!] THIS FILE OWNS NO MUTABLE STORAGE (cmake/check_no_mutable_storage.py, per
+ * board), and has no board in it: no `#ifdef <BOARD>`, no board header.
  *
  * Clean-room design; no third-party code reused.
  */
 #include "cli.h"
 #include "sd_card_svc.h"     /* the card driver, through sd_card_board_ops */
 #include "fs_cmd_core.h"
-#include "sd_cmd_board.h"     /* the mount glue, the FileX driver, fs_sd_device() */
+#include "sd_cmd_board.h"    /* the mount glue, the FileX driver, fs_sd_device() */
 
 #include <stdint.h>
 #include <string.h>
@@ -37,7 +51,7 @@ static const char *sd_strerror(int rc)
 {
 	switch (rc) {
 	case SD_ERR_PARAM:   return "bad argument";
-	case SD_ERR_HAL:     return "SDMMC/DMA transfer failed";
+	case SD_ERR_HAL:     return "SDMMC transfer failed";
 	case SD_ERR_TIMEOUT: return "card not ready / transfer timed out";
 	case SD_ERR_STATE:   return "driver not initialized / card not probed";
 	case SD_ERR_NO_CARD: return "no card in slot";
@@ -45,10 +59,31 @@ static const char *sd_strerror(int rc)
 	}
 }
 
+/* ---- the board's card driver table ---------------------------------------- *
+ *
+ * The first thing `info`, `read` and `format` do: with a field of the table
+ * left NULL they refuse before they take any ownership slot, unmount anything
+ * or talk to the card.  The alternative is a call through NULL from the shell
+ * thread.  A board that defines no table at all does not link
+ * (svc/fs/sd_card_svc.h).
+ */
+static int sd_refuse_if_unwired(struct cli_instance *sh)
+{
+	const struct sd_card_ops *ops = &sd_card_board_ops;
+
+	if (ops->probe != NULL && ops->status != NULL && ops->info != NULL &&
+	    ops->read_blocks != NULL)
+		return 0;
+	cli_error(sh, "sd: refused -- this firmware's card driver table "
+	              "(sd_card_board_ops) has an empty field\r\n");
+	return 1;
+}
+
+/* ---- low-level card commands (raw-gated) --------------------------------- */
+
 /*
- * Take the raw slot for a card-disruptive op (re-probe).  Refused while the SD
- * filesystem is mounted or busy, so a probe (HAL_SD_DeInit) can never run under
- * a live FX_MEDIA.
+ * Take the raw slot for a card-disruptive op.  Refused while the filesystem is
+ * mounted or busy, so a re-probe can never run under a live FX_MEDIA.
  */
 static int sd_raw_gate(struct cli_instance *sh)
 {
@@ -59,28 +94,36 @@ static int sd_raw_gate(struct cli_instance *sh)
 	return 0;
 }
 
-/* ---- low-level card commands (Phase A, raw-gated) ------------------------- */
+/* Identify the card if it is not already usable.  Call under the raw slot. */
+static int sd_ensure_ready(struct cli_instance *sh)
+{
+	int rc;
+
+	if (sd_card_board_ops.status() == SD_OK)
+		return 0;
+
+	rc = sd_card_board_ops.probe();
+	if (rc != 0) {
+		cli_error(sh, "sd: %s\r\n", sd_strerror(rc));
+		return -1;
+	}
+	return 0;
+}
 
 static int cmd_sd_info(struct cli_instance *sh, int argc, char **argv)
 {
 	const struct sd_card_info *ci;
-	int rc;
 
 	(void)argc;
 	(void)argv;
 
+	if (sd_refuse_if_unwired(sh) != 0)
+		return 1;
 	if (sd_raw_gate(sh) != 0)
 		return 1;
-
-	/* Identify only if not already usable; never re-probe a mounted card
-	 * (the raw gate already excludes that case). */
-	if (sd_card_board_ops.status() != SD_OK) {
-		rc = sd_card_board_ops.probe();
-		if (rc != 0) {
-			cli_error(sh, "sd: %s\r\n", sd_strerror(rc));
-			sd_raw_end();
-			return 1;
-		}
+	if (sd_ensure_ready(sh) != 0) {
+		sd_raw_end();
+		return 1;
 	}
 
 	ci = sd_card_board_ops.info();
@@ -106,11 +149,14 @@ static int cmd_sd_info(struct cli_instance *sh, int argc, char **argv)
 
 static int cmd_sd_read(struct cli_instance *sh, int argc, char **argv)
 {
-	uint8_t buf[512];
+	uint8_t buf[SD_BLOCK_SIZE];
 	uint32_t lba;
 	int rc;
 
 	(void)argc;
+
+	if (sd_refuse_if_unwired(sh) != 0)
+		return 1;
 
 	/* argv[0] = "read", argv[1] = LBA. */
 	if (cli_parse_u32(argv[1], &lba) != 0) {
@@ -120,14 +166,9 @@ static int cmd_sd_read(struct cli_instance *sh, int argc, char **argv)
 
 	if (sd_raw_gate(sh) != 0)
 		return 1;
-
-	if (sd_card_board_ops.status() != SD_OK) {
-		rc = sd_card_board_ops.probe();
-		if (rc != 0) {
-			cli_error(sh, "sd: %s\r\n", sd_strerror(rc));
-			sd_raw_end();
-			return 1;
-		}
+	if (sd_ensure_ready(sh) != 0) {
+		sd_raw_end();
+		return 1;
 	}
 
 	rc = sd_card_board_ops.read_blocks(lba, buf, 1);
@@ -138,24 +179,25 @@ static int cmd_sd_read(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	return cli_hexdump_base(sh, buf, sizeof buf,
-	                        (unsigned long long)lba * 512ull) == 0 ? 0 : 1;
+	                        (unsigned long long)lba * (unsigned long long)SD_BLOCK_SIZE)
+	       == 0 ? 0 : 1;
 }
 
 /* ---- filesystem commands (shared core, bound to sd_dev) ------------------- */
 
 static const struct fs_device sd_dev = {
 	.name       = "sd",
-	.mount_hint = "no FAT filesystem? insert a FAT-formatted card",
+	.mount_hint = "no FAT filesystem? insert a FAT-formatted card or run `sd format yes`",
 	.acquire    = sd_media_acquire,
 	.unmount    = sd_media_unmount,
 	.is_mounted = sd_is_mounted,
-	.op_begin   = sd_op_begin,   .op_end   = sd_op_end,
-	.excl_begin = sd_exclusive_begin, .excl_end = sd_exclusive_end,
-	.dir_lock   = sd_dir_lock,   .dir_unlock = sd_dir_unlock,
+	.op_begin   = sd_op_begin,        .op_end     = sd_op_end,
+	.excl_begin = sd_exclusive_begin, .excl_end   = sd_exclusive_end,
+	.dir_lock   = sd_dir_lock,        .dir_unlock = sd_dir_unlock,
 	.info_extra = NULL,
 };
 
-/* Accessor for cross-command reuse (camera save, owhinata/stm32f746g-disco#42). */
+/* Accessor for cross-command reuse (`camera save`, owhinata/stm32f746g-disco#42). */
 const struct fs_device *fs_sd_device(void)
 {
 	return &sd_dev;
@@ -196,11 +238,13 @@ static int cmd_sd_umount(struct cli_instance *sh, int argc, char **argv)
 	return fs_core_umount(&sd_dev, sh, argc, argv);
 }
 
+/* ---- format --------------------------------------------------------------- */
+
 /*
- * Pick sectors_per_cluster for a whole-card FAT32 format: a power-of-two that
- * caps the cluster count (bounds FAT size / format time) while keeping clusters
- * comfortably above the FAT32 minimum (65525) so FileX's post-FAT recalc still
- * lands on FAT32.  Returns -1 if the card is too small for FAT32.
+ * Pick sectors_per_cluster for a whole-card FAT32 format: a power of two that caps
+ * the cluster count (which bounds the FAT size and the format time) while keeping
+ * the count comfortably above the FAT32 minimum of 65525, so FileX's own post-FAT
+ * recalculation still lands on FAT32.  Returns -1 if the card is too small.
  */
 static int fat32_spc(uint32_t total, uint32_t *out_spc)
 {
@@ -221,6 +265,9 @@ static int cmd_sd_format(struct cli_instance *sh, int argc, char **argv)
 	FX_MEDIA *media = FX_NULL;
 	int is_fat32 = 0;
 	int rc;
+
+	if (sd_refuse_if_unwired(sh) != 0)
+		return 1;
 
 	/* `sd format yes` -- the literal `yes` is the safety latch.  FAT32 only;
 	 * why there is no exFAT: owhinata/stm32f746g-disco#35. */
@@ -255,12 +302,13 @@ static int cmd_sd_format(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "formatting %lu MiB as FAT32 (%lu B clusters)...\r\n",
 	          (unsigned long)(total / 2048u), (unsigned long)(spc * 512u));
 
-	/* Format the whole card as a superfloppy (format mode -> driver INIT skips
-	 * detection).  num_fats=2 / dir_entries=0 (FAT32 root is a cluster chain). */
+	/* Format the whole card as a superfloppy: format mode makes the driver's INIT
+	 * skip partition detection, which a blank card would fail.  num_fats=2,
+	 * dir_entries=0 (a FAT32 root is a cluster chain, not a fixed table). */
 	fx_sd_set_format_mode(1);
 	status = fx_media_format(sd_glue_media(), fx_sd_driver, FX_NULL,
 	                         sd_glue_cache(), sd_glue_cache_size(),
-	                         "SD", 2, 0, 0, total, 512, spc, 255, 63);
+	                         "SD", 2, 0, 0, total, SD_BLOCK_SIZE, spc, 255, 63);
 	fx_sd_set_format_mode(0);
 
 	if (status != FX_SUCCESS) {
@@ -271,12 +319,15 @@ static int cmd_sd_format(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	/*
-	 * Remount WITHOUT dropping the exclusive slot first: releasing here and then
-	 * calling the normal mount path would leave a window in which another console
-	 * or a background job takes ownership and the remount fails with FS_ERR_BUSY,
-	 * reporting failure for a format that succeeded.  The FAT32 check is made
-	 * before releasing too, so it describes the media this command produced and
-	 * not one a concurrent umount has since closed.
+	 * Remount WITHOUT dropping the exclusive slot first.  A board may run more
+	 * than one console plus background jobs, so releasing here and then calling
+	 * the normal mount path would leave a window in which another command takes
+	 * ownership and the remount fails with FS_ERR_BUSY -- reporting failure for a
+	 * format that actually succeeded.  sd_media_mount_exclusive() is the entry
+	 * point that mounts while the slot is still held.
+	 *
+	 * The FAT32 check is made before releasing too, so the answer describes the
+	 * media this command produced and not one a concurrent umount has since closed.
 	 */
 	status = sd_media_mount_exclusive(&media);
 	if (status == FX_SUCCESS)
@@ -299,7 +350,7 @@ static int cmd_sd_format(struct cli_instance *sh, int argc, char **argv)
 }
 
 CLI_SUBCMD_SET_CREATE(sd_subcmds,
-	CLI_CMD_ARG(info,   NULL, "card type/capacity/geometry/CID/CSD", cmd_sd_info,   1, 0),
+	CLI_CMD_ARG(info,   NULL, "card type/capacity/geometry/CID/CSD",   cmd_sd_info,   1, 0),
 	CLI_CMD_ARG_USAGE(read,   NULL, "hexdump one 512 B block <lba>",
 	                  "<lba>",         cmd_sd_read,   2, 0),
 	CLI_CMD_ARG_USAGE(format, NULL, "format as FAT32 -- confirm with 'yes'",
@@ -314,9 +365,8 @@ CLI_SUBCMD_SET_CREATE(sd_subcmds,
 	                  "<path>",        cmd_sd_rm,     2, 0),
 	CLI_CMD_ARG_USAGE(mkdir,  NULL, "create directory <path>",
 	                  "<path>",        cmd_sd_mkdir,  2, 0),
-	CLI_CMD_ARG(df,     NULL, "filesystem capacity / free (FAT)",    cmd_sd_df,     1, 0),
-	CLI_CMD_ARG(umount, NULL, "flush and unmount",                   cmd_sd_umount, 1, 0),
+	CLI_CMD_ARG(df,     NULL, "filesystem capacity / free (FAT)",      cmd_sd_df,     1, 0),
+	CLI_CMD_ARG(umount, NULL, "flush and unmount",                     cmd_sd_umount, 1, 0),
 	CLI_SUBCMD_SET_END);
 
-CLI_CMD_REGISTER(sd, sd_subcmds,
-                 "microSD card (SDMMC1, FileX FAT)", NULL, 1, 0);
+CLI_CMD_REGISTER(sd, sd_subcmds, "microSD card + FAT filesystem", NULL, 1, 0);

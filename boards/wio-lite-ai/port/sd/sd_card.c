@@ -491,13 +491,16 @@ int sd_card_status(void)
 	return SD_ERR_TIMEOUT;
 }
 
-/* The four calls the `sd` command makes, under the fixed name the shared
- * contract declares (svc/fs/sd_card_svc.h, issue #232). */
+/* The six calls the `sd` command, the FileX media driver and the mount glue
+ * make, under the fixed name the shared contract declares
+ * (svc/fs/sd_card_svc.h, issues #232 and #233). */
 const struct sd_card_ops sd_card_board_ops = {
-	.probe       = sd_card_probe,
-	.status      = sd_card_status,
-	.info        = sd_card_get_info,
-	.read_blocks = sd_card_read_blocks,
+	.probe        = sd_card_probe,
+	.status       = sd_card_status,
+	.info         = sd_card_get_info,
+	.read_blocks  = sd_card_read_blocks,
+	.write_blocks = sd_card_write_blocks,
+	.release      = sd_card_deinit,
 };
 
 int sd_card_init(void)

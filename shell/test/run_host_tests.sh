@@ -309,14 +309,15 @@ done
 # REAL dispatcher, over stand-ins of the board's mount glue, its FileX media
 # driver, fx_media_format() (fx_shim/), the filesystem bodies and the card
 # driver table, which record every call in order and whether an ownership slot
-# was held at it.  Once per shape of the table: FULL, and each of its four
-# fields left empty (NOPROBE, NOSTATUS, NOINFO, NOREAD).  Nothing typed at a
+# was held at it.  Once per shape of the table: FULL, and each of its six
+# fields left empty (NOPROBE, NOSTATUS, NOINFO, NOREAD, NOWRITE, NORELEASE;
+# the last two from issue #233).  Nothing typed at a
 # console shows the order: `sd format` remounts and reads the FAT32 answer
 # before it gives the slot back (the stand-in that gives it back marks the
 # media "not FAT32"), every exit gives it back once and leaves format mode
 # off, `info` / `read` touch the card only under the slot, and an empty field
 # refuses before any slot or card call.
-for shape in FULL NOPROBE NOSTATUS NOINFO NOREAD; do
+for shape in FULL NOPROBE NOSTATUS NOINFO NOREAD NOWRITE NORELEASE; do
     gcc $CFLAGS -DCLI_USE_COLOR=0 -DSD_TEST_SHAPE_$shape \
         $glue_inc -I "$here/shim" -I "$here/fx_shim" \
         -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" -I "$svc/fs" \

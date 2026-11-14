@@ -12,7 +12,8 @@
  *
  * Built once per shape of the card driver table:
  *   FULL      every field set (what f746g-disco and wio-lite-ai define)
- *   NOPROBE / NOSTATUS / NOINFO / NOREAD   that one field left NULL
+ *   NOPROBE / NOSTATUS / NOINFO / NOREAD / NOWRITE / NORELEASE
+ *             that one field left NULL
  *
  * Pinned (nothing typed at a console shows the order of these):
  *   - `sd format`: without `yes`, or with the exclusive slot refused, nothing
@@ -47,7 +48,8 @@
 
 #if !defined(SD_TEST_SHAPE_FULL) && !defined(SD_TEST_SHAPE_NOPROBE) && \
     !defined(SD_TEST_SHAPE_NOSTATUS) && !defined(SD_TEST_SHAPE_NOINFO) && \
-    !defined(SD_TEST_SHAPE_NOREAD)
+    !defined(SD_TEST_SHAPE_NOREAD) && !defined(SD_TEST_SHAPE_NOWRITE) && \
+    !defined(SD_TEST_SHAPE_NORELEASE)
 #error "define one SD_TEST_SHAPE_*"
 #endif
 
@@ -296,6 +298,25 @@ __attribute__((unused)) static int t_read_blocks(uint32_t lba, void *buf, uint32
 	return t_read_rc;
 }
 
+/* The command itself never writes nor releases the card (the FileX media
+ * driver and the mount glue do, and they are stand-ins here): these record a
+ * call so a test would see one. */
+__attribute__((unused)) static int t_write_blocks(uint32_t lba, const void *buf,
+                                                  uint32_t count_)
+{
+	(void)lba;
+	(void)buf;
+	(void)count_;
+	rec("write_blk");
+	return SD_OK;
+}
+
+__attribute__((unused)) static int t_release(void)
+{
+	rec("release");
+	return SD_OK;
+}
+
 #if defined(SD_TEST_SHAPE_NOPROBE)
 #define T_PROBE NULL
 #else
@@ -316,10 +337,20 @@ __attribute__((unused)) static int t_read_blocks(uint32_t lba, void *buf, uint32
 #else
 #define T_READ t_read_blocks
 #endif
+#if defined(SD_TEST_SHAPE_NOWRITE)
+#define T_WRITE NULL
+#else
+#define T_WRITE t_write_blocks
+#endif
+#if defined(SD_TEST_SHAPE_NORELEASE)
+#define T_RELEASE NULL
+#else
+#define T_RELEASE t_release
+#endif
 
 const struct sd_card_ops sd_card_board_ops = {
 	.probe = T_PROBE, .status = T_STATUS, .info = T_INFO,
-	.read_blocks = T_READ,
+	.read_blocks = T_READ, .write_blocks = T_WRITE, .release = T_RELEASE,
 };
 
 /* ---- harness --------------------------------------------------------------- */
@@ -395,7 +426,8 @@ static int touched_nothing(void)
 	return at("excl_begin") < 0 && at("raw_begin") < 0 && at("unmount") < 0 &&
 	       at("probe") < 0 && at("status") < 0 && at("info") < 0 &&
 	       at("read_blk") < 0 && at("format") < 0 && at("fmode") < 0 &&
-	       at("mount_excl") < 0 && at("acquire") < 0;
+	       at("mount_excl") < 0 && at("acquire") < 0 &&
+	       at("write_blk") < 0 && at("release") < 0;
 }
 
 /* ---- the full table -------------------------------------------------------- */
@@ -699,8 +731,12 @@ int main(void)
 	       "NOSTATUS"
 #elif defined(SD_TEST_SHAPE_NOINFO)
 	       "NOINFO"
-#else
+#elif defined(SD_TEST_SHAPE_NOREAD)
 	       "NOREAD"
+#elif defined(SD_TEST_SHAPE_NOWRITE)
+	       "NOWRITE"
+#else
+	       "NORELEASE"
 #endif
 	);
 	t_empty_field();

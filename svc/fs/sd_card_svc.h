@@ -9,16 +9,17 @@
  *
  * Each board with a microSD slot has its own block driver over its own SDMMC
  * controller (f746g-disco and wio-lite-ai port/sd/sd_card.c).  What the `sd`
- * command needs from that driver is the four calls in struct sd_card_ops, and
- * the values below that both drivers already answered in: the result codes,
- * the block size and the identity of the probed card.
+ * command, the FileX media driver and the mount glue need from that driver is
+ * the six calls in struct sd_card_ops, and the values below that both drivers
+ * already answered in: the result codes, the block size and the identity of
+ * the probed card.
  *
  * [!] THE BOARD DEFINES sd_card_board_ops UNDER THAT FIXED NAME, in its
  * port/sd/sd_card.c, as a const pointing at its driver's functions.  There is
  * no default definition: a board that compiles the command without defining it
- * fails to link.  The board's own glue (the FileX driver, the mount glue, the
- * start-up code) keeps calling its driver by name through its port/sd/sd_card.h,
- * which includes this file.
+ * fails to link.  The FileX media driver and the mount glue (still each
+ * board's port/filex/) reach the card through this table too (issue #233);
+ * only the start-up code calls the driver by name (its init).
  *
  * Thread context only, like the drivers behind it.  Freestanding: no HAL, no
  * board header, no tx_api.h, no FileX.
@@ -71,9 +72,17 @@ struct sd_card_ops {
 	/** Read @p count 512 B blocks from LBA @p lba into @p buf (any
 	 *  alignment).  The command reads one block at a time. */
 	int (*read_blocks)(uint32_t lba, void *buf, uint32_t count);
+	/** Write @p count 512 B blocks from @p buf (any alignment) to LBA
+	 *  @p lba; returns once the card has committed them.  Destructive:
+	 *  reached only through the FileX media driver. */
+	int (*write_blocks)(uint32_t lba, const void *buf, uint32_t count);
+	/** Drop the probed card back to RESET so the next probe identifies
+	 *  it from scratch (the mount glue's eviction).  Idempotent. */
+	int (*release)(void);
 };
 
-/** Defined by the board (port/sd/sd_card.c), read by the `sd` command. */
+/** Defined by the board (port/sd/sd_card.c), read by the `sd` command, the
+ *  FileX media driver and the mount glue. */
 extern const struct sd_card_ops sd_card_board_ops;
 
 #ifdef __cplusplus

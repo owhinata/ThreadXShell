@@ -72,7 +72,8 @@ static int sd_refuse_if_unwired(struct cli_instance *sh)
 	const struct sd_card_ops *ops = &sd_card_board_ops;
 
 	if (ops->probe != NULL && ops->status != NULL && ops->info != NULL &&
-	    ops->read_blocks != NULL)
+	    ops->read_blocks != NULL && ops->write_blocks != NULL &&
+	    ops->release != NULL)
 		return 0;
 	cli_error(sh, "sd: refused -- this firmware's card driver table "
 	              "(sd_card_board_ops) has an empty field\r\n");

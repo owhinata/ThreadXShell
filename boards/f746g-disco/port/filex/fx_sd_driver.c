@@ -16,7 +16,7 @@
  * were used as a reference only (no code reused).
  */
 #include "fx_sd_driver.h"
-#include "sd_card.h"
+#include "sd_card_svc.h"   /* the card, through sd_card_board_ops */
 
 #include <stdint.h>
 
@@ -89,7 +89,7 @@ static int bpb_sane(const uint8_t *b)
  */
 static int detect_partition(void)
 {
-	const struct sd_card_info *ci = sd_card_get_info();
+	const struct sd_card_info *ci = sd_card_board_ops.info();
 	uint32_t block_count = ci->block_count;
 	const uint8_t *b = mbr_buf;
 
@@ -98,7 +98,7 @@ static int detect_partition(void)
 
 	if (block_count == 0u)
 		return -1;
-	if (sd_card_read_blocks(0, mbr_buf, 1) != SD_OK)
+	if (sd_card_board_ops.read_blocks(0, mbr_buf, 1) != SD_OK)
 		return -1;
 	if (b[510] != 0x55u || b[511] != 0xAAu)
 		return -1;
@@ -159,13 +159,13 @@ VOID fx_sd_driver(FX_MEDIA *media_ptr)
 	case FX_DRIVER_INIT:
 		/* SD has an internal FTL: no RELEASE_SECTORS forwarding needed. */
 		media_ptr->fx_media_driver_free_sector_update = FX_FALSE;
-		if (sd_card_probe() != SD_OK)
+		if (sd_card_board_ops.probe() != SD_OK)
 			return;
 		if (sd_format_mode) {
 			/* Formatting: write the whole card as a superfloppy (a blank
 			 * card has no VBR/MBR yet, so detection would fail). */
 			sd_part_lba = 0;
-			sd_part_blocks = sd_card_get_info()->block_count;
+			sd_part_blocks = sd_card_board_ops.info()->block_count;
 			if (sd_part_blocks == 0u)
 				return;
 		} else if (detect_partition() != 0) {
@@ -183,7 +183,7 @@ VOID fx_sd_driver(FX_MEDIA *media_ptr)
 	case FX_DRIVER_BOOT_READ:
 		if (!bounds_ok(0, 1))
 			return;
-		if (sd_card_read_blocks(sd_part_lba, buffer, 1) != SD_OK)
+		if (sd_card_board_ops.read_blocks(sd_part_lba, buffer, 1) != SD_OK)
 			return;
 		/* FileX leaves the boot-signature check to the driver. */
 		if (buffer[510] != 0x55u || buffer[511] != 0xAAu) {
@@ -196,7 +196,8 @@ VOID fx_sd_driver(FX_MEDIA *media_ptr)
 	case FX_DRIVER_READ:
 		if (!bounds_ok(sector, count))
 			return;
-		if (sd_card_read_blocks(sd_part_lba + sector, buffer, count) != SD_OK)
+		if (sd_card_board_ops.read_blocks(sd_part_lba + sector, buffer,
+		                                  count) != SD_OK)
 			return;
 		media_ptr->fx_media_driver_status = FX_SUCCESS;
 		break;
@@ -204,7 +205,8 @@ VOID fx_sd_driver(FX_MEDIA *media_ptr)
 	case FX_DRIVER_WRITE:
 		if (!bounds_ok(sector, count))
 			return;
-		if (sd_card_write_blocks(sd_part_lba + sector, buffer, count) != SD_OK)
+		if (sd_card_board_ops.write_blocks(sd_part_lba + sector, buffer,
+		                                   count) != SD_OK)
 			return;
 		media_ptr->fx_media_driver_status = FX_SUCCESS;
 		break;
@@ -214,7 +216,7 @@ VOID fx_sd_driver(FX_MEDIA *media_ptr)
 			return;
 		if (!bounds_ok(0, 1))
 			return;
-		if (sd_card_write_blocks(sd_part_lba, buffer, 1) != SD_OK)
+		if (sd_card_board_ops.write_blocks(sd_part_lba, buffer, 1) != SD_OK)
 			return;
 		media_ptr->fx_media_driver_status = FX_SUCCESS;
 		break;

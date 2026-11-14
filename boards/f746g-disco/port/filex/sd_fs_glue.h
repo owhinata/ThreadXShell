@@ -24,7 +24,7 @@
  * same guards by shell/cmds/fs_cmd_core.h (the same shape as wio-lite-ai's).
  */
 #ifndef FS_ERR_BUSY
-#define FS_ERR_BUSY 0xF0u      /* another owner (umount / raw) holds it */
+#define FS_ERR_BUSY 0xF0u      /* another owner (umount / format / raw) holds it */
 #endif
 #ifndef FS_ERR_NO_CARD
 #define FS_ERR_NO_CARD 0xF1u   /* the slot is empty                     */

@@ -20,10 +20,12 @@ The files are grouped by the feature they serve (issue #153):
 | `svc/blob/` | The asset store's board-independent parts (issue #192): the header format and a transfer's decisions (`blob_state`), the slot table's rules and lookups (`blob_map`), the `blob write` coordinator (`blob_write`), and since issue #194 the one set of store results (`blob_err.h`) and the store contract of the shared `blob` command (`blob_svc.h`); see [The asset store's shared parts](#the-asset-stores-shared-parts-issue-192). No file here is named `blob.h` (every board has a `src/blob.h` of its own). |
 | `svc/net/` | The contract of the shared `net` command, `net_svc.h` (issue #219; f746g-disco and wio-lite-ai, grove-vision-ai-v2 has no network). A header only: the command is `shell/cmds/cmd_net.c`, the one implementation under it is `shell/cmds/net_core.c` (issue #220) and the one telnet console is `shell/cmds/net_tty.c` (issue #221) -- both need NetX and ThreadX, so they cannot live here -- and each board's adapter is the board's; see [The `net` command and the telnet console are one implementation](#the-net-command-and-the-telnet-console-are-one-implementation-issue-212). |
 | `svc/kv/` | The persistent configuration store (issue #214; f746g-disco and wio-lite-ai, grove-vision-ai-v2 has none): the one implementation over FlashDB (`kv.c`, `kv.h`), its record format and key checks (`kv_record`), what the board gives it (`kv_board.h`) and FlashDB's one build configuration (`fdb_cfg.h`). The `kv` command and the boot-time steps are `shell/cmds/cmd_kv.c` and `shell/cmds/kv_cfg.c`; see [The key-value store](#the-key-value-store-and-the-kv-command-are-one-implementation-issue-214). |
+| `svc/fs/` | The contract of a board's microSD card driver, `sd_card_svc.h` (issue #232; f746g-disco and wio-lite-ai, grove-vision-ai-v2 has no slot): the block size, the result codes, the probed card's identity and the table of four calls the board defines under a fixed name. A header only: the `sd` command is `shell/cmds/cmd_sd.c`, and the FileX glue it calls is still each board's (declared in `shell/cmds/sd_cmd_board.h`, because FileX's header includes `tx_api.h`); see [The `sd` command is shared](#the-sd-command-is-shared-issue-232). |
 
 `svc/` itself and `nn/`, `plugin/`, `camera/` and `blob/` are on the firmware's
-include path on every board, and `net/` and `kv/` on f746g-disco's and
-wio-lite-ai's (grove-vision-ai-v2 has neither feature), so a source names a
+include path on every board, `net/` and `kv/` on f746g-disco's and
+wio-lite-ai's (grove-vision-ai-v2 has neither feature), and `fs/` on
+f746g-disco's and, only in a build with `BSP_ENABLE_SD`, wio-lite-ai's, so a source names a
 header by its file name alone (`#include "nn_core.h"`). The storage audit
 covers every source a board's build compiles under `svc/` (see
 `cmake/README.md`).
@@ -1732,6 +1734,64 @@ dispatcher, the secret-key table included) and `test_kv_cfg` (the boot steps,
 once with each default: the port handed over exactly once on every path and
 every reported line word for word).  f746g-disco's own side is
 `boards/f746g-disco/test/test_kv_qspi.c` (that board's README).
+
+## The `sd` command is shared (issue #232)
+
+f746g-disco and wio-lite-ai each have a microSD slot with a FAT filesystem on
+FileX; grove-vision-ai-v2 has none.  Until issue #232 each board had its own
+`cmds/cmd_sd.c`.  Since then the command is one file, `shell/cmds/cmd_sd.c`,
+with the first line `optional BOARD_HAS_SD` (f746g-disco ON, wio-lite-ai from
+`BSP_ENABLE_SD`, grove-vision-ai-v2 OFF).  It prints the same lines on both
+boards, worded as wio-lite-ai's were.  `sd info` has no clock line (the
+driver's start-up log still carries it on wio-lite-ai), and there is no exFAT
+(owhinata/stm32f746g-disco#35): `sd format yes` writes FAT32 and nothing else.
+
+| File | What it holds |
+|---|---|
+| `shell/cmds/cmd_sd.c` | The command: `info`, `read <lba>`, `format yes`, and the filesystem subcommands `ls cat write rm mkdir df umount`, which are the shared bodies in `shell/cmds/fs_cmd_core.c` bound to the `sd` medium.  Also `fs_sd_device()`, the medium `camera save` writes through. |
+| `svc/fs/sd_card_svc.h` | The card driver's contract, freestanding (no HAL, no board header, no `tx_api.h`, no FileX): `SD_BLOCK_SIZE`, the `SD_*` results, `struct sd_card_info`, and `struct sd_card_ops` with its four calls (probe, status, the probed card's identity, read blocks). |
+| `shell/cmds/sd_cmd_board.h` | The rest of what the command calls, still each board's own code and called by name: the mount glue (`port/filex/sd_fs_glue.c`: the mount entry points, the ownership slots, the directory lock, the media and its cache) and the FileX media driver with its format mode (`port/filex/fx_sd_driver.c`).  Declared once, so both boards' definitions are checked against the same declarations; each board's `sd_fs_glue.h` and `fx_sd_driver.h` include it and keep only their own (the start-up call, the ownership sentinels, wio-lite-ai's last probe result). |
+| each board's `port/sd/sd_card.c` | The driver, and `const struct sd_card_ops sd_card_board_ops` pointing at it. |
+
+What the command and the contract fix, on both boards:
+
+- **The board's table has a fixed name and no default.**  A board that
+  compiles the command without defining `sd_card_board_ops` does not link.
+  A table with a field left empty is refused by `info`, `read` and `format`
+  before they take any ownership slot, unmount anything or touch the card.
+  The filesystem subcommands do not go through the table: the FileX driver
+  calls the board's card driver by name.
+- **`sd format yes` keeps the exclusive slot from start to end**: unmount,
+  probe, format (with the driver's format mode on, and off again as soon as
+  the format returns), mount again through `sd_media_mount_exclusive()`, then the FAT32
+  check, and only then the slot is given back, once.  A format that let go of
+  the slot before remounting would let another console or a background job
+  take it in between, and the format would be reported as failed although it
+  succeeded; the FAT32 answer read after letting go could describe a media
+  someone else had closed.  Until issue #232 f746g-disco's format did exactly
+  that (it remounted through the normal entry point).
+- **`sd info` and `sd read` refuse a mounted filesystem** (`run \`sd umount\`
+  first`), because they may probe the card again, which would break a mounted
+  FileX media underneath it.
+- **How a board learns that the slot is empty stays in its driver and its
+  glue** (a card-detect pin, or no card answering the probe); the command only
+  prints the answer.  That difference, and the glue and the FileX driver
+  being two copies, go with issue #233.
+- **The audit.**  `cmd_sd.c` owns no mutable storage (the medium is a const,
+  the block buffer of `sd read` is on the stack), checked per board like every
+  shared file.
+
+Host test (`shell/test/run_host_tests.sh`): `test_sd_cmd`, the real
+`cmd_sd.c` through the real dispatcher over stand-ins of the glue, the FileX
+driver, `fx_media_format()` and the card table that record every call in
+order and whether the slot was held at it, built once with the full table and
+once with each of its four fields empty.  It checks the order of `sd format`
+(the stand-in that gives the slot back marks the media "not FAT32", so a
+check made after letting go fails the test), that every exit gives the slot
+back once, and that an empty field touches nothing.  How each board's card
+and slot work is its README:
+[f746g-disco](../boards/f746g-disco/README.md#the-sd-command-shared-with-wio-lite-ai-issue-232),
+[wio-lite-ai](../boards/wio-lite-ai/README.md#commands).
 
 ## Why the lock and the threads are the board's
 

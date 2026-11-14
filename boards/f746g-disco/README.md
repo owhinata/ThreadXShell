@@ -2695,6 +2695,56 @@ build now fails instead.  The option changes `NX_TCP_SOCKET`.
 | Its stack | 2,560 B in internal SRAM, high-water **572 B** (`thread`, after the test run of issue #221) |
 | Code | text +1,184 B over `36e16cc` (the shared console against `nx_shell.c`) |
 
+### The `sd` command: shared with wio-lite-ai (issue #232)
+
+The microSD slot (SDMMC1, 4-bit at 24 MHz, DMA2 through a bounce buffer in
+SRAM1) carries one FAT filesystem on FileX.  The command is the shared
+`shell/cmds/cmd_sd.c`; what it promises on both boards, and the contract of the
+card driver under it, are in
+[`svc/README.md`](../../svc/README.md#the-sd-command-is-shared-issue-232).
+
+```
+sd info            card type, capacity, block geometry, bus width, CID/CSD
+sd read <lba>      hexdump one 512 B block
+sd format yes      format the whole card as a FAT32 superfloppy (destructive)
+sd ls [path] | cat <path> | write <path> <text> | rm <path> | mkdir <path>
+sd df              capacity / free / FAT type
+sd umount          flush and unmount
+```
+
+- The filesystem is mounted on first use.  `sd info` and `sd read` refuse
+  while it is mounted (`sd: filesystem mounted or busy; run \`sd umount\`
+  first`), because they may identify the card again.
+- `sd format yes` holds the exclusive ownership from the unmount to the FAT32
+  check after the remount, and prints `formatted and mounted (FAT32)`.  Until
+  issue #232 it let go between the format and the remount, so another console
+  or a background job could take the card in between.
+- There is no exFAT (FileX is built without it, owhinata/stm32f746g-disco#35).
+  The `exfat` argument of `sd format`, which only answered `sd: exFAT not
+  supported in this build (FAT32 only)`, went with issue #232: `sd format
+  exfat` is now asked for `sd format yes`, and `sd format exfat yes` is
+  refused by the shell as the wrong number of arguments.
+- **The card-detect pin is PC13** (pull-up, low = inserted).  An empty slot is
+  answered from the pin before any command goes to the card: `sd: no card in
+  slot` from `info`, `read` and `format`, `sd: mount failed: no card (0xf1)`
+  from the filesystem subcommands.  When the mounted card
+  is pulled, or another one is put in (the old card address no longer
+  answers), the next filesystem command drops the stale media without
+  flushing it and mounts the new card.  The pin is also checked on the remount
+  after `sd format`, so a card pulled during a format is answered the same way.
+
+| File | What it holds |
+|---|---|
+| `port/sd/sd_card.c`, `port/sd/sd_card.h` | The block driver: SDMMC1, the DMA2 streams, the SRAM1 bounce buffer and its cache maintenance, the card-detect pin; and the shared command's table `sd_card_board_ops` (since #232) |
+| `port/filex/fx_sd_driver.c` | The FileX media driver; finds the FAT volume behind an MBR, or with format mode on treats the whole card as one volume |
+| `port/filex/sd_fs_glue.c` | The mounted media, its 4 KB sector cache, the ownership slots and the hot-plug check; two mount entry points over one body since #232 (the normal one, and the one `sd format` uses while it holds the exclusive slot) |
+| `cmds/cmd_sd.c`, `cmds/fs_devices.h` | removed by #232 (the shared `shell/cmds/cmd_sd.c` and `shell/cmds/sd_cmd_board.h`) |
+
+| Measured at #232 | |
+|---|---|
+| Code | text +336 B (`null`) / +392 B (`tflm`) over `5aa5def` |
+| Shell stack, deepest `sd format` / `sd read` | 1,492 B / 1,500 B of 4,096 B, summed from the disassembly with the dispatch and an interrupt's stacked frame (`camera save`, about 3.18 KB, stays the deepest SD path) |
+
 ## Debugging
 
 SWD is available through the same ST-Link.  Use the system `gdb-multiarch` --

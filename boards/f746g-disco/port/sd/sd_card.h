@@ -74,7 +74,8 @@ int sd_card_read_blocks(uint32_t lba, void *buf, uint32_t count);
 
 /**
  * Write @p count 512 B blocks from @p buf (any alignment) to LBA @p lba.
- * Destructive; not exposed by the Phase A `sd` command (read-only).  Waits for
+ * Destructive; reached only through the FileX media driver (`sd write`, `sd
+ * format`, `camera save`), never by a raw `sd` subcommand.  Waits for
  * the card to leave PROGRAMMING before returning so the data is committed.
  */
 int sd_card_write_blocks(uint32_t lba, const void *buf, uint32_t count);

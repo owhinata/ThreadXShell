@@ -34,7 +34,7 @@ shell をボード非依存コアとして統合する当初の目標は達成�
 ## アーキテクチャ / レイヤリング
 
 一方向依存を守る: **HAL/CMSIS/ThreadX（`lib/`）← port（ボード別グルー）← shell ← app**。
-構成は `shell/` / `svc/`（freestanding サービス層: 汎用 + `nn/` `plugin/` `camera/` `blob/` `net/` `kv/`）/ `asset/`（plugin ソースと container ツール）/
+構成は `shell/` / `svc/`（freestanding サービス層: 汎用 + `nn/` `plugin/` `camera/` `blob/` `net/` `kv/` `fs/`）/ `asset/`（plugin ソースと container ツール）/
 `lib/`（upstream、read-only）/ `cmake/`（共有ビルド規則とゲート）/ `boards/<board>/`（port ldscript
 src cmds svc cmake test README。wio のみ boot も）。
 

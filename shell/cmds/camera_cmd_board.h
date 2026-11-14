@@ -14,7 +14,11 @@
  * command's file reader for its path source had until issue #196.
  *
  * [!] THE SHARED COMMAND INCLUDES THIS AND NOT A BOARD'S cmds/ HEADERS.  That
- * is why this exists: a board's fs_devices.h stays its own.  Sending over
+ * is why this exists: which media a board has, and under which names, is the
+ * board's, so the shared command asks it here rather than naming a medium's
+ * accessor itself (the microSD's, fs_sd_device(), is declared in
+ * shell/cmds/sd_cmd_board.h since issue #232; each board's cmds/fs_devices.h
+ * declared it until then).  Sending over
  * YMODEM, which claims the console the command runs on, needed a board
  * function here too until issue #231 made the wiring shared
  * (shell/cmds/xfer_console.h); the shared command calls that directly.

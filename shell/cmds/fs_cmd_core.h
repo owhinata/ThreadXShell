@@ -14,10 +14,9 @@
  * wrappers that bind it (the CLI passes only the leaf subcommand name as argv[0],
  * so the device cannot be recovered from argv).
  *
- * Today microSD (cmd_sd.c) is the only device.  The indirection is kept from the
- * f746 original it was ported from -- where the same bodies also served a
- * LevelX/QSPI NOR filesystem -- because this board has an unused 16 MB W25Q128 on
- * OCTOSPI2 that owhinata/wio-lite-ai#10 may bring back as exactly that second media.
+ * Today microSD (shell/cmds/cmd_sd.c, shared since issue #232) is the only
+ * device.  The indirection is kept from the f746 original it was ported from --
+ * where the same bodies also served a LevelX/QSPI NOR filesystem until #194.
  *
  * Thread-context only; the bodies use the cli_* output API and the device's
  * ownership gates, so they are safe from background jobs.
@@ -49,7 +48,7 @@ struct cli_instance;
 
 /**
  * Media abstraction for the shared command bodies.  One instance per command file
- * (cmd_sd.c => microSD); the callbacks forward to that media's glue.
+ * (shell/cmds/cmd_sd.c => microSD); the callbacks forward to that media's glue.
  */
 struct fs_device {
 	const char *name;        /* "sd": message prefix                           */
@@ -68,7 +67,9 @@ struct fs_device {
 const char *fs_strerror(UINT status);
 
 /** Mount-on-demand: returns the media or NULL after printing the failure + the
- *  device's mount_hint.  Exposed for device-specific handlers (the format remount). */
+ *  device's mount_hint.  Exposed for the commands that write through a medium
+ *  (`camera save`).  `sd format` does not use it: it remounts while it still
+ *  holds the exclusive slot, which this entry point would refuse. */
 FX_MEDIA *fs_core_mount(const struct fs_device *dev, struct cli_instance *sh);
 
 /* Shared command bodies; each binds a device.  Argument arity matches the
@@ -91,10 +92,12 @@ int fs_core_umount(const struct fs_device *dev, struct cli_instance *sh, int arg
 int fs_core_read_file(const struct fs_device *dev, struct cli_instance *sh,
                       const char *path, void *buf, uint32_t cap, uint32_t *out_len);
 
-/* The per-device accessors (fs_sd_device() and friends) are NOT declared here.
- * Which media a board has is the board's business (the f746 port carried a
- * QSPI NOR filesystem beside the microSD until #194), so each board declares its
- * own in boards/<board>/cmds/fs_devices.h; this header stays media-neutral. */
+/* The per-device accessors are NOT declared here, so this header stays
+ * media-neutral (the f746 port carried a QSPI NOR filesystem beside the microSD
+ * until #194).  The microSD's, fs_sd_device(), is declared with the rest of the
+ * `sd` command's board interface in shell/cmds/sd_cmd_board.h (issue #232; each
+ * board's cmds/fs_devices.h until then); which media a board offers another
+ * command is that board's (shell/cmds/camera_cmd_board.h). */
 
 #ifdef __cplusplus
 }

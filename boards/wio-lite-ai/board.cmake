@@ -695,8 +695,9 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm" AND BSP_ENABLE_SD)
         "the default existed, reconfigure with -DBSP_ENABLE_SD=OFF.")
 endif()
 
-# The block driver, the FileX media stack and the command are one unit -- cmd_sd.c
-# is the only caller of port/sd and port/filex, so they are added or omitted
+# The block driver, the FileX media stack and the command are one unit -- the
+# shared shell/cmds/cmd_sd.c (with `camera save` through it, and the start-up
+# code) is the only caller of port/sd and port/filex, so they are added or omitted
 # together.  This append must stay BELOW the option() above: SHELL_SOURCES is set
 # earlier in the file, when BSP_ENABLE_SD is still undefined, so appending there
 # silently drops the driver and the link fails on sd_card_init().

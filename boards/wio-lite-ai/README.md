@@ -241,8 +241,9 @@ it does not create firmware decoder/plugin objects. See the
 [shared storage gate contract](../../cmake/README.md) for scope, command
 replay, and negative tests (since issue #230 no file is exempt; until then
 `svc/ymodem.c` was). Since issue #206 the scope
-is every `shell/cmds/` file as well; `fs_cmd_core.c` follows `BOARD_HAS_FILEX`,
-which this board sets from `BSP_ENABLE_SD` (OFF: compiled by nothing).
+is every `shell/cmds/` file as well; `fs_cmd_core.c` follows `BOARD_HAS_FILEX`
+and `cmd_sd.c` `BOARD_HAS_SD` (since issue #232), which this board both sets
+from `BSP_ENABLE_SD` (OFF: compiled by nothing).
 
 ## Console
 
@@ -2026,6 +2027,18 @@ Behind them: the RTL8720DN companion for WiFi and the telnet console (`wifi`,
 `blob`, `nor`), the 8 MB PSRAM (`psram`), the ST7789 panel over the LTDC's RGB
 interface (`lcd`), a DVP camera (`camera`), and the TFLM inference backend
 (`nn`).
+
+`sd` (the microSD on SDMMC1) is only in a build with `BSP_ENABLE_SD`, which in
+practice means the `null` backend: with tflm and the SD the image does not fit
+the internal Flash (21,664 B over at issue #232), and the tflm default turns
+the SD off ([Build options](#build-options)).  The command is the one shared
+with f746g-disco, `shell/cmds/cmd_sd.c` since issue #232 (described in
+[`svc/README.md`](../../svc/README.md#the-sd-command-is-shared-issue-232));
+this board keeps the card driver (`port/sd/sd_card.c`, which defines the
+command's table `sd_card_board_ops`), the FileX driver and the mount glue
+(`port/filex/`), and an empty slot is learnt from the probe, there being no
+card-detect pin.  [!] Issue #234 removes the microSD from this board, `sd`
+with it.
 
 This board runs two shell instances -- `wio>` on the USB CDC and `wio-net>` on
 telnet -- each with its own line editor, history and RX/TX drop counters.

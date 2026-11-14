@@ -17,8 +17,7 @@
  */
 #include "sd_fs_glue.h"     /* incl. the FS_ERR_* ownership sentinels */
 #include "fx_sd_driver.h"
-#include "sd_card.h"        /* probed; status/release go through
-                               sd_card_board_ops */
+#include "sd_card_svc.h"    /* status/release, through sd_card_board_ops */
 
 #include "tx_api.h"
 
@@ -169,14 +168,14 @@ UINT sd_media_acquire(FX_MEDIA **out)
 	}
 
 	/* Hot-plug: if the mounted card was removed or swapped (the old RCA no longer
-	 * answers CMD13), the open FX_MEDIA is now stale.  Evict it WITHOUT flushing --
-	 * the card may be gone, so abort, not close.  Eviction is only safe when no
-	 * other op is using the media (sd_active_ops counts this caller's own
-	 * op_begin); if another op is in flight, refuse rather than hand back the stale
-	 * media (that op fails with an I/O error and the next solo command evicts). */
-	if (sd_mounted &&
-	    (!sd_card_is_probed() ||
-	     sd_card_board_ops.status() != SD_OK)) {
+	 * answers CMD13), the open FX_MEDIA is now stale.  The status query alone
+	 * tells: it answers "not probed" for a card the driver has already given up
+	 * on, and probes nothing.  Evict it WITHOUT flushing -- the card may be gone,
+	 * so abort, not close.  Eviction is only safe when no other op is using the
+	 * media (sd_active_ops counts this caller's own op_begin); if another op is in
+	 * flight, refuse rather than hand back the stale media (that op fails with an
+	 * I/O error and the next solo command evicts). */
+	if (sd_mounted && sd_card_board_ops.status() != SD_OK) {
 		if (sd_active_ops > 1) {
 			tx_mutex_put(&sd_mount_lock);
 			return FS_ERR_BUSY;
@@ -190,9 +189,10 @@ UINT sd_media_acquire(FX_MEDIA **out)
 	/*
 	 * NO "is a card present?" pre-check here, deliberately.
 	 *
-	 * The f746 original tested its card-detect GPIO at this point and returned
-	 * FS_ERR_NO_CARD early.  This board has no such pin (see sd_card.h), so the
-	 * nearest equivalent -- sd_card_is_probed() -- is a *cached* predicate that is
+	 * The f746 glue tested its card-detect GPIO at this point and returned
+	 * FS_ERR_NO_CARD early, until issue #233 gave it this board's shape.  This
+	 * board has no such pin (see sd_card.h), so the nearest equivalent --
+	 * sd_card_is_probed() -- is a *cached* predicate that is
 	 * false until something has already talked to the card.  Gating on it here
 	 * would be a deadlock by construction: the probe happens inside FX_DRIVER_INIT,
 	 * which is reached only by the fx_media_open() below, which the gate would have

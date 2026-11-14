@@ -37,6 +37,14 @@ static volatile int sd_format_mode;
  * bounces through its own aligned DMA buffer, so any alignment is fine. */
 static uint8_t mbr_buf[SD_BLOCK_SIZE];
 
+/* Result of the probe done by the last FX_DRIVER_INIT; see fx_sd_driver.h. */
+static int last_probe_rc;
+
+int fx_sd_last_probe_rc(void)
+{
+	return last_probe_rc;
+}
+
 void fx_sd_set_format_mode(int on)
 {
 	sd_format_mode = on;
@@ -159,7 +167,11 @@ VOID fx_sd_driver(FX_MEDIA *media_ptr)
 	case FX_DRIVER_INIT:
 		/* SD has an internal FTL: no RELEASE_SECTORS forwarding needed. */
 		media_ptr->fx_media_driver_free_sector_update = FX_FALSE;
-		if (sd_card_board_ops.probe() != SD_OK)
+		/* Overwritten unconditionally, before any early return: a stale
+		 * SD_ERR_NO_CARD from an earlier mount attempt must never survive to
+		 * make the glue misreport a later non-FAT card as an empty slot. */
+		last_probe_rc = sd_card_board_ops.probe();
+		if (last_probe_rc != SD_OK)
 			return;
 		if (sd_format_mode) {
 			/* Formatting: write the whole card as a superfloppy (a blank

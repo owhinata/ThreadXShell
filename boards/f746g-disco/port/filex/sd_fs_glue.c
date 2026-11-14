@@ -19,8 +19,7 @@
  */
 #include "sd_fs_glue.h"     /* incl. the FS_ERR_* ownership sentinels */
 #include "fx_sd_driver.h"
-#include "sd_card.h"        /* the card-detect pin; status/release go
-                               through sd_card_board_ops */
+#include "sd_card_svc.h"    /* status/release, through sd_card_board_ops */
 
 #include "tx_api.h"
 
@@ -137,34 +136,37 @@ void sd_dir_unlock(void)
 }
 
 /*
- * Shared mount body; the caller holds sd_mount_lock.  The card-detect pin is
- * tested here so both entry points below answer an empty slot the same way
- * (FS_ERR_NO_CARD) -- including a card pulled between `sd format` and its
- * remount.
+ * Shared mount body; the caller holds sd_mount_lock.  Nothing is checked before
+ * the mount: the card driver's probe, run by FX_DRIVER_INIT inside
+ * fx_media_open(), reads the card-detect pin first and answers an empty slot
+ * without touching the card.  fx_media_open() reports any INIT failure as a
+ * flat FX_IO_ERROR, so the empty slot is recovered afterwards from the FileX
+ * driver's recorded probe result -- for both entry points below, including a
+ * card pulled between `sd format` and its remount (issue #233).
  */
 static UINT mount_locked(void)
 {
 	UINT status;
 
-	if (!sd_card_is_present())
-		return FS_ERR_NO_CARD;
-
 	if (sd_mounted)
 		return FX_SUCCESS;
 
 	status = fx_media_open(&sd_media, "sd", fx_sd_driver,
-	                       FX_NULL, sd_media_cache,
-	                       sizeof sd_media_cache);
+	                       FX_NULL, sd_media_cache, sizeof sd_media_cache);
 	if (status == FX_SUCCESS) {
 		sd_mounted = 1;
 		LOG_INF("media mounted");
+	} else if (fx_sd_last_probe_rc() == SD_ERR_NO_CARD) {
+		/* Empty slot, not a broken filesystem: report it as such so the shell
+		 * prints "no card" instead of a mount hint about FAT. */
+		status = FS_ERR_NO_CARD;
 	}
 	return status;
 }
 
 UINT sd_media_acquire(FX_MEDIA **out)
 {
-	UINT status;
+	UINT status = FX_SUCCESS;
 
 	tx_mutex_get(&sd_mount_lock, TX_WAIT_FOREVER);
 
@@ -174,16 +176,16 @@ UINT sd_media_acquire(FX_MEDIA **out)
 		return FS_ERR_BUSY;
 	}
 
-	/* Hot-plug: if the mounted card was removed (present pin) or swapped (the
-	 * old RCA no longer answers CMD13), the open FX_MEDIA is now stale.  Evict it
-	 * WITHOUT flushing -- the card may be gone, so abort (not close).  Eviction is
-	 * only safe when no other op is using the media (active_ops counts this
-	 * caller's op_begin); if another op is in flight, refuse rather than hand back
-	 * the stale media (that op will fail with an I/O error and the next solo
-	 * command evicts). */
-	if (sd_mounted &&
-	    (!sd_card_is_present() ||
-	     sd_card_board_ops.status() != SD_OK)) {
+	/* Hot-plug: if the mounted card was removed or swapped, the open FX_MEDIA is
+	 * now stale.  The status query alone tells: the card driver answers "not
+	 * probed" or, with the card-detect pin empty, "no card" before it sends
+	 * anything, and a swapped card no longer answers CMD13 at the old RCA.
+	 * Evict it WITHOUT flushing -- the card may be gone, so abort (not close).
+	 * Eviction is only safe when no other op is using the media (active_ops
+	 * counts this caller's op_begin); if another op is in flight, refuse rather
+	 * than hand back the stale media (that op will fail with an I/O error and the
+	 * next solo command evicts). */
+	if (sd_mounted && sd_card_board_ops.status() != SD_OK) {
 		if (sd_active_ops > 1) {
 			tx_mutex_put(&sd_mount_lock);
 			return FS_ERR_BUSY;

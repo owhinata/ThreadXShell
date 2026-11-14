@@ -23,4 +23,24 @@
  * for every board in shell/cmds/sd_cmd_board.h (issue #232). */
 #include "sd_cmd_board.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * The SD_* result of the probe run by the most recent FX_DRIVER_INIT.
+ *
+ * fx_media_open() reports every driver INIT failure as a flat FX_IO_ERROR, which
+ * would make "no card in the slot" indistinguishable from "card present but not
+ * FAT".  The mount glue reads this afterwards to tell the two apart and report
+ * FS_ERR_NO_CARD for the former (issue #233; until then this board looked at its
+ * card-detect pin before mounting).  Overwritten at the top of every INIT, so a
+ * stale SD_ERR_NO_CARD can never leak into a later, unrelated failure.
+ */
+int fx_sd_last_probe_rc(void);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* FX_SD_DRIVER_H */

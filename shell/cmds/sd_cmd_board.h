@@ -14,8 +14,8 @@
  * wio-lite-ai), called by these names; they are declared here, once, so both
  * boards' definitions are checked against the same declarations.  A board's
  * port/filex/sd_fs_glue.h and fx_sd_driver.h include this and keep only what
- * is the board's own (its start-up call, its ownership sentinels, and on
- * wio-lite-ai the result of the last probe).
+ * is the board's own (its start-up call, its ownership sentinels and the
+ * result of the last probe).
  *
  * [!] THE `sd` COMMAND INCLUDES THIS AND NOT A BOARD'S HEADERS
  * (shell/cmds/camera_cmd_board.h says why).  FileX types appear here, so this

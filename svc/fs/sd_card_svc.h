@@ -8,11 +8,12 @@
  *          sees it (issue #232).
  *
  * Each board with a microSD slot has its own block driver over its own SDMMC
- * controller (f746g-disco and wio-lite-ai port/sd/sd_card.c).  What the `sd`
- * command, the FileX media driver and the mount glue need from that driver is
- * the six calls in struct sd_card_ops, and the values below that both drivers
- * already answered in: the result codes, the block size and the identity of
- * the probed card.
+ * controller (f746g-disco's port/sd/sd_card.c; wio-lite-ai had one too until
+ * issue #234).  What the `sd` command, the FileX media driver and the mount
+ * glue need from that driver is the six calls in struct sd_card_ops, and the
+ * values below that both boards' drivers already answered in when the contract
+ * was written: the result codes, the block size and the identity of the
+ * probed card.
  *
  * [!] THE BOARD DEFINES sd_card_board_ops UNDER THAT FIXED NAME, in its
  * port/sd/sd_card.c, as a const pointing at its driver's functions.  There is

@@ -129,8 +129,8 @@ bytes are never touched here**, so both numbers are fixed.
 
 ### [!] DMA cannot see the TCMs, and it fails silently
 
-DMA1, DMA2 and the SDMMC1 IDMA cannot reach ITCM or DTCM (RM0468 2.1.2 / 2.1.5
-/ 2.1.6).  A DMA buffer placed in DTCM does not fault -- the transfer simply
+DMA1 and DMA2 (the camera's DCMI runs on DMA2) cannot reach ITCM or DTCM
+(RM0468 2.1.2 / 2.1.5 / 2.1.6).  A DMA buffer placed in DTCM does not fault -- the transfer simply
 does not happen, and the buffer keeps whatever was in it.  That is the whole
 reason the placement policy exists:
 
@@ -242,8 +242,10 @@ it does not create firmware decoder/plugin objects. See the
 replay, and negative tests (since issue #230 no file is exempt; until then
 `svc/ymodem.c` was). Since issue #206 the scope
 is every `shell/cmds/` file as well; `fs_cmd_core.c` follows `BOARD_HAS_FILEX`
-and `cmd_sd.c` `BOARD_HAS_SD` (since issue #232), which this board both sets
-from `BSP_ENABLE_SD` (OFF: compiled by nothing).
+and `cmd_sd.c`, `sd_fs_glue.c` and `fx_sd_driver.c` `BOARD_HAS_SD` (issues
+#232 and #233).  This board sets both OFF since issue #234 removed its microSD
+(until then they followed `BSP_ENABLE_SD`), so those files are compiled by
+nothing here.
 
 ## Console
 
@@ -291,7 +293,6 @@ Negative tests for the gate live in `cmake/fixtures/run_fixture_tests.py`.
 | `BSP_ENABLE_WFI` | ON | ThreadX idle WFI |
 | `BSP_ENABLE_IWDG` | ON | watchdog + `wdt` |
 | `BSP_ENABLE_PSRAM` | ON | OCTOSPI1 APS6408 window + `psram` |
-| `BSP_ENABLE_SD` | **OFF under tflm**, else ON | SDMMC1 + `sd` |
 | `BSP_ENABLE_LCD` | ON | FPC-40 RGB panel on the LTDC + `lcd` |
 | `BSP_ENABLE_KV` | ON | external NOR on OCTOSPI2 + the config KV store |
 | `CONFIG_MLPERF_TINY` | OFF | MLPerf Tiny v1.4 harness + `mlperf` |
@@ -299,7 +300,9 @@ Negative tests for the gate live in `cmake/fixtures/run_fixture_tests.py`.
 The FPC-24 DVP camera (DCMI + `camera`) is not optional on this board: the `nn`
 adapter is built on it (the live `nn stream` path, the producer and worker threads,
 the band sink), so the former `BSP_ENABLE_CAMERA` option was removed (issue #147)
-and `-DBSP_ENABLE_CAMERA=OFF` now stops the configure.
+and `-DBSP_ENABLE_CAMERA=OFF` now stops the configure.  The former
+`BSP_ENABLE_SD` went with the microSD in issue #234
+([Commands](#commands-1)).
 
 ### Why tflm is the default here and nowhere else (issue #98)
 
@@ -310,7 +313,8 @@ f746g-disco's tflm bakes a `.tflite` in and this repo ships none -- defaulting i
 would make a clean tree fail to configure -- so that board stays `null`.
 
 [!] **It costs most of what is left of the 384 KB app partition**, and the microSD
-is what pays for it.  Measured:
+was what paid for it: until issue #234 removed the microSD from this board, the
+tflm default turned it off.  Measured then:
 
 | build | app partition | free |
 |---|---|---|
@@ -320,20 +324,16 @@ is what pays for it.  Measured:
 | **`tflm`, SD dropped (the default)**, at #108 | **358,664 B, 91.2%** | **34,552 B** |
 | `tflm` + SD, at #108 | 393,124 B, 99.98% | **92 B** |
 
-The `tflm` + SD row links and leaves no room to add anything, which is why the
-tflm default also turns `BSP_ENABLE_SD` off.  `-DBSP_ENABLE_SD=ON` brings it
-back, but wanting the SD back is a reason to audit the space first, not to pass
-a flag -- and since #108 the plugin loader of #78 Step 3b will not fit beside
-it at all.
+The `tflm` + SD row linked but left no room to add anything, which is why the
+tflm default turned the SD off, and since #108 the plugin loader of #78 Step 3b
+would not have fitted beside it at all.
 
 [!] The switch only affects NEW build directories.  `CONFIG_NN_BACKEND` is a cache
 variable, so a tree already configured as `null` stays `null` until it is
-reconfigured -- which is also why the SD default, keyed on `NOT DEFINED
-BSP_ENABLE_SD`, does not fire in one of those.  **This bit issue #108**: its
-development tree had been configured with SD on, and the plugin work measured as
-overflowing the partition when the default configuration had 34 KB free.  Since
-then a tflm tree with SD on prints a configure WARNING saying so; reconfigure
-with `-DBSP_ENABLE_SD=OFF`.
+reconfigured.  **This bit issue #108**: its development tree had been configured
+with the SD on (the SD default did not fire in an existing tree either), and the
+plugin work measured as overflowing the partition when the default
+configuration had 34 KB free.
 
 [!] **The tflm build has not been run on hardware.**  It builds and passes every
 gate in both configurations, and `check_cxx_runtime.py` -- which only runs for
@@ -428,13 +428,12 @@ contract in `svc/camera/camera_svc.h` (the layers are in
 [svc/README.md](../../svc/README.md#the-camera-command-is-shared-issue-143)).
 `camera scan` and `camera reg` stay in `cmds/cmd_camera_board.c`, appended to
 the shared table.  Capabilities (`svc/camera_svc_config.h`): power, info, test
-pattern, send; save only with `BSP_ENABLE_SD` (the default tflm build has no
-SD, so no `camera save`); `CAMERA_SVC_OFF_STOPS_STREAM 1`.
+pattern, send; no save (`camera save` went with the microSD in issue #234);
+`CAMERA_SVC_OFF_STOPS_STREAM 1`.
 
 ```
 camera probe | on | off | info
 camera capture [test]           snapshot one frame + channel statistics
-camera save [sd] <path>         (BSP_ENABLE_SD builds) the LAST capture, raw
 camera send [name]              the LAST capture over YMODEM (`rb -y` on the PC)
 camera stream start [test] | stop | stats
 camera scan | reg <addr> <reg> [value] [-16]   (this board's own)
@@ -456,15 +455,15 @@ camera scan | reg <addr> <reg> [value] [-16]   (this board's own)
   record (`cam_last_report`, in DTCM: CPU-only data) with the frame generation
   and the thread that captured it, and the report prints them only for that
   thread and that frame.
-- **`save` / `send` read the last capture** (the band stream fills no frame).  A
+- **`send` reads the last capture** (the band stream fills no frame).  A
   read that finds the frame replaced fails the transfer with `ymodem: source
   read error` and then `camera: frame changed by a concurrent capture`.
 - **`psram test` and the `wifi flash` image staging drop the last capture**
   (issue #150): the frame lives in the PSRAM they overwrite, so under their
-  OCTOSPI1 reconfigurer mark -- which already keeps capture, save and send out
+  OCTOSPI1 reconfigurer mark -- which already keeps capture and send out
   for the whole run -- they call `camera_frame_invalidate()` before the first
-  write (the staging does it in `rtl8720_img.c`'s YMODEM begin), and `save` /
-  `send` then answer no frame until the next capture.
+  write (the staging does it in `rtl8720_img.c`'s YMODEM begin), and `send`
+  then answers no frame until the next capture.
 - **Lines read `label    : value`** (the label padded to 8 and ` : `), the same
   form on all three boards.
 - Console stack high water after capture / send (`thread`): 2,260 of 4,096 B at
@@ -474,7 +473,7 @@ camera scan | reg <addr> <reg> [value] [-16]   (this board's own)
 
 `src/psram_guard.c` keeps one word: the number of **users** of the PSRAM window
 and a **reconfigurer** mark.  Users -- a scan-out start, `camera capture` /
-`save` / `send`, `nn bench`, `nn stream`, an mlperf run -- are counted and run
+`send`, `nn bench`, `nn stream`, an mlperf run -- are counted and run
 together.  (`nn bench` holds its place from the fill through the last run, issue
 #163, so `membench psram` during a background `nn bench` is refused.)  A reconfigurer -- the `psram` tuning subcommands, `membench`,
 `devmem`, `wifi flash` -- is admitted only on a zero word, sets its mark, and
@@ -1630,9 +1629,9 @@ when a model changes.
 | cifar10 plugin (M7) | text 2,704 B, bss 8,852 B, load image 11,584 B; requirement: decode 816, draw 676, report 720 B |
 | blazeface container | 194,120 B (model 189,816 B at +4,304) |
 | `.plugin` reservation | 32 KB -- 2.8x the larger load image (cifar10's 11,584 B) |
-| app flash, default build (SD off) | **362,372 B of 384 KB (92%), 30,844 B free** -- what `free` reports on hardware at e09ce56.  #116 gave back **1,840 B** of the 4,628 B #110's wiring cost over #108 (below) |
+| app flash, default build (without the SD) | **362,372 B of 384 KB (92%), 30,844 B free** -- what `free` reports on hardware at e09ce56.  #116 gave back **1,840 B** of the 4,628 B #110's wiring cost over #108 (below) |
 | app flash at #161 (default build, from the image; `free` on hardware follows the DFU) | **368,976 B of 384 KB, 24,240 B free**; DTCM 118,936 B (unchanged), `.bss` 111,152 B.  The shared dispatcher's and backend's state are board-defined `.bss` in AXI-SRAM: `nn_model_board_state` 32 B, `nn_tflm_board_state` 1,060 B |
-| AXI-SRAM heap room | **102,944 B** (`end` to `__heap_end`, SD off) -- #116 added 192 B.  `free` says 102,912 for that region, which is the same number less the 32 B already handed out |
+| AXI-SRAM heap room | **102,944 B** (`end` to `__heap_end`, without the SD) -- #116 added 192 B.  `free` says 102,912 for that region, which is the same number less the 32 B already handed out |
 | `.psram_ai` carve-out in use | **1,638,400 B**, and `free` agrees -- #116 gave back the 1,536 B candidate scratch (`BF_MAX_CAND` x `sizeof(struct bf_cand)`), which the resident decoder owned |
 | DTCM ceiling for growing `nn_work` | **4,544 B** (`_smsp_stack - _dtcm_used_end`; the 8 KB main-stack reservation is not free) |
 | stack already spent at the plugin call sites | **49 B of 3,072 on `nn_work`** (decode), **105 B of 1,536 on `cam_prev`** (draw), **1,977 B of 4,096 on the shell** -- the first two measured at #116 with a plugin running (#110 measured 641 / 137); the shell re-measured at #121 (build `5cb217f`), whose report buffers in the shared command's frame added about 300 B |
@@ -2018,8 +2017,8 @@ through the same commands in the same order):
 ai        blob      camera    console   coremark  crash
 devmem    dmesg     echo      free      help      jobs
 kill      kv        lcd       membench  mlperf    net
-nor       psram     reboot    sd        sleep     thread
-uptime    usleep    version   watch     wdt       wifi
+nor       psram     reboot    sleep     thread    uptime
+usleep    version   watch     wdt       wifi
 ```
 
 Behind them: the RTL8720DN companion for WiFi and the telnet console (`wifi`,
@@ -2028,21 +2027,15 @@ Behind them: the RTL8720DN companion for WiFi and the telnet console (`wifi`,
 interface (`lcd`), a DVP camera (`camera`), and the TFLM inference backend
 (`nn`).
 
-`sd` (the microSD on SDMMC1) is only in a build with `BSP_ENABLE_SD`, which in
-practice means the `null` backend: with tflm and the SD the image does not fit
-the internal Flash (21,664 B over at issue #232), and the tflm default turns
-the SD off ([Build options](#build-options)).  The command is the one shared
-with f746g-disco, `shell/cmds/cmd_sd.c` since issue #232 (described in
-[`svc/README.md`](../../svc/README.md#the-sd-command-is-shared-issue-232));
-so are the FileX media driver and the mount glue under it,
-`shell/cmds/fx_sd_driver.c` and `shell/cmds/sd_fs_glue.c` since issue #233.
-This board keeps the card driver (`port/sd/sd_card.c`, which defines the
-table `sd_card_board_ops`), the state of the shared driver and glue
-(`src/sd_fs_state.c`: one 14,144 B object in the AXI-SRAM's `.bss`, too large
-for what is left of the DTCM) and the FileX build settings
-(`port/filex/fx_user.h`).  An empty slot is learnt from the probe, there being
-no card-detect pin.  [!] Issue #234 removes the microSD from this board, `sd`
-with it.
+The microSD on SDMMC1 was removed in issue #234, and with it `sd` and `camera
+save`: the card driver, the FileX build settings and the board's state of the
+shared FileX driver and mount glue went too.  With tflm, the default since
+issue #98, the SD did not fit the internal Flash (21,664 B over at issue #232),
+so no default build since then had carried it, and the default image is the
+same bytes as before.  The `null` build gave back 35,160 B of internal Flash and 18,624 B of
+statically allocated AXI-SRAM.  The shared `sd` command, FileX driver and
+mount glue stay for f746g-disco
+([`svc/README.md`](../../svc/README.md#the-sd-command-is-shared-issue-232)).
 
 This board runs two shell instances -- `wio>` on the USB CDC and `wio-net>` on
 telnet -- each with its own line editor, history and RX/TX drop counters.

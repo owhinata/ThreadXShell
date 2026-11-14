@@ -2695,12 +2695,12 @@ build now fails instead.  The option changes `NX_TCP_SOCKET`.
 | Its stack | 2,560 B in internal SRAM, high-water **572 B** (`thread`, after the test run of issue #221) |
 | Code | text +1,184 B over `36e16cc` (the shared console against `nx_shell.c`) |
 
-### The `sd` command: shared with wio-lite-ai (issue #232)
+### The `sd` command (issue #232)
 
 The microSD slot (SDMMC1, 4-bit at 24 MHz, DMA2 through a bounce buffer in
 SRAM1) carries one FAT filesystem on FileX.  The command is the shared
-`shell/cmds/cmd_sd.c`; what it promises on both boards, and the contract of the
-card driver under it, are in
+`shell/cmds/cmd_sd.c` (wio-lite-ai shared it until issue #234 removed its
+microSD); what it promises, and the contract of the card driver under it, are in
 [`svc/README.md`](../../svc/README.md#the-sd-command-is-shared-issue-232).
 
 ```

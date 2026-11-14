@@ -11,7 +11,8 @@
  * an ownership slot (exclusive or raw) was held when it was made.
  *
  * Built once per shape of the card driver table:
- *   FULL      every field set (what f746g-disco and wio-lite-ai define)
+ *   FULL      every field set (what f746g-disco defines; wio-lite-ai did
+ *             too until issue #234)
  *   NOPROBE / NOSTATUS / NOINFO / NOREAD / NOWRITE / NORELEASE
  *             that one field left NULL
  * and once more as REAL (issue #233): the stand-ins of the mount glue and the

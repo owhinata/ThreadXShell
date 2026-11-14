@@ -63,7 +63,8 @@ No mark, a second `shared-command:` anywhere in the file, a first line that is
 not exactly one of these, or an unreadable file fails the audit.
 `BOARD_HAS_<X>` names a property (what the board has, never which board it is);
 today the optional files are `fs_cmd_core.c`, on `BOARD_HAS_FILEX`
-(f746g-disco ON, wio-lite-ai from `BSP_ENABLE_SD`, grove-vision-ai-v2 OFF),
+(f746g-disco ON, wio-lite-ai OFF since issue #234 removed its microSD --
+from `BSP_ENABLE_SD` before -- and grove-vision-ai-v2 OFF),
 `cmd_sd.c`, `sd_fs_glue.c` and `fx_sd_driver.c`, on `BOARD_HAS_SD` (issue
 #232, the mount glue and the FileX media driver from issue #233: set like
 `BOARD_HAS_FILEX` on every board, but a property of its own, because a

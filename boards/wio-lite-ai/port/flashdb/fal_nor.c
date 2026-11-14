@@ -13,7 +13,8 @@
  * bounded waiting.  Nothing about OCTOSPI appears here.
  *
  * Layering: port/flashdb calls port/nor.  Both are port/, so this is a same-layer
- * call, matching how port/filex/fx_sd_driver.c sits on port/sd/sd_card.c.
+ * call (the shared FileX media driver, by contrast, reaches port/sd/sd_card.c
+ * only through the table in svc/fs/sd_card_svc.h, issue #233).
  *
  * Locking: these callbacks do NOT take the device mutex themselves -- port/nor's
  * primitives take it (recursively) on every call, and FlashDB has already taken it

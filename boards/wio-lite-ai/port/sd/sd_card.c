@@ -178,8 +178,9 @@ static int classify_err(uint32_t err)
  * without this a yanked card spins here for the full second and is then reported as
  * a generic timeout instead of "no card".
  *
- * Clearing sd_probed on the way out is what lets the FileX glue evict a stale
- * mounted media (it re-checks sd_card_is_probed()).
+ * Clearing sd_probed on the way out is what lets the shared FileX glue evict a
+ * stale mounted media: it asks sd_card_status() only (issue #233), which then
+ * answers SD_ERR_STATE without a command to the card.
  */
 static int wait_transfer_state(void)
 {

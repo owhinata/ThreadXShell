@@ -178,7 +178,8 @@ void tx_application_define(void *first_unused_memory)
    * HAL_GetTick and it is safe pre-scheduler (owhinata/wio-lite-ai#12), like rtl8720_init() above.
    * Fail-soft: on failure the `sd` commands report "driver not initialized". */
   (void) sd_card_init();
-  /* FileX mount singleton: creates its mutexes and runs fx_system_initialize().
+  /* FileX mount singleton (the shared shell/cmds/sd_fs_glue.c since issue
+   * #233): creates its mutexes and runs fx_system_initialize().
    * Object creation only -- the media is mounted lazily by the first `sd` command
    * that needs a filesystem, so a boot with no card (or no FAT on it) costs
    * nothing and cannot fail here. */

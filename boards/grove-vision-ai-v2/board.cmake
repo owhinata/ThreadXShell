@@ -369,7 +369,8 @@ set(BOARD_HAS_FILEX OFF)
 set(BOARD_HAS_NETX OFF)   # no network: shell/cmds/cmd_net.c is compiled by nothing (#219)
 set(BOARD_HAS_KV OFF)     # no key-value store: shell/cmds/cmd_kv.c is compiled by nothing (#214)
 set(BOARD_HAS_KV_NETX OFF) # neither: shell/cmds/kv_cfg.c is compiled by nothing (#214)
-set(BOARD_HAS_SD OFF)     # no microSD slot: shell/cmds/cmd_sd.c is compiled by nothing (#232)
+set(BOARD_HAS_SD OFF)     # no microSD slot: shell/cmds/cmd_sd.c, sd_fs_glue.c and
+                          # fx_sd_driver.c are compiled by nothing (#232, #233)
 set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/core/cli_core.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_complete.c"

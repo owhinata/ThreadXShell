@@ -64,10 +64,12 @@ struct fs_device {
 /** FileX status -> human string (media-neutral; hints come from mount_hint). */
 const char *fs_strerror(UINT status);
 
-/** Mount-on-demand: returns the media or NULL after printing the failure + the
- *  device's mount_hint.  Exposed for the commands that write through a medium
- *  (`camera save`).  `sd format` does not use it: it remounts while it still
- *  holds the exclusive slot, which this entry point would refuse. */
+/** Mount-on-demand: returns the media or NULL after printing the failure, and
+ *  the device's mount_hint unless the failure is FS_ERR_BUSY, FS_ERR_NO_CARD
+ *  or FS_ERR_UNWIRED (not about the filesystem on the card).  Exposed for
+ *  the commands that write through a medium (`camera save`).  `sd format`
+ *  does not use it: it remounts while it still holds the exclusive slot,
+ *  which this entry point would refuse. */
 FX_MEDIA *fs_core_mount(const struct fs_device *dev, struct cli_instance *sh);
 
 /* Shared command bodies; each binds a device.  Argument arity matches the

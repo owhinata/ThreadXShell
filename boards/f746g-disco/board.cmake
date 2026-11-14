@@ -312,9 +312,10 @@ list(FILTER FX_CORE EXCLUDE REGEX "simulat")            # RAM-disk demo drivers
 # The property shell/cmds/fs_cmd_core.c is optional on (issue #206): this board
 # always has FileX, so the shared storage audit wants that file shipped.
 set(BOARD_HAS_FILEX ON)
-# The property shell/cmds/cmd_sd.c is optional on (issue #232): this board always
-# has the microSD slot and its driver, so the shared storage audit wants that
-# file shipped.  A separate property from BOARD_HAS_FILEX: the filesystem and
+# The property shell/cmds/cmd_sd.c is optional on (issue #232), and the mount
+# glue and FileX driver under it, shell/cmds/sd_fs_glue.c and fx_sd_driver.c
+# (issue #233): this board always has the microSD slot and its driver, so the
+# shared storage audit wants those files shipped.  A separate property from BOARD_HAS_FILEX: the filesystem and
 # the card are two things, although on this board both are always there.
 set(BOARD_HAS_SD ON)
 # The property shell/cmds/cmd_net.c is optional on (issue #219): this board

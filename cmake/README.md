@@ -64,9 +64,10 @@ not exactly one of these, or an unreadable file fails the audit.
 `BOARD_HAS_<X>` names a property (what the board has, never which board it is);
 today the optional files are `fs_cmd_core.c`, on `BOARD_HAS_FILEX`
 (f746g-disco ON, wio-lite-ai from `BSP_ENABLE_SD`, grove-vision-ai-v2 OFF),
-`cmd_sd.c`, on `BOARD_HAS_SD` (issue #232: set like `BOARD_HAS_FILEX` on every
-board, but a property of its own, because a filesystem and a card slot are two
-things), and `cmd_net.c`, `net_core.c` and `net_tty.c`, on `BOARD_HAS_NETX` (issues #219, #220 and #221:
+`cmd_sd.c`, `sd_fs_glue.c` and `fx_sd_driver.c`, on `BOARD_HAS_SD` (issue
+#232, the mount glue and the FileX media driver from issue #233: set like
+`BOARD_HAS_FILEX` on every board, but a property of its own, because a
+filesystem and a card slot are two things), and `cmd_net.c`, `net_core.c` and `net_tty.c`, on `BOARD_HAS_NETX` (issues #219, #220 and #221:
 f746g-disco and wio-lite-ai ON; grove-vision-ai-v2 has no network and declares
 OFF, so the files must be compiled by nothing there), `cmd_kv.c`, on
 `BOARD_HAS_KV` (issue #214: f746g-disco ON, wio-lite-ai from `BSP_ENABLE_KV`,

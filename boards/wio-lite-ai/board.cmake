@@ -714,8 +714,9 @@ endif()
 # #232), which reaches this board's card driver through its sd_card_board_ops
 # table (port/sd/sd_card.c) and the glue through shell/cmds/sd_cmd_board.h.
 # BOARD_HAS_FILEX is the property shell/cmds/fs_cmd_core.c is optional on (issue
-# #206), and BOARD_HAS_SD the one shell/cmds/cmd_sd.c is (issue #232): the shared
-# storage audit wants each file shipped when ON and compiled by nothing when OFF.
+# #206), and BOARD_HAS_SD the one shell/cmds/cmd_sd.c (issue #232),
+# sd_fs_glue.c and fx_sd_driver.c (issue #233) are: the shared storage audit
+# wants each file shipped when ON and compiled by nothing when OFF.
 # Spelled ON / OFF here whatever truth value BSP_ENABLE_SD has.
 if(BSP_ENABLE_SD)
     set(BOARD_HAS_FILEX ON)

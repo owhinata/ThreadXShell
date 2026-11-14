@@ -33,7 +33,9 @@
  *     takes no slot.
  *   - with a field of the table empty, `info`, `read` and `format` refuse
  *     before any slot, unmount or card call; the filesystem subcommands do not
- *     use the table and still run.
+ *     check the table in cmd_sd.c and reach the body (since issue #233 the
+ *     mount glue refuses them, which test_sd_fs_glue.c pins: the glue here
+ *     is a stand-in).
  */
 #include <stddef.h>
 #include <stdarg.h>

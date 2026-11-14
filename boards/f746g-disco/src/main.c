@@ -213,7 +213,8 @@ void tx_application_define(void *first_unused_memory)
 	if (sd_card_init() != 0)
 		printf("sd: init failed (sd command disabled)\r\n");
 
-	/* SD filesystem glue (owhinata/stm32f746g-disco#34): SD mount mutexes and
+	/* SD filesystem glue (owhinata/stm32f746g-disco#34; the shared
+	 * shell/cmds/sd_fs_glue.c since issue #233): SD mount mutexes and
 	 * fx_system_initialize() -- the media mounts lazily on the first `sd` FS
 	 * command.  The board's only FileX media since issue #194. */
 	sd_fs_glue_init();

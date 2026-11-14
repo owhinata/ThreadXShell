@@ -2724,26 +2724,43 @@ sd umount          flush and unmount
   supported in this build (FAT32 only)`, went with issue #232: `sd format
   exfat` is now asked for `sd format yes`, and `sd format exfat yes` is
   refused by the shell as the wrong number of arguments.
-- **The card-detect pin is PC13** (pull-up, low = inserted).  An empty slot is
-  answered from the pin before any command goes to the card: `sd: no card in
-  slot` from `info`, `read` and `format`, `sd: mount failed: no card (0xf1)`
-  from the filesystem subcommands.  When the mounted card
-  is pulled, or another one is put in (the old card address no longer
-  answers), the next filesystem command drops the stale media without
-  flushing it and mounts the new card.  The pin is also checked on the remount
-  after `sd format`, so a card pulled during a format is answered the same way.
+- **The card-detect pin is PC13** (pull-up, low = inserted), and only the
+  card driver reads it.  Its probe reads the pin first and answers an empty
+  slot without a command to the card; status, read and write read it too,
+  and answer `no card` for a probed card that is gone.  So an empty slot is
+  `sd: no card in slot` from `info`, `read` and `format`, and `sd: mount
+  failed: no card (0xf1)` from the filesystem subcommands: since issue #233
+  the shared mount glue tries the mount, and reads back the probe that failed
+  it (until then this board's own glue checked the pin before the mount, with
+  the same answer).  One case answers differently: if the card driver failed
+  to initialise at boot (`sd: init failed` is printed then), the probe returns
+  before it reads the pin, so an empty slot is `sd: mount failed: I/O error
+  (0x90)` where it used to be `no card`.  When the mounted card is pulled, or
+  another one is put in (the
+  old card address no longer answers), the driver's status is not ready, and
+  the next filesystem command drops the stale media without flushing it and
+  mounts the new card, or answers `no card`.  The remount after `sd format`
+  goes through the same probe, so a card pulled during a format is answered
+  the same way.
 
 | File | What it holds |
 |---|---|
-| `port/sd/sd_card.c`, `port/sd/sd_card.h` | The block driver: SDMMC1, the DMA2 streams, the SRAM1 bounce buffer and its cache maintenance, the card-detect pin; and the shared command's table `sd_card_board_ops` (since #232) |
-| `port/filex/fx_sd_driver.c` | The FileX media driver; finds the FAT volume behind an MBR, or with format mode on treats the whole card as one volume |
-| `port/filex/sd_fs_glue.c` | The mounted media, its 4 KB sector cache, the ownership slots and the hot-plug check; two mount entry points over one body since #232 (the normal one, and the one `sd format` uses while it holds the exclusive slot) |
+| `port/sd/sd_card.c`, `port/sd/sd_card.h` | The block driver: SDMMC1, the DMA2 streams, the SRAM1 bounce buffer and its cache maintenance, the card-detect pin; and the table `sd_card_board_ops` of the shared command, mount glue and FileX driver (since #232, six calls since #233) |
+| `src/sd_fs_state.c` | `sd_fs_board_state`, the state of the shared mount glue and FileX driver (since #233): plain `.bss` in the internal SRAM, touched only by the CPU |
+| `port/filex/fx_user.h` | The FileX build settings |
+| `port/filex/fx_sd_driver.c`, `port/filex/sd_fs_glue.c` and their headers | removed by #233 (the shared `shell/cmds/fx_sd_driver.c` and `shell/cmds/sd_fs_glue.c`, described in [`svc/README.md`](../../svc/README.md#the-sd-command-is-shared-issue-232)) |
 | `cmds/cmd_sd.c`, `cmds/fs_devices.h` | removed by #232 (the shared `shell/cmds/cmd_sd.c` and `shell/cmds/sd_cmd_board.h`) |
 
 | Measured at #232 | |
 |---|---|
 | Code | text +336 B (`null`) / +392 B (`tflm`) over `5aa5def` |
 | Shell stack, deepest `sd format` / `sd read` | 1,492 B / 1,500 B of 4,096 B, summed from the disassembly with the dispatch and an interrupt's stacked frame (`camera save`, about 3.18 KB, stays the deepest SD path) |
+
+| Measured at #233 | |
+|---|---|
+| Code | text 456,184 -> 456,344 B (+160 B, `null`) / 660,388 -> 660,564 B (+176 B, `tflm`) over `40cfd7f` |
+| RAM | `sd_fs_board_state` is 14,144 B of the internal SRAM's `.bss` (what the two files' statics were); RAM in all +8 B |
+| Shell stack, deepest `sd format` / `sd ls` / `camera save` | 1,176 B / 1,704 B / 2,896 B of 4,096 B, counted from the command's function down, on the high side (every direct call in a function's body counted as reached), without the dispatch or an interrupt's stacked frame -- so not comparable with the #232 row |
 
 ## Debugging
 

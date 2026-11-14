@@ -7,7 +7,7 @@
  * @brief   FileX build configuration (owhinata/stm32f746g-disco#30; the microSD
  * filesystem only since issue #194).
  *
- * Pulled in by fx_port.h via FX_INCLUDE_USER_DEFINE_FILE (CMakeLists.txt).
+ * Pulled in by fx_port.h via FX_INCLUDE_USER_DEFINE_FILE (board.cmake).
  *
  * Deliberately NOT defined:
  *   - FX_SINGLE_THREAD: keep the per-media ThreadX mutex so shell foreground

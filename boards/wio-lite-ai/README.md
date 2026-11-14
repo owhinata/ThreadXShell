@@ -2034,10 +2034,14 @@ the internal Flash (21,664 B over at issue #232), and the tflm default turns
 the SD off ([Build options](#build-options)).  The command is the one shared
 with f746g-disco, `shell/cmds/cmd_sd.c` since issue #232 (described in
 [`svc/README.md`](../../svc/README.md#the-sd-command-is-shared-issue-232));
-this board keeps the card driver (`port/sd/sd_card.c`, which defines the
-command's table `sd_card_board_ops`), the FileX driver and the mount glue
-(`port/filex/`), and an empty slot is learnt from the probe, there being no
-card-detect pin.  [!] Issue #234 removes the microSD from this board, `sd`
+so are the FileX media driver and the mount glue under it,
+`shell/cmds/fx_sd_driver.c` and `shell/cmds/sd_fs_glue.c` since issue #233.
+This board keeps the card driver (`port/sd/sd_card.c`, which defines the
+table `sd_card_board_ops`), the state of the shared driver and glue
+(`src/sd_fs_state.c`: one 14,144 B object in the AXI-SRAM's `.bss`, too large
+for what is left of the DTCM) and the FileX build settings
+(`port/filex/fx_user.h`).  An empty slot is learnt from the probe, there being
+no card-detect pin.  [!] Issue #234 removes the microSD from this board, `sd`
 with it.
 
 This board runs two shell instances -- `wio>` on the USB CDC and `wio-net>` on

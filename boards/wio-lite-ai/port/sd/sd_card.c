@@ -361,7 +361,7 @@ int sd_card_probe(void)
 {
 	HAL_SD_CardInfoTypeDef ci;
 	uint32_t widemode;
-	uint32_t ker_hz;
+	uint32_t ker_hz, clock_hz;
 	int i, rc;
 
 	rc = op_lock();
@@ -435,10 +435,11 @@ int sd_card_probe(void)
 	info.block_size     = ci.LogBlockSize;
 	info.bus_width      = (widemode == SDMMC_BUS_WIDE_4B) ? 4u : 1u;
 	info.capacity_bytes = (uint64_t)ci.LogBlockNbr * ci.LogBlockSize;
-	/* Report the clock actually in force rather than a hard-coded constant, so
-	   `sd info` stays honest if the inherited PLL1Q ever changes. */
+	/* Log the clock actually in force rather than a hard-coded constant, so the
+	   line stays honest if the inherited PLL1Q ever changes.  Kept here, not in
+	   the shared struct sd_card_info: `sd info` does not print it (#232). */
 	ker_hz = HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_SDMMC);
-	info.clock_hz = ker_hz / (2u * SD_CLOCK_DIV);
+	clock_hz = ker_hz / (2u * SD_CLOCK_DIV);
 	for (i = 0; i < 4; i++) {
 		info.cid[i] = hsd.CID[i];
 		info.csd[i] = hsd.CSD[i];
@@ -448,7 +449,7 @@ int sd_card_probe(void)
 	LOG_INF("card up: %lu MiB, %u-bit, %lu kHz",
 	        (unsigned long)(info.capacity_bytes / (1024u * 1024u)),
 	        (unsigned)info.bus_width,
-	        (unsigned long)(info.clock_hz / 1000u));
+	        (unsigned long)(clock_hz / 1000u));
 	op_unlock();
 	return 0;
 }
@@ -489,6 +490,15 @@ int sd_card_status(void)
 	op_unlock();
 	return SD_ERR_TIMEOUT;
 }
+
+/* The four calls the `sd` command makes, under the fixed name the shared
+ * contract declares (svc/fs/sd_card_svc.h, issue #232). */
+const struct sd_card_ops sd_card_board_ops = {
+	.probe       = sd_card_probe,
+	.status      = sd_card_status,
+	.info        = sd_card_get_info,
+	.read_blocks = sd_card_read_blocks,
+};
 
 int sd_card_init(void)
 {

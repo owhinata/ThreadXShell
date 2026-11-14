@@ -32,7 +32,7 @@
 #include "camera_svc_config.h" /* CAMERA_SVC_BOARD_DECLS: the names declared */
 #include "camera_cmd_board.h"
 #include "fs_cmd_core.h"
-#include "fs_devices.h"       /* fs_sd_device() (camera save) */
+#include "sd_cmd_board.h"     /* fs_sd_device() (camera save) */
 
 #include <string.h>
 

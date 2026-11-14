@@ -400,6 +400,15 @@ int sd_card_status(void)
 	return rc;
 }
 
+/* The four calls the `sd` command makes, under the fixed name the shared
+ * contract declares (svc/fs/sd_card_svc.h, issue #232). */
+const struct sd_card_ops sd_card_board_ops = {
+	.probe       = sd_card_probe,
+	.status      = sd_card_status,
+	.info        = sd_card_get_info,
+	.read_blocks = sd_card_read_blocks,
+};
+
 int sd_card_init(void)
 {
 	GPIO_InitTypeDef g = {0};

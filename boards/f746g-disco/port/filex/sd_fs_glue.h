@@ -17,10 +17,6 @@
 
 #include "fx_api.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 /*
  * Ownership sentinels returned by the gates below and by sd_media_acquire(),
  * outside the FileX status space so a status-to-string mapper cannot confuse
@@ -34,58 +30,19 @@ extern "C" {
 #define FS_ERR_NO_CARD 0xF1u   /* the slot is empty                     */
 #endif
 
+/* Everything else this glue offers -- the mount entry points, the ownership
+ * slots, the directory lock and the format's media + cache -- is declared once
+ * for every board in shell/cmds/sd_cmd_board.h (issue #232), after the
+ * sentinels above so they stay this layer's definitions. */
+#include "sd_cmd_board.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /** Create the SD glue mutexes and run fx_system_initialize().  Call once from
  *  tx_application_define(). */
 void sd_fs_glue_init(void);
-
-/** Return the mounted media in *out, mounting (fx_media_open) on first use.
- *  Returns FX_SUCCESS or the failing fx status; a card without a FAT volume
- *  fails -- there is no SD format yet (Phase C). */
-UINT sd_media_acquire(FX_MEDIA **out);
-
-/**
- * Mount while the caller ALREADY holds the exclusive slot (`sd format`).
- *
- * sd_media_acquire() refuses while sd_busy is set, which is exactly the state a
- * format is in -- so a format that released the slot before remounting would let
- * another console or a background job take it in between and make the remount
- * fail with FS_ERR_BUSY although the format succeeded.  Skips the hot-plug
- * eviction (the format has just probed the card) but still answers an empty slot
- * with FS_ERR_NO_CARD.
- */
-UINT sd_media_mount_exclusive(FX_MEDIA **out);
-
-/** Flush + unmount (fx_media_close).  No-op when not mounted. */
-UINT sd_media_unmount(void);
-
-/** Nonzero while the SD media is mounted. */
-int sd_is_mounted(void);
-
-/** Nonzero while format/umount/raw owns the SD media. */
-int sd_is_busy(void);
-
-/*
- * Media ownership, reader/writer style: every FS command
- * holds a shared op slot; umount takes the exclusive slot; the card-disruptive
- * `sd info`/`sd read` (which re-probe the card) take the raw slot, additionally
- * refused while the media is mounted.  begin calls return FX_SUCCESS or
- * FS_ERR_BUSY and never block; pair every successful begin with its end.
- */
-UINT sd_op_begin(void);
-void sd_op_end(void);
-UINT sd_exclusive_begin(void);
-void sd_exclusive_end(void);
-UINT sd_raw_begin(void);
-void sd_raw_end(void);
-
-/** Serialize multi-call directory sequences (`sd ls`). */
-void sd_dir_lock(void);
-void sd_dir_unlock(void);
-
-/** The media singleton + its sector cache (for a future `sd format`). */
-FX_MEDIA *sd_glue_media(void);
-UCHAR    *sd_glue_cache(void);
-ULONG     sd_glue_cache_size(void);
 
 #ifdef __cplusplus
 }

@@ -29,11 +29,9 @@
  * Clean-room design; ported from the STM32F746 Discovery firmware's cmd_sd.c.
  */
 #include "cli.h"
-#include "sd_card.h"
+#include "sd_card_svc.h"     /* the card driver, through sd_card_board_ops */
 #include "fs_cmd_core.h"
-#include "fs_devices.h"   /* fs_sd_device(): this file is what defines it */
-#include "sd_fs_glue.h"
-#include "fx_sd_driver.h"
+#include "sd_cmd_board.h"     /* the mount glue, the FileX driver, fs_sd_device() */
 
 #include <stdint.h>
 #include <string.h>
@@ -71,10 +69,10 @@ static int sd_ensure_ready(struct cli_instance *sh)
 {
 	int rc;
 
-	if (sd_card_status() == SD_OK)
+	if (sd_card_board_ops.status() == SD_OK)
 		return 0;
 
-	rc = sd_card_probe();
+	rc = sd_card_board_ops.probe();
 	if (rc != 0) {
 		cli_error(sh, "sd: %s\r\n", sd_strerror(rc));
 		return -1;
@@ -96,7 +94,7 @@ static int cmd_sd_info(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 
-	ci = sd_card_get_info();
+	ci = sd_card_board_ops.info();
 	cli_print(sh, "type      : %s (v%s)\r\n",
 	          (ci->type == 1u) ? "SDHC/SDXC" : "SDSC",
 	          (ci->version == 1u) ? "2.x" : "1.x");
@@ -105,7 +103,6 @@ static int cmd_sd_info(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)ci->block_count,
 	          (unsigned long)ci->block_size);
 	cli_print(sh, "bus width : %lu-bit\r\n", (unsigned long)ci->bus_width);
-	cli_print(sh, "clock     : %lu kHz\r\n", (unsigned long)(ci->clock_hz / 1000u));
 	cli_print(sh, "rca       : 0x%04lx\r\n", (unsigned long)ci->rca);
 	cli_print(sh, "ccc       : 0x%03lx\r\n", (unsigned long)ci->card_class);
 	cli_print(sh, "cid       : %08lx %08lx %08lx %08lx\r\n",
@@ -139,7 +136,7 @@ static int cmd_sd_read(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 
-	rc = sd_card_read_blocks(lba, buf, 1);
+	rc = sd_card_board_ops.read_blocks(lba, buf, 1);
 	sd_raw_end();        /* data is in buf; release before the hexdump */
 	if (rc != 0) {
 		cli_error(sh, "sd: read failed: %s\r\n", sd_strerror(rc));
@@ -250,13 +247,13 @@ static int cmd_sd_format(struct cli_instance *sh, int argc, char **argv)
 
 	/* block_count is only valid after a probe -- get a real capacity before
 	 * fx_media_format uses it as total_sectors. */
-	rc = sd_card_probe();
+	rc = sd_card_board_ops.probe();
 	if (rc != SD_OK) {
 		cli_error(sh, "sd: %s\r\n", sd_strerror(rc));
 		sd_exclusive_end();
 		return 1;
 	}
-	total = sd_card_get_info()->block_count;
+	total = sd_card_board_ops.info()->block_count;
 	if (total == 0u || fat32_spc(total, &spc) != 0) {
 		cli_error(sh, "sd: card too small for FAT32\r\n");
 		sd_exclusive_end();

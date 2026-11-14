@@ -1148,6 +1148,11 @@ target_include_directories(shell PRIVATE
     "${NX_DIR}/ports/cortex_m7/gnu/inc"
     "${NX_DIR}/addons/dhcp"
     "${BOARD_DIR}/port/netxduo")                # nx_user.h
+# The microSD card driver's contract (svc/fs/sd_card_svc.h, issue #232): on the
+# include path only when the card is compiled, like the sources that need it.
+if(BSP_ENABLE_SD)
+    target_include_directories(shell PRIVATE "${CMAKE_SOURCE_DIR}/svc/fs")
+endif()
 target_compile_definitions(shell PRIVATE
     CFG_TUSB_MCU=OPT_MCU_STM32H7
     TX_INCLUDE_USER_DEFINE_FILE

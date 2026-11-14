@@ -34,34 +34,14 @@
 
 #include <stdint.h>
 
+/* The block size, the SD_* result codes and struct sd_card_info are the
+ * shared contract's (svc/fs/sd_card_svc.h, issue #232); this driver defines
+ * its sd_card_board_ops table in sd_card.c. */
+#include "sd_card_svc.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* Logical/physical block size.  SDHC/SDXC are fixed 512 B; HAL also assumes it. */
-#define SD_BLOCK_SIZE   512u
-
-/* Error returns (negative); 0 is success. */
-#define SD_OK            0
-#define SD_ERR_PARAM    -1   /* bad argument (null buffer, zero count)          */
-#define SD_ERR_HAL      -2   /* HAL/DMA reported an error or refused the request*/
-#define SD_ERR_TIMEOUT  -3   /* card never reached TRANSFER / DMA never completed*/
-#define SD_ERR_STATE    -4   /* driver not initialized / card not probed        */
-#define SD_ERR_NO_CARD  -5   /* no card in the slot (card-detect = released)    */
-
-/** Snapshot of the probed card's identity/geometry (filled by sd_card_probe). */
-struct sd_card_info {
-	uint32_t type;            /* CARD_SDSC / CARD_SDHC_SDXC (HAL CardType)     */
-	uint32_t version;         /* CARD_V1_X / CARD_V2_X                         */
-	uint32_t card_class;      /* card command classes (CCC)                   */
-	uint32_t rca;             /* relative card address                        */
-	uint32_t block_count;     /* logical 512 B block count (LogBlockNbr)      */
-	uint32_t block_size;      /* logical block size, always 512               */
-	uint32_t bus_width;       /* negotiated data lines: 1 or 4                */
-	uint64_t capacity_bytes;  /* block_count * 512                            */
-	uint32_t cid[4];          /* raw CID                                       */
-	uint32_t csd[4];          /* raw CSD                                       */
-};
 
 /**
  * One-time bring-up: GPIO (AF12), DMA2 streams, NVIC, SDMMC1 clock source mux,

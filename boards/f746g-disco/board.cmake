@@ -149,6 +149,7 @@ target_include_directories(bsp_iface INTERFACE
     "${CMAKE_SOURCE_DIR}/svc/camera"   # frame.h
     "${CMAKE_SOURCE_DIR}/svc/blob"
     "${CMAKE_SOURCE_DIR}/svc/net"
+    "${CMAKE_SOURCE_DIR}/svc/fs"   # sd_card_svc.h: the card driver's contract (#232)
     "${BOARD_DIR}/svc"          # this board's services: log.h / timebase.h
     "${GEN_DIR}"
     "${HAL_DIR}/Inc"
@@ -717,6 +718,7 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/svc/camera"
     "${CMAKE_SOURCE_DIR}/svc/blob"
     "${CMAKE_SOURCE_DIR}/svc/net"
+    "${CMAKE_SOURCE_DIR}/svc/fs"   # sd_card_svc.h (#232)
     "${BOARD_DIR}/svc")            # this board's svc: log.h / timebase.h
 target_compile_definitions(shell PRIVATE TX_INCLUDE_USER_DEFINE_FILE
     FX_INCLUDE_USER_DEFINE_FILE           # port/filex/fx_user.h

@@ -84,7 +84,7 @@
 #include "cli.h"
 #if BSP_ENABLE_SD
 #include "fs_cmd_core.h"  /* struct fs_device */
-#include "fs_devices.h"   /* fs_sd_device(): the microSD media + its ownership gates */
+#include "sd_cmd_board.h" /* fs_sd_device(): the microSD media + its ownership gates */
 #endif
 
 #include <stdint.h>

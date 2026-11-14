@@ -19,12 +19,13 @@
 
 #include "fx_api.h"
 
+/* The driver's entry point fx_sd_driver() and its format mode are declared once
+ * for every board in shell/cmds/sd_cmd_board.h (issue #232). */
+#include "sd_cmd_board.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/** FileX media driver entry (pass to fx_media_open / fx_media_format). */
-VOID fx_sd_driver(FX_MEDIA *media_ptr);
 
 /**
  * The SD_* result of the sd_card_probe() run by the most recent FX_DRIVER_INIT.
@@ -36,16 +37,6 @@ VOID fx_sd_driver(FX_MEDIA *media_ptr);
  * SD_ERR_NO_CARD can never leak into a later, unrelated failure.
  */
 int fx_sd_last_probe_rc(void);
-
-/**
- * Enable/disable "format mode" for the next driver INIT.  A blank card has no
- * valid VBR/MBR, so the normal INIT partition detection fails and fx_media_format
- * could never run.  With format mode on, INIT skips detection and treats the whole
- * card as a superfloppy (partition start 0, size = card block count).  The `sd`
- * command sets it under the exclusive ownership slot around fx_media_format and
- * clears it afterwards.
- */
-void fx_sd_set_format_mode(int on);
 
 #ifdef __cplusplus
 }

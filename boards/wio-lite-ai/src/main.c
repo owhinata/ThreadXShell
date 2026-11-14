@@ -31,10 +31,6 @@
 #if BSP_PSRAM_INIT_IN_APP
 #include "psram.h"      /* app-first OCTOSPI1 APS6408 bring-up (issue #3) */
 #endif
-#if BSP_ENABLE_SD
-#include "sd_card.h"    /* microSD block driver over SDMMC1 + IDMA (issue #6) */
-#include "sd_cmd_board.h" /* sd_fs_glue_init(): the shared FileX mount glue (#233) */
-#endif
 #if BSP_ENABLE_LCD
 #include "ltdc_display.h" /* FPC-40 RGB panel over LTDC + DMA2D (issue #7) */
 #endif
@@ -170,21 +166,6 @@ void tx_application_define(void *first_unused_memory)
    * of the firmware still runs. */
   (void) rtl_link_core_init();
   (void) erpc_service_init();
-
-#if BSP_ENABLE_SD
-  /* microSD block driver (owhinata/wio-lite-ai#6): creates its mutex/semaphore and configures the
-   * SDMMC1 pins, kernel-clock mux and NVIC.  It performs NO card I/O -- the card is
-   * identified lazily by the first `sd` command -- so nothing here waits on
-   * HAL_GetTick and it is safe pre-scheduler (owhinata/wio-lite-ai#12), like rtl8720_init() above.
-   * Fail-soft: on failure the `sd` commands report "driver not initialized". */
-  (void) sd_card_init();
-  /* FileX mount singleton (the shared shell/cmds/sd_fs_glue.c since issue
-   * #233): creates its mutexes and runs fx_system_initialize().
-   * Object creation only -- the media is mounted lazily by the first `sd` command
-   * that needs a filesystem, so a boot with no card (or no FAT on it) costs
-   * nothing and cannot fail here. */
-  sd_fs_glue_init();
-#endif
 
 #if BSP_ENABLE_LCD
   /* LCD over LTDC + DMA2D (owhinata/wio-lite-ai#7).  Creates its ThreadX objects, pulses the

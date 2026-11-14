@@ -33,14 +33,9 @@
 /** `capture test` / `stream start test`: the OV2640's COM7 colour bars. */
 #define CAMERA_SVC_HAS_TEST   1
 
-/** `camera save`: only with the microSD built in.  The one medium is "sd";
- *  see the f746 config for the X-macro's shape. */
-#if BSP_ENABLE_SD
-#define CAMERA_SVC_HAS_SAVE   1
-#define CAMERA_SVC_SAVE_MEDIA(first, more) first("sd")
-#else
+/** `camera save`: none -- this board has no storage medium (microSD
+ *  removed in issue #234). */
 #define CAMERA_SVC_HAS_SAVE   0
-#endif
 
 /** `camera send`: the last capture to the PC over YMODEM. */
 #define CAMERA_SVC_HAS_SEND   1

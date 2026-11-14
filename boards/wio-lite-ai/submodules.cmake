@@ -25,5 +25,4 @@ set(_submodule_sentinels
     "lib/threadx/common/src/tx_thread_create.c"
     "lib/coremark/core_main.c"
     "lib/netxduo/common/src/nx_ip_create.c"
-    "lib/flashdb/src/fdb_kvdb.c"
-    "lib/filex/common/src/fx_media_open.c")
+    "lib/flashdb/src/fdb_kvdb.c")

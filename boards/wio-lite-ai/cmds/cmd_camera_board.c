@@ -82,10 +82,6 @@
 #include "camera_cmd_board.h"
 #include "camera_svc_config.h" /* CAMERA_SVC_BOARD_DECLS: the names declared */
 #include "cli.h"
-#if BSP_ENABLE_SD
-#include "fs_cmd_core.h"  /* struct fs_device */
-#include "sd_cmd_board.h" /* fs_sd_device(): the microSD media + its ownership gates */
-#endif
 
 #include <stdint.h>
 #include <string.h>
@@ -100,15 +96,6 @@ static void report(struct cli_instance *sh, int rc)
 	if (rc != CAM_OK)
 		cli_error(sh, "camera: %s\r\n", cam_strerror(rc));
 }
-
-/* ---- the shell-layer service (shell/cmds/camera_cmd_board.h) ------------- */
-
-#if BSP_ENABLE_SD
-const struct fs_device *camera_board_medium(const char *name)
-{
-	return (strcmp(name, "sd") == 0) ? fs_sd_device() : NULL;
-}
-#endif
 
 /* ---- the SCCB tools -------------------------------------------------------- */
 

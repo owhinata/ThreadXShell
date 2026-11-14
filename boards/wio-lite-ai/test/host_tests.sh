@@ -449,27 +449,25 @@ gcc $CFLAGS -I "$board/port/nn" \
 
 # issue #143 -- the `camera` table this board builds: the shared command
 # (shell/cmds/cmd_camera.c) against this board's REAL svc/camera_svc_config.h,
-# over the shared stub adapter, with and without the microSD (`camera save`
-# follows BSP_ENABLE_SD).  A board subcommand that reuses a shared name is
+# over the shared stub adapter; it also pins that there is no `camera save`
+# (the microSD was removed in issue #234).  A board subcommand that reuses a shared name is
 # silently unreachable, and only the built table shows it; the run also pins
 # this board's `camera off` -- the shared command stops the operator's stream
 # first and then powers down (CAMERA_SVC_OFF_STOPS_STREAM 1).
 st="$HOST_TEST_SHELL_TEST"
-for sd in 0 1; do
-    gcc $CFLAGS -DCLI_USE_COLOR=0 -DBSP_ENABLE_SD=$sd \
-        -I "$st" -I "$HOST_TEST_BACKEND" -I "$st/shim" -I "$st/fx_shim" \
-        -I "$board/svc" -I "$inc" -I "$HOST_TEST_CORE" \
-        -I "$st/../cmds" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
-        "$here/test_camera_table.c" "$st/camera_svc_stub.c" \
-        "$st/../cmds/cmd_camera.c" \
-        "$HOST_TEST_CORE/cli_session.c" "$HOST_TEST_CORE/cli_edit.c" \
-        "$HOST_TEST_CORE/cli_history.c" "$HOST_TEST_CORE/cli_printf.c" \
-        "$svc/fmt.c" "$HOST_TEST_CORE/cli_parse.c" \
-        "$HOST_TEST_CORE/cli_complete.c" \
-        "$HOST_TEST_BACKEND/cli_backend_dummy.c" "$st/host_glue.c" \
-        $LDFLAGS -o "$out/test_camera_table_wio"
-    "$out/test_camera_table_wio"
-done
+gcc $CFLAGS -DCLI_USE_COLOR=0 \
+    -I "$st" -I "$HOST_TEST_BACKEND" -I "$st/shim" \
+    -I "$board/svc" -I "$inc" -I "$HOST_TEST_CORE" \
+    -I "$st/../cmds" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/blob" \
+    "$here/test_camera_table.c" "$st/camera_svc_stub.c" \
+    "$st/../cmds/cmd_camera.c" \
+    "$HOST_TEST_CORE/cli_session.c" "$HOST_TEST_CORE/cli_edit.c" \
+    "$HOST_TEST_CORE/cli_history.c" "$HOST_TEST_CORE/cli_printf.c" \
+    "$svc/fmt.c" "$HOST_TEST_CORE/cli_parse.c" \
+    "$HOST_TEST_CORE/cli_complete.c" \
+    "$HOST_TEST_BACKEND/cli_backend_dummy.c" "$st/host_glue.c" \
+    $LDFLAGS -o "$out/test_camera_table_wio"
+"$out/test_camera_table_wio"
 
 # issue #219 -- the `net` table this board builds: the shared command
 # (shell/cmds/cmd_net.c) against this board's REAL svc/net_svc_config.h, over

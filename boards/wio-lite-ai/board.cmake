@@ -653,89 +653,11 @@ option(BSP_PSRAM_INIT_IN_APP "Bring up OCTOSPI1 PSRAM app-side (app-first valida
 set(CONFIG_NN_BACKEND "tflm" CACHE STRING "NN inference backend: null | tflm")
 set_property(CACHE CONFIG_NN_BACKEND PROPERTY STRINGS null tflm)
 
-# On-board microSD over SDMMC1 + IDMA.  ON builds the block driver
-# (port/sd), its .axi_dma bounce buffer and the `sd` command.  Turn OFF to build a
-# firmware with no bus master at all -- useful when bisecting a D-cache coherency
-# suspicion, since SDMMC1's IDMA is the only DMA engine this app enables.
-#
-# [!] The DEFAULT flips to OFF for the tflm backend.  That build adds
-# ~103 KB of interpreter and kernels to a 384 KB partition, and the microSD costs
-# 34,432 B of flash plus 18,624 B of AXI-SRAM -- the latter being the scarce memory,
-# since it is the only RAM a bus master can address.  Nothing on the AI path
-# uses it: models come from the external NOR's blob region, which is the whole reason
-# that route was chosen.  Turning SD off gives back a third of what TFLM costs and
-# takes nothing off the inference path.
-#
-# It is a DEFAULT and not a forced value: `-DBSP_ENABLE_SD=ON` still wins, because
-# option() leaves an already-defined cache entry alone.  The message below makes the
-# coupling visible -- a peripheral disappearing as a side effect of an unrelated switch
-# is the kind of thing that should never be discovered by wondering where `sd` went.
-if(CONFIG_NN_BACKEND STREQUAL "tflm" AND NOT DEFINED BSP_ENABLE_SD)
-    message(STATUS "tflm backend: defaulting BSP_ENABLE_SD=OFF "
-                   "(saves 34,432 B flash + 18,624 B AXI-SRAM; "
-                   "models come from the NOR blob region, not the SD card). "
-                   "Pass -DBSP_ENABLE_SD=ON to keep the microSD and FileX.")
-    set(BSP_ENABLE_SD OFF CACHE BOOL
-        "Enable the microSD card (SDMMC1) and the sd command")
-endif()
-option(BSP_ENABLE_SD "Enable the microSD card (SDMMC1) and the sd command" ON)
-# [!] AND THE DEFAULT DOES NOT REACH A TREE THAT ALREADY HAS AN ANSWER.  A build
-# directory first configured with the null backend -- or before issue #98 -- keeps
-# BSP_ENABLE_SD=ON in its cache when it is switched to tflm, and nothing says so.
-# That is not hypothetical: issue #108's development tree was exactly that, and it
-# measured the plugin work as overflowing the partition (by 148 B, then fitting
-# with 92 B spare after trimming) when the default configuration had 34,552 B
-# free.  tflm + SD still links today, so this warns rather than refuses -- but
-# with no room for anything, and the plugin loader of #78 Step 3b will not fit.
-if(CONFIG_NN_BACKEND STREQUAL "tflm" AND BSP_ENABLE_SD)
-    message(WARNING
-        "tflm backend with BSP_ENABLE_SD=ON: measured at issue #108 this leaves "
-        "92 B of the 384 KB app partition (393,124 B used), against 34,552 B "
-        "with the tflm default of SD off.  If this tree was configured before "
-        "the default existed, reconfigure with -DBSP_ENABLE_SD=OFF.")
-endif()
-
-# The block driver, the FileX media stack and the command are one unit -- the
-# shared shell/cmds/cmd_sd.c (with `camera save` through it, and the start-up
-# code) is the only caller of port/sd and of the shared FileX media driver and
-# mount glue (shell/cmds/fx_sd_driver.c, sd_fs_glue.c, issue #233, with this
-# board's state of them in src/sd_fs_state.c), so they are added or omitted
-# together.  This append must stay BELOW the option() above: SHELL_SOURCES is set
-# earlier in the file, when BSP_ENABLE_SD is still undefined, so appending there
-# silently drops the driver and the link fails on sd_card_init().
-#
-# FileX (eclipse-threadx/filex, MIT) is GLOB'd whole
-# and configured through port/filex/fx_user.h, the same pattern as ThreadX and NetX
-# Duo -- one executable compiled uniformly so every translation unit agrees on the
-# FX_MEDIA / FX_FILE layout.  --gc-sections drops the feature paths nothing calls.
-#
-# fs_cmd_core.c is board-independent (it talks FileX, not SDMMC) and so lives in the
-# shared tree, and so does the `sd` command itself, shell/cmds/cmd_sd.c (issue
-# #232), which reaches this board's card driver through its sd_card_board_ops
-# table (port/sd/sd_card.c) and the glue through shell/cmds/sd_cmd_board.h.
-# BOARD_HAS_FILEX is the property shell/cmds/fs_cmd_core.c is optional on (issue
-# #206), and BOARD_HAS_SD the one shell/cmds/cmd_sd.c (issue #232),
-# sd_fs_glue.c and fx_sd_driver.c (issue #233) are: the shared storage audit
-# wants each file shipped when ON and compiled by nothing when OFF.
-# Spelled ON / OFF here whatever truth value BSP_ENABLE_SD has.
-if(BSP_ENABLE_SD)
-    set(BOARD_HAS_FILEX ON)
-    set(BOARD_HAS_SD ON)
-    set(FX_DIR "${CMAKE_SOURCE_DIR}/lib/filex")
-    file(GLOB FX_CORE "${FX_DIR}/common/src/*.c")
-    list(FILTER FX_CORE EXCLUDE REGEX "simulat")     # RAM-disk demo drivers
-    list(APPEND SHELL_SOURCES
-        "${BOARD_DIR}/port/sd/sd_card.c"
-        "${CMAKE_SOURCE_DIR}/shell/cmds/fx_sd_driver.c"   # shared (#233)
-        "${CMAKE_SOURCE_DIR}/shell/cmds/sd_fs_glue.c"     # shared (#233)
-        "${BOARD_DIR}/src/sd_fs_state.c"                  # ...their state
-        "${CMAKE_SOURCE_DIR}/shell/cmds/fs_cmd_core.c"
-        "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_sd.c"
-        ${FX_CORE})
-else()
-    set(BOARD_HAS_FILEX OFF)
-    set(BOARD_HAS_SD OFF)
-endif()
+# No microSD (removed in issue #234), so no FileX either: the shared storage
+# audit wants shell/cmds/fs_cmd_core.c (#206), cmd_sd.c (#232), sd_fs_glue.c
+# and fx_sd_driver.c (#233) compiled by nothing on this board.
+set(BOARD_HAS_FILEX OFF)
+set(BOARD_HAS_SD OFF)
 
 # The FPC-40 RGB LCD over LTDC + DMA2D.  ON builds the display driver
 # and the `lcd` command; the two frame buffers land in the OCTOSPI1 PSRAM, so this
@@ -1113,8 +1035,6 @@ target_link_options(shell PRIVATE -u _printf_float)
 target_include_directories(shell PRIVATE
     "${BOARD_DIR}/src"                           # board app headers + tusb_config.h
     "${BOARD_DIR}/port/threadx"
-    "${BOARD_DIR}/port/sd"                       # sd_card.h
-    "${BOARD_DIR}/port/filex"                    # fx_user.h
     "${BOARD_DIR}/port/ltdc"                     # ltdc_display.h
     "${BOARD_DIR}/port/camera"                   # camera.h
     "${BOARD_DIR}/port/nor"                      # nor_flash.h
@@ -1129,8 +1049,6 @@ target_include_directories(shell PRIVATE
     "${BOARD_DIR}/port/flashdb"
     "${CMAKE_SOURCE_DIR}/lib/flashdb/inc"
     "${CMAKE_SOURCE_DIR}/lib/flashdb/port/fal/inc"
-    "${CMAKE_SOURCE_DIR}/lib/filex/common/inc"
-    "${CMAKE_SOURCE_DIR}/lib/filex/ports/cortex_m7/gnu/inc"
     "${CMAKE_SOURCE_DIR}/shell/include"
     "${CMAKE_SOURCE_DIR}/shell/core"
     "${CMAKE_SOURCE_DIR}/shell/backend"
@@ -1157,11 +1075,6 @@ target_include_directories(shell PRIVATE
     "${NX_DIR}/ports/cortex_m7/gnu/inc"
     "${NX_DIR}/addons/dhcp"
     "${BOARD_DIR}/port/netxduo")                # nx_user.h
-# The microSD card driver's contract (svc/fs/sd_card_svc.h, issue #232): on the
-# include path only when the card is compiled, like the sources that need it.
-if(BSP_ENABLE_SD)
-    target_include_directories(shell PRIVATE "${CMAKE_SOURCE_DIR}/svc/fs")
-endif()
 target_compile_definitions(shell PRIVATE
     CFG_TUSB_MCU=OPT_MCU_STM32H7
     TX_INCLUDE_USER_DEFINE_FILE
@@ -1185,8 +1098,6 @@ target_compile_definitions(shell PRIVATE
     BSP_ENABLE_WFI=$<BOOL:${BSP_ENABLE_WFI}>      # gates TX_ENABLE_WFI (tx_user.h)
     BSP_ENABLE_PSRAM=$<BOOL:${BSP_ENABLE_PSRAM}>          # PSRAM window + psram cmd
     BSP_PSRAM_INIT_IN_APP=$<BOOL:${BSP_PSRAM_INIT_IN_APP}>  # app-side OCTOSPI1 bring-up
-    FX_INCLUDE_USER_DEFINE_FILE             # port/filex/fx_user.h
-    BSP_ENABLE_SD=$<BOOL:${BSP_ENABLE_SD}>                  # SDMMC1 microSD + sd cmd
     BSP_ENABLE_LCD=$<BOOL:${BSP_ENABLE_LCD}>                # LTDC LCD + lcd cmd
     BSP_ENABLE_KV=$<BOOL:${BSP_ENABLE_KV}>)                 # OCTOSPI2 NOR + KV store
 # -Os + LTO, plus two flags that disable optimisations which are legal C
@@ -1294,9 +1205,6 @@ list(APPEND DTCM_REQUIRED --require-dtcm nn_worker_stack)        # port/nn/nn_ca
 list(APPEND DTCM_REQUIRED --require-axi  cam_band)               # DCMI via DMA2_Stream1
 if(BSP_ENABLE_LCD)
     list(APPEND DTCM_REQUIRED --require-dtcm preview_stack)      # src/cam_preview.c
-endif()
-if(BSP_ENABLE_SD)
-    list(APPEND DTCM_REQUIRED --require-axi sd_bounce)           # SDMMC1 IDMA
 endif()
 
 add_custom_command(TARGET shell POST_BUILD

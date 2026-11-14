@@ -5,14 +5,15 @@
  * Host test: the `camera` subcommand table Wio Lite AI actually builds -- the
  * shared command (shell/cmds/cmd_camera.c) against this board's REAL
  * svc/camera_svc_config.h, over the stub adapter (shell/test/camera_svc_stub.c)
- * and stub handlers for the board's own subcommands (issue #143).  Built twice,
- * with and without BSP_ENABLE_SD, because `camera save` follows it.
+ * and stub handlers for the board's own subcommands (issue #143).
  *
  *  - [!] NO NAME TWICE: CAMERA_SVC_BOARD_SUBCMDS is appended to the shared
  *    entries and the parser takes the first match, so a board name that
  *    reuses a shared one would be silently unreachable.
  *  - each shared subcommand is there exactly when its capability is 1, and
  *    the board's scan / reg come after the shared ones.
+ *  - there is no `camera save`: this board has no storage medium (microSD
+ *    removed in issue #234).
  *  - `camera off` with the operator's stream running stops it first and then
  *    powers down (CAMERA_SVC_OFF_STOPS_STREAM 1, issue #143).
  */
@@ -26,10 +27,6 @@
 #include "camera_svc_config.h"
 #include "camera_svc_stub.h"
 #include "camera_table_check.h"
-
-#ifndef BSP_ENABLE_SD
-#define BSP_ENABLE_SD 0
-#endif
 
 /* The board's handlers, as CAMERA_SVC_BOARD_DECLS names them. */
 static int board_calls;
@@ -101,7 +98,7 @@ int main(void)
 	static const char *const board[] = { "scan", "reg" };
 	int last_shared;
 
-	printf("test_camera_table (wio-lite-ai, BSP_ENABLE_SD=%d):\n", (int)BSP_ENABLE_SD);
+	printf("test_camera_table (wio-lite-ai):\n");
 	expect("the `camera` root is registered", t != NULL);
 	if (t == NULL)
 		return 1;
@@ -123,8 +120,8 @@ int main(void)
 		last_shared = at;
 	}
 
-	expect("save exactly with BSP_ENABLE_SD",
-	       camera_table_has(t, "save") == BSP_ENABLE_SD);
+	expect("no `camera save` (no storage medium, issue #234)",
+	       CAMERA_SVC_HAS_SAVE == 0 && !camera_table_has(t, "save"));
 	run("camera scan\r");
 	expect("`camera scan` reaches the board", board_calls == 1 &&
 	       strcmp(board_last, "scan") == 0);
@@ -144,12 +141,11 @@ int main(void)
 	       camera_stub.calls_stop == 1 && camera_stub.calls_off == 1 &&
 	       strstr(cli_dummy_output_str(&tr0),
 	              "camera: stopping stream before power off\r\n") != NULL);
-#if BSP_ENABLE_SD
-	run("camera save usb /a.raw\r");
-	expect("save refuses a medium this board does not have, in its words",
+	run("camera save sd /a.raw\r");
+	expect("`camera save` reaches neither the board nor the adapter",
+	       board_calls == 0 && camera_stub.calls_capture == 0 &&
 	       strstr(cli_dummy_output_str(&tr0),
-	              "camera: unknown medium 'usb' (sd)\r\n") != NULL);
-#endif
+	              "camera: missing or unknown subcommand\r\n") != NULL);
 
 	if (failures != 0) {
 		printf("test_camera_table: %d failure(s)\n", failures);

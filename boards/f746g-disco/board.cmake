@@ -302,7 +302,8 @@ list(FILTER TX_ASM EXCLUDE REGEX "tx_misra\\.S$")
 # --- FileX (the microSD filesystem) ------------------------------------------
 # Same pattern as ThreadX: GLOB the core, configure via port/filex/fx_user.h
 # (FX_INCLUDE_USER_DEFINE_FILE below).  The RAM simulator/demo drivers are
-# excluded; the board's driver glue is port/filex.  gc-sections drops the unused
+# excluded; the driver and the mount glue are shared (shell/cmds/fx_sd_driver.c,
+# shell/cmds/sd_fs_glue.c, issue #233).  gc-sections drops the unused
 # FileX feature paths from the final image.  The QSPI NOR is not a filesystem
 # (issue #194 makes it the blob store), so LevelX is no longer built.
 set(FX_DIR "${CMAKE_SOURCE_DIR}/lib/filex")
@@ -665,8 +666,11 @@ add_executable(shell
     "${BOARD_DIR}/ui/guix_camera_ui.c"
     "${CMAKE_SOURCE_DIR}/lib/ov5640/ov5640.c"
     "${CMAKE_SOURCE_DIR}/lib/ov5640/ov5640_reg.c"
-    "${BOARD_DIR}/port/filex/fx_sd_driver.c"
-    "${BOARD_DIR}/port/filex/sd_fs_glue.c"
+    # The microSD's FileX media driver and mount glue, shared (#233), and
+    # this board's state of them.
+    "${CMAKE_SOURCE_DIR}/shell/cmds/fx_sd_driver.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/sd_fs_glue.c"
+    "${BOARD_DIR}/src/sd_fs_state.c"
     "${BOARD_DIR}/port/threadx/tx_glue.c"
     ${NN_SOURCES}                                                     # nn layer + backend
     "${TX_DIR}/utility/execution_profile_kit/tx_execution_profile.c"  # EPK (`thread` cpu%)

@@ -4,7 +4,7 @@
  *
  * Host test: the one shared `sd` command (shell/cmds/cmd_sd.c, issue #232)
  * through the REAL dispatcher, as the boards compile it, over stand-ins that
- * record every call in order: the board's mount glue and FileX media driver
+ * record every call in order: the mount glue and FileX media driver
  * (shell/cmds/sd_cmd_board.h), fx_media_format() (fx_shim/fx_api.h), the
  * filesystem bodies (fs_cmd_core.h) and the card driver table
  * (svc/fs/sd_card_svc.h, defined here).  Each recorded call carries whether
@@ -14,6 +14,9 @@
  *   FULL      every field set (what f746g-disco and wio-lite-ai define)
  *   NOPROBE / NOSTATUS / NOINFO / NOREAD / NOWRITE / NORELEASE
  *             that one field left NULL
+ * and once more as REAL (issue #233): the stand-ins of the mount glue and the
+ * FileX media driver replaced by the real shared ones (shell/cmds/
+ * sd_fs_glue.c, fx_sd_driver.c) over sd_fake.c, for `sd format` only.
  *
  * Pinned (nothing typed at a console shows the order of these):
  *   - `sd format`: without `yes`, or with the exclusive slot refused, nothing
@@ -49,8 +52,12 @@
 #if !defined(SD_TEST_SHAPE_FULL) && !defined(SD_TEST_SHAPE_NOPROBE) && \
     !defined(SD_TEST_SHAPE_NOSTATUS) && !defined(SD_TEST_SHAPE_NOINFO) && \
     !defined(SD_TEST_SHAPE_NOREAD) && !defined(SD_TEST_SHAPE_NOWRITE) && \
-    !defined(SD_TEST_SHAPE_NORELEASE)
+    !defined(SD_TEST_SHAPE_NORELEASE) && !defined(SD_TEST_SHAPE_REAL)
 #error "define one SD_TEST_SHAPE_*"
+#endif
+
+#if defined(SD_TEST_SHAPE_REAL)
+#include "sd_fake.h"
 #endif
 
 static int failures;
@@ -129,11 +136,12 @@ static UINT t_format_rc, t_mount_rc;
 static UINT t_fat32_after;        /* the FAT32 flag a successful mount leaves */
 static int t_fmt_mode;            /* fx_sd_set_format_mode()'s current value */
 static FX_MEDIA t_media;
-static UCHAR t_cache[64];
+__attribute__((unused)) static UCHAR t_cache[64];
 static ULONG t_fmt_total;         /* what fx_media_format() was handed */
 static UINT t_fmt_bps, t_fmt_spc;
 static int t_fmt_args_ok;
 
+#if !defined(SD_TEST_SHAPE_REAL)
 UINT sd_exclusive_begin(void)
 {
 	rec("excl_begin");
@@ -232,6 +240,8 @@ UINT fx_media_format(FX_MEDIA *media_ptr, VOID (*driver)(FX_MEDIA *media),
 	return t_format_rc;
 }
 
+#endif /* !SD_TEST_SHAPE_REAL */
+
 /* ---- the filesystem bodies (fs_cmd_core.c is not linked) ------------------- */
 
 const char *fs_strerror(UINT status)
@@ -271,6 +281,7 @@ static int t_probe_rc, t_status_rc, t_read_rc;
 static struct sd_card_info t_info;
 static uint32_t t_read_lba;
 
+#if !defined(SD_TEST_SHAPE_REAL)
 __attribute__((unused)) static int t_probe(void)
 {
 	rec("probe");
@@ -352,6 +363,7 @@ const struct sd_card_ops sd_card_board_ops = {
 	.probe = T_PROBE, .status = T_STATUS, .info = T_INFO,
 	.read_blocks = T_READ, .write_blocks = T_WRITE, .release = T_RELEASE,
 };
+#endif /* !SD_TEST_SHAPE_REAL: sd_fake.c has the table */
 
 /* ---- harness --------------------------------------------------------------- */
 
@@ -416,12 +428,15 @@ static void expect(const char *what, int ok)
 	if (!ok) {
 		printf("       output was: \"%s\"\n", cli_dummy_output_str(&tr0));
 		printf("       calls were: \"%s\"\n", t_rec);
+#if defined(SD_TEST_SHAPE_REAL)
+		printf("       fake calls: \"%s\"\n", sd_fake_calls());
+#endif
 		failures++;
 	}
 }
 
 /* No ownership slot, unmount or card call in the record. */
-static int touched_nothing(void)
+__attribute__((unused)) static int touched_nothing(void)
 {
 	return at("excl_begin") < 0 && at("raw_begin") < 0 && at("unmount") < 0 &&
 	       at("probe") < 0 && at("status") < 0 && at("info") < 0 &&
@@ -668,7 +683,7 @@ static void t_fs_binders(void)
 	       at("probe") < 0 && at("status") < 0);
 
 	d = fs_sd_device();
-	expect("the medium: its name, its hint and the board's glue",
+	expect("the medium: its name, its hint and the mount glue",
 	       strcmp(d->name, "sd") == 0 &&
 	       strcmp(d->mount_hint, "no FAT filesystem? insert a FAT-formatted "
 	                             "card or run `sd format yes`") == 0 &&
@@ -682,7 +697,58 @@ static void t_fs_binders(void)
 
 /* ---- a field of the table left empty --------------------------------------- */
 
-#if !defined(SD_TEST_SHAPE_FULL)
+#if defined(SD_TEST_SHAPE_REAL)
+/* ---- format over the real glue and FileX driver ---------------------------- */
+
+static void t_format_real(void)
+{
+	int fmt, open_, rel;
+
+	printf("format over the real mount glue and FileX media driver\n");
+
+	reset();
+	sd_fake_reset();
+	run("sd format yes\r");
+	fmt = sd_fake_at("media_format[-B]");
+	open_ = sd_fake_at("media_open[LB]");
+	rel = sd_fake_at("slot_released");
+	expect("formatted, remounted, FAT32: the success line, no busy",
+	       has("formatting 30436 MiB as FAT32 (16384 B clusters)...\r\n") &&
+	       has("formatted and mounted (FAT32)\r\n") && !has("busy") &&
+	       !has("did not produce"));
+	expect("the format, then the remount through the holder's entry with the "
+	       "slot held, then the slot given back once",
+	       fmt >= 0 && open_ > fmt && rel > open_ &&
+	       sd_fake_count("slot_released") == 1 &&
+	       sd_fake_count("media_open") == 1 && sd_fake_at("status") < 0);
+	expect("the remount found the FAT the format wrote",
+	       sd_is_mounted() && !sd_is_busy() && sd_fake.opened &&
+	       strstr(sd_fake_log(), "fxsd: superfloppy (VBR@0), 62333952 blocks\n")
+	       != NULL);
+	expect("format mode off, the lock and the slot given back",
+	       sd_fs_board_state.format_mode == 0 && !sd_fake.lock_held &&
+	       sd_fake.lock_gets == sd_fake.lock_puts &&
+	       sd_fs_board_state.active_ops == 0);
+
+	/* A mounted media is unmounted (closed) first, with the slot held. */
+	reset();
+	sd_fake_reset();
+	sd_fake_put_vbr(0, 62333952u);
+	{
+		FX_MEDIA *m = NULL;
+
+		(void)sd_media_acquire(&m);   /* the bodies are stand-ins here */
+	}
+	run("sd format yes\r");
+	expect("formatting a mounted card: closed with the slot held, first",
+	       sd_fake_at("media_close[LB]") >= 0 &&
+	       sd_fake_at("media_close[LB]") < sd_fake_at("media_format[-B]") &&
+	       has("formatted and mounted (FAT32)\r\n") &&
+	       sd_fake_count("slot_released") == 1);
+}
+#endif
+
+#if !defined(SD_TEST_SHAPE_FULL) && !defined(SD_TEST_SHAPE_REAL)
 static void t_empty_field(void)
 {
 	static const char *const lines[] = {
@@ -723,6 +789,9 @@ int main(void)
 	t_info_cmd();
 	t_read_cmd();
 	t_fs_binders();
+#elif defined(SD_TEST_SHAPE_REAL)
+	printf("test_sd_cmd (REAL)\n");
+	t_format_real();
 #else
 	printf("test_sd_cmd (%s)\n",
 #if defined(SD_TEST_SHAPE_NOPROBE)

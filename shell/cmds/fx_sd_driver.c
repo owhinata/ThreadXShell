@@ -1,21 +1,32 @@
+/* shared-command: optional BOARD_HAS_SD */
 /*
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * @file    fx_sd_driver.c
- * @brief   FileX media driver on the SDMMC1 block API
- * (owhinata/stm32f746g-disco#34).
+ * @brief   FileX media driver on a board's microSD card driver, for every
+ *          board with a slot (owhinata/stm32f746g-disco#34,
+ *          owhinata/wio-lite-ai#6; one implementation since issue #233).
  *
- * See fx_sd_driver.h.  FileX's fx_media_open() always reads logical sector 0 for
- * the boot record and never calls _fx_partition_offset_calculate(), so an
- * MBR-partitioned card would otherwise fail to mount.  This driver detects the
- * layout at INIT (superfloppy VBR @ LBA 0, or MBR with partition 0) and adds the
- * partition start to every physical access, bounding all I/O to the partition.
+ * Maps FileX driver requests onto the card's block calls (sd_card_board_ops,
+ * svc/fs/sd_card_svc.h).  The SD card has its own wear-leveling FTL, so there
+ * is no LevelX layer.  FileX's fx_media_open() always reads logical sector 0
+ * for the boot record and never calls _fx_partition_offset_calculate(), so an
+ * MBR-partitioned card (how PC/camera tools format microSD) would otherwise
+ * fail to mount.  This driver detects the layout at INIT (superfloppy VBR @
+ * LBA 0, or MBR with partition 0) and adds the partition start to every
+ * physical access, bounding all I/O to the partition, so FileX sees a flat
+ * volume.
+ *
+ * [!] THIS FILE OWNS NO MUTABLE STORAGE (cmake/check_no_mutable_storage.py, per
+ * board): the partition window, the format mode, the block buffer of the
+ * detection and the last probe's result are the board's sd_fs_board_state
+ * (shell/cmds/sd_cmd_board.h).
  *
  * Clean-room rewrite; the FileX driver request set and the MBR/BPB field layout
  * were used as a reference only (no code reused).
  */
-#include "fx_sd_driver.h"
+#include "sd_cmd_board.h"
 #include "sd_card_svc.h"   /* the card, through sd_card_board_ops */
 
 #include <stdint.h>
@@ -23,31 +34,14 @@
 #define LOG_TAG "fxsd"
 #include "log.h"
 
-/* Partition window for the current mount (recomputed at INIT for hot-plug):
- * physical LBA = sd_part_lba + logical, valid for logical < sd_part_blocks. */
-static uint32_t sd_part_lba;
-static uint32_t sd_part_blocks;
-
-/* When set, the next INIT skips partition detection and uses the whole card as
- * a superfloppy (for fx_media_format of a blank card).  Set/cleared by the `sd`
- * command under the exclusive ownership slot. */
-static volatile int sd_format_mode;
-
-/* LBA 0 scratch for partition detection (INIT only). sd_card_read_blocks()
- * bounces through its own aligned DMA buffer, so any alignment is fine. */
-static uint8_t mbr_buf[SD_BLOCK_SIZE];
-
-/* Result of the probe done by the last FX_DRIVER_INIT; see fx_sd_driver.h. */
-static int last_probe_rc;
-
 int fx_sd_last_probe_rc(void)
 {
-	return last_probe_rc;
+	return sd_fs_board_state.last_probe_rc;
 }
 
 void fx_sd_set_format_mode(int on)
 {
-	sd_format_mode = on;
+	sd_fs_board_state.format_mode = on;
 }
 
 static uint16_t rd_le16(const uint8_t *p)
@@ -90,8 +84,8 @@ static int bpb_sane(const uint8_t *b)
 }
 
 /*
- * Read LBA 0 and decide the volume layout.  Returns 0 and fills
- * sd_part_lba/sd_part_blocks on success, nonzero (and zeroes them) when no
+ * Read LBA 0 and decide the volume layout.  Returns 0 and fills the partition
+ * window (part_lba/part_blocks) on success, nonzero (and zeroes it) when no
  * usable FAT layout is found.  All range checks use subtraction form so a
  * corrupt MBR cannot pass via 32-bit wrap.
  */
@@ -99,22 +93,23 @@ static int detect_partition(void)
 {
 	const struct sd_card_info *ci = sd_card_board_ops.info();
 	uint32_t block_count = ci->block_count;
-	const uint8_t *b = mbr_buf;
+	const uint8_t *b = sd_fs_board_state.mbr_buf;
 
-	sd_part_lba = 0;
-	sd_part_blocks = 0;
+	sd_fs_board_state.part_lba = 0;
+	sd_fs_board_state.part_blocks = 0;
 
 	if (block_count == 0u)
 		return -1;
-	if (sd_card_board_ops.read_blocks(0, mbr_buf, 1) != SD_OK)
+	if (sd_card_board_ops.read_blocks(0, sd_fs_board_state.mbr_buf, 1) !=
+	    SD_OK)
 		return -1;
 	if (b[510] != 0x55u || b[511] != 0xAAu)
 		return -1;
 
 	/* Superfloppy: VBR directly at LBA 0. */
 	if (((b[0] == 0xEBu && b[2] == 0x90u) || b[0] == 0xE9u) && bpb_sane(b)) {
-		sd_part_lba = 0;
-		sd_part_blocks = block_count;
+		sd_fs_board_state.part_lba = 0;
+		sd_fs_board_state.part_blocks = block_count;
 		LOG_INF("superfloppy (VBR@0), %lu blocks",
 		        (unsigned long)block_count);
 		return 0;
@@ -128,8 +123,8 @@ static int detect_partition(void)
 
 		if (is_fat_part_type(e[4]) && first != 0u && size != 0u &&
 		    first < block_count && size <= block_count - first) {
-			sd_part_lba = first;
-			sd_part_blocks = size;
+			sd_fs_board_state.part_lba = first;
+			sd_fs_board_state.part_blocks = size;
 			LOG_INF("MBR part0 @%lu, %lu blocks",
 			        (unsigned long)first, (unsigned long)size);
 			return 0;
@@ -146,11 +141,11 @@ static int bounds_ok(uint32_t logical, uint32_t count)
 {
 	if (count == 0u)
 		return 0;
-	if (logical >= sd_part_blocks)
+	if (logical >= sd_fs_board_state.part_blocks)
 		return 0;
-	if (count > sd_part_blocks - logical)
+	if (count > sd_fs_board_state.part_blocks - logical)
 		return 0;
-	if (logical > 0xFFFFFFFFu - sd_part_lba)
+	if (logical > 0xFFFFFFFFu - sd_fs_board_state.part_lba)
 		return 0;
 	return 1;
 }
@@ -170,15 +165,16 @@ VOID fx_sd_driver(FX_MEDIA *media_ptr)
 		/* Overwritten unconditionally, before any early return: a stale
 		 * SD_ERR_NO_CARD from an earlier mount attempt must never survive to
 		 * make the glue misreport a later non-FAT card as an empty slot. */
-		last_probe_rc = sd_card_board_ops.probe();
-		if (last_probe_rc != SD_OK)
+		sd_fs_board_state.last_probe_rc = sd_card_board_ops.probe();
+		if (sd_fs_board_state.last_probe_rc != SD_OK)
 			return;
-		if (sd_format_mode) {
+		if (sd_fs_board_state.format_mode) {
 			/* Formatting: write the whole card as a superfloppy (a blank
 			 * card has no VBR/MBR yet, so detection would fail). */
-			sd_part_lba = 0;
-			sd_part_blocks = sd_card_board_ops.info()->block_count;
-			if (sd_part_blocks == 0u)
+			sd_fs_board_state.part_lba = 0;
+			sd_fs_board_state.part_blocks =
+				sd_card_board_ops.info()->block_count;
+			if (sd_fs_board_state.part_blocks == 0u)
 				return;
 		} else if (detect_partition() != 0) {
 			return;     /* status stays FX_IO_ERROR -> mount fails cleanly */
@@ -187,15 +183,16 @@ VOID fx_sd_driver(FX_MEDIA *media_ptr)
 		break;
 
 	case FX_DRIVER_UNINIT:
-		/* Leave the card probed so the next mount is cheap; the SDMMC
-		 * teardown (hot-plug) is handled by the `sd` command, not here. */
+		/* Leave the card probed so the next mount is cheap; the card's
+		 * release (hot-plug) is the mount glue's eviction, not here. */
 		media_ptr->fx_media_driver_status = FX_SUCCESS;
 		break;
 
 	case FX_DRIVER_BOOT_READ:
 		if (!bounds_ok(0, 1))
 			return;
-		if (sd_card_board_ops.read_blocks(sd_part_lba, buffer, 1) != SD_OK)
+		if (sd_card_board_ops.read_blocks(sd_fs_board_state.part_lba,
+		                                  buffer, 1) != SD_OK)
 			return;
 		/* FileX leaves the boot-signature check to the driver. */
 		if (buffer[510] != 0x55u || buffer[511] != 0xAAu) {
@@ -208,8 +205,8 @@ VOID fx_sd_driver(FX_MEDIA *media_ptr)
 	case FX_DRIVER_READ:
 		if (!bounds_ok(sector, count))
 			return;
-		if (sd_card_board_ops.read_blocks(sd_part_lba + sector, buffer,
-		                                  count) != SD_OK)
+		if (sd_card_board_ops.read_blocks(sd_fs_board_state.part_lba +
+		                                  sector, buffer, count) != SD_OK)
 			return;
 		media_ptr->fx_media_driver_status = FX_SUCCESS;
 		break;
@@ -217,8 +214,8 @@ VOID fx_sd_driver(FX_MEDIA *media_ptr)
 	case FX_DRIVER_WRITE:
 		if (!bounds_ok(sector, count))
 			return;
-		if (sd_card_board_ops.write_blocks(sd_part_lba + sector, buffer,
-		                                   count) != SD_OK)
+		if (sd_card_board_ops.write_blocks(sd_fs_board_state.part_lba +
+		                                   sector, buffer, count) != SD_OK)
 			return;
 		media_ptr->fx_media_driver_status = FX_SUCCESS;
 		break;
@@ -228,7 +225,8 @@ VOID fx_sd_driver(FX_MEDIA *media_ptr)
 			return;
 		if (!bounds_ok(0, 1))
 			return;
-		if (sd_card_board_ops.write_blocks(sd_part_lba, buffer, 1) != SD_OK)
+		if (sd_card_board_ops.write_blocks(sd_fs_board_state.part_lba,
+		                                   buffer, 1) != SD_OK)
 			return;
 		media_ptr->fx_media_driver_status = FX_SUCCESS;
 		break;

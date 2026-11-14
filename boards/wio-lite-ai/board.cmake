@@ -697,7 +697,9 @@ endif()
 
 # The block driver, the FileX media stack and the command are one unit -- the
 # shared shell/cmds/cmd_sd.c (with `camera save` through it, and the start-up
-# code) is the only caller of port/sd and port/filex, so they are added or omitted
+# code) is the only caller of port/sd and of the shared FileX media driver and
+# mount glue (shell/cmds/fx_sd_driver.c, sd_fs_glue.c, issue #233, with this
+# board's state of them in src/sd_fs_state.c), so they are added or omitted
 # together.  This append must stay BELOW the option() above: SHELL_SOURCES is set
 # earlier in the file, when BSP_ENABLE_SD is still undefined, so appending there
 # silently drops the driver and the link fails on sd_card_init().
@@ -723,8 +725,9 @@ if(BSP_ENABLE_SD)
     list(FILTER FX_CORE EXCLUDE REGEX "simulat")     # RAM-disk demo drivers
     list(APPEND SHELL_SOURCES
         "${BOARD_DIR}/port/sd/sd_card.c"
-        "${BOARD_DIR}/port/filex/fx_sd_driver.c"
-        "${BOARD_DIR}/port/filex/sd_fs_glue.c"
+        "${CMAKE_SOURCE_DIR}/shell/cmds/fx_sd_driver.c"   # shared (#233)
+        "${CMAKE_SOURCE_DIR}/shell/cmds/sd_fs_glue.c"     # shared (#233)
+        "${BOARD_DIR}/src/sd_fs_state.c"                  # ...their state
         "${CMAKE_SOURCE_DIR}/shell/cmds/fs_cmd_core.c"
         "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_sd.c"
         ${FX_CORE})
@@ -1110,7 +1113,7 @@ target_include_directories(shell PRIVATE
     "${BOARD_DIR}/src"                           # board app headers + tusb_config.h
     "${BOARD_DIR}/port/threadx"
     "${BOARD_DIR}/port/sd"                       # sd_card.h
-    "${BOARD_DIR}/port/filex"                    # fx_user.h + the SD glue
+    "${BOARD_DIR}/port/filex"                    # fx_user.h
     "${BOARD_DIR}/port/ltdc"                     # ltdc_display.h
     "${BOARD_DIR}/port/camera"                   # camera.h
     "${BOARD_DIR}/port/nor"                      # nor_flash.h

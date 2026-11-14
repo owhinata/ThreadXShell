@@ -30,6 +30,7 @@ const char *fs_strerror(UINT status)
 	switch (status) {
 	case FS_ERR_BUSY:        return "busy (format in progress)";
 	case FS_ERR_NO_CARD:     return "no card";
+	case FS_ERR_UNWIRED:     return "card driver table has an empty field";
 	case FX_BOOT_ERROR:      return "invalid boot record";
 	case FX_MEDIA_INVALID:   return "media invalid";
 	case FX_NOT_FOUND:       return "not found";
@@ -80,7 +81,11 @@ FX_MEDIA *fs_core_mount(const struct fs_device *dev, struct cli_instance *sh)
 	if (status != FX_SUCCESS) {
 		cli_error(sh, "%s: mount failed: %s (0x%02x)\r\n",
 		          dev->name, fs_strerror(status), status);
-		if (status != FS_ERR_BUSY && status != FS_ERR_NO_CARD)
+		/* The hint is about the filesystem on the card: not for an owner
+		 * that holds the media, an empty slot, or a mount refused before
+		 * anything was touched. */
+		if (status != FS_ERR_BUSY && status != FS_ERR_NO_CARD &&
+		    status != FS_ERR_UNWIRED)
 			cli_error(sh, "%s: %s\r\n", dev->name, dev->mount_hint);
 		return NULL;
 	}

@@ -306,7 +306,7 @@ for shape in FULL NOTELNET NOOWNER NOGUARD; do
 done
 
 # issue #232 -- the one shared `sd` command (shell/cmds/cmd_sd.c) through the
-# REAL dispatcher, over stand-ins of the board's mount glue, its FileX media
+# REAL dispatcher, over stand-ins of the mount glue, the FileX media
 # driver, fx_media_format() (fx_shim/), the filesystem bodies and the card
 # driver table, which record every call in order and whether an ownership slot
 # was held at it.  Once per shape of the table: FULL, and each of its six
@@ -328,6 +328,66 @@ for shape in FULL NOPROBE NOSTATUS NOINFO NOREAD NOWRITE NORELEASE; do
         $LDFLAGS -o "$out/test_sd_cmd_$shape"
     "$out/test_sd_cmd_$shape"
 done
+
+# issue #233 -- the `sd` command's format joined to the REAL mount glue and
+# FileX media driver (shell/cmds/sd_fs_glue.c, fx_sd_driver.c) over the
+# fakes of sd_fake.c (the card, FileX's open / format, the mutexes): the
+# remount after the format goes through the real entry for a holder of the
+# exclusive slot, is not refused as busy, and the slot is given back once,
+# after the FAT32 answer was read (the fake marks the media "not FAT32" when
+# the slot is given back).
+gcc $CFLAGS -DCLI_USE_COLOR=0 -DSD_TEST_SHAPE_REAL \
+    $glue_inc -I "$here/shim" -I "$here/fx_shim" -I "$here/sd_cfg" \
+    -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" -I "$svc/fs" \
+    "$here/test_sd_cmd.c" "$here/../cmds/cmd_sd.c" \
+    "$here/../cmds/sd_fs_glue.c" "$here/../cmds/fx_sd_driver.c" "$here/sd_fake.c" \
+    "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
+    "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
+    $glue \
+    $LDFLAGS -o "$out/test_sd_cmd_REAL"
+"$out/test_sd_cmd_REAL"
+
+# issue #233 -- the one microSD mount glue (shell/cmds/sd_fs_glue.c) as the
+# boards compile it, with the REAL FileX media driver under it and the REAL
+# `sd` command and filesystem bodies (cmd_sd.c, fs_cmd_core.c) over it,
+# through the REAL dispatcher, over sd_fake.c: a card behind the board's
+# table, FileX's open / close / abort (open runs the driver's INIT and boot
+# read as FileX does), the mutexes and the log, every call recorded with
+# whether the mount lock and the exclusive slot were held.  Once with the
+# full table and once per field left empty.  Nothing typed at a console
+# shows these: one mount on first use, the eviction (abort, never close;
+# release; only when no other operation is inside, otherwise busy with
+# nothing thrown away), the holder's entry mounting without evicting, the
+# slots against each other, no card vs. not FAT without carrying the last
+# probe over, and an empty field refused before the mount lock, FileX or the
+# card, in one line without the mount hint for every filesystem subcommand.
+for shape in FULL NOPROBE NOSTATUS NOINFO NOREAD NOWRITE NORELEASE; do
+    gcc $CFLAGS -DCLI_USE_COLOR=0 -DSD_FAKE_SHAPE_$shape \
+        $glue_inc -I "$here/shim" -I "$here/fx_shim" -I "$here/sd_cfg" \
+        -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" -I "$svc/fs" \
+        "$here/test_sd_fs_glue.c" "$here/sd_fake.c" \
+        "$here/../cmds/sd_fs_glue.c" "$here/../cmds/fx_sd_driver.c" \
+        "$here/../cmds/cmd_sd.c" "$here/../cmds/fs_cmd_core.c" \
+        "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
+        "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
+        $glue \
+        $LDFLAGS -o "$out/test_sd_fs_glue_$shape"
+    "$out/test_sd_fs_glue_$shape"
+done
+
+# issue #233 -- the one FileX media driver for the microSD
+# (shell/cmds/fx_sd_driver.c) as the boards compile it, driven request by
+# request over sd_fake.c's card: the layout found at INIT from a block 0 the
+# test builds (a superfloppy, an MBR's partition 0, no signature, a partition
+# type that is not FAT, an MBR whose start + size wraps or passes the card),
+# every request bounded to the partition (the end, a count of 0, a physical
+# address that would wrap), format mode taking the whole card, and the probe
+# result overwritten at every INIT.
+gcc $CFLAGS -I "$here/shim" -I "$here/fx_shim" -I "$here/sd_cfg" \
+    -I "$here" -I "$here/../cmds" -I "$svc/fs" \
+    "$here/test_fx_sd_driver.c" "$here/sd_fake.c" "$here/../cmds/fx_sd_driver.c" \
+    $LDFLAGS -o "$out/test_fx_sd_driver"
+"$out/test_fx_sd_driver"
 
 # owhinata/wio-lite-ai#8 phase 3a -- camera frame pipeline core (svc/camera/frame_pipeline.c): ring
 # slot acquire/publish, refcount pin/put, DROP/LATEST policy + pending transfer, detach
@@ -1302,6 +1362,28 @@ for shape in FULL BARE MIN DUP; do
         $glue \
         $LDFLAGS -o "$out/test_camera_cmd"
     "$out/test_camera_cmd"
+done
+
+# issue #233 -- `camera save sd <path>` through the REAL `sd` medium, the REAL
+# mount of the filesystem bodies and the REAL mount glue and FileX media
+# driver, over the stub camera adapter (which writes the file) and sd_fake.c.
+# With the full card table the save mounts and writes; with a field of it
+# empty (NOWRITE) it says so in one line without the mount hint, creates no
+# file, touches neither FileX nor the card and gives every slot back.
+for shape in FULL NOWRITE; do
+    gcc $CFLAGS -DCLI_USE_COLOR=0 -DCAM_TEST_SHAPE_FULL -DCAM_TEST_SD_REAL \
+        -DSD_FAKE_SHAPE_$shape \
+        $glue_inc -I "$here/shim" -I "$here/fx_shim" -I "$here/camera_cfg" -I "$here/sd_cfg" \
+        -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" -I "$svc/nn" -I "$svc/plugin" \
+        -I "$svc/camera" -I "$svc/blob" -I "$svc/fs" \
+        "$here/test_camera_save_sd.c" "$here/camera_svc_stub.c" \
+        "$here/../cmds/cmd_camera.c" "$here/../cmds/cmd_sd.c" "$here/../cmds/fs_cmd_core.c" \
+        "$here/../cmds/sd_fs_glue.c" "$here/../cmds/fx_sd_driver.c" "$here/sd_fake.c" \
+        "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
+        "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
+        $glue \
+        $LDFLAGS -o "$out/test_camera_save_sd_$shape"
+    "$out/test_camera_save_sd_$shape"
 done
 
 # issue #194 -- the shared `blob` command (shell/cmds/cmd_blob.c) through the

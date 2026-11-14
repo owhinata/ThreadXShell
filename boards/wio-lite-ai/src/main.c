@@ -33,7 +33,7 @@
 #endif
 #if BSP_ENABLE_SD
 #include "sd_card.h"    /* microSD block driver over SDMMC1 + IDMA (issue #6) */
-#include "sd_fs_glue.h" /* FileX lazy-mount singleton for the card (issue #6) */
+#include "sd_cmd_board.h" /* sd_fs_glue_init(): the shared FileX mount glue (#233) */
 #endif
 #if BSP_ENABLE_LCD
 #include "ltdc_display.h" /* FPC-40 RGB panel over LTDC + DMA2D (issue #7) */

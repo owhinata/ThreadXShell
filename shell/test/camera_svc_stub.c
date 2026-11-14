@@ -24,6 +24,9 @@
 #if CAMERA_SVC_HAS_SAVE
 #include "fs_cmd_core.h"
 #endif
+#if defined(CAM_TEST_SD_REAL)
+#include "sd_cmd_board.h"   /* fs_sd_device(): the real `sd` medium (#233) */
+#endif
 
 struct camera_stub camera_stub;
 
@@ -286,7 +289,7 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 static UINT stub_op_begin(void) { camera_stub.calls_op_begin++; return FX_SUCCESS; }
 static void stub_op_end(void)   { camera_stub.calls_op_end++; }
 
-static const struct fs_device stub_sd = { .name = "sd", .op_begin = stub_op_begin,
+__attribute__((unused)) static const struct fs_device stub_sd = { .name = "sd", .op_begin = stub_op_begin,
                                           .op_end = stub_op_end };
 static const struct fs_device stub_fs = { .name = "fs", .op_begin = stub_op_begin,
                                           .op_end = stub_op_end };
@@ -294,12 +297,19 @@ static const struct fs_device stub_fs = { .name = "fs", .op_begin = stub_op_begi
 const struct fs_device *camera_board_medium(const char *name)
 {
 	if (strcmp(name, "sd") == 0)
+#if defined(CAM_TEST_SD_REAL)
+		/* The real `sd` medium over the real mount glue, FileX driver and
+		 * filesystem bodies (test_camera_save_sd.c, issue #233). */
+		return fs_sd_device();
+#else
 		return &stub_sd;
+#endif
 	if (strcmp(name, "fs") == 0)
 		return &stub_fs;
 	return NULL;
 }
 
+#if !defined(CAM_TEST_SD_REAL)   /* else: the real fs_cmd_core.c's */
 static FX_MEDIA stub_media;
 
 const char *fs_strerror(UINT status) { (void)status; return "stub fs error"; }
@@ -309,6 +319,7 @@ FX_MEDIA *fs_core_mount(const struct fs_device *dev, struct cli_instance *sh)
 	(void)sh;
 	return &stub_media;
 }
+#endif
 UINT fx_file_create(FX_MEDIA *m, CHAR *name)
 {
 	(void)m; (void)name;

@@ -35,16 +35,14 @@ extern "C" {
 struct cli_instance;
 
 /* Sentinels returned by the ownership gates and by acquire(), deliberately outside
- * the FileX status space so fs_strerror() cannot confuse them with one.  The
- * authoritative copy lives in the port layer (port/filex/sd_fs_glue.h) since that
- * is what produces them; guarded so including both headers is fine, and repeated
- * here so this file stands alone for a media whose glue it does not include. */
-#ifndef FS_ERR_BUSY
-#define FS_ERR_BUSY 0xF0u      /* another owner (umount / format / raw) holds it */
-#endif
-#ifndef FS_ERR_NO_CARD
+ * the FileX status space so fs_strerror() cannot confuse them with one.  Defined
+ * here and nowhere else (issue #233): the mount glue that produces them
+ * (shell/cmds/sd_fs_glue.c) includes this header. */
+#define FS_ERR_BUSY    0xF0u   /* another owner (umount / format / raw) holds it */
 #define FS_ERR_NO_CARD 0xF1u   /* the slot is empty (removable media only)       */
-#endif
+#define FS_ERR_UNWIRED 0xF2u   /* a field of the card driver table is empty:
+                                  refused before the media or the card was
+                                  touched (issue #233)                         */
 
 /**
  * Media abstraction for the shared command bodies.  One instance per command file

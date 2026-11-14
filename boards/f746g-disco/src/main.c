@@ -39,7 +39,7 @@
 #include "cli_backend_uart.h"
 #include "qspi_flash.h"
 #include "sd_card.h"
-#include "sd_fs_glue.h"
+#include "sd_cmd_board.h"   /* sd_fs_glue_init(): the shared SD mount glue (#233) */
 #include "sdram.h"
 #include "camera.h"
 #include "ltdc_display.h"

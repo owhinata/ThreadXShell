@@ -17,9 +17,11 @@
  * [!] THE BOARD DEFINES sd_card_board_ops UNDER THAT FIXED NAME, in its
  * port/sd/sd_card.c, as a const pointing at its driver's functions.  There is
  * no default definition: a board that compiles the command without defining it
- * fails to link.  The FileX media driver and the mount glue (still each
- * board's port/filex/) reach the card through this table too (issue #233);
- * only the start-up code calls the driver by name (its init).
+ * fails to link.  The FileX media driver and the mount glue (shared,
+ * shell/cmds/fx_sd_driver.c and sd_fs_glue.c, issue #233) reach the card
+ * through this table too, and no field may be left NULL (they refuse first,
+ * shell/cmds/sd_cmd_board.h); only the start-up code calls the driver by
+ * name (its init).
  *
  * Thread context only, like the drivers behind it.  Freestanding: no HAL, no
  * board header, no tx_api.h, no FileX.

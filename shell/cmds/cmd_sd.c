@@ -22,8 +22,9 @@
  *
  * What it needs from the board comes through two headers and nothing else:
  * the card driver as the board's table under a fixed name (svc/fs/
- * sd_card_svc.h), and the FileX mount glue and media driver, still each
- * board's own and called by name (shell/cmds/sd_cmd_board.h).
+ * sd_card_svc.h), and the FileX mount glue and media driver, one shared
+ * implementation each over the board's state (shell/cmds/sd_cmd_board.h,
+ * issue #233).
  *
  * The filesystem subcommands are thin binders over the media-independent bodies
  * in fs_cmd_core.c, parameterized by sd_dev.  The low-level `info`/`read` may
@@ -31,8 +32,7 @@
  * mounted FX_MEDIA underneath it, so they take the raw ownership slot --
  * refused while the filesystem is mounted, with `sd umount` as the way out.
  * How a board learns that the slot is empty (a card-detect pin, or no card
- * answering a probe) is its driver's and its glue's; this file only prints the
- * answer.
+ * answering a probe) is its card driver's; this file only prints the answer.
  *
  * [!] THIS FILE OWNS NO MUTABLE STORAGE (cmake/check_no_mutable_storage.py, per
  * board), and has no board in it: no `#ifdef <BOARD>`, no board header.
@@ -64,16 +64,13 @@ static const char *sd_strerror(int rc)
  * The first thing `info`, `read` and `format` do: with a field of the table
  * left NULL they refuse before they take any ownership slot, unmount anything
  * or talk to the card.  The alternative is a call through NULL from the shell
- * thread.  A board that defines no table at all does not link
- * (svc/fs/sd_card_svc.h).
+ * thread.  The check is the one the mount entry points make too
+ * (sd_card_ops_complete(), shell/cmds/sd_cmd_board.h).  A board that defines
+ * no table at all does not link (svc/fs/sd_card_svc.h).
  */
 static int sd_refuse_if_unwired(struct cli_instance *sh)
 {
-	const struct sd_card_ops *ops = &sd_card_board_ops;
-
-	if (ops->probe != NULL && ops->status != NULL && ops->info != NULL &&
-	    ops->read_blocks != NULL && ops->write_blocks != NULL &&
-	    ops->release != NULL)
+	if (sd_card_ops_complete())
 		return 0;
 	cli_error(sh, "sd: refused -- this firmware's card driver table "
 	              "(sd_card_board_ops) has an empty field\r\n");

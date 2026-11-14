@@ -135,14 +135,40 @@ void sd_dir_unlock(void)
 	tx_mutex_put(&sd_dir_mutex);
 }
 
+/*
+ * Shared mount body; the caller holds sd_mount_lock.  The card-detect pin is
+ * tested here so both entry points below answer an empty slot the same way
+ * (FS_ERR_NO_CARD) -- including a card pulled between `sd format` and its
+ * remount.
+ */
+static UINT mount_locked(void)
+{
+	UINT status;
+
+	if (!sd_card_is_present())
+		return FS_ERR_NO_CARD;
+
+	if (sd_mounted)
+		return FX_SUCCESS;
+
+	status = fx_media_open(&sd_media, "sd", fx_sd_driver,
+	                       FX_NULL, sd_media_cache,
+	                       sizeof sd_media_cache);
+	if (status == FX_SUCCESS) {
+		sd_mounted = 1;
+		LOG_INF("media mounted");
+	}
+	return status;
+}
+
 UINT sd_media_acquire(FX_MEDIA **out)
 {
-	UINT status = FX_SUCCESS;
+	UINT status;
 
 	tx_mutex_get(&sd_mount_lock, TX_WAIT_FOREVER);
 
 	if (sd_busy) {
-		/* umount/raw owns the media; do not mount behind its back. */
+		/* umount/format/raw owns the media; do not mount behind its back. */
 		tx_mutex_put(&sd_mount_lock);
 		return FS_ERR_BUSY;
 	}
@@ -166,21 +192,21 @@ UINT sd_media_acquire(FX_MEDIA **out)
 		LOG_INF("card removed/changed; media evicted");
 	}
 
-	if (!sd_card_is_present()) {
-		tx_mutex_put(&sd_mount_lock);
-		return FS_ERR_NO_CARD;
-	}
+	status = mount_locked();
 
-	if (!sd_mounted) {
-		status = fx_media_open(&sd_media, "sd", fx_sd_driver,
-		                       FX_NULL, sd_media_cache,
-		                       sizeof sd_media_cache);
-		if (status == FX_SUCCESS) {
-			sd_mounted = 1;
-			LOG_INF("media mounted");
-		}
-	}
+	tx_mutex_put(&sd_mount_lock);
 
+	if (status == FX_SUCCESS && out != FX_NULL)
+		*out = &sd_media;
+	return status;
+}
+
+UINT sd_media_mount_exclusive(FX_MEDIA **out)
+{
+	UINT status;
+
+	tx_mutex_get(&sd_mount_lock, TX_WAIT_FOREVER);
+	status = mount_locked();
 	tx_mutex_put(&sd_mount_lock);
 
 	if (status == FX_SUCCESS && out != FX_NULL)

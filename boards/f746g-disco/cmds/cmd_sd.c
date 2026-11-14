@@ -218,25 +218,16 @@ static int fat32_spc(uint32_t total, uint32_t *out_spc)
 
 static int cmd_sd_format(struct cli_instance *sh, int argc, char **argv)
 {
-	int is_exfat = 0;
-	int yi, rc;
 	uint32_t total, spc = 0;
 	UINT status;
-	FX_MEDIA *media;
+	FX_MEDIA *media = FX_NULL;
+	int is_fat32 = 0;
+	int rc;
 
-	/* `sd format [exfat] yes` -- the literal `yes` is the safety latch. */
-	if (argc >= 2 && strcmp(argv[1], "exfat") == 0)
-		is_exfat = 1;
-	yi = 1 + is_exfat;
-	if (argc != yi + 1 || strcmp(argv[yi], "yes") != 0) {
-		cli_error(sh, "sd: destructive; confirm with `sd format %syes`\r\n",
-		          is_exfat ? "exfat " : "");
-		return 1;
-	}
-
-	if (is_exfat) {
-		/* Why this build is FAT32 only: owhinata/stm32f746g-disco#35. */
-		cli_error(sh, "sd: exFAT not supported in this build (FAT32 only)\r\n");
+	/* `sd format yes` -- the literal `yes` is the safety latch.  FAT32 only;
+	 * why there is no exFAT: owhinata/stm32f746g-disco#35. */
+	if (argc != 2 || strcmp(argv[1], "yes") != 0) {
+		cli_error(sh, "sd: destructive; confirm with `sd format yes`\r\n");
 		return 1;
 	}
 
@@ -273,20 +264,35 @@ static int cmd_sd_format(struct cli_instance *sh, int argc, char **argv)
 	                         sd_glue_cache(), sd_glue_cache_size(),
 	                         "SD", 2, 0, 0, total, 512, spc, 255, 63);
 	fx_sd_set_format_mode(0);
-	sd_exclusive_end();
 
 	if (status != FX_SUCCESS) {
+		sd_exclusive_end();
 		cli_error(sh, "sd: format failed: %s (0x%02x)\r\n",
 		          fs_strerror(status), status);
 		return 1;
 	}
 
-	/* Remount and require FAT32 -- the command contract is "FAT32 superfloppy",
-	 * so a FAT16 fallback is a failure, not a warning. */
-	media = fs_core_mount(&sd_dev, sh);
-	if (media == NULL)
+	/*
+	 * Remount WITHOUT dropping the exclusive slot first: releasing here and then
+	 * calling the normal mount path would leave a window in which another console
+	 * or a background job takes ownership and the remount fails with FS_ERR_BUSY,
+	 * reporting failure for a format that succeeded.  The FAT32 check is made
+	 * before releasing too, so it describes the media this command produced and
+	 * not one a concurrent umount has since closed.
+	 */
+	status = sd_media_mount_exclusive(&media);
+	if (status == FX_SUCCESS)
+		is_fat32 = (media->fx_media_32_bit_FAT == FX_TRUE);
+	sd_exclusive_end();
+
+	if (status != FX_SUCCESS) {
+		cli_error(sh, "sd: mount after format failed: %s (0x%02x)\r\n",
+		          fs_strerror(status), status);
 		return 1;
-	if (media->fx_media_32_bit_FAT != FX_TRUE) {
+	}
+	/* The command contract is "FAT32 superfloppy", so a FAT16 fallback is a
+	 * failure, not a warning. */
+	if (!is_fat32) {
 		cli_error(sh, "sd: format did not produce FAT32 (card too small)\r\n");
 		return 1;
 	}
@@ -299,7 +305,7 @@ CLI_SUBCMD_SET_CREATE(sd_subcmds,
 	CLI_CMD_ARG_USAGE(read,   NULL, "hexdump one 512 B block <lba>",
 	                  "<lba>",         cmd_sd_read,   2, 0),
 	CLI_CMD_ARG_USAGE(format, NULL, "format as FAT32 -- confirm with 'yes'",
-	                  "[exfat] yes",   cmd_sd_format, 1, 2),
+	                  "yes",           cmd_sd_format, 1, 1),
 	CLI_CMD_ARG_USAGE(ls,     NULL, "list directory [path]",
 	                  "[path]",        cmd_sd_ls,     1, 1),
 	CLI_CMD_ARG_USAGE(cat,    NULL, "print file <path>",

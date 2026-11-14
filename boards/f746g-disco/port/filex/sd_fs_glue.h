@@ -43,6 +43,18 @@ void sd_fs_glue_init(void);
  *  fails -- there is no SD format yet (Phase C). */
 UINT sd_media_acquire(FX_MEDIA **out);
 
+/**
+ * Mount while the caller ALREADY holds the exclusive slot (`sd format`).
+ *
+ * sd_media_acquire() refuses while sd_busy is set, which is exactly the state a
+ * format is in -- so a format that released the slot before remounting would let
+ * another console or a background job take it in between and make the remount
+ * fail with FS_ERR_BUSY although the format succeeded.  Skips the hot-plug
+ * eviction (the format has just probed the card) but still answers an empty slot
+ * with FS_ERR_NO_CARD.
+ */
+UINT sd_media_mount_exclusive(FX_MEDIA **out);
+
 /** Flush + unmount (fx_media_close).  No-op when not mounted. */
 UINT sd_media_unmount(void);
 

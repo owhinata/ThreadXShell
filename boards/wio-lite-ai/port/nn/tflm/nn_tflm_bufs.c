@@ -18,7 +18,7 @@
  * region 3 maps Normal write-back cacheable (owhinata/wio-lite-ai#9 phase 2a).  That
  * is the right home for exactly the reason the rest of the firmware avoids it: this
  * is bulk, CPU-ONLY working set.  No bus master may ever touch either buffer -- not
- * the DMA that fills a camera frame, not the SDMMC IDMA -- because in this window a
+ * the DMA that fills a camera frame, not the LTDC -- because in this window a
  * master's write is coherent at the bus and stale in the D-cache, intermittently,
  * only under cache pressure.  The model bytes arrive here by CPU copy out of the NOR
  * driver's indirect reads, and the arena is never anything but CPU-touched.

@@ -63,11 +63,13 @@ RAM_LENGTH = 320 * 1024
 #
 # The reason is not tidiness.  A name in this list that the build did not compile is
 # reported as "no such object in the image" -- which reads exactly like a placement
-# regression, and is not one.  `BSP_ENABLE_SD=OFF` used to fail that way on
-# `sd_bounce`, so the toggle could not be used at all: its whole purpose is to build a
-# firmware with no bus master while bisecting a D-cache suspicion, and the gate refused
-# precisely the build someone reaches for when something is already wrong.  Same flaw,
-# same fix as cmake/check_psram_ai_residency.py (owhinata/wio-lite-ai#9 phase 2c).
+# regression, and is not one.  Listing preview_stack here would make
+# `BSP_ENABLE_LCD=OFF` fail that way, and that toggle exists to build a firmware for
+# bisecting a PLL3/USB or PSRAM-bandwidth suspicion: the gate would refuse precisely
+# the build someone reaches for when something is already wrong.  (The microSD's
+# OFF build did fail that way, before owhinata/wio-lite-ai#9 phase 2c; the microSD
+# was removed in issue #234.)  Same flaw, same fix as
+# cmake/check_psram_ai_residency.py (owhinata/wio-lite-ai#9 phase 2c).
 REQUIRED_DTCM = (
     "usb_stack",                    # TinyUSB device task
     "cdc_sh_stack",                 # console shell instance   (CLI_INSTANCE_DEFINE)
@@ -86,13 +88,10 @@ REQUIRED_DTCM = (
 
 # Must stay in AXI-SRAM: a bus master writes or reads these directly.
 #
-#   sd_bounce  SDMMC1 IDMA (port/sd/sd_card.c).  An AHB master -- it cannot see the
-#              TCMs at all, and moving this buffer would make every SD transfer a
-#              silent no-op rather than an error.
 #   cam_band   DCMI via DMA2_Stream1 (port/camera/camera.c, owhinata/wio-lite-ai#35).
-# Same reachability rule, and the same silent failure: in DTCM the camera
-#              would keep running and the panel would show whatever was in the
-#              buffer at boot.
+#              DMA2 cannot see the TCMs at all: in DTCM the camera would keep
+#              running and the panel would show whatever was in the buffer at
+#              boot, with no error.
 #
 # cam_frame / ltdc_fb are the other master-touched buffers.  They live in
 # PSRAM and are checked by cmake/check_psram_ai_residency.py, which asserts they stay
@@ -101,11 +100,11 @@ REQUIRED_DTCM = (
 # ASSERT covered them; it never did -- that ASSERT only bounds the total against the 8 MB
 # window and says nothing about which sub-range a buffer landed in.  Harmless while the
 # whole window was non-cacheable, wrong the moment part of it was not.)
-# Both of them arrive from CMakeLists.txt via --require-axi rather than being named
-# here, like the DTCM list above (sd_bounce belongs to BSP_ENABLE_SD; cam_band is
-# always built -- the camera is not optional on this board, #147 -- and is passed the
-# same way).  The comment stays because the REASON is not conditional: whichever of
-# them is in a given image must be in AXI-SRAM.
+# cam_band arrives from CMakeLists.txt via --require-axi rather than being named
+# here, like the DTCM list above (it is always built -- the camera is not optional
+# on this board, #147 -- and is passed the same way as the optional names).  The
+# comment stays because the REASON is not conditional: a bus-master buffer in a
+# given image must be in AXI-SRAM.
 #
 # [!] MAINTENANCE OBLIGATION, and it is the weak point of moving the lists out.  A NEW
 # bus-master buffer added to this firmware is not protected until someone adds it to

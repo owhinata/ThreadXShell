@@ -631,9 +631,9 @@ option(BSP_ENABLE_WFI "Enable ThreadX idle WFI power saving" ON)
 # the bring-up moves into the bootloader and BSP_PSRAM_INIT_IN_APP is turned OFF.
 option(BSP_ENABLE_PSRAM "Enable OCTOSPI1 APS6408 PSRAM (MPU window + psram command)" ON)
 option(BSP_PSRAM_INIT_IN_APP "Bring up OCTOSPI1 PSRAM app-side (app-first validation)" ON)
-# Which NN backend this build links.  Declared HERE, above the BSP_ENABLE_*
-# options, because BSP_ENABLE_SD's default depends on it -- the rest of the NN wiring
-# stays further down with the other source lists.
+# Which NN backend this build links.  Declared here with the other build
+# options; the rest of the NN wiring stays further down with the other source
+# lists.
 #
 # DEFAULT tflm SINCE ISSUE #98.  This board can afford it and the other two cannot:
 # its models come from the NOR blob region at RUNTIME, so nothing has to be baked
@@ -643,10 +643,9 @@ option(BSP_PSRAM_INIT_IN_APP "Bring up OCTOSPI1 PSRAM app-side (app-first valida
 #
 # [!] IT COSTS MOST OF WHAT IS LEFT OF THE 384 KB APP PARTITION.  Measured at the
 # commit that made this change: 305,584 B (77.7%) as `null`, 350,096 B (89.0%) as
-# `tflm` with the microSD dropped -- which is what the BSP_ENABLE_SD default below
-# does, and why it does it.  Keeping the SD as well is 384,572 B (97.8%), leaving
-# 8,644 B: enough to link today and not enough to add anything.  If a future change
-# needs the SD back, it needs the space audited first, not just -DBSP_ENABLE_SD=ON.
+# `tflm` with the microSD dropped, which is why the tflm default turned the SD off
+# (the microSD was removed altogether in issue #234).  Keeping the SD as well was
+# 384,572 B (97.8%), leaving 8,644 B: enough to link and not enough to add anything.
 #
 # Existing build directories are unaffected: this is a CACHE default, so a tree
 # already configured as `null` stays `null` until someone reconfigures it.
@@ -670,7 +669,9 @@ option(BSP_ENABLE_LCD "Enable the FPC-40 RGB LCD (LTDC) and the lcd command" ON)
 
 
 # Driver and command move together -- cmd_lcd.c is the only caller of port/ltdc --
-# and, like the SD block above, this append must stay BELOW the option().
+# and this append must stay BELOW the option(): SHELL_SOURCES is set earlier in
+# the file, when BSP_ENABLE_LCD is still undefined, so appending there would
+# silently drop the driver.
 if(BSP_ENABLE_LCD)
     list(APPEND SHELL_SOURCES
         "${BOARD_DIR}/port/ltdc/ltdc_display.c"
@@ -691,12 +692,12 @@ endif()
 # either way -- see port/nor/nor_flash.h for why that fence stays.
 option(BSP_ENABLE_KV "Enable the external NOR flash (OCTOSPI2) and the config KV store" ON)
 
-# Driver, database and commands move together, and -- like the SD/LCD/camera
-# blocks -- this append must stay BELOW the option().
+# Driver, database and commands move together, and -- like the LCD block --
+# this append must stay BELOW the option().
 #
 # FlashDB (armink/FlashDB, Apache-2.0) is taken as three core
-# sources plus the FAL it ships in its own port/ directory.  Unlike ThreadX/FileX/
-# NetX Duo above, this one is NOT GLOB'd whole: fdb_tsdb.c (time-series database)
+# sources plus the FAL it ships in its own port/ directory.  Unlike ThreadX and
+# NetX Duo, this one is NOT GLOB'd whole: fdb_tsdb.c (time-series database)
 # and fdb_file.c (filesystem-backed storage) are features svc/kv/fdb_cfg.h
 # does not enable, and fal_rtt.c is the RT-Thread integration and does not build
 # outside it.  Configuration comes from svc/kv/fdb_cfg.h (shared, issue #214) and
@@ -826,8 +827,8 @@ endif()
 # If the app partition ever gets tight again, a `none` value that drops
 # the whole layer is the natural place to add the toggle.
 #
-# CONFIG_NN_BACKEND itself is declared much earlier in this file, above the BSP_ENABLE_*
-# block, because BSP_ENABLE_SD's default depends on which backend was selected.
+# CONFIG_NN_BACKEND itself is declared earlier in this file, with the other build
+# options.
 set(NN_SOURCES "${CMAKE_SOURCE_DIR}/svc/nn/nn.c"   # the dispatcher (shared, #161)
                "${BOARD_DIR}/port/nn/nn_model_board.c"  # ...its state + hooks
                "${BOARD_DIR}/port/nn/nn_svc_wio.c"   # the shared `nn` command's adapter
@@ -1052,10 +1053,11 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/shell/include"
     "${CMAKE_SOURCE_DIR}/shell/core"
     "${CMAKE_SOURCE_DIR}/shell/backend"
-    # The shared commands' own headers: this board's cmds/ live in a different
-    # directory now, so cmd_camera_board.c can no longer reach fs_cmd_core.h
-    # through the "same directory first" rule for quoted includes.  Nothing else
-    # is in there, so no existing include can be shadowed by adding it.
+    # The shared commands' own headers (camera_cmd_board.h, net_tty.h,
+    # xfer_console.h, ...): this board's cmds/ and src/ live in other
+    # directories, so the "same directory first" rule for quoted includes does
+    # not reach them.  No header in there shares a name with one elsewhere on
+    # this path, so adding it shadows nothing.
     "${CMAKE_SOURCE_DIR}/shell/cmds"
     "${BOARD_DIR}/backend"                       # cli_backend_usbcdc.h / _log.h
     "${CMAKE_SOURCE_DIR}/svc"
@@ -1105,7 +1107,7 @@ target_compile_definitions(shell PRIVATE
 # only start to matter under LTO, which propagates these inferences ACROSS
 # translation units for the first time:
 #
-#  -fno-strict-aliasing            NetX Duo and FileX cast packet buffers to protocol
+#  -fno-strict-aliasing            NetX Duo casts packet buffers to protocol
 #                                  headers constantly.  Whole-program alias analysis is
 #                                  exactly the condition under which those type-punning
 #                                  violations stop being harmless.
@@ -1191,11 +1193,9 @@ add_custom_command(TARGET shell POST_BUILD
 # The objects that only exist in SOME configurations are named here rather than in the
 # script, for the reason spelled out at the top of it: a required symbol the build never
 # compiled is reported as "no such object in the image", which reads like a placement
-# regression and is not one.  Before this, `BSP_ENABLE_SD=OFF` could not be built at
-# all -- the gate failed on sd_bounce -- which defeated the option's entire purpose,
-# since it exists to produce a firmware with no bus master while bisecting a D-cache
-# suspicion.  The condition on each line below is the same one that adds its source
-# (the camera lines have none: the camera is not optional on this board, #147).
+# regression and is not one.  The condition on each line below is the same one that
+# adds its source (the camera lines have none: the camera is not optional on this
+# board, #147).
 set(DTCM_REQUIRED "")
 if(BSP_ENABLE_KV)
     list(APPEND DTCM_REQUIRED --require-dtcm kv_boot_stack)      # src/kv_boot.c

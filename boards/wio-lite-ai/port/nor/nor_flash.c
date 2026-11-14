@@ -54,7 +54,7 @@
  * CACHE: every byte moves through the OCTOSPI data register by CPU load/store.
  * There is no DMA and no memory-mapped window, so no buffer is ever written
  * behind the D-cache's back and no maintenance is required for any caller
- * alignment -- unlike port/sd/sd_card.c, whose IDMA forced a bounce buffer.
+ * alignment.
  */
 #include "nor_flash.h"
 

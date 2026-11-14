@@ -6,8 +6,8 @@
  *                                  bootloader owns sector 0 (0x08000000, 128 KB)
  *                                  and jumps to the vector table it finds here.
  *   RAM   : 320 KB @ 0x24000000 -- AXI-SRAM (D1).  Reserved for what a BUS MASTER
- *                                  has to reach: DMA1/DMA2 and the SDMMC1 IDMA
- *                                  cannot see either TCM (owhinata/wio-lite-ai#46).
+ *                                  has to reach: DMA1/DMA2 cannot see either
+ *                                  TCM (owhinata/wio-lite-ai#46).
  *                                  ONE STATED EXCEPTION: the top 32 KB is the
  *                                  .plugin reservation (issue #108), because
  *                                  CODE cannot live in DTCM -- see .plugin.
@@ -417,10 +417,10 @@ SECTIONS
    * CPU-only hot data moved out of AXI-SRAM (owhinata/wio-lite-ai#46): every ThreadX thread
    * stack and the RTL8720 UART rings.
    *
-   * WHY.  AXI-SRAM is the only RAM a bus master can reach -- DMA1/DMA2 and the
-   * SDMMC1 IDMA cannot see either TCM (RM0468 sec 2.1.2 / 2.1.5 / 2.1.6), which is
-   * why port/sd/sd_card.c has to bounce through .axi_dma above.  Of the 221 KB this
-   * firmware had in AXI-SRAM, exactly 4 KB actually needed to be there; the rest was
+   * WHY.  AXI-SRAM is the only RAM a bus master can reach -- DMA1/DMA2 cannot see
+   * either TCM (RM0468 sec 2.1.2 / 2.1.5 / 2.1.6), which is why the camera's DCMI
+   * bands sit in .axi_dma below.  Of the 221 KB this firmware had in AXI-SRAM at
+   * the time, exactly 4 KB actually needed to be there; the rest was
    * CPU-only data occupying the one memory the camera's DCMI band (owhinata/wio-lite-ai#35) has no
    * substitute for.  Stacks are also the hottest data in the system, so DTCM is not
    * a consolation prize: zero wait states and no D-cache line to evict.
@@ -488,17 +488,18 @@ SECTIONS
     __bss_end__ = _ebss;
   } >RAM
 
-  /* Bus-master DMA scratch, in AXI-SRAM (owhinata/wio-lite-ai#6).  The SDMMC1 IDMA is the first
-   * bus master this firmware enables, so its buffer is the first memory the CPU and
-   * something else both write.  It stays plain cacheable AXI-SRAM and the driver
-   * does the clean/invalidate (port/sd/sd_card.c) -- but that only works if no OTHER
-   * variable shares a 32-byte cache line with it, or maintaining this buffer would
-   * silently discard or flush a neighbour.  Hence its own output section with
-   * ALIGN(32) at BOTH ends, rather than an aligned array inside .bss.
+  /* Bus-master DMA buffers, in AXI-SRAM (owhinata/wio-lite-ai#6; the microSD's
+   * bounce buffer that opened it was removed in issue #234).  Today it holds the
+   * camera's two DCMI bands (cam_band, port/camera/camera.c), which DMA2 writes and
+   * the CPU reads.  They stay plain cacheable AXI-SRAM and the driver does the
+   * invalidate -- but that only works if no OTHER variable shares a 32-byte cache
+   * line with them, or maintaining these buffers would silently discard or flush a
+   * neighbour.  Hence its own output section with ALIGN(32) at BOTH ends, rather
+   * than an aligned array inside .bss.
    *
-   * AXI-SRAM and not DTCM: the IDMA is an AHB master and the TCMs are reachable only
-   * by the core and by MDMA through AHBS (RM0468 sec 2.4), so a DTCM bounce buffer
-   * would fail silently.  NOLOAD: transfer scratch, never loaded or zeroed at boot. */
+   * AXI-SRAM and not DTCM: DMA2 cannot see the TCMs, which are reachable only by
+   * the core and by MDMA through AHBS (RM0468 sec 2.4), so a DTCM buffer would fail
+   * silently.  NOLOAD: transfer buffers, never loaded or zeroed at boot. */
   .axi_dma (NOLOAD) :
   {
     . = ALIGN(32);
@@ -600,9 +601,9 @@ SECTIONS
    * bring-up, app/psram.c does); the MPU marks this window Normal non-cacheable
    * (app/mpu.c) so future DMA buffers stay coherent under the D-cache.  NOLOAD:
    * volatile external RAM -- never part of the .bin, never loaded or zeroed at boot.
-   * Empty for v1 (no named PSRAM residents yet); named buffers land in .psram* as
-   * consumers (owhinata/wio-lite-ai#5 SD / owhinata/wio-lite-ai#6 LCD / owhinata/wio-lite-ai#7 camera)
-   * arrive. _psram_start/_psram_end bound the free pool for a future PSRAM allocator. */
+   * Named buffers land in .psram* (today the LCD frame buffers, ltdc_fb, and the
+   * camera frame, cam_frame). _psram_start/_psram_end bound the free pool for a
+   * future PSRAM allocator. */
   .psram_noinit (NOLOAD) :
   {
     . = ALIGN(32);

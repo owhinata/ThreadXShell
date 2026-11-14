@@ -82,8 +82,10 @@ PSRAM_AI_LENGTH = 2 * 1024 * 1024
 # --require is passed in: a buffer that belongs to a BSP_ENABLE_* option and is demanded
 # by this script from a build that never compiled it is reported as "no such object in
 # the image" -- which reads like a placement regression and is not one.
-# check_dtcm_residency.py learned this in owhinata/wio-lite-ai#9 phase 2c, when a hardcoded
-# sd_bounce made BSP_ENABLE_SD=OFF unbuildable; this file kept its own hardcoded list
+# ltdc_fb is such a buffer today: a BSP_ENABLE_LCD=OFF build has none.
+# check_dtcm_residency.py learned this in owhinata/wio-lite-ai#9 phase 2c, when a
+# hardcoded microSD buffer made the build without the microSD unbuildable (the
+# microSD itself was removed in issue #234); this file kept its own hardcoded list
 # and broke an optional configuration in exactly the same way
 # (owhinata/wio-lite-ai#50).  The rule both scripts now follow: ONLY residents that exist
 # in EVERY configuration may be named in the source; anything a toggle can remove comes

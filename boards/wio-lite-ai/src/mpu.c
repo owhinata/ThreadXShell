@@ -9,13 +9,14 @@
  * non-cacheable, shareable so DMA buffers placed there stay coherent with no
  * per-transfer clean/invalidate.
  *
- * That premise is no longer hypothetical: owhinata/wio-lite-ai#6 enabled the SDMMC1 IDMA,
- * the first bus master in this firmware.  It deliberately does NOT use a region here --
- * its 4 KB bounce buffer sits in ordinary cacheable AXI-SRAM and port/sd/sd_card.c
- * cleans/invalidates around each transfer, because a small scratch buffer does not
- * justify one of the 16 MPU regions.  Use this table for buffers that are large,
- * long-lived, or touched at a rate where per-transfer maintenance would hurt (an
- * LCD/camera framebuffer); use explicit maintenance for small scratch.
+ * That premise is not hypothetical: the camera frame and the LCD frame buffers sit
+ * in this window and are written or read by DMA2, DMA2D and the LTDC.  The camera's DCMI
+ * bands deliberately do NOT use a region here -- they sit in ordinary cacheable
+ * AXI-SRAM and port/camera/camera.c invalidates a band before reading it, because
+ * the transpose's strided reads have to come from internal RAM.  Use this table
+ * for buffers that are large, long-lived, or touched at a rate where per-transfer
+ * maintenance would hurt (an LCD/camera framebuffer); use explicit maintenance for
+ * buffers that have to live in AXI-SRAM.
  *
  * Ordering (hard invariant, PM0253 sec 4.6.8 -- a barrier is required after every
  * MPU update): mpu_config() MUST run *between* SCB_EnableICache() and
@@ -47,7 +48,7 @@ struct mpu_region {
  * as Normal, Non-cacheable, Shareable, full RW, execute-never (DMA/data buffers,
  * not code) -- TEX=001, C=0, B=0, S=1, AP=full, XN=1.  8 MB is a power of two and
  * naturally aligned, so it needs no sub-region masking.  Future DMA carve-outs
- * (camera framebuffer, SD scratch) are added as further rows here.
+ * are added as further rows here.
  *
  * Region 1: the 64 KB ITCM at 0x00000000, read-only but executable.  Since issue
  * owhinata/wio-lite-ai#24 the interrupt paths live there (.itcm), and ITCM sits at address

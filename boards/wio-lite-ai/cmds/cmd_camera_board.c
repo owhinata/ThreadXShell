@@ -4,21 +4,20 @@
  */
 /**
  * @file    cmd_camera_board.c
- * @brief   This board's half of the `camera` command: the raw SCCB tools, and
- *          the shell-layer service the shared command needs
+ * @brief   This board's half of the `camera` command: the raw SCCB tools
  *          (owhinata/wio-lite-ai#8, issue #143).
  *
- * The command itself -- probe / on / off / info / capture / save / send /
- * stream -- is shell/cmds/cmd_camera.c, shared with the other boards, over this
+ * The command itself -- probe / on / off / info / capture / send / stream
+ * (no `save`: this board has no storage medium) -- is shell/cmds/cmd_camera.c,
+ * shared with the other boards, over this
  * board's adapter port/camera/camera_svc_wio.c.  What stays here is appended to
  * that table by CAMERA_SVC_BOARD_SUBCMDS (svc/camera_svc_config.h):
  *
  *   camera scan           list every 7-bit SCCB address that ACKs
  *   camera reg <a> <r> .. raw SCCB register read / write
  *
- * plus, with the microSD built in, camera_board_medium() (shell/cmds/
- * camera_cmd_board.h).  `camera send` goes over the shared YMODEM wiring
- * (shell/cmds/xfer_console.c, issue #231).  The notes below are about reading the capture report,
+ * `camera send` goes over the shared YMODEM wiring (shell/cmds/xfer_console.c,
+ * issue #231).  The notes below are about reading the capture report,
  * which camera_svc_wio.c now writes.
  *
  * `camera probe` proves the sensor-control side: a chip ID means XCLK is at a

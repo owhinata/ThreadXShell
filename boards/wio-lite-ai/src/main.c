@@ -270,26 +270,28 @@ int main(void)
    * single-CPU, and one CPU behind one D-cache is self-coherent across threads and
    * ISRs.  USB dwc2 runs slave/FIFO (the CPU copies buffer<->FIFO by MMIO;
    * app/tusb_config.h pins CFG_TUD_DWC2_DMA_ENABLE=0), so it is not an exception.
-   * The one real bus master (SDMMC1 IDMA) is handled per-buffer -- see the DMA
-   * coherency note below.  The reset-persistent crash log lives in DTCM, which
-   * bypasses the D-cache, so it stays coherent and survives a reset.  CMSIS
-   * invalidates each cache before enabling; .data/.bss were written to SRAM with
-   * the caches off, so there are no stale lines.  A reset (DFU reboot / crash)
-   * disables the caches in HW, and the app persists no cacheable-SRAM state across
-   * a reset, so the boot handoff is unchanged.
+   * The real bus masters (the camera's DMA, the LCD's LTDC and DMA2D) are handled
+   * per-buffer -- see the DMA coherency note below.  The reset-persistent crash
+   * log lives in DTCM, which bypasses the D-cache, so it stays coherent and
+   * survives a reset.  CMSIS invalidates each cache before enabling; .data/.bss
+   * were written to SRAM with the caches off, so there are no stale lines.  A
+   * reset (DFU reboot / crash) disables the caches in HW, and the app persists no
+   * cacheable-SRAM state across a reset, so the boot handoff is unchanged.
    *
-   * DMA coherency: there IS a bus master now (owhinata/wio-lite-ai#6) -- the SDMMC1 IDMA, once a
-   * card is probed -- so the "one CPU behind one D-cache, self-coherent" reading of
-   * the paragraph above stops holding for the memory that master touches.  Two
-   * mechanisms cover it, and new DMA peripherals should pick one deliberately:
+   * DMA coherency: there ARE bus masters (owhinata/wio-lite-ai#6 onward) -- DMA2 for
+   * the camera's DCMI, the LTDC scanning out the LCD and DMA2D drawing into its
+   * frame buffer -- so the "one CPU behind
+   * one D-cache, self-coherent" reading of the paragraph above stops holding for
+   * the memory they touch.  Two mechanisms cover it, and new DMA peripherals
+   * should pick one deliberately:
    *   - mpu_config() (below, between the two cache enables) marks the OCTOSPI1 PSRAM
    *     window at 0x90000000 Normal non-cacheable, so buffers placed there are
-   *     coherent with no per-transfer maintenance.  Bulk buffers (a camera
-   *     framebuffer) belong here.
-   *   - port/sd/sd_card.c instead keeps one small bounce buffer in ordinary cacheable
-   *     AXI-SRAM (its own .axi_dma section, so no neighbour shares a cache line) and
-   *     cleans/invalidates around each transfer.  A 4 KB scratch does not justify
-   *     spending an MPU region, and the caller's buffer never reaches the DMA.
+   *     coherent with no per-transfer maintenance.  Bulk buffers (the camera frame,
+   *     the LCD frame buffers) belong here.
+   *   - port/camera/camera.c instead keeps its two DCMI bands in ordinary cacheable
+   *     AXI-SRAM (their own .axi_dma section, so no neighbour shares a cache line)
+   *     and invalidates a band before the CPU reads it, because the strided reads of
+   *     the transpose have to come from internal RAM.
    * USB stays outside both: dwc2 is slave/FIFO here (CFG_TUD_DWC2_DMA_ENABLE=0). */
   SCB_EnableICache();
   mpu_config();       /* PSRAM non-cacheable region; MUST sit between I- and D-cache

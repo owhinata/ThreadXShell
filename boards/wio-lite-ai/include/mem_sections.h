@@ -16,10 +16,10 @@
  * script)
  *
  * AXI-SRAM is the scarce one, and not because it is small.  It is the only RAM a
- * bus master can address: DMA1/DMA2 and the SDMMC1 internal IDMA cannot see either
- * TCM (RM0468 sec 2.1.2 / 2.1.5 / 2.1.6), which is why port/sd/sd_card.c bounces
- * every SD transfer through a buffer in .axi_dma.  A survey of every *_DMA() call
- * in this firmware found exactly three buffers a master ever touches, totalling
+ * bus master can address: DMA1/DMA2 cannot see either TCM (RM0468 sec 2.1.2 /
+ * 2.1.5 / 2.1.6), which is why the camera's DCMI bands (port/camera/camera.c) sit
+ * in .axi_dma.  A survey of every *_DMA() call in this firmware at the time
+ * (owhinata/wio-lite-ai#46) found exactly three buffers a master ever touches, totalling
  * 4 KB in AXI-SRAM -- the other 217 KB was CPU-only data sitting in the one memory
  * the camera's DCMI band (owhinata/wio-lite-ai#35) has no substitute for.
  *

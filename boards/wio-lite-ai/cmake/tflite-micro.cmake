@@ -138,8 +138,9 @@ set(NN_TFLM_VERIFY OFF CACHE BOOL "Verify the flatbuffer before building an inte
 # remaining 1.16x is the optimiser, and 58 ms is not nothing.
 #
 # The flash it costs was found elsewhere instead: NN_TFLM_VERIFY moved to the host
-# (above) and BSP_ENABLE_SD defaults OFF for this backend (CMakeLists.txt), which
-# together give back far more than -Os did while taking nothing off the inference path.
+# (above) and the microSD was left out of tflm builds (and removed altogether in
+# issue #234), which together give back far more than -Os did while taking nothing
+# off the inference path.
 #
 # A STRING and not a boolean, because option() would silently turn it into ON/OFF --
 # the same reasoning as BSP_OPT_LEVEL in CMakeLists.txt.

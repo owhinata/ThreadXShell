@@ -322,7 +322,7 @@ typedef void (*camera_band_fn)(void *ctx, unsigned band, const uint16_t *px,
  *
  * The DMA runs in double-buffer mode over two fixed band buffers and the memory
  * registers are never rewritten (RM0468 sec 15.3.11's on-the-fly target change is
- * not needed).  The stream fills no frame, so `camera save` / `send` keep showing the
+ * not needed).  The stream fills no frame, so `camera send` keeps sending the
  * last camera_capture().  It is exclusive with camera_capture().
  */
 /* Started only by the holder table above (issue #142): camera.c passes the one
@@ -384,8 +384,8 @@ int camera_frame_read(uint32_t offset, void *dst, uint32_t len, uint32_t *gen);
 
 /**
  * Drop the captured-frame flag: the frame's bytes in the PSRAM are about to be
- * destroyed (issue #150; `psram test`).  Afterwards `camera save` / `send`
- * answer "no frame" until the next capture.  A no-op when the driver is not
+ * destroyed (issue #150; `psram test`).  Afterwards `camera send` answers
+ * "no frame" until the next capture.  A no-op when the driver is not
  * initialised.
  *
  * [!] A one-shot, not a claim.  The caller must hold the OCTOSPI1 reconfigurer

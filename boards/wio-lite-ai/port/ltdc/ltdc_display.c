@@ -993,7 +993,7 @@ int ltdc_init(void)
 		goto fail_obj;     /* ltdc_up stays false */
 	}
 
-	/* Reload-ready IRQ: below the RTL8720 UART (5) and OTG_HS/SDMMC1 (6), whose
+	/* Reload-ready IRQ: below the RTL8720 UART (5) and OTG_HS / the camera (6), whose
 	   ISRs have real deadlines, and above SysTick (14) / PendSV (15).  The
 	   vector only fires once HAL_LTDC_Reload() arms LTDC_IT_RR inside
 	   ltdc_flip(), which cannot happen before the scheduler runs.  DMA2D's
@@ -1450,7 +1450,7 @@ int ltdc_flip(void)
  * ========================================================================== */
 
 /* Reload-ready IRQ (only armed transiently by HAL_LTDC_Reload).  Bracketed with
-   the ThreadX execution-profile hooks like the SD / USB ISRs so the kit charges
+   the ThreadX execution-profile hooks like the USB ISR so the kit charges
    this time to the (isr) row.  HAL_LTDC_IRQHandler() clears the RR flag,
    disables the RR interrupt and dispatches HAL_LTDC_ReloadEventCallback(). */
 void LTDC_IRQHandler(void)

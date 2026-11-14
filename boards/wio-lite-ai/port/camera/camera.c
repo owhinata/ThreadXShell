@@ -31,8 +31,8 @@
  *     MCU's internal ones stay off (CAM_I2C_INT_PULLUP).
  *     I2C4 lives in D3 and is muxed by RCC_D3CCIPR.I2C4SEL, whose RESET value
  *     selects rcc_pclk4 = 137.5 MHz.  The __HAL_RCC_I2C4_CONFIG below re-states
- *     that default rather than changing anything -- the same idiom, and the same
- *     justification, as port/sd/sd_card.c's __HAL_RCC_SDMMC_CONFIG.  No PLL, no
+ *     that default rather than changing anything: it names the kernel clock the
+ *     TIMINGR constants were derived for.  No PLL, no
  *     divider and no FLASH_ACR is written anywhere in this file (CLAUDE.md: the
  *     app inherits the bootloader's clock tree and never reconfigures it).
  *
@@ -250,7 +250,7 @@ static DMA_HandleTypeDef hdma_dcmi;
  * so the CPU and the DCMI's DMA see the same bytes with no clean/invalidate.
  * That holds ONLY while this buffer stays in .psram_noinit -- move it to
  * AXI-SRAM and every read below needs cache maintenance (and the .axi_dma
- * treatment port/sd/sd_card.c uses for its bounce buffer).
+ * treatment cam_band below gets).
  */
 static uint8_t cam_frame[CAMERA_FRAME_BYTES]
 	__attribute__((aligned(32), section(".psram_noinit.camera")));
@@ -265,9 +265,8 @@ static int cam_colorbar = -1;          /* live/colorbar state, -1 = unknown   */
 /*
  * The two band buffers of the staged stream (owhinata/wio-lite-ai#35).
  *
- * [!] THIS IS THE SECOND BUFFER IN THIS FIRMWARE THAT A BUS MASTER WRITES AND THE
- * CPU READS -- port/sd/sd_card.c's sd_bounce was the first, and this follows it
- * exactly:
+ * [!] A BUS MASTER WRITES THIS BUFFER AND THE CPU READS IT THROUGH THE D-CACHE,
+ * so it takes every precaution such a buffer needs:
  *
  *   - AXI-SRAM (.axi_dma), because DMA2 cannot see either TCM at all (RM0468 sec
  *     2.1.2 / 2.1.5 / 2.1.6).  In DTCM the transfer would not fault, it would
@@ -591,7 +590,7 @@ static int cam_i2c_init_locked(void)
 	__HAL_RCC_GPIOF_CLK_ENABLE();
 	/* Re-state the RESET value of RCC_D3CCIPR.I2C4SEL (rcc_pclk4).  This changes
 	   nothing -- it documents which kernel clock the TIMINGR constants above were
-	   derived for.  Same idiom as port/sd/sd_card.c. */
+	   derived for (see the I2C4 note at the top of this file). */
 	__HAL_RCC_I2C4_CONFIG(RCC_I2C4CLKSOURCE_D3PCLK1);
 	__HAL_RCC_I2C4_CLK_ENABLE();
 
@@ -1106,7 +1105,7 @@ static int dcmi_init_locked(void)
 	}
 	__HAL_LINKDMA(&hdcmi, DMA_Handle, hdma_dcmi);
 
-	/* Priority 6 alongside SDMMC1 and OTG_HS, below the RTL8720 UART's hard
+	/* Priority 6 alongside OTG_HS, below the RTL8720 UART's hard
 	   byte deadline (5).  It only shapes latency: ThreadX masks with PRIMASK,
 	   and an overrun is decided by the DMA's own priority and the 8-word DCMI
 	   FIFO long before any ISR could run.  NOT enabled here -- see
@@ -1410,7 +1409,7 @@ static void cam_stream_teardown(void)
 	drain_stream_sem();
 
 	/* Nothing to hand over: a band stream fills no frame, and copying anything
-	   into cam_frame would make `camera save` claim a picture the preview never
+	   into cam_frame would make `camera send` claim a picture the preview never
 	   showed.  The band buffers are the DMA's, and it has stopped. */
 	/*
 	 * [!] A CONFIRMED END (issue #142).  An error (DCMI overrun, DMA TE) is
@@ -1491,7 +1490,7 @@ static void cam_band_service(void)
 
 	buf = (cam_band_ct0 + newest) % 2u;
 	/* Discard any line the CPU still holds over this band before reading what the
-	   DMA wrote -- the same contract port/sd/sd_card.c has with the SDMMC IDMA.
+	   DMA wrote: the CPU never writes a band, so there is nothing to clean.
 	   Cheap despite the size: 38,400 B is 1,200 lines, and the strided read that
 	   follows re-fetches each of them exactly once (a 640 B row stride over 60
 	   rows is 1,920 B of working set, which stays resident across all 320

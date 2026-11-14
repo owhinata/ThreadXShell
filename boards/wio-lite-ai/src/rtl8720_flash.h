@@ -13,8 +13,7 @@
  * download protocol's read-word command and checks for the framed reply.  It does NOT
  * erase or write any flash (fully reversible; the RTL8720 mask-ROM download mode is
  * re-enterable, so this cannot brick it).  M2 adds the flashloader stub upload + flash
- * READ (still non-destructive -- SRAM write + flash read only); M3 adds erase/write/verify;
- * M4 adds the microSD image source.
+ * READ (still non-destructive -- SRAM write + flash read only); M3 adds erase/write/verify.
  *
  * Layering: HAL/CMSIS <- rtl8720.c (basic UART/power) <- rtl8720_flash.c (download
  * protocol) <- cmd_wifi.c (shell).  It never touches the RCC clock tree -- only GPIO

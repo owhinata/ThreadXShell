@@ -247,92 +247,153 @@ void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
  */
 #define CAM_IO_CHUNK 512u
 
-/* JPEG: variable length, no raster pixels -- report the stream length and the
-   SOI/EOI markers (the driver already verified them on capture). */
-static void cam_report_jpeg(const struct camera_mode *m,
-                            struct camera_svc_capture_report *rep,
-                            struct camera_op_result *res, struct camera_out *o)
-{
-	struct camera_info ci;
-	uint8_t tail[2] = { 0, 0 };
-	uint32_t head, gen;
+/* What this board keeps in camera_svc_capture_report::board for its own
+   lines (camera_svc_capture_board_lines): a JPEG's two markers. */
+#define CAM_REP_KIND    0u   /* CAM_REP_KIND_* below                    */
+#define CAM_REP_SOI_OK  1u   /* the stream starts FF D8                 */
+#define CAM_REP_EOI_OK  2u   /* the stream ends FF D9                   */
+#define CAM_REP_KIND_RASTER 0u
+#define CAM_REP_KIND_JPEG   1u
 
-	if (camera_get_info(&ci) != 0) {
-		cam_res_rc(res, CAM_ERR_STATE);
+static void cam_rep_chan(struct camera_svc_chan_stat *c, const char *name,
+                         uint8_t bits, uint32_t min, uint32_t max,
+                         uint32_t sum, uint32_t n)
+{
+	c->name = name;
+	c->bits = bits;
+	c->min = (uint16_t)min;
+	c->max = (uint16_t)max;
+	c->mean_x100 = camera_mean_x100(sum, n);
+}
+
+/* A read of the frame the report started on (@p gen0), or a failure in @p res. */
+static int cam_rep_read(uint32_t off, void *dst, uint32_t n, uint32_t gen0,
+                        struct camera_op_result *res)
+{
+	uint32_t gen;
+	int rc = camera_frame_read(off, dst, n, &gen);
+
+	if (rc != 0) {
+		cam_res_rc(res, rc);
+		return -1;
+	}
+	if (gen != gen0) {
+		camera_res_fail(res, CAMERA_SVC_ERR_NO_FRAME,
+		                "frame changed mid-read (concurrent capture)");
+		return -1;
+	}
+	return 0;
+}
+
+/* JPEG: variable length, no raster pixels -- the stream length and the
+   SOI/EOI markers (the driver already verified them on capture), read from
+   the frame @p gen0 names: the head first, the tail last. */
+static void cam_report_jpeg(uint32_t len, uint32_t cap, uint32_t gen0,
+                            struct camera_svc_capture_report *rep,
+                            struct camera_op_result *res)
+{
+	uint8_t tail[2] = { 0, 0 };
+	uint32_t head = (len < CAMERA_SVC_HEAD_MAX) ? len : CAMERA_SVC_HEAD_MAX;
+
+	/* A length the frame cannot have is a frame that changed under it. */
+	if (len < 2u || len > cap) {
+		camera_res_fail(res, CAMERA_SVC_ERR_NO_FRAME,
+		                "frame changed mid-read (concurrent capture)");
 		return;
 	}
+	if (cam_rep_read(0u, rep->head, head, gen0, res) != 0 ||
+	    cam_rep_read(len - 2u, tail, 2u, gen0, res) != 0)
+		return;
+	rep->head_len = head;
+	rep->board[CAM_REP_KIND] = CAM_REP_KIND_JPEG;
+	rep->board[CAM_REP_SOI_OK] = (rep->head[0] == 0xFFu && rep->head[1] == 0xD8u);
+	rep->board[CAM_REP_EOI_OK] = (tail[0] == 0xFFu && tail[1] == 0xD9u);
 	camera_res_ok(res);
-	camera_out(o, "frame    : %ux%u JPEG (%lu bytes)\r\n", (unsigned)m->width,
-	           (unsigned)m->height, (unsigned long)ci.frame_bytes);
-	head = (ci.frame_bytes < CAMERA_SVC_HEAD_MAX) ? ci.frame_bytes
-	                                             : CAMERA_SVC_HEAD_MAX;
-	if (head >= 2u && camera_frame_read(0, rep->head, head, &gen) == 0) {
-		camera_out(o, "SOI      : %s\r\n",
-		           (rep->head[0] == 0xFFu && rep->head[1] == 0xD8u)
-		               ? "ok (FFD8)" : "MISSING");
-		rep->head_len = head;
-	}
-	if (ci.frame_bytes >= 2u &&
-	    camera_frame_read(ci.frame_bytes - 2u, tail, 2u, &gen) == 0)
-		camera_out(o, "EOI      : %s\r\n",
-		           (tail[0] == 0xFFu && tail[1] == 0xD9u) ? "ok (FFD9)"
-		                                                  : "MISSING");
 }
 
 /*
  * Per-channel statistics over the captured frame, computed chunk by chunk
  * through camera_frame_read (the driver mutex serializes against a concurrent
  * capture).  Sums fit comfortably: WVGA's 384000 px * max 255 < 2^27.  The
- * RGB565 ones are svc/camera/cam_rgb565's (issue #237).
+ * RGB565 ones and the seam are svc/camera/cam_rgb565's (issue #237).
+ *
+ * [!] THE GENERATION FIRST, EVERYTHING ELSE AFTER, the order
+ * camera_svc_frame_open() uses: one byte is read for the frame's generation,
+ * then the length, the format and the size are taken, and every later read --
+ * the statistics, the head, a JPEG's tail -- must come from that generation.
+ * A `camera res` / `camera format` (which drops the frame) or another capture
+ * (which replaces it) landing anywhere in between makes a later read fail or
+ * name another generation; either fails the report.  So the numbers never
+ * describe a new frame by an old width.  The report succeeds only after a read
+ * of that generation that came after the length and the size.
  */
 void camera_svc_capture_report(struct camera_svc_capture_report *rep,
                                struct camera_op_result *res,
-                               camera_svc_write_fn write,
                                int (*cancelled)(void *ctx), void *ctx)
 {
-	struct camera_out o = { write, ctx, 0 };
 	struct camera_mode m;
+	struct camera_info ci;
 	uint8_t buf[CAM_IO_CHUNK];
 	struct cam_rgb565_stats st;                /* RGB565: R5 / G6 / B5     */
 	struct cam_rgb565_walk walk;
 	uint32_t rmin = 255, rmax = 0, rsum = 0;   /* YUV422: U                */
 	uint32_t gmin = 255, gmax = 0, gsum = 0;   /* YUV422: V                */
 	uint32_t ymin = 255, ymax = 0, ysum = 0;   /* luma for YUV422 / Y8     */
-	uint32_t gen0 = 0, gen, off, npx;
+	uint32_t gen0, off, npx;
+	uint8_t probe;
 	int rc;
 
 	rep->head_len = 0u;   /* the warm-up is the capture's (left alone) */
+	rep->nchan = 0u;
+	rep->nseam = 0u;
+	memset(rep->board, 0, sizeof rep->board);
 
-	if (camera_get_mode(&m) != 0) {
+	rc = camera_frame_read(0u, &probe, 1u, &gen0);
+	if (rc != 0) {
+		cam_res_rc(res, rc);
+		return;
+	}
+	if (camera_get_mode(&m) != 0 || camera_get_info(&ci) != 0) {
 		cam_res_rc(res, CAM_ERR_STATE);
 		return;
 	}
-	if (m.format == CAM_FMT_JPEG) {
-		cam_report_jpeg(&m, rep, res, &o);
+	if (!ci.frame_valid) {
+		cam_res_rc(res, CAM_ERR_NO_FRAME);
 		return;
 	}
+	rep->format = camera_named_name(camera_format_names, m.format);
+	rep->width = m.width;
+	rep->height = m.height;
+	if (m.format == CAM_FMT_JPEG) {
+		rep->bytes = ci.frame_bytes;
+		cam_report_jpeg(ci.frame_bytes, m.frame_bytes, gen0, rep, res);
+		return;
+	}
+	/* A raster frame is the whole of its mode; anything else is not the
+	   frame this mode describes. */
+	if (ci.frame_bytes != m.frame_bytes) {
+		camera_res_fail(res, CAMERA_SVC_ERR_NO_FRAME,
+		                "frame changed mid-read (concurrent capture)");
+		return;
+	}
+	rep->bytes = m.frame_bytes;
 
 	npx = (uint32_t)m.width * m.height;
 	cam_rgb565_begin(&walk, &st, m.width);
 
 	/* Walk the frame in fixed chunks, accumulating per-format statistics.  A
-	   generation change between chunks means a concurrent capture replaced the
-	   pixels (frame_valid alone cannot detect that -- only the generation). */
+	   generation change means a concurrent capture replaced the pixels
+	   (frame_valid alone cannot detect that -- only the generation). */
 	for (off = 0; off < m.frame_bytes; ) {
 		uint32_t n = (m.frame_bytes - off < CAM_IO_CHUNK)
 		             ? m.frame_bytes - off : CAM_IO_CHUNK;
 
-		rc = camera_frame_read(off, buf, n, &gen);
-		if (rc != 0) {
-			cam_res_rc(res, rc);
+		if (cam_rep_read(off, buf, n, gen0, res) != 0)
 			return;
-		}
-		if (off == 0) {
-			gen0 = gen;
-		} else if (gen != gen0) {
-			camera_res_fail(res, CAMERA_SVC_ERR_NO_FRAME,
-			             "frame changed mid-read (concurrent capture)");
-			return;
+		if (off == 0u) {
+			/* the first bytes, from the same read as the statistics */
+			rep->head_len = (n < CAMERA_SVC_HEAD_MAX) ? n : CAMERA_SVC_HEAD_MAX;
+			memcpy(rep->head, buf, rep->head_len);
 		}
 		if (m.format == CAM_FMT_RGB565) {
 			/* 512 is even and the walk counts the rows from the width, so
@@ -368,7 +429,7 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 		}
 		off += n;
 		/* Asked once per chunk, as the old in-command walk did: a Ctrl+C
-		   ends the report with nothing written. */
+		   ends the report and nothing is printed. */
 		if (cancelled != NULL && cancelled(ctx)) {
 			res->status = CAMERA_SVC_ERR_CANCELLED;
 			res->detail[0] = '\0';
@@ -377,52 +438,45 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 		}
 	}
 
-	cam_rgb565_end(&walk);   /* the seam: printed from issue #237 step 2 */
-
-	camera_res_ok(res);
-	camera_out(&o, "frame    : %ux%u %s (%lu bytes)\r\n", (unsigned)m.width,
-	           (unsigned)m.height, camera_named_name(camera_format_names, m.format),
-	           (unsigned long)m.frame_bytes);
 	if (m.format == CAM_FMT_RGB565) {
-		camera_out(&o, "R5       : min %2lu  max %2lu  mean %lu.%lu\r\n",
-		           (unsigned long)st.min[0], (unsigned long)st.max[0],
-		           (unsigned long)(st.sum[0] / npx),
-		           (unsigned long)((st.sum[0] % npx) * 10u / npx));
-		camera_out(&o, "G6       : min %2lu  max %2lu  mean %lu.%lu\r\n",
-		           (unsigned long)st.min[1], (unsigned long)st.max[1],
-		           (unsigned long)(st.sum[1] / npx),
-		           (unsigned long)((st.sum[1] % npx) * 10u / npx));
-		camera_out(&o, "B5       : min %2lu  max %2lu  mean %lu.%lu\r\n",
-		           (unsigned long)st.min[2], (unsigned long)st.max[2],
-		           (unsigned long)(st.sum[2] / npx),
-		           (unsigned long)((st.sum[2] % npx) * 10u / npx));
+		cam_rgb565_end(&walk);
+		cam_rep_chan(&rep->chan[0], "R", 5u, st.min[0], st.max[0], st.sum[0], npx);
+		cam_rep_chan(&rep->chan[1], "G", 6u, st.min[1], st.max[1], st.sum[1], npx);
+		cam_rep_chan(&rep->chan[2], "B", 5u, st.min[2], st.max[2], st.sum[2], npx);
+		rep->nchan = 3u;
+		/* The seam, as wio-lite-ai's (svc/camera/cam_rgb565.h). */
+		rep->seam_row = st.seam_row;
+		rep->seam[0] = (struct camera_svc_seam_step){ "R", st.seam_d[0] };
+		rep->seam[1] = (struct camera_svc_seam_step){ "G", st.seam_d[1] };
+		rep->seam[2] = (struct camera_svc_seam_step){ "B", st.seam_d[2] };
+		rep->nseam = 3u;
 	} else if (m.format == CAM_FMT_YUV422) {
 		uint32_t nc = npx / 2u;   /* one U and one V per two luma samples */
 
-		camera_out(&o, "Y        : min %3lu  max %3lu  mean %lu.%lu\r\n",
-		           (unsigned long)ymin, (unsigned long)ymax,
-		           (unsigned long)(ysum / npx),
-		           (unsigned long)((ysum % npx) * 10u / npx));
-		camera_out(&o, "Cb       : min %3lu  max %3lu  mean %lu.%lu  (U)\r\n",
-		           (unsigned long)rmin, (unsigned long)rmax,
-		           (unsigned long)(rsum / nc),
-		           (unsigned long)((rsum % nc) * 10u / nc));
-		camera_out(&o, "Cr       : min %3lu  max %3lu  mean %lu.%lu  (V)\r\n",
-		           (unsigned long)gmin, (unsigned long)gmax,
-		           (unsigned long)(gsum / nc),
-		           (unsigned long)((gsum % nc) * 10u / nc));
+		cam_rep_chan(&rep->chan[0], "Y", 8u, ymin, ymax, ysum, npx);
+		cam_rep_chan(&rep->chan[1], "Cb", 8u, rmin, rmax, rsum, nc);
+		cam_rep_chan(&rep->chan[2], "Cr", 8u, gmin, gmax, gsum, nc);
+		rep->nchan = 3u;
 	} else {   /* Y8 */
-		camera_out(&o, "Y        : min %3lu  max %3lu  mean %lu.%lu\r\n",
-		           (unsigned long)ymin, (unsigned long)ymax,
-		           (unsigned long)(ysum / npx),
-		           (unsigned long)((ysum % npx) * 10u / npx));
+		cam_rep_chan(&rep->chan[0], "Y", 8u, ymin, ymax, ysum, npx);
+		rep->nchan = 1u;
 	}
+	camera_res_ok(res);
+}
 
-	/* First 32 raw bytes -- a quick eyeball check, same frame as the stats
-	   (the shared command dumps them after these lines). */
-	if (camera_frame_read(0, rep->head, CAMERA_SVC_HEAD_MAX, &gen) == 0 &&
-	    gen == gen0)
-		rep->head_len = CAMERA_SVC_HEAD_MAX;
+/* This board's own lines: a JPEG's markers, nothing for a raster frame. */
+int camera_svc_capture_board_lines(const struct camera_svc_capture_report *rep,
+                                   camera_svc_write_fn write, void *ctx)
+{
+	struct camera_out o = { write, ctx, 0 };
+
+	if (rep->board[CAM_REP_KIND] == CAM_REP_KIND_JPEG) {
+		camera_out(&o, "SOI      : %s\r\n",
+		           rep->board[CAM_REP_SOI_OK] ? "ok (FFD8)" : "MISSING");
+		camera_out(&o, "EOI      : %s\r\n",
+		           rep->board[CAM_REP_EOI_OK] ? "ok (FFD9)" : "MISSING");
+	}
+	return o.failed ? -1 : 0;
 }
 
 /* ---- reading the last capture out (save / send) -------------------------- */

@@ -117,7 +117,7 @@ struct camera_mode {
 	uint16_t width;
 	uint16_t height;
 	uint32_t frame_bytes;
-	const char *format;    /**< "RGB565" */
+	const char *format;    /**< "rgb565" (the word f746g-disco's `camera format` takes) */
 };
 
 /** Snapshot of driver + sensor state (camera_get_info). */

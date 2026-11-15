@@ -231,8 +231,55 @@ enum camera_svc_warmup_unit {
 	CAMERA_SVC_WARMUP_MS,         /**< a settle time, in milliseconds     */
 };
 
-/** What a capture report hands back for the shared command to print. */
+/** Most statistics lines (one per channel) a capture report carries. */
+#define CAMERA_SVC_CHAN_MAX 3u
+
+/** Most channels the seam line names. */
+#define CAMERA_SVC_SEAM_MAX 3u
+
+/** The values a board keeps for its own lines (camera_svc_capture_board_lines). */
+#define CAMERA_SVC_BOARD_VALUES 5u
+
+/** One statistics line: `R(5)     : min   0  max  31  mean  11.62`. */
+struct camera_svc_chan_stat {
+	const char *name;      /**< "R", "Cb": a literal of the board's       */
+	uint32_t mean_x100;    /**< the mean x100, truncated                   */
+	uint16_t min, max;
+	uint8_t  bits;         /**< what the value is out of: 5 is 0..31       */
+};
+
+/** One channel of the seam line: `dG 0.57`. */
+struct camera_svc_seam_step {
+	const char *name;      /**< "R", "G", "B": a literal of the board's    */
+	uint32_t d_x100;       /**< the step between the two rows' means x100 */
+};
+
+/**
+ * What a capture report hands back for the shared command to print (issue
+ * #237).  The caller's, on its stack: the shared command clears it before the
+ * capture, the capture fills the warm-up, the report fills the rest.
+ *
+ * [!] NUMBERS, NOT LINES.  The board answers what it measured; the frame line,
+ * the statistics lines and the seam line are the shared command's, in one
+ * shape on every board.  What only one board has (Grove's mosaic and Bayer
+ * phase, f746g-disco's JPEG markers) it keeps in @ref board, which the shared
+ * command never reads, and writes with camera_svc_capture_board_lines().
+ */
 struct camera_svc_capture_report {
+	/* the frame line: `frame    : 320x240 rgb565 (153600 bytes)` */
+	const char *format;                 /**< a literal of the board's      */
+	uint32_t width, height;
+	uint32_t bytes;                     /**< the frame's length            */
+	/* the statistics lines, in the board's order (0..CAMERA_SVC_CHAN_MAX) */
+	struct camera_svc_chan_stat chan[CAMERA_SVC_CHAN_MAX];
+	uint8_t  nchan;
+	/* the seam line, when nseam != 0: the largest step between two adjacent
+	   rows' channel means, at seam_row (the later of the two) */
+	uint8_t  nseam;
+	uint32_t seam_row;
+	struct camera_svc_seam_step seam[CAMERA_SVC_SEAM_MAX];
+	/* the board's own, for its own lines; the shared command does not read */
+	uint32_t board[CAMERA_SVC_BOARD_VALUES];
 	uint8_t  head[CAMERA_SVC_HEAD_MAX]; /**< the frame's first bytes        */
 	uint32_t head_len;                  /**< valid bytes in head[]          */
 	uint32_t warmup;                    /**< frames or ms, per warmup_unit  */
@@ -250,7 +297,7 @@ struct camera_svc_capture_report {
  * time slept before the snapshot (f746, ms), or CAMERA_SVC_WARMUP_NONE -- and
  * camera_svc_capture_report() leaves them alone.  On the caller's stack, so
  * the figure is this capture's and no other console's.  The shared command
- * prints it after the board's lines.
+ * prints it after the report's lines.
  *
  * The board writes its own "capturing ..." line through @p write before the
  * capture starts -- after any refusal it can give at once (wio: the OCTOSPI1
@@ -267,27 +314,42 @@ void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
                         int (*cancelled)(void *ctx), void *ctx);
 
 /**
- * Report on the LAST capture: write the board's statistics lines and hand back
- * its leading bytes (the shared command hexdumps them, after the lines).  It
- * does NOT touch @p rep's warm-up, which camera_svc_capture() filled.
- * Statistics and head come from the same capture generation; if the frame is replaced part way the report fails
- * rather than mixing two frames (a head that cannot be read from that
- * generation comes back with head_len 0).
+ * Report on the LAST capture: fill @p rep's numbers -- the frame line, the
+ * statistics, the seam, the board's own values and the leading bytes -- and
+ * WRITE NOTHING (issue #237).  It does NOT touch @p rep's warm-up, which
+ * camera_svc_capture() filled.  Every number comes from the same capture
+ * generation; if the frame is replaced part way the report fails rather than
+ * mixing two frames.
  *
  * The status is in @p res: CAMERA_SVC_OK or a CAMERA_SVC_ERR_* (NO_FRAME when
  * nothing has been captured), with the board's words in its detail.
  *
+ * [!] ON A FAILURE OR A CANCEL THE NUMBERS ARE NOT PRINTED, whatever the board
+ * left in @p rep: the shared command prints the failure alone (or, cancelled,
+ * nothing) and does not call camera_svc_capture_board_lines().  So "a failed
+ * report prints no statistics" is the shared command's, on every board.
+ *
  * [!] A LONG WALK ASKS @p cancelled BETWEEN CHUNKS, and when it says yes
- * (non-zero) the board stops, writes NOTHING, and answers
- * CAMERA_SVC_ERR_CANCELLED.  The board holds no shell instance, so it cannot
- * see a Ctrl+C itself; and the console only reads its input while somebody
- * asks, so a walk that never asks runs to the end and prints lines nobody
- * wanted.  @p cancelled gets the same @p ctx as @p write.
+ * (non-zero) the board stops and answers CAMERA_SVC_ERR_CANCELLED.  The board
+ * holds no shell instance, so it cannot see a Ctrl+C itself; and the console
+ * only reads its input while somebody asks.
  */
 void camera_svc_capture_report(struct camera_svc_capture_report *rep,
                                struct camera_op_result *res,
-                               camera_svc_write_fn write,
                                int (*cancelled)(void *ctx), void *ctx);
+
+/**
+ * Write the board's own lines of a successful report, after the shared ones
+ * (Grove: mosaic and Bayer phase; f746g-disco: a JPEG's markers; wio-lite-ai:
+ * none), from @p rep alone -- @ref camera_svc_capture_report::board and what
+ * else the report filled.  It reads no frame, takes no lock and cannot fail;
+ * it stops at the first line @p write refuses and says so.
+ *
+ * @return 0, or -1 when @p write refused a line (the shared command then
+ *         prints nothing more).
+ */
+int camera_svc_capture_board_lines(const struct camera_svc_capture_report *rep,
+                                   camera_svc_write_fn write, void *ctx);
 
 /* ---- reading the last capture out (save / send) -------------------------- */
 

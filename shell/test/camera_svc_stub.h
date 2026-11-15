@@ -26,6 +26,12 @@ struct camera_stub {
 	unsigned nholders;
 	uint32_t lost;
 	uint32_t head_len;
+	/* what the capture report answers (issue #237): copied whole into the
+	   caller's report but for the warm-up, then head_len / head as above */
+	struct camera_svc_capture_report report;
+	int report_fills_then_fails;      /* fill every number, then fail    */
+	const char *board_line;           /* the board's line, or none       */
+	int board_refuses;                /* the board's writer was refused  */
 	uint32_t warmup;                  /* what the capture paid ...       */
 	uint8_t warmup_unit;              /* ... and in what                 */
 	int capture_cancels;              /* the capture asks for a cancel   */
@@ -44,6 +50,7 @@ struct camera_stub {
 	int calls_open, calls_read, calls_start, calls_stop, calls_send;
 	int calls_op_begin, calls_op_end, closed_file, created_file;
 	int cancel_asked;
+	int calls_report, calls_board_lines;
 	int flushed;                      /* fx_media_flush() calls         */
 	int calls_state;                  /* camera_svc_stream_state()      */
 	int samples;                      /* camera_svc_stream_report()     */

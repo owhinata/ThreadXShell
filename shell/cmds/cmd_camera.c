@@ -339,6 +339,77 @@ static int cam_parse_test(struct cli_instance *sh, const char *arg,
 
 /* ---- one-shot capture ----------------------------------------------------- */
 
+/*
+ * [!] THE CAPTURE'S LINES ARE THIS FILE'S, IN ONE SHAPE ON EVERY BOARD (issue
+ * #237): the board answers numbers (svc/camera/camera_svc.h) and these print
+ * them, after the report returned -- so with no camera lock, no guard and no
+ * critical section of any board held.  Each returns cli_print()'s answer: a
+ * line the console refused ends the capture's output there.
+ */
+
+/* `R(5)     : min   0  max  31  mean  11.62` -- the heading padded to 8. */
+static int cam_print_chan(struct cli_instance *sh,
+                          const struct camera_svc_chan_stat *c)
+{
+	static const char pad[] = "        ";
+	const char *name = c->name ? c->name : "?";
+	size_t w = strlen(name) + 2u + (c->bits >= 100u ? 3u :
+	                                c->bits >= 10u ? 2u : 1u);
+
+	return cli_print(sh, "%s(%u)%s : min %3u  max %3u  mean %3lu.%02lu\r\n",
+	                 name, (unsigned)c->bits,
+	                 pad + (w < sizeof pad - 1u ? w : sizeof pad - 1u),
+	                 (unsigned)c->min, (unsigned)c->max,
+	                 (unsigned long)(c->mean_x100 / 100u),
+	                 (unsigned long)(c->mean_x100 % 100u));
+}
+
+/* `seam     : row 237  dR 0.30  dG 0.57  dB 0.23`, one write for the line. */
+static int cam_print_seam(struct cli_instance *sh,
+                          const struct camera_svc_capture_report *rep)
+{
+	const struct camera_svc_seam_step *d = rep->seam;
+	unsigned long row = (unsigned long)rep->seam_row;
+
+#define CAM_SEAM_D(k) d[k].name ? d[k].name : "?",                          \
+	(unsigned long)(d[k].d_x100 / 100u), (unsigned long)(d[k].d_x100 % 100u)
+	switch (rep->nseam) {
+	case 1:
+		return cli_print(sh, "seam     : row %3lu  d%s %lu.%02lu\r\n",
+		                 row, CAM_SEAM_D(0));
+	case 2:
+		return cli_print(sh, "seam     : row %3lu  d%s %lu.%02lu  "
+		                 "d%s %lu.%02lu\r\n", row, CAM_SEAM_D(0),
+		                 CAM_SEAM_D(1));
+	default:
+		return cli_print(sh, "seam     : row %3lu  d%s %lu.%02lu  "
+		                 "d%s %lu.%02lu  d%s %lu.%02lu\r\n", row,
+		                 CAM_SEAM_D(0), CAM_SEAM_D(1), CAM_SEAM_D(2));
+	}
+#undef CAM_SEAM_D
+}
+
+/* The frame line, the statistics, the seam: the report's own lines. */
+static int cam_print_report(struct cli_instance *sh,
+                            const struct camera_svc_capture_report *rep)
+{
+	unsigned n = rep->nchan;
+
+	if (cli_print(sh, "frame    : %lux%lu %s (%lu bytes)\r\n",
+	              (unsigned long)rep->width, (unsigned long)rep->height,
+	              rep->format ? rep->format : "?",
+	              (unsigned long)rep->bytes) < 0)
+		return -1;
+	if (n > CAMERA_SVC_CHAN_MAX)
+		n = CAMERA_SVC_CHAN_MAX;
+	for (unsigned k = 0; k < n; k++)
+		if (cam_print_chan(sh, &rep->chan[k]) < 0)
+			return -1;
+	if (rep->nseam != 0u && cam_print_seam(sh, rep) < 0)
+		return -1;
+	return 0;
+}
+
 static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
 {
 	struct camera_svc_capture_report rep;
@@ -362,13 +433,21 @@ static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
 		cam_print_fail(sh, &res, "");
 		return 1;
 	}
-	camera_svc_capture_report(&rep, &res, cam_write, cam_cancelled, sh);
+	/* [!] A FAILED OR CANCELLED REPORT PRINTS NONE OF ITS NUMBERS, whatever
+	   it left in rep (svc/camera/camera_svc.h): the failure alone, or -- a
+	   Ctrl+C -- nothing, and the board's lines are not asked for. */
+	camera_svc_capture_report(&rep, &res, cam_cancelled, sh);
 	if (res.status == CAMERA_SVC_ERR_CANCELLED)
 		return 1;                 /* Ctrl+C: the core prints ^C */
 	if (res.status != CAMERA_SVC_OK) {
 		cam_print_fail(sh, &res, "");
 		return 1;
 	}
+	/* From here a refused line ends the output: nothing after it is
+	   printed, the board's lines, the warm-up and the dump included. */
+	if (cam_print_report(sh, &rep) < 0 ||
+	    camera_svc_capture_board_lines(&rep, cam_write, sh) < 0)
+		return 1;
 	/*
 	 * [!] WHAT THE CAPTURE PAID TO WARM UP, IN ONE SHAPE ON EVERY BOARD
 	 * (issue #143 decision 6): the frames it let go, or the time it slept.
@@ -377,20 +456,26 @@ static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
 	 * wait this time", and a line that disappears cannot be told from a
 	 * board that does not count.  A board that does not (NONE) prints none.
 	 */
-	if (rep.warmup_unit == (uint8_t)CAMERA_SVC_WARMUP_FRAMES)
-		cli_print(sh, "warm-up  : %lu frame%s dropped\r\n",
-		          (unsigned long)rep.warmup, rep.warmup == 1u ? "" : "s");
-	else if (rep.warmup_unit == (uint8_t)CAMERA_SVC_WARMUP_MS)
-		cli_print(sh, "warm-up  : %lu ms\r\n", (unsigned long)rep.warmup);
-	/* The first bytes, from the same capture as the board's lines -- a quick
+	if (rep.warmup_unit == (uint8_t)CAMERA_SVC_WARMUP_FRAMES) {
+		if (cli_print(sh, "warm-up  : %lu frame%s dropped\r\n",
+		              (unsigned long)rep.warmup,
+		              rep.warmup == 1u ? "" : "s") < 0)
+			return 1;
+	} else if (rep.warmup_unit == (uint8_t)CAMERA_SVC_WARMUP_MS) {
+		if (cli_print(sh, "warm-up  : %lu ms\r\n",
+		              (unsigned long)rep.warmup) < 0)
+			return 1;
+	}
+	/* The first bytes, from the same capture as the lines above -- a quick
 	   eyeball check. */
 	if (rep.head_len != 0u) {
 		uint32_t n = rep.head_len;
 
 		if (n > CAMERA_SVC_HEAD_MAX)
 			n = CAMERA_SVC_HEAD_MAX;
-		cli_print(sh, "bytes[0..%lu]:\r\n", (unsigned long)(n - 1u));
-		cli_hexdump(sh, rep.head, n);
+		if (cli_print(sh, "bytes[0..%lu]:\r\n", (unsigned long)(n - 1u)) < 0)
+			return 1;
+		(void)cli_hexdump(sh, rep.head, n);
 	}
 	return 0;
 }

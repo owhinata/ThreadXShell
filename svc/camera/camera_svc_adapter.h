@@ -72,6 +72,22 @@ static inline void camera_res_in_use(struct camera_op_result *res,
 	res->nusers = (unsigned)n;
 }
 
+/* ---- capture report numbers ---------------------------------------------- */
+
+/*
+ * The mean of @p n values summing to @p sum, x100 and truncated (issue #237):
+ * the quotient x100 plus the remainder x100 / n, so nothing is wider than 32
+ * bits -- the remainder is below n, and n x 100 fits for any n below 2^25
+ * (f746g-disco's largest frame is WVGA, 384000 pixels), and a mean of a
+ * byte-sized value x100 is at most 25500.  0 when n is 0.
+ */
+static inline uint32_t camera_mean_x100(uint32_t sum, uint32_t n)
+{
+	if (n == 0u)
+		return 0u;
+	return (sum / n) * 100u + ((sum % n) * 100u) / n;
+}
+
 /* ---- report lines -------------------------------------------------------- */
 
 /**

@@ -35,6 +35,13 @@ void camera_stub_reset(void)
 	memset(&camera_stub, 0, sizeof camera_stub);
 	camera_stub.stop_what = CAMERA_SVC_STOP_REQUESTED;
 	camera_stub.frame_len = 8u;
+	/* A report of no statistics and no seam: a frame line, then the
+	   board's line.  A test adds what it checks. */
+	camera_stub.report.format = "stubfmt";
+	camera_stub.report.width = 4u;
+	camera_stub.report.height = 2u;
+	camera_stub.report.bytes = 16u;
+	camera_stub.board_line = "stub: board lines\r\n";
 }
 
 static void stub_result(struct camera_op_result *res)
@@ -110,12 +117,12 @@ void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
 
 void camera_svc_capture_report(struct camera_svc_capture_report *rep,
                                struct camera_op_result *res,
-                               camera_svc_write_fn write,
                                int (*cancelled)(void *ctx), void *ctx)
 {
-	/* Never the warm-up: that is the capture's (svc/camera/camera_svc.h). */
-	memset(rep->head, 0, sizeof rep->head);
-	rep->head_len = 0u;
+	uint32_t warmup = rep->warmup;
+	uint8_t unit = rep->warmup_unit;
+
+	camera_stub.calls_report++;
 	stub_result(res);
 	if (res->status != CAMERA_SVC_OK)
 		return;
@@ -127,10 +134,28 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 			return;
 		}
 	}
-	stub_line(write, ctx, "stub: frame stats\r\n");
+	/* Never the warm-up: that is the capture's (svc/camera/camera_svc.h). */
+	*rep = camera_stub.report;
+	rep->warmup = warmup;
+	rep->warmup_unit = unit;
 	rep->head_len = camera_stub.head_len;
 	for (uint32_t i = 0; i < rep->head_len && i < CAMERA_SVC_HEAD_MAX; i++)
 		rep->head[i] = (uint8_t)(0xA0u + i);
+	if (camera_stub.report_fills_then_fails) {
+		res->status = CAMERA_SVC_ERR_NO_FRAME;
+		strcpy(res->detail, "stub: frame changed mid-report");
+	}
+}
+
+int camera_svc_capture_board_lines(const struct camera_svc_capture_report *rep,
+                                   camera_svc_write_fn write, void *ctx)
+{
+	(void)rep;
+	camera_stub.calls_board_lines++;
+	if (camera_stub.board_line != NULL &&
+	    write(ctx, camera_stub.board_line, strlen(camera_stub.board_line)) < 0)
+		return -1;
+	return camera_stub.board_refuses ? -1 : 0;
 }
 
 void camera_svc_frame_open(struct camera_svc_frame *f,

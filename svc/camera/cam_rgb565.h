@@ -69,7 +69,8 @@ struct cam_rgb565_walk {
 	uint32_t width;               /**< pixels per row                         */
 	uint32_t col;                 /**< pixels so far in the current row       */
 	uint32_t row;                 /**< the current row's index                */
-	uint32_t row_sum[3];          /**< the current row's channel sums         */
+	uint32_t row_start[3];        /**< the channel sums when the current row
+	                               *   began (its own sums are the difference) */
 	uint32_t prev_x100[3];        /**< the previous row's channel means x100  */
 };
 

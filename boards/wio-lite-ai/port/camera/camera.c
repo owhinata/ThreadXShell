@@ -2270,7 +2270,7 @@ int camera_get_mode(struct camera_mode *out)
 	out->width       = CAMERA_FRAME_WIDTH;
 	out->height      = CAMERA_FRAME_HEIGHT;
 	out->frame_bytes = CAMERA_FRAME_BYTES;
-	out->format      = "RGB565";
+	out->format      = "rgb565";   /* f746g-disco's `camera format` word (#237) */
 	return CAM_OK;
 }
 

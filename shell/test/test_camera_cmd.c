@@ -183,6 +183,208 @@ static void check_table(void)
 
 /* ---- the lines ------------------------------------------------------------ */
 
+/* ---- capture: the shared lines (issue #237) ------------------------------- */
+
+/* A report with every shared line: three channels, a three-colour seam, the
+   board's line, a warm-up and a head. */
+static void capture_full_report(void)
+{
+	struct camera_svc_capture_report *r = &camera_stub.report;
+
+	r->format = "rgb565";
+	r->width = 320u;
+	r->height = 240u;
+	r->bytes = 153600u;
+	r->nchan = 3u;
+	r->chan[0] = (struct camera_svc_chan_stat){ "R", 1204u, 0u, 31u, 5u };
+	r->chan[1] = (struct camera_svc_chan_stat){ "G", 2999u, 3u, 63u, 6u };
+	r->chan[2] = (struct camera_svc_chan_stat){ "B", 5u, 1u, 31u, 5u };
+	r->nseam = 3u;
+	r->seam_row = 7u;
+	r->seam[0] = (struct camera_svc_seam_step){ "R", 30u };
+	r->seam[1] = (struct camera_svc_seam_step){ "G", 1257u };
+	r->seam[2] = (struct camera_svc_seam_step){ "B", 3u };
+	camera_stub.warmup = 15u;
+	camera_stub.warmup_unit = CAMERA_SVC_WARMUP_FRAMES;
+	camera_stub.head_len = 4u;
+}
+
+/* Where @p needle starts in the output of `camera capture` run as set up. */
+static size_t capture_offset_of(const char *needle)
+{
+	const char *out, *at;
+
+	run("camera capture\r");
+	out = cli_dummy_output_str(&tr0);
+	at = strstr(out, needle);
+	return at ? (size_t)(at - out) : 0u;
+}
+
+/* Run `camera capture` with the console refusing from @p needle on: the
+   bytes before it go out, that line is refused. */
+static void capture_refused_at_seam(const char *needle, int seam)
+{
+	size_t off;
+
+	reset();
+	capture_full_report();
+	if (!seam)
+		camera_stub.report.nseam = 0u;
+	off = capture_offset_of(needle);
+	expect("the refusal point is in the output", off != 0u);
+	reset();
+	capture_full_report();
+	if (!seam)
+		camera_stub.report.nseam = 0u;
+	cli_dummy_clear_output(&tr0);
+	cli_dummy_set_tx_cap(&tr0, off);
+	run("camera capture\r");
+	cli_dummy_set_tx_cap(&tr0, 0);
+}
+
+static void capture_refused_at(const char *needle)
+{
+	capture_refused_at_seam(needle, 1);
+}
+
+static void check_capture(void)
+{
+	/* every line, in the shared order and shape */
+	reset();
+	capture_full_report();
+	run("camera capture\r");
+	expect("capture: the frame line",
+	       has("frame    : 320x240 rgb565 (153600 bytes)\r\n"));
+	expect("capture: a channel line, its heading padded to 8, two decimals",
+	       has("R(5)     : min   0  max  31  mean  12.04\r\n") &&
+	       has("G(6)     : min   3  max  63  mean  29.99\r\n"));
+	expect("capture: a mean under one keeps its leading zero",
+	       has("B(5)     : min   1  max  31  mean   0.05\r\n"));
+	expect("capture: the seam line names three colours",
+	       has("seam     : row   7  dR 0.30  dG 12.57  dB 0.03\r\n"));
+	expect("capture: announcement, frame, channels, seam, board, warm-up, dump",
+	       before("stub: capturing live", "frame    :") &&
+	       before("frame    :", "R(5)") && before("R(5)", "G(6)") &&
+	       before("G(6)", "B(5)") && before("B(5)", "seam     :") &&
+	       before("seam     :", "stub: board lines") &&
+	       before("stub: board lines", "warm-up  : 15 frames dropped") &&
+	       before("warm-up  :", "bytes[0..3]:"));
+	expect("capture: the report and the board's lines are each asked once",
+	       camera_stub.calls_report == 1 && camera_stub.calls_board_lines == 1);
+
+	/* one channel, two-digit bits, the widest values, a one-colour seam */
+	reset();
+	camera_stub.report.nchan = 1u;
+	camera_stub.report.chan[0] =
+		(struct camera_svc_chan_stat){ "Y", 25500u, 255u, 255u, 8u };
+	camera_stub.report.nseam = 1u;
+	camera_stub.report.seam_row = 120u;
+	camera_stub.report.seam[0] = (struct camera_svc_seam_step){ "G", 85u };
+	run("camera capture\r");
+	expect("capture: one channel at its largest",
+	       has("Y(8)     : min 255  max 255  mean 255.00\r\n") &&
+	       !has("R(") && !has("(5)"));
+	expect("capture: a one-colour seam",
+	       has("seam     : row 120  dG 0.85\r\n") && !has("dR") && !has("dB"));
+	reset();
+	camera_stub.report.nchan = 1u;
+	camera_stub.report.chan[0] =
+		(struct camera_svc_chan_stat){ "Cb", 12799u, 100u, 160u, 8u };
+	run("camera capture\r");
+	expect("capture: a two-letter heading, the mean truncated",
+	       has("Cb(8)    : min 100  max 160  mean 127.99\r\n"));
+	reset();
+	camera_stub.report.nchan = 1u;
+	camera_stub.report.chan[0] =
+		(struct camera_svc_chan_stat){ "Cr", 0u, 0u, 1023u, 10u };
+	run("camera capture\r");
+	expect("capture: a two-digit bit count keeps the padding to 8",
+	       has("Cr(10)   : min   0  max 1023  mean   0.00\r\n"));
+
+	/* no channel and no seam: the frame line, then the board's */
+	reset();
+	run("camera capture\r");
+	expect("capture: no channel lines and no seam line",
+	       has("frame    : 4x2 stubfmt (16 bytes)\r\n") && !has(" : min ") &&
+	       !has("seam") && before("frame    :", "stub: board lines"));
+
+	/* a failed report prints the failure alone, numbers or no numbers */
+	reset();
+	capture_full_report();
+	camera_stub.report_fills_then_fails = 1;
+	run("camera capture\r");
+	expect("capture: a report that filled its numbers and then failed "
+	       "prints only the failure",
+	       has("stub: capturing live\r\n") &&
+	       has("camera: stub: frame changed mid-report\r\n") &&
+	       !has("frame    :") && !has("R(5)") && !has("seam") &&
+	       !has("stub: board lines") && !has("warm-up") && !has("bytes["));
+	expect("capture: and does not ask for the board's lines",
+	       camera_stub.calls_report == 1 && camera_stub.calls_board_lines == 0);
+	expect("capture: the failure comes after the announcement",
+	       before("stub: capturing live", "camera: stub: frame changed"));
+
+	/* cancelled in the capture, or in the report: the announcement only */
+	reset();
+	capture_full_report();
+	camera_stub.capture_cancels = 1;
+	cli_dummy_inject(&tr0, "camera capture\r\x03", 16);
+	cli_test_pump(&sh0);
+	expect("capture: a cancel in the capture prints the announcement only",
+	       has("stub: capturing live\r\n") && !has("frame    :") &&
+	       camera_stub.calls_report == 0 && camera_stub.calls_board_lines == 0);
+	reset();
+	capture_full_report();
+	cli_dummy_inject(&tr0, "camera capture\r\x03", 16);
+	cli_test_pump(&sh0);
+	expect("capture: a cancel in the report prints the announcement only",
+	       has("stub: capturing live\r\n") && !has("frame    :") &&
+	       !has("camera: ") && camera_stub.calls_report == 1 &&
+	       camera_stub.calls_board_lines == 0);
+
+	/* [!] a refused line ends the output: nothing after it is asked for */
+	capture_refused_at("frame    :");
+	expect("capture: refused at the frame line, nothing after it",
+	       has("stub: capturing live") && !has("frame    :") &&
+	       !has("R(5)") && camera_stub.calls_board_lines == 0);
+	capture_refused_at("G(6)");
+	expect("capture: refused at a channel line, nothing after it",
+	       has("R(5)     :") && !has("G(6)") && !has("seam") &&
+	       camera_stub.calls_board_lines == 0);
+	/* the last channel line refused, with no seam line after it: the
+	   board's lines are not asked for (the console would drop them anyway,
+	   so only the call shows it) */
+	capture_refused_at_seam("B(5)", 0);
+	expect("capture: refused at the last channel line, the board's lines "
+	       "not asked",
+	       has("G(6)     :") && !has("B(5)") &&
+	       camera_stub.calls_board_lines == 0);
+	capture_refused_at("seam     :");
+	expect("capture: refused at the seam line, the board's lines not asked",
+	       has("B(5)     :") && !has("seam") &&
+	       camera_stub.calls_board_lines == 0);
+	capture_refused_at("stub: board lines");
+	expect("capture: refused at the board's line, no warm-up and no dump",
+	       has("seam     :") && camera_stub.calls_board_lines == 1 &&
+	       !has("stub: board lines") && !has("warm-up") && !has("bytes["));
+	capture_refused_at("warm-up  :");
+	expect("capture: refused at the warm-up, no dump",
+	       has("stub: board lines") && !has("warm-up") && !has("bytes["));
+	capture_refused_at("bytes[");
+	expect("capture: refused at the dump's heading, no dump",
+	       has("warm-up  : 15 frames dropped") && !has("bytes[") &&
+	       !has("000000"));
+
+	/* a board that says its own writer refused: nothing after it either,
+	   though the console would still take it */
+	reset();
+	capture_full_report();
+	camera_stub.board_refuses = 1;
+	run("camera capture\r");
+	expect("capture: the board's refusal ends the output too",
+	       has("stub: board lines") && !has("warm-up") && !has("bytes["));
+}
+
 static void check_common(void)
 {
 	/* an IN_USE stop names the holders and changes nothing */
@@ -225,11 +427,11 @@ static void check_common(void)
 	expect("capture lets the board announce a live frame",
 	       has("stub: capturing live\r\n") && camera_stub.last_test == 0);
 	expect("then the board's lines, then the dump of the head",
-	       before("stub: frame stats", "bytes[0..3]:\r\n"));
+	       before("stub: board lines", "bytes[0..3]:\r\n"));
 	reset();
 	camera_stub.head_len = 0;
 	run("camera capture\r");
-	expect("no head, no dump", has("stub: frame stats") && !has("bytes["));
+	expect("no head, no dump", has("stub: board lines") && !has("bytes["));
 
 	/* the warm-up the capture paid: none, frames, or time -- one shape */
 	reset();
@@ -243,7 +445,7 @@ static void check_common(void)
 	run("camera capture\r");
 	expect("frames let go are printed after the board's lines, before the dump",
 	       has("warm-up  : 15 frames dropped\r\n") &&
-	       before("stub: frame stats", "warm-up  :") &&
+	       before("stub: board lines", "warm-up  :") &&
 	       before("warm-up  :", "bytes[0..3]:"));
 	reset();
 	camera_stub.warmup = 1;
@@ -267,7 +469,7 @@ static void check_common(void)
 	cli_dummy_inject(&tr0, "camera capture\r\x03", 16);
 	cli_test_pump(&sh0);
 	expect("a Ctrl+C between warm-up frames ends the capture silently",
-	       camera_stub.calls_capture == 1 && !has("stub: frame stats") &&
+	       camera_stub.calls_capture == 1 && !has("stub: board lines") &&
 	       !has("warm-up") && !has("camera: cancel"));
 
 	/* stats: state and holders first, the board's lines after */
@@ -339,7 +541,7 @@ static void check_common(void)
 	cli_dummy_inject(&tr0, "camera capture\r\x03", 16);
 	cli_test_pump(&sh0);
 	expect("a Ctrl+C during the walk is asked about and ends it silently",
-	       camera_stub.cancel_asked >= 1 && !has("stub: frame stats") &&
+	       camera_stub.cancel_asked >= 1 && !has("stub: board lines") &&
 	       !has("bytes[") && !has("camera: cancel"));
 
 	/* IN_USE with nobody left to name keeps the old spelling */
@@ -632,8 +834,10 @@ int main(void)
 	check_table();
 #if defined(CAM_TEST_SHAPE_DUP)
 	(void)check_common;   /* the duplicate's table is the whole point here */
+	(void)check_capture;
 #else
 	check_common();
+	check_capture();
 #endif
 #if defined(CAM_TEST_SHAPE_FULL)
 	check_full();

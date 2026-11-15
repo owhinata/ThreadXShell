@@ -312,6 +312,10 @@ void camera_svc_info(struct camera_op_result *res,
  * so a command only ever printed its own.  A mismatch is the same failure as a
  * replaced frame.
  *
+ * The frame's first bytes are copied in with the statistics, from the same
+ * read (issue #237): the report hands them back from here and does not read
+ * the PSRAM a second time.
+ *
  * DTCM: CPU-only data, kept out of the AXI-SRAM that bus masters need.
  */
 struct cam_report_rec {
@@ -320,6 +324,7 @@ struct cam_report_rec {
 	uint32_t gen;
 	struct camera_mode m;
 	struct cam_rgb565_stats st;     /* the statistics and the seam */
+	uint8_t  head[CAMERA_SVC_HEAD_MAX];   /* the frame's first bytes */
 };
 
 static struct cam_report_rec cam_last_report DTCM_BSS;
@@ -369,6 +374,8 @@ static void cam_capture_walk(struct camera_op_result *res,
 		}
 		if (off == 0u) {
 			r->gen = gen;
+			memcpy(r->head, buf, n < CAMERA_SVC_HEAD_MAX ? n
+			                                             : CAMERA_SVC_HEAD_MAX);
 		} else if (gen != r->gen) {
 			camera_res_fail(res, CAMERA_SVC_ERR_NO_FRAME,
 			                "frame changed mid-read (concurrent capture)");
@@ -420,25 +427,27 @@ void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
 }
 
 /*
- * The report prints the record camera_svc_capture() took, after checking --
- * with a one-byte read under the camera lock (and the guard, the frame being
+ * The report answers from the record camera_svc_capture() took, after checking
+ * -- with a one-byte read under the camera lock (and the guard, the frame being
  * in the PSRAM) -- that the frame is still the one it describes.  The record
- * is never printed for a frame another capture replaced.
+ * is never handed back for a frame another capture replaced.  The guard is
+ * given back before the numbers are filled in, and the shared command prints
+ * them after this returns.
  */
 void camera_svc_capture_report(struct camera_svc_capture_report *rep,
                                struct camera_op_result *res,
-                               camera_svc_write_fn write,
                                int (*cancelled)(void *ctx), void *ctx)
 {
-	static const char *const chan[3] = { "R(5)", "G(6)", "B(5)" };
-	struct camera_out o = { write, ctx, 0 };
+	static const char *const chan[3] = { "R", "G", "B" };
+	static const uint8_t bits[3] = { 5u, 6u, 5u };
 	struct cam_report_rec r;
 	uint8_t probe;
 	uint32_t gen;
 	int rc;
 
 	(void)cancelled;
-	rep->head_len = 0u;               /* this board prints no head dump */
+	(void)ctx;
+	rep->head_len = 0u;   /* the warm-up is the capture's (left alone) */
 
 	if (!cam_psram_take(res))
 		return;
@@ -454,23 +463,40 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 		                "frame changed by a concurrent capture");
 		return;
 	}
-	camera_res_ok(res);
 
-	camera_out(&o, "frame    : %ux%u %s (%lu bytes)\r\n",
-	           (unsigned)r.m.width, (unsigned)r.m.height, r.m.format,
-	           (unsigned long)r.m.frame_bytes);
-	for (int k = 0; k < 3; k++)
-		camera_out(&o, "%-8s : min %3lu  max %3lu  mean %3lu\r\n", chan[k],
-		           (unsigned long)r.st.min[k], (unsigned long)r.st.max[k],
-		           (unsigned long)(r.st.npx ? r.st.sum[k] / r.st.npx : 0u));
-	/* The banding metric: the largest jump between two adjacent rows' channel
-	   means (x100).  A settled frame is single digits; a gain change landing
-	   mid-readout shows up as hundreds, at the row where it landed. */
-	camera_out(&o, "seam     : row %3lu  dR %lu.%02lu  dG %lu.%02lu  dB %lu.%02lu\r\n",
-	           (unsigned long)r.st.seam_row,
-	           (unsigned long)(r.st.seam_d[0] / 100u), (unsigned long)(r.st.seam_d[0] % 100u),
-	           (unsigned long)(r.st.seam_d[1] / 100u), (unsigned long)(r.st.seam_d[1] % 100u),
-	           (unsigned long)(r.st.seam_d[2] / 100u), (unsigned long)(r.st.seam_d[2] % 100u));
+	rep->format = r.m.format;   /* "rgb565", camera_get_mode()'s (issue #237) */
+	rep->width = r.m.width;
+	rep->height = r.m.height;
+	rep->bytes = r.m.frame_bytes;
+	for (unsigned k = 0; k < 3u; k++) {
+		rep->chan[k].name = chan[k];
+		rep->chan[k].bits = bits[k];
+		rep->chan[k].min = (uint16_t)r.st.min[k];
+		rep->chan[k].max = (uint16_t)r.st.max[k];
+		rep->chan[k].mean_x100 = camera_mean_x100(r.st.sum[k], r.st.npx);
+		/* The banding metric: the largest jump between two adjacent rows'
+		   channel means (x100).  A settled frame is single digits; a gain
+		   change landing mid-readout shows up as hundreds, at the row where
+		   it landed. */
+		rep->seam[k].name = chan[k];
+		rep->seam[k].d_x100 = r.st.seam_d[k];
+	}
+	rep->nchan = 3u;
+	rep->seam_row = r.st.seam_row;
+	rep->nseam = 3u;
+	memcpy(rep->head, r.head, CAMERA_SVC_HEAD_MAX);
+	rep->head_len = CAMERA_SVC_HEAD_MAX;
+	camera_res_ok(res);
+}
+
+/* This board has no lines of its own: the shared ones say it all. */
+int camera_svc_capture_board_lines(const struct camera_svc_capture_report *rep,
+                                   camera_svc_write_fn write, void *ctx)
+{
+	(void)rep;
+	(void)write;
+	(void)ctx;
+	return 0;
 }
 
 /* ---- reading the last capture out (save / send) -------------------------- */

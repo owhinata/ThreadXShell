@@ -239,32 +239,33 @@ void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
 	camera_res_ok(res);
 }
 
+/* What this board keeps in camera_svc_capture_report::board for its own
+   lines (camera_svc_capture_board_lines): the mosaic of the three planes in
+   their order, the Bayer phase the datapath ran with, and the colour
+   separation. */
+#define CAM_REP_MOSAIC_B 0u   /* x100 */
+#define CAM_REP_MOSAIC_G 1u   /* x100 */
+#define CAM_REP_MOSAIC_R 2u   /* x100 */
+#define CAM_REP_BAYER    3u   /* cam_dp_bayer() */
+#define CAM_REP_COLOUR   4u   /* x100 */
+_Static_assert(CAM_REP_COLOUR < CAMERA_SVC_BOARD_VALUES,
+               "Grove's own capture values fit the report");
+
 /*
- * The two figures answer DIFFERENT questions, and conflating them was a
- * mistake worth not repeating:
- *
- *   mosaic  -- did a demosaic run at all?  Single digits yes, tens no.  It
- *              says NOTHING about whether the phase was right.
- *   colour  -- was the phase right?  A wrong phase interpolates red and blue
- *              from where they are not, dragging both toward green, so the
- *              frame desaturates.  Try all four `camera bayer` values on
- *              something strongly coloured: the right one maximises this.
- *
- * Nothing here reads the landing buffer, so there is nothing to cancel.
+ * The report answers from the record camera_svc_capture() took; nothing here
+ * reads the landing buffer, so there is nothing to cancel.  The plane ORDER is
+ * the hardware's (B, G, R).  The seam is G's alone.
  */
 void camera_svc_capture_report(struct camera_svc_capture_report *rep,
                                struct camera_op_result *res,
-                               camera_svc_write_fn write,
                                int (*cancelled)(void *ctx), void *ctx)
 {
-	static const char *const name[3] = {
-		"B(plane 0)", "G(plane 1)", "R(plane 2)"
-	};
-	struct camera_out o = { write, ctx, 0 };
+	static const char *const name[3] = { "B", "G", "R" };
 	struct cam_capture_rec r;
 	TX_INTERRUPT_SAVE_AREA
 
 	(void)cancelled;
+	(void)ctx;
 	rep->head_len = 0u;   /* the warm-up is the capture's (left alone) */
 	TX_DISABLE
 	r = cam_last_capture;
@@ -274,31 +275,62 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 		                "frame changed by a concurrent capture");
 		return;
 	}
-	camera_res_ok(res);
 
-	camera_out(&o, "frame    : %ux%u planar B/G/R\r\n",
-	           (unsigned)CAM_FRAME_WIDTH, (unsigned)CAM_FRAME_HEIGHT);
-	for (unsigned k = 0; k < 3u; k++)
-		camera_out(&o, "%s : min %3u  max %3u  mean %3lu.%02lu  "
-		           "mosaic %3lu.%02lu\r\n", name[k],
-		           r.plane[k].min, r.plane[k].max,
-		           (unsigned long)(r.plane[k].mean_x100 / 100u),
-		           (unsigned long)(r.plane[k].mean_x100 % 100u),
-		           (unsigned long)(r.plane[k].mosaic_x100 / 100u),
-		           (unsigned long)(r.plane[k].mosaic_x100 % 100u));
-	camera_out(&o, "seam     : row %3lu  dG %lu.%02lu  "
-	           "(single digits = settled)\r\n",
-	           (unsigned long)r.seam_row, (unsigned long)(r.seam_x100 / 100u),
-	           (unsigned long)(r.seam_x100 % 100u));
-	camera_out(&o, "bayer    : %s   colour separation %lu.%02lu\r\n",
-	           cam_dp_bayer_name(r.bayer),
-	           (unsigned long)(r.colour_x100 / 100u),
-	           (unsigned long)(r.colour_x100 % 100u));
-	camera_out(&o, "           (mosaic: single digits = a demosaic ran. "
-	           "colour: bigger = the phase fits)\r\n");
-
+	rep->format = "planar B/G/R";
+	rep->width = CAM_FRAME_WIDTH;
+	rep->height = CAM_FRAME_HEIGHT;
+	rep->bytes = CAM_RAW_BYTES;
+	for (unsigned k = 0; k < 3u; k++) {
+		rep->chan[k].name = name[k];
+		rep->chan[k].bits = 8u;
+		rep->chan[k].min = r.plane[k].min;
+		rep->chan[k].max = r.plane[k].max;
+		rep->chan[k].mean_x100 = r.plane[k].mean_x100;
+		rep->board[CAM_REP_MOSAIC_B + k] = r.plane[k].mosaic_x100;
+	}
+	rep->nchan = 3u;
+	rep->seam_row = r.seam_row;
+	rep->seam[0].name = "G";
+	rep->seam[0].d_x100 = r.seam_x100;
+	rep->nseam = 1u;
+	rep->board[CAM_REP_BAYER] = r.bayer;
+	rep->board[CAM_REP_COLOUR] = r.colour_x100;
 	memcpy(rep->head, r.head, CAMERA_SVC_HEAD_MAX);
 	rep->head_len = CAMERA_SVC_HEAD_MAX;
+	camera_res_ok(res);
+}
+
+/*
+ * This board's own lines.  The two figures answer DIFFERENT questions, and
+ * conflating them was a mistake worth not repeating:
+ *
+ *   mosaic  -- did a demosaic run at all?  Single digits yes, tens no.  It
+ *              says NOTHING about whether the phase was right.
+ *   colour  -- was the phase right?  A wrong phase interpolates red and blue
+ *              from where they are not, dragging both toward green, so the
+ *              frame desaturates.  Try all four `camera bayer` values on
+ *              something strongly coloured: the right one maximises this.
+ */
+int camera_svc_capture_board_lines(const struct camera_svc_capture_report *rep,
+                                   camera_svc_write_fn write, void *ctx)
+{
+	struct camera_out o = { write, ctx, 0 };
+	const uint32_t *b = rep->board;
+
+	camera_out(&o, "mosaic   : B %lu.%02lu  G %lu.%02lu  R %lu.%02lu\r\n",
+	           (unsigned long)(b[CAM_REP_MOSAIC_B] / 100u),
+	           (unsigned long)(b[CAM_REP_MOSAIC_B] % 100u),
+	           (unsigned long)(b[CAM_REP_MOSAIC_G] / 100u),
+	           (unsigned long)(b[CAM_REP_MOSAIC_G] % 100u),
+	           (unsigned long)(b[CAM_REP_MOSAIC_R] / 100u),
+	           (unsigned long)(b[CAM_REP_MOSAIC_R] % 100u));
+	camera_out(&o, "bayer    : %s   colour separation %lu.%02lu\r\n",
+	           cam_dp_bayer_name((uint8_t)b[CAM_REP_BAYER]),
+	           (unsigned long)(b[CAM_REP_COLOUR] / 100u),
+	           (unsigned long)(b[CAM_REP_COLOUR] % 100u));
+	camera_out(&o, "           (mosaic: single digits = a demosaic ran. "
+	           "colour: bigger = the phase fits)\r\n");
+	return o.failed ? -1 : 0;
 }
 
 /* ---- the stream (issue #142: the operator's hold on the panel stream) ---- */

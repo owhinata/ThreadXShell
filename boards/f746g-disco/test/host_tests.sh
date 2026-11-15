@@ -276,6 +276,21 @@ else
          "toolchain under $HOST_TEST_REPO/tools/" >&2
 fi
 
+# issue #237 -- this board's `camera capture` report (port/camera/
+# camera_svc_f746.c) over a fake driver: the frame replaced or dropped before
+# each of the report's driver calls fails it (the generation is read first,
+# the size after, every later read checked against it), and the numbers of a
+# frame left alone -- RGB565 at a width 512-byte reads do not divide, with its
+# seam; YUV422; Y8 at WVGA; JPEG with and without its markers and at lengths
+# it cannot have.
+gcc $CFLAGS -I "$board/port/camera" -I "$board/svc" -I "$HOST_TEST_SVC" \
+    -I "$HOST_TEST_SVC/camera" \
+    "$here/test_camera_svc_f746.c" "$board/port/camera/camera_svc_f746.c" \
+    "$board/port/camera/camera_names.c" "$HOST_TEST_SVC/camera/cam_rgb565.c" \
+    "$HOST_TEST_SVC/fmt.c" \
+    $LDFLAGS -o "$out/test_camera_svc_f746"
+"$out/test_camera_svc_f746"
+
 # issue #143 -- the `camera` table this board builds: the shared command
 # (shell/cmds/cmd_camera.c) against this board's REAL svc/camera_svc_config.h,
 # over the shared stub adapter.  A board subcommand that reuses a shared name

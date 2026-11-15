@@ -1699,7 +1699,10 @@ mutable storage in it):
   store; `kv_cfg_tty_port()` hands the telnet console its port once
   (`net.shell.port`, or 23 when the store is not open or the key is missing,
   not a u32 or not a port); `kv_cfg_net_mode()` and `kv_cfg_net_apply()`
-  apply `net.mode` once (`dhcp`: make DHCP the source and wait up to 30 s for
+  apply `net.mode` (once at boot; "once" is the caller's promise, and
+  wio-lite-ai's `wifi reconnect` applies it again after it connects,
+  [its README](../boards/wio-lite-ai/README.md#wifi-reconnect-the-saved-settings-again-issue-238))
+  (`dhcp`: make DHCP the source and wait up to 30 s for
   a lease; `static`: `net.ip`, `net.mask` and `net.gw`, all three; `manual`:
   nothing).  With the default DHCP, an absent or unusable `net.mode` or a
   store that did not open becomes DHCP (`no usable net.mode -- DHCP, this

@@ -874,7 +874,8 @@ What is this board's:
 |---|---|
 | `port/flashdb/fal_cfg.h` | The FAL device over the NOR and the one partition `kv` |
 | `port/flashdb/fal_nor.c` | The FAL device's four operations over `port/nor`, FlashDB's log and assert hooks, `kv_board_state` and `kv_board_facts`.  The store's hold and FlashDB's lock are both the NOR device's recursive mutex: an entry point tries for up to 5 s and then answers `store busy`; `kv_init()` and FlashDB's lock wait without a limit |
-| `src/kv_boot.c` | The configuration thread `cfg` (priority 15, its stack in DTCM) and its order: open the store, `net.shell.port`, `wifi.enable`, `wifi.autoconnect`, `net.mode`, ignoring `net.mode` while the WiFi session is down; `kv_cfg_board_facts` (an absent `net.mode` leaves the address alone); the shell instance on the log transport that the WiFi steps print through |
+| `src/kv_boot.c` | The configuration thread `cfg` (priority 15, its stack in DTCM) and its order: open the store, `net.shell.port`, `wifi.enable`, `wifi.autoconnect`, `net.mode`, ignoring `net.mode` while the WiFi session is down; `kv_cfg_board_facts` (an absent `net.mode` leaves the address alone); the shell instance on the log transport that the WiFi steps print through.  Since issue #238 the WiFi and `net.mode` steps are one function that `wifi reconnect` calls too, with the mark that keeps the two from running at once ([below](#wifi-reconnect-the-saved-settings-again-issue-238)) |
+| `src/kv_wifi.c` / `.h` | What the `wifi.*` keys say to do (leave the radio off, power it only, refuse, or connect, and with which default security), as one pure function for both callers; `test/test_kv_wifi.c` walks every combination (issue #238) |
 | `svc/kv_svc_config.h` | The words: `external NOR`, and `erasing 1 MB and rebuilding -- about 15 s...` |
 | `BSP_ENABLE_KV` | The build option (ON); OFF builds neither the store nor the two shared files |
 
@@ -2230,8 +2231,9 @@ this board's own `src/net_shell.c`, operated with `net shell start` / `stop` /
   client attached do not end FAILED, and `wifi ver` afterwards reports no
   receive errors.
 - **Refused on the telnet console**, because each would take away the session
-  it runs on or needs the raw serial port: `wifi connect` / `disconnect` /
-  `on` / `off` / `reset`, `wifi flash info` / `read` / `write`, `mlperf`, and
+  it runs on or needs the raw serial port: `wifi connect` / `reconnect` /
+  `disconnect` / `on` / `off` / `reset`, `wifi flash info` / `read` / `write`,
+  `mlperf`, and
   every YMODEM transfer (`camera send`, `blob write`, `wifi flash imgload` /
   `backup`).  `wifi flash imginfo` touches no link and is not refused.  The
   words are as before:
@@ -2267,6 +2269,116 @@ Measured at `a157609`:
 | `net-tty` listener | priority 14 (above the link worker, 15, and the consoles, 16; below the IP thread, 11, and the DHCP thread, 13); stack 2,560 B in DTCM, high-water **588 B** (`thread`, after the test run of issue #221) |
 | Internal flash free (app partition) | **14,452 B** (11,316 B at `36e16cc` measured the same way; the 11,324 B of issue #220 above was measured another way) |
 | DTCM free (`_smsp_stack - _dtcm_used_end`) | **1,848 B**, unchanged (the stack and the transmit ring were already in DTCM; only their names changed) |
+
+### `wifi reconnect`: the saved settings again (issue #238)
+
+Every `wifi flash` session ends by resetting the module, which takes WiFi
+down and makes the host forget the module's firmware generation and the
+re-association credentials.  Until issue #238 the way back was `wifi ver` and
+a hand-typed `wifi connect`, or a reboot.  `wifi reconnect`, typed on the USB
+CDC console, runs the boot configuration's own sequence -- one function in
+`src/kv_boot.c` that the `cfg` thread and the command both call:
+
+1. ask the module for its firmware version, when the host does not know its
+   generation (after `wifi flash` it does not; on a board that is still
+   connected it does, and there is no query).  The query's hazard on
+   firmware older than N2 (owhinata/wio-lite-ai#20) is the one every boot
+   already takes;
+2. associate with `wifi.ssid`, `wifi.psk` and `wifi.security` (when
+   `wifi.security` is not set: WPA2-AES with a `wifi.psk`, open without),
+   with the same retries as the boot;
+3. bring the host stack up, or keep it when it is already up;
+4. apply `net.mode` -- only when the association connected.
+
+`wifi.enable` and `wifi.autoconnect` are not read: they say what the boot
+does by itself, and the command runs because the operator asked (the
+association powers the module when it is off, as `wifi connect` does).  The
+host's re-association is turned on only when `wifi.autoreconnect` reads true;
+otherwise whether it is on or off is left as it was.  Its stored credentials
+are handled as by `wifi connect`: dropped when the association starts, taken
+again when it connects and re-association is on.  Nothing is written to the
+store.
+
+| When | Answer |
+|---|---|
+| Typed on the telnet console | `wifi reconnect: refused on the telnet console -- it would destroy this session. Run it from the USB CDC console.`, before any key is read |
+| Typed as `wifi reconnect &` | ``wifi reconnect: run in the foreground (not `... &`)``, before any key is read |
+| The boot configuration has not finished (`thread` shows `cfg` other than `compl`) | `wifi reconnect: the boot configuration is still running -- see dmesg; retry when it ends` |
+| Another `wifi reconnect` is running | `wifi reconnect: already running` (telnet and `&` are refused first, so only the USB console's foreground can run one; the answer is kept as a guard) |
+| The store is not open | `wifi reconnect: the configuration store is not open (<state>)` |
+| No `wifi.ssid` | `wifi reconnect: no saved network (wifi.ssid is not set)`; a key that cannot be read is reported first by the shared reader (`wifi.ssid: ignored (<why>)`) |
+| The association fails | the association's own lines, then `wifi reconnect: not connected -- net.mode not applied` |
+| It connects, `net.mode=dhcp` | `net.mode=dhcp: waiting up to 30 s for a lease (Ctrl+C does not stop this wait)`, then `DHCP lease acquired` or `no DHCP lease within 30 s` |
+| It connects, `net.mode=static` / `manual` / absent | as at boot: `static address applied` (or its warnings) / nothing / nothing |
+
+- **Ctrl+C** is answered inside the association (its retries are bounded at
+  60 s) and in the wait for the host stack (20 s), as for `wifi connect`.
+  The command asks for it right after the association returns -- on success
+  too -- and then does not apply `net.mode`; a Ctrl+C during the host stack's
+  bring-up stops only the wait, and the bring-up goes on.  The line
+  `wifi reconnect: stopped by Ctrl+C -- net.mode not applied` is in `dmesg`
+  only: the console discards what a command prints after Ctrl+C.
+- **The DHCP wait (up to 30 s) does not stop on Ctrl+C**: the shared step
+  has no way to ask, and adding one would change f746g-disco too.  It always
+  ends within 30 s.
+- **The boot and the command never run at once**: a one-byte mark in
+  `src/kv_boot.c` says which of them is running, set by the command in one
+  interrupt-masked test, held until `net.mode` has been applied, and given
+  back on every way out.  No other command looks at it.
+- **After `wifi flash`** the end of the session prints, in a build with the
+  store:
+
+  ```
+  wifi: RTL8720 reset to normal firmware
+    WiFi is not connected.  `wifi reconnect` connects again with the saved settings;
+    by hand, `wifi ver` and then `wifi connect` (this session dropped the firmware proof)
+  ```
+
+  It only names the command; nothing reconnects by itself.  A build without
+  the store (`BSP_ENABLE_KV=OFF`) has no `wifi reconnect` and keeps the old
+  one line, ``run `wifi ver` before `wifi connect` (this session dropped the
+  firmware proof)``.
+
+Two things it does that may surprise:
+
+- **With an address already there, `DHCP lease acquired` comes at once.**
+  The shared wait ends when the interface has any address, so on a board
+  that was still connected it counts the address it already had (the
+  `dmesg` stamps of the wait line and of `DHCP lease acquired` were the same
+  millisecond).  The line then does not prove a new lease; the worker
+  reinitialises the client on the re-association afterwards, as after
+  `wifi connect`, and `net info` shows the address.  For the same reason a
+  static address set with `net ip` from telnet during the wait ends it with
+  that line, as it does at boot today; and a board on a static address whose
+  saved `net.mode` is `dhcp` would see its static address and report the
+  lease at once.  Neither is fixed by issue #238.
+- **The association's progress is on the console only.**  At boot the
+  sequence prints through the `cfg` instance, whose output is the log, so
+  the firmware version, `wifi: connecting to ...`, the retries and the
+  module's reason, `wifi: connected`, `autoreconnect armed for ...` and the
+  host-stack lines are all in `dmesg`.  A `wifi reconnect` prints them on its
+  own console, and `dmesg` keeps, under `cfg`, only what `src/kv_boot.c` and
+  the shared kv steps report: `wifi reconnect: applying the saved settings`
+  (first, so the run is told apart from the boot's), `associating with
+  "<ssid>"`, the `net.mode` lines, `stopped by Ctrl+C` or `not connected`,
+  and the readers' warnings.  Beside them are the other modules' own log
+  lines, as for any `wifi connect`: `wauto: armed for ...` /
+  `wauto: disarmed (...)` (a reconnect over an armed policy reads
+  ``disarmed (superseded by `wifi connect`)``, since it is the same
+  association) and `nx: link raised to ...` / `nx: host stack up ...`.  The
+  refusals in the table, the missing `wifi.ssid` and the closed store
+  included, are printed on the console only.
+
+Measured for issue #238 (board #2, one DFU; incremental builds; the stack
+figures are `thread` peaks since the reboot of the test run):
+
+| What | Value |
+|---|---|
+| `shell.bin` | 379,600 B at `e578112` -> 379,704 B (#235, `8c2a776`) -> 379,928 B (the `wifi.*` decision moved into `src/kv_wifi.c`, `3bf7a4a`) -> **381,104 B** (`wifi reconnect`, `b27da53`; +1,176 B) |
+| Internal flash free (app partition, 393,216 B) | **12,112 B** (13,616 B at `e578112`, 13,288 B at `3bf7a4a`) |
+| USB console thread (`wio>`, 4,096 B) | peak **1,884 B** (2,212 B left), reached by `wifi flash info` and the `wifi reconnect` after it; a reconnect while connected, a Ctrl+C during the association and the reconnect after it did not raise it |
+| `cfg` thread (4,096 B, DTCM) | peak 1,620 B before issue #238 -> 1,636 B (`3bf7a4a`) -> **1,676 B** (`b27da53`) |
+| Not measured | `net.mode=static` and `manual` (the board's store holds `dhcp`, and it was not rewritten), an association that fails, and a warning from a key read |
 
 ### The WiFi link layer (issue #222)
 

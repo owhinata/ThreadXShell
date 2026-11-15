@@ -15,6 +15,8 @@
  *   wifi ver                      prove the eRPC link (rpc_system_ack) + read the FW
  *                                 build id = the capability gate the L2 bridge requires
  *   wifi connect <ssid> [pw] [sec]  associate (STA) + arm the L2 bridge (owhinata/wio-lite-ai#5 inc 3)
+ *   wifi reconnect                connect again with the saved kv settings, the boot's
+ *                                 own sequence -- src/kv_boot.c (issue #238; KV builds only)
  *   wifi disconnect               drop the current association
  *   wifi autoreconnect [on|off]   re-associate by ourselves when the AP goes away
  * (owhinata/wio-lite-ai#32)

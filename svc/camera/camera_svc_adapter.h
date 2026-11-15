@@ -147,4 +147,20 @@ static inline void camera_out_n(struct camera_out *o, char *line, size_t cap,
 	va_end(ap);
 }
 
+/*
+ * The capture's announcement, ONE SENTENCE ON EVERY BOARD (issue #237):
+ * `camera: capturing live frame ...` (or `colorbar test`), with what the
+ * capture costs in between when the board has something to say about it
+ * (@p cost: wio-lite-ai's " (~1 s of warm-up; ...)", or NULL).  The board
+ * writes it, and the words are this one format's.  What the adapter refuses
+ * at once is refused before it (not announced); what the driver refuses is
+ * refused after it (svc/camera/camera_svc.h, camera_svc_capture()).
+ */
+static inline void camera_out_capturing(struct camera_out *o, int test,
+                                        const char *cost)
+{
+	camera_out(o, "camera: capturing %s frame%s ...\r\n",
+	           test ? "colorbar test" : "live", cost ? cost : "");
+}
+
 #endif /* CAMERA_SVC_ADAPTER_H */

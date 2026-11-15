@@ -191,17 +191,20 @@ void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
                         camera_svc_write_fn write,
                         int (*cancelled)(void *ctx), void *ctx)
 {
+	struct camera_out o = { write, ctx, 0 };
 	struct cam_capture_rec r;
 	const uint8_t *raw;
 	uint32_t dropped = 0u;
 	int rc;
 	TX_INTERRUPT_SAVE_AREA
 
-	(void)write;   /* no announcement on this board, as before */
 	if (test) {   /* CAMERA_SVC_HAS_TEST 0: the shared command refuses first */
 		camera_res_fail(res, CAMERA_SVC_ERR_NOSUP, "no test pattern");
 		return;
 	}
+	/* Announced before the frames it lets go (issue #237): a Ctrl+C among
+	   them leaves this line and nothing after it. */
+	camera_out_capturing(&o, 0, NULL);
 	/* Frames since bring-up at or below the count are let go, the
 	   operator's Ctrl+C asked between them (issue #143). */
 	rc = camera_capture_settled(CAMERA_ONESHOT_WARM_FRAMES, &dropped,

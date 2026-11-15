@@ -299,10 +299,14 @@ struct camera_svc_capture_report {
  * the figure is this capture's and no other console's.  The shared command
  * prints it after the report's lines.
  *
- * The board writes its own "capturing ..." line through @p write before the
- * capture starts -- after any refusal it can give at once (wio: the OCTOSPI1
- * guard), so a refused capture is not announced -- because what a capture
- * costs is the board's to say (wio: "~1 s of warm-up").
+ * The board writes the "capturing ..." line through @p write before the
+ * capture starts, because what a capture costs is the board's to say (wio:
+ * "~1 s of warm-up").  The sentence is camera_out_capturing()'s
+ * (camera_svc_adapter.h), the same on every board.  A refusal the ADAPTER
+ * gives at once comes before it and is not announced (wio: the OCTOSPI1 guard;
+ * Grove: a test pattern); a refusal the DRIVER gives (a capture while a stream
+ * runs, ...) comes after it, on every board: the announcement, then the
+ * failure.
  *
  * A board whose warm-up is a run of frames asks @p cancelled between them
  * (Grove); when it says yes the capture ends CAMERA_SVC_ERR_CANCELLED and the

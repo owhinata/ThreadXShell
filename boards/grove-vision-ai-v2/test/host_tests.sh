@@ -238,6 +238,20 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_cam_convert"
 "$out/test_cam_convert"
 
+# issue #237 -- this board's `camera capture` (port/camera/camera_svc_grove.c)
+# over a fake driver: it announces itself before the frames it lets go, and a
+# Ctrl+C among them leaves that one line and nothing after it; a test pattern
+# is refused unannounced; the report's numbers (B, G, R at 8 bits, the seam of
+# G alone) and this board's own lines.  camera_svc_shim/ stands in for
+# tx_api.h and the one SDK type cam_sensor.h names; the numbers are the real
+# cam_convert.c's.
+gcc $CFLAGS -I "$here/camera_svc_shim" -I "$board/port/camera" -I "$board/svc" \
+    -I "$board/port/nn" -I "$svc" -I "$svc/camera" -I "$svc/nn" \
+    "$here/test_camera_svc_grove.c" "$board/port/camera/camera_svc_grove.c" \
+    "$board/port/camera/cam_convert.c" "$svc/fmt.c" \
+    $LDFLAGS -o "$out/test_camera_svc_grove"
+"$out/test_camera_svc_grove"
+
 # issue #151 -- scripts/planar_bgr_to_png.py reproduces the packer above on the
 # PC so a `camera send` PNG can look like the panel.  A re-implementation drifts
 # without anything noticing, so the REAL cam_convert.c (included by the driver,

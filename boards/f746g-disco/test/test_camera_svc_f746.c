@@ -179,6 +179,8 @@ static int never_cancel(void *ctx) { (void)ctx; return cancel_now; }
 
 static struct camera_svc_capture_report rep;
 
+static char last_detail[CAMERA_SVC_DETAIL_MAX + 1];   /* the failure's words */
+
 static int report(void)
 {
 	struct camera_op_result res;
@@ -189,6 +191,7 @@ static int report(void)
 	memset(&res, 0, sizeof res);
 	camera_svc_capture_report(&rep, &res, never_cancel, NULL);
 	EQ(rep.warmup, 123u, "the warm-up is the capture's");
+	memcpy(last_detail, res.detail, sizeof last_detail);
 	return res.status;
 }
 
@@ -430,6 +433,28 @@ static void test_changes(void)
 	setup_rgb565();
 	fake_info.frame_bytes -= 2u;
 	EQ(report(), CAMERA_SVC_ERR_NO_FRAME, "a raster frame shorter than its mode");
+
+	/* the words each one gives: another console's capture is "changed
+	   mid-read", a `camera res` / `format` (which drops the frame) is "no
+	   captured frame" -- the README quotes both */
+	for (int at = 2; at <= 4; at++) {
+		setup_rgb565();
+		fake_ev = EV_REPLACE;
+		fake_ev_at = at;
+		EQ(report(), CAMERA_SVC_ERR_NO_FRAME, "a replaced frame");
+		EQ(strcmp(last_detail, "frame changed mid-read (concurrent capture)"),
+		   0, "is changed mid-read");
+		setup_rgb565();
+		fake_ev = EV_DROP;
+		fake_ev_at = at;
+		EQ(report(), CAMERA_SVC_ERR_NO_FRAME, "a dropped frame");
+		EQ(strcmp(last_detail, "no captured frame"), 0, "is no captured frame");
+	}
+	setup_jpeg();
+	fake_ev = EV_DROP;
+	fake_ev_at = 4;   /* before the tail's read */
+	EQ(report(), CAMERA_SVC_ERR_NO_FRAME, "a jpeg dropped before its tail");
+	EQ(strcmp(last_detail, "no captured frame"), 0, "is no captured frame");
 
 	/* a cancel between reads */
 	setup_rgb565();

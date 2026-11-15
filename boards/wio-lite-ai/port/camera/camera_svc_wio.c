@@ -406,9 +406,8 @@ void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
 	   after a power cycle also pays for the sensor bring-up: 200 ms COM7 reset
 	   + 220 ms register table + 100 ms settle, plus 100 ms more if the
 	   colorbar state has to change. */
-	camera_out(&o, "camera: capturing %s frame (~1 s of warm-up; +0.6 s on the "
-	           "first one after a power cycle) ...\r\n",
-	           test ? "colorbar test" : "live");
+	camera_out_capturing(&o, test, " (~1 s of warm-up; +0.6 s on the first "
+	                     "one after a power cycle)");
 	rc = camera_capture(test ? 1 : 0);
 	if (rc != CAM_OK) {
 		cam_psram_give();

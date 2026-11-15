@@ -229,8 +229,7 @@ void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
 	int rc;
 
 	(void)cancelled;
-	camera_out(&o, "camera: capturing %s frame ...\r\n",
-	           test ? "colorbar test" : "live");
+	camera_out_capturing(&o, test, NULL);
 	rc = camera_capture_warm(test ? 1 : 0, &warm_ms);
 	cam_res_rc(res, rc);
 	if (rc == 0) {

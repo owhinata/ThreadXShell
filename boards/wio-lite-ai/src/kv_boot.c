@@ -62,6 +62,7 @@
 #include "kv.h"        /* the shared store (svc/kv, issue #214) */
 #include "kv_boot.h"
 #include "kv_cfg.h"    /* the shared boot steps (shell/cmds, issue #214) */
+#include "kv_wifi.h"   /* what the wifi.* keys say to do (issue #238) */
 
 #include "cli.h"
 #include "cli_backend_log.h"
@@ -133,10 +134,33 @@ static void cfg_wifi(void)
 {
 	char ssid[WIFI_AUTO_SSID_MAX + 1];
 	char psk[WIFI_AUTO_PASS_MAX + 1];
-	uint32_t security;
-	int have_psk, security_explicit;
+	uint32_t security = 0u;
+	struct kv_wifi_in in = { .caller = KV_WIFI_BOOT, .store_open = 1 };
+	struct kv_wifi_answer a;
+	unsigned reads;
 
-	if (!kv_cfg_bool("wifi.enable", 0)) {
+	/* Read the keys one at a time, as src/kv_wifi.h asks for them: a key the
+	 * answer does not depend on is never read, so it never warns. */
+	for (reads = 0u;; reads++) {
+		a = kv_wifi_next(&in);
+		if (reads >= KV_WIFI_KEYS)
+			break;
+		if (a.step == KV_WIFI_READ_ENABLE)
+			in.enable = kv_wifi_seen_of(kv_cfg_bool("wifi.enable", 0));
+		else if (a.step == KV_WIFI_READ_AUTOCONNECT)
+			in.autoconnect = kv_wifi_seen_of(kv_cfg_bool("wifi.autoconnect", 0));
+		else if (a.step == KV_WIFI_READ_SSID)
+			in.ssid = kv_wifi_seen_of(kv_cfg_str("wifi.ssid", ssid, sizeof ssid));
+		else if (a.step == KV_WIFI_READ_PSK)
+			in.psk = kv_wifi_seen_of(kv_cfg_str("wifi.psk", psk, sizeof psk));
+		else if (a.step == KV_WIFI_READ_SECURITY)
+			in.security = kv_wifi_seen_of(kv_get_u32("wifi.security",
+			                                         &security) == KV_OK);
+		else
+			break;
+	}
+
+	if (a.step == KV_WIFI_RADIO_OFF) {
 		/* Nothing to do, and deliberately so: rtl8720_init() has already driven
 		 * CHIP_EN low from tx_application_define(), so the module is held OFF
 		 * rather than left floating.  That call is unconditional -- it is what
@@ -146,7 +170,7 @@ static void cfg_wifi(void)
 		return;
 	}
 
-	if (!kv_cfg_bool("wifi.autoconnect", 0)) {
+	if (a.step == KV_WIFI_POWER_ONLY) {
 		/*
 		 * Power-only.  The boot wait is ours to do here because the paths that
 		 * would otherwise do it -- rtl_link_begin() and `wifi ver` -- only wait
@@ -168,14 +192,16 @@ static void cfg_wifi(void)
 	 * therefore skip the boot wait entirely and put the first eRPC frame on the
 	 * wire while the module was still starting.
 	 */
-	if (!kv_cfg_str("wifi.ssid", ssid, sizeof ssid)) {
+	if (a.step == KV_WIFI_NO_SSID) {
 		LOG_WRN("wifi.autoconnect is set but wifi.ssid is not -- not associating");
 		return;
 	}
-	have_psk = kv_cfg_str("wifi.psk", psk, sizeof psk);
-	security_explicit = (kv_get_u32("wifi.security", &security) == KV_OK);
-	if (!security_explicit)
-		security = have_psk ? WIFI_RPC_SEC_WPA2_AES_PSK : WIFI_RPC_SEC_OPEN;
+	if (a.step != KV_WIFI_CONNECT)
+		return;   /* not reached: with the store open the boot is answered
+		           * radio off, power only, no ssid or connect
+		           * (test/test_kv_wifi.c) */
+	if (in.security != KV_WIFI_YES)
+		security = a.default_security;
 
 	/*
 	 * Arm the re-association policy BEFORE associating, not after
@@ -200,8 +226,9 @@ static void cfg_wifi(void)
 	 * high fails just as readily as one at 1.7 s (measured).
 	 */
 	LOG_INF("associating with \"%s\"", ssid);
-	if (wifi_connect_run(&kv_boot_sh, ssid, have_psk ? psk : NULL, security,
-	                     security_explicit, /* earn_gen */ true) != 0)
+	if (wifi_connect_run(&kv_boot_sh, ssid, (in.psk == KV_WIFI_YES) ? psk : NULL,
+	                     security, in.security == KV_WIFI_YES,
+	                     /* earn_gen */ true) != 0)
 		LOG_WRN("automatic association failed -- `wifi connect` by hand");
 
 	/* The passphrase is on the stack here and in host RAM inside wifi_auto after

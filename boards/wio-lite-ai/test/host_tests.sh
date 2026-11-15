@@ -508,6 +508,18 @@ gcc $CFLAGS -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
     $LDFLAGS -o "$out/test_wifi_flash_guard"
 "$out/test_wifi_flash_guard"
 
+# issue #238 -- what the stored wifi.* keys say to do (src/kv_wifi.c), driven
+# the way src/kv_boot.c drives it: every combination of the five keys found or
+# not, for the boot and for a console command, with the store open and closed.
+# The boot must read exactly the keys it read before #238, in the same order
+# (a read of an unreadable key adds a warning to `dmesg`), and end on the same
+# answer; the console never reads wifi.enable or wifi.autoconnect and is
+# refused without wifi.ssid.  wifi_rpc.h is the real one (constants only).
+gcc $CFLAGS -I "$board/src" \
+    "$here/test_kv_wifi.c" "$board/src/kv_wifi.c" \
+    $LDFLAGS -o "$out/test_kv_wifi"
+"$out/test_kv_wifi"
+
 # issue #175 -- the model I/O check this board's host gate (verify_tflite) compiles from
 # svc/nn/tflm/nn_tflm_model_check.h, the function the backend runs before it plans a
 # model: generated files wrong in exactly one way must be refused as the board would

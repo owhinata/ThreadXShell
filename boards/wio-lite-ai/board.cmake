@@ -738,7 +738,8 @@ if(BSP_ENABLE_KV)
         "${CMAKE_SOURCE_DIR}/svc/kv/kv.c"
         "${CMAKE_SOURCE_DIR}/svc/kv/kv_record.c"
         "${BOARD_DIR}/src/kv_boot.c"
-        ${KV_CFG_SOURCES}                           # the shared boot steps (#214)
+        "${BOARD_DIR}/src/kv_wifi.c"   # what the wifi.* keys say to do (#238)
+        ${KV_CFG_SOURCES}                          # the shared boot steps (#214)
         "${BOARD_DIR}/src/blob.c"
         "${BOARD_DIR}/src/blob_writer.c"   # the shared `blob`'s store (#194)
         "${BOARD_DIR}/src/blob_slots.c"

@@ -796,6 +796,9 @@ list(APPEND SHELL_SOURCES
     # same two shared files f746g-disco runs its camera sink on.
     "${CMAKE_SOURCE_DIR}/svc/camera/cam_step.c"
     "${CMAKE_SOURCE_DIR}/svc/camera/cam_holders.c"
+    # `camera capture`'s RGB565 statistics and seam, shared with f746g-disco
+    # (issue #237).
+    "${CMAKE_SOURCE_DIR}/svc/camera/cam_rgb565.c"
     # The camera -> inference glue.  Independent of the LCD for the same
     # reason as the band sink; the overlay it feeds is drawn from the preview
     # thread (nn_panel.c below), which is built only with the LCD.

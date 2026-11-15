@@ -49,6 +49,7 @@
 #include <string.h>
 
 #include "camera.h"
+#include "cam_rgb565.h"   /* the RGB565 statistics, shared with f746g-disco */
 #include "mem_sections.h" /* DTCM_BSS: CPU-only data out of AXI-SRAM (issue #46) */
 #include "tx_api.h"      /* TX_DISABLE, tx_thread_identify(): the report record */
 #if BSP_ENABLE_PSRAM
@@ -273,89 +274,20 @@ void camera_svc_info(struct camera_op_result *res,
 
 /* ---- one-shot capture ----------------------------------------------------- */
 
-/* Frame I/O chunk: exactly one 320-pixel RGB565 row, so the report computes
-   per-row statistics without buffering more of the frame than that. */
+/* Frame I/O chunk: exactly one 320-pixel RGB565 row.  The statistics no longer
+   need it (svc/camera/cam_rgb565 counts the rows itself); it stays the read
+   size the walk below has always used. */
 #define CAM_IO_CHUNK (CAMERA_FRAME_WIDTH * 2u)
 
 /*
  * Per-channel min/max/mean over the whole frame -- the instrument phase 2
  * exists to read.  A frame that never arrived is all zeros; a saturated one
  * pins every channel at max; a DCMI latching on the wrong edge or losing sync
- * gives min 0 / max full on all three with a mid-grey mean.
+ * gives min 0 / max full on all three with a mid-grey mean.  With them, the
+ * largest adjacent-row step (the seam): see the header of
+ * cmds/cmd_camera_board.c for how to read dR / dG / dB
+ * (owhinata/wio-lite-ai#44).  Both are svc/camera/cam_rgb565's (issue #237).
  */
-struct rgb_stats {
-	uint32_t min[3], max[3], sum[3];
-	uint32_t npx;
-};
-
-static void stats_init(struct rgb_stats *s)
-{
-	for (int i = 0; i < 3; i++) {
-		s->min[i] = 0xFFFFFFFFu;
-		s->max[i] = 0u;
-		s->sum[i] = 0u;
-	}
-	s->npx = 0u;
-}
-
-static void stats_add_rgb565(struct rgb_stats *s, const uint8_t *buf, uint32_t n)
-{
-	for (uint32_t i = 0; i + 1u < n; i += 2u) {
-		uint32_t p = (uint32_t)buf[i] | ((uint32_t)buf[i + 1u] << 8);
-		uint32_t ch[3] = { (p >> 11) & 0x1Fu, (p >> 5) & 0x3Fu, p & 0x1Fu };
-
-		for (int k = 0; k < 3; k++) {
-			if (ch[k] < s->min[k]) s->min[k] = ch[k];
-			if (ch[k] > s->max[k]) s->max[k] = ch[k];
-			s->sum[k] += ch[k];
-		}
-		s->npx++;
-	}
-}
-
-/* Per-row channel means, x100 so the seam metric keeps two decimals in integers. */
-static void row_means_x100(const uint8_t *buf, uint32_t n, uint32_t out[3])
-{
-	uint32_t sum[3] = { 0u, 0u, 0u };
-	uint32_t npx = 0u;
-
-	for (uint32_t i = 0; i + 1u < n; i += 2u) {
-		uint32_t p = (uint32_t)buf[i] | ((uint32_t)buf[i + 1u] << 8);
-
-		sum[0] += (p >> 11) & 0x1Fu;
-		sum[1] += (p >> 5) & 0x3Fu;
-		sum[2] += p & 0x1Fu;
-		npx++;
-	}
-	for (int k = 0; k < 3; k++)
-		out[k] = npx ? (sum[k] * 100u) / npx : 0u;
-}
-
-/* Largest adjacent-row step, and where.  Ranked on the summed channel delta so
-   one row is reported rather than three unrelated ones.  See the header of
-   cmds/cmd_camera_board.c for how to read dR / dG / dB (owhinata/wio-lite-ai#44). */
-struct seam_max {
-	uint32_t row;
-	uint32_t d[3];
-	uint32_t total;
-};
-
-static void seam_track(struct seam_max *s, uint32_t row,
-                       const uint32_t a[3], const uint32_t b[3])
-{
-	uint32_t d[3], total = 0u;
-
-	for (int k = 0; k < 3; k++) {
-		d[k] = (a[k] > b[k]) ? a[k] - b[k] : b[k] - a[k];
-		total += d[k];
-	}
-	if (total > s->total) {
-		s->total = total;
-		s->row   = row;
-		for (int k = 0; k < 3; k++)
-			s->d[k] = d[k];
-	}
-}
 
 /*
  * [!] THE STATISTICS ARE TAKEN INSIDE THE CAPTURE'S OWN HOLD OF THE OCTOSPI1
@@ -387,8 +319,7 @@ struct cam_report_rec {
 	TX_THREAD *owner;               /* the thread whose capture this is */
 	uint32_t gen;
 	struct camera_mode m;
-	struct rgb_stats st;
-	struct seam_max seam;
+	struct cam_rgb565_stats st;     /* the statistics and the seam */
 };
 
 static struct cam_report_rec cam_last_report DTCM_BSS;
@@ -420,17 +351,16 @@ static void cam_capture_walk(struct camera_op_result *res,
                              struct cam_report_rec *r)
 {
 	uint8_t buf[CAM_IO_CHUNK];
-	uint32_t prev[3] = { 0u, 0u, 0u };
-	uint32_t gen, off, row;
+	struct cam_rgb565_walk walk;
+	uint32_t gen, off;
 	int rc;
 
 	memset(r, 0, sizeof *r);
 	(void)camera_get_mode(&r->m);
-	stats_init(&r->st);
-	for (off = 0, row = 0; off < r->m.frame_bytes; row++) {
+	cam_rgb565_begin(&walk, &r->st, r->m.width);
+	for (off = 0; off < r->m.frame_bytes; ) {
 		uint32_t n = (r->m.frame_bytes - off < CAM_IO_CHUNK)
 		             ? r->m.frame_bytes - off : CAM_IO_CHUNK;
-		uint32_t rmean[3];
 
 		rc = camera_frame_read(off, buf, n, &gen);
 		if (rc != CAM_OK) {
@@ -444,13 +374,10 @@ static void cam_capture_walk(struct camera_op_result *res,
 			                "frame changed mid-read (concurrent capture)");
 			return;
 		}
-		stats_add_rgb565(&r->st, buf, n);
-		row_means_x100(buf, n, rmean);
-		if (row != 0u)
-			seam_track(&r->seam, row, prev, rmean);
-		prev[0] = rmean[0]; prev[1] = rmean[1]; prev[2] = rmean[2];
+		cam_rgb565_add(&walk, buf, n);
 		off += n;
 	}
+	cam_rgb565_end(&walk);
 	r->valid = 1u;
 	r->owner = tx_thread_identify();
 	camera_res_ok(res);
@@ -540,10 +467,10 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 	   means (x100).  A settled frame is single digits; a gain change landing
 	   mid-readout shows up as hundreds, at the row where it landed. */
 	camera_out(&o, "seam     : row %3lu  dR %lu.%02lu  dG %lu.%02lu  dB %lu.%02lu\r\n",
-	           (unsigned long)r.seam.row,
-	           (unsigned long)(r.seam.d[0] / 100u), (unsigned long)(r.seam.d[0] % 100u),
-	           (unsigned long)(r.seam.d[1] / 100u), (unsigned long)(r.seam.d[1] % 100u),
-	           (unsigned long)(r.seam.d[2] / 100u), (unsigned long)(r.seam.d[2] % 100u));
+	           (unsigned long)r.st.seam_row,
+	           (unsigned long)(r.st.seam_d[0] / 100u), (unsigned long)(r.st.seam_d[0] % 100u),
+	           (unsigned long)(r.st.seam_d[1] / 100u), (unsigned long)(r.st.seam_d[1] % 100u),
+	           (unsigned long)(r.st.seam_d[2] / 100u), (unsigned long)(r.st.seam_d[2] % 100u));
 }
 
 /* ---- reading the last capture out (save / send) -------------------------- */

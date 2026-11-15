@@ -41,6 +41,7 @@
 
 #include "camera.h"
 #include "camera_names.h"
+#include "cam_rgb565.h"   /* the RGB565 statistics, shared with wio-lite-ai */
 #include "camera_svc_adapter.h"
 #include "fmt.h"
 
@@ -281,7 +282,8 @@ static void cam_report_jpeg(const struct camera_mode *m,
 /*
  * Per-channel statistics over the captured frame, computed chunk by chunk
  * through camera_frame_read (the driver mutex serializes against a concurrent
- * capture).  Sums fit comfortably: 76800 px * max 63 < 2^23.
+ * capture).  Sums fit comfortably: WVGA's 384000 px * max 255 < 2^27.  The
+ * RGB565 ones are svc/camera/cam_rgb565's (issue #237).
  */
 void camera_svc_capture_report(struct camera_svc_capture_report *rep,
                                struct camera_op_result *res,
@@ -291,9 +293,10 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 	struct camera_out o = { write, ctx, 0 };
 	struct camera_mode m;
 	uint8_t buf[CAM_IO_CHUNK];
-	uint32_t rmin = 255, rmax = 0, rsum = 0;
-	uint32_t gmin = 255, gmax = 0, gsum = 0;
-	uint32_t bmin = 255, bmax = 0, bsum = 0;   /* RGB565: R5 / G6 / B5     */
+	struct cam_rgb565_stats st;                /* RGB565: R5 / G6 / B5     */
+	struct cam_rgb565_walk walk;
+	uint32_t rmin = 255, rmax = 0, rsum = 0;   /* YUV422: U                */
+	uint32_t gmin = 255, gmax = 0, gsum = 0;   /* YUV422: V                */
 	uint32_t ymin = 255, ymax = 0, ysum = 0;   /* luma for YUV422 / Y8     */
 	uint32_t gen0 = 0, gen, off, npx;
 	int rc;
@@ -310,6 +313,7 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 	}
 
 	npx = (uint32_t)m.width * m.height;
+	cam_rgb565_begin(&walk, &st, m.width);
 
 	/* Walk the frame in fixed chunks, accumulating per-format statistics.  A
 	   generation change between chunks means a concurrent capture replaced the
@@ -331,23 +335,9 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 			return;
 		}
 		if (m.format == CAM_FMT_RGB565) {
-			for (uint32_t i = 0; i + 1u < n; i += 2u) {
-				uint32_t p = (uint32_t)buf[i] |
-				             ((uint32_t)buf[i + 1u] << 8);
-				uint32_t r = (p >> 11) & 0x1Fu;
-				uint32_t gg = (p >> 5) & 0x3Fu;
-				uint32_t b = p & 0x1Fu;
-
-				if (r < rmin) rmin = r;
-				if (r > rmax) rmax = r;
-				rsum += r;
-				if (gg < gmin) gmin = gg;
-				if (gg > gmax) gmax = gg;
-				gsum += gg;
-				if (b < bmin) bmin = b;
-				if (b > bmax) bmax = b;
-				bsum += b;
-			}
+			/* 512 is even and the walk counts the rows from the width, so
+			   a chunk need not end on a row. */
+			cam_rgb565_add(&walk, buf, n);
 		} else if (m.format == CAM_FMT_YUV422) {
 			/* YUYV groups Y0 U Y1 V; off is a multiple of 4, so a group never
 			   straddles a chunk.  Y -> luma; U -> r*, V -> g* accumulators. */
@@ -387,23 +377,25 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 		}
 	}
 
+	cam_rgb565_end(&walk);   /* the seam: printed from issue #237 step 2 */
+
 	camera_res_ok(res);
 	camera_out(&o, "frame    : %ux%u %s (%lu bytes)\r\n", (unsigned)m.width,
 	           (unsigned)m.height, camera_named_name(camera_format_names, m.format),
 	           (unsigned long)m.frame_bytes);
 	if (m.format == CAM_FMT_RGB565) {
 		camera_out(&o, "R5       : min %2lu  max %2lu  mean %lu.%lu\r\n",
-		           (unsigned long)rmin, (unsigned long)rmax,
-		           (unsigned long)(rsum / npx),
-		           (unsigned long)((rsum % npx) * 10u / npx));
+		           (unsigned long)st.min[0], (unsigned long)st.max[0],
+		           (unsigned long)(st.sum[0] / npx),
+		           (unsigned long)((st.sum[0] % npx) * 10u / npx));
 		camera_out(&o, "G6       : min %2lu  max %2lu  mean %lu.%lu\r\n",
-		           (unsigned long)gmin, (unsigned long)gmax,
-		           (unsigned long)(gsum / npx),
-		           (unsigned long)((gsum % npx) * 10u / npx));
+		           (unsigned long)st.min[1], (unsigned long)st.max[1],
+		           (unsigned long)(st.sum[1] / npx),
+		           (unsigned long)((st.sum[1] % npx) * 10u / npx));
 		camera_out(&o, "B5       : min %2lu  max %2lu  mean %lu.%lu\r\n",
-		           (unsigned long)bmin, (unsigned long)bmax,
-		           (unsigned long)(bsum / npx),
-		           (unsigned long)((bsum % npx) * 10u / npx));
+		           (unsigned long)st.min[2], (unsigned long)st.max[2],
+		           (unsigned long)(st.sum[2] / npx),
+		           (unsigned long)((st.sum[2] % npx) * 10u / npx));
 	} else if (m.format == CAM_FMT_YUV422) {
 		uint32_t nc = npx / 2u;   /* one U and one V per two luma samples */
 

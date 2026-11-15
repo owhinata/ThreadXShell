@@ -1676,6 +1676,17 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
     $LDFLAGS -o "$out/test_cam_step"
 "$out/test_cam_step"
 
+# issue #237 -- `camera capture`'s RGB565 statistics and seam (svc/camera/
+# cam_rgb565.c, shared by f746g-disco and wio-lite-ai).  The two boards' own
+# computations as they were before it are run beside it on the same frames,
+# read 512 bytes at a time (f746g-disco) and a row at a time (wio-lite-ai), and
+# every number has to agree; a read that does not end on a row, equal steps, a
+# flat frame and the largest values at WVGA are walked too.
+gcc $CFLAGS -I "$svc/camera" \
+    "$here/test_cam_rgb565.c" "$svc/camera/cam_rgb565.c" \
+    $LDFLAGS -o "$out/test_cam_rgb565"
+"$out/test_cam_rgb565"
+
 # ---- board-pinned tests --------------------------------------------------- *
 # Same toolchain flags and the same scratch dir, exported so a board test is built
 # exactly like a core one and cannot quietly diverge.  A board with no

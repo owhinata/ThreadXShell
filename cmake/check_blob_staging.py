@@ -45,7 +45,7 @@ side alone fails the suite rather than quietly loosening this gate.
 exactly count x ENTRY_BYTES.)
 
 [!] "NOT APPLICABLE" IS DECIDED BY THE BUILD AND CHECKED AGAINST THE IMAGE.
-An unstaged backend (`null`; on f746g-disco also `stedgeai`, whose model is
+An unstaged backend (on f746g-disco `null`, `stedgeai`, whose model is
 linked in, and `stedgeai_reloc`, which loads through its own loader into its
 own 448 KB slots and refuses at load what does not fit) has nothing to fit --
 but this does not take that on trust: an unstaged image that holds the staging

@@ -24,13 +24,15 @@ cmake -B build/wio-lite-ai -G Ninja \
 cmake --build build/wio-lite-ai
 ```
 
-The default `tflm` backend generates its tflite-micro tree at configure time from
-the `lib/tflite-micro` submodule (issue #134; see the root README's Building
-section), which that configure initialises on first use -- it is not in this
-board's `submodules.cmake`, so `-DCONFIG_NN_BACKEND=null` never fetches it. The
-generation downloads tflite-micro's third-party dependencies (flatbuffers,
-gemmlowp, ruy, CMSIS-NN) and needs Python, so the first tflm configure of a build
-directory needs the network even when every submodule is present.
+[!] **The first configure of every build directory needs the network.**  The
+`tflm` backend, the only one this board has since issue #239, generates its
+tflite-micro tree at configure time from the `lib/tflite-micro` submodule (issue
+#134; see the root README's Building section), which that configure initialises
+on first use -- it is not in this board's `submodules.cmake`, and every configure
+here reads it. The generation downloads tflite-micro's third-party dependencies
+(flatbuffers, gemmlowp, ruy, CMSIS-NN) and needs Python, so a new build directory
+needs the network even when every submodule is present; a later configure of the
+same directory reuses the generated tree.
 
 The ST Cube set this board pins -- the H7 HAL and CMSIS device H7 -- and its
 CMSIS core are not submodules: `board.cmake` fetches them at the commits it names
@@ -236,8 +238,8 @@ PLUGIN's object -- the only compile of that file this board produces.  Auditing
 a compile that is not in the image would be a gate answering about something
 nobody ships. Since issue #117, firmware coverage is derived from the configured
 build, including `plugin_exec.c`, `plugin_paint_budget.c` and `rect_geom.c` when
-the backend enables them. A null-backend build audits only its actual sources;
-it does not create firmware decoder/plugin objects. See the
+the backend enables them (tflm, the only backend here since issue #239, always
+does). The audit covers only the sources the build actually compiles. See the
 [shared storage gate contract](../../cmake/README.md) for scope, command
 replay, and negative tests (since issue #230 no file is exempt; until then
 `svc/ymodem.c` was). Since issue #206 the scope
@@ -288,7 +290,7 @@ Negative tests for the gate live in `cmake/fixtures/run_fixture_tests.py`.
 
 | Option | Default | Effect |
 |---|---|---|
-| `CONFIG_NN_BACKEND` | **tflm** | TensorFlow Lite Micro inference; `null` for the stub |
+| `CONFIG_NN_BACKEND` | **tflm** | TensorFlow Lite Micro inference, the only value (issue #239); any other stops the configure |
 | `BSP_ENABLE_LTO` | ON | link-time optimisation for the shell firmware |
 | `BSP_ENABLE_WFI` | ON | ThreadX idle WFI |
 | `BSP_ENABLE_IWDG` | ON | watchdog + `wdt` |
@@ -304,17 +306,20 @@ and `-DBSP_ENABLE_CAMERA=OFF` now stops the configure.  The former
 `BSP_ENABLE_SD` went with the microSD in issue #234
 ([Commands](#commands-1)).
 
-### Why tflm is the default here and nowhere else (issue #98)
+### Inference is mandatory: tflm is the only backend (issue #239)
 
-This is the only board that can afford it without asking anything of whoever
-configures the tree.  Its models arrive at RUNTIME, from the NOR blob region, so
-nothing is baked into the image and `cmake -DBOARD=wio-lite-ai` needs no arguments.
-f746g-disco's tflm bakes a `.tflite` in and this repo ships none -- defaulting it
-would make a clean tree fail to configure -- so that board stays `null`.
+Every build of this board compiles the TensorFlow Lite Micro backend; the
+no-inference `null` backend it offered until issue #239 is gone, and a
+`CONFIG_NN_BACKEND` other than `tflm` stops the configure.  Models arrive at
+RUNTIME, from the NOR blob region, so nothing is baked into the image and
+`cmake -DBOARD=wio-lite-ai` needs no arguments.  tflm became the default here in
+issue #98 (f746g-disco followed in issue #130, and still offers `null` and its
+`stedgeai` backends).
 
 [!] **It costs most of what is left of the 384 KB app partition**, and the microSD
 was what paid for it: until issue #234 removed the microSD from this board, the
-tflm default turned it off.  Measured then:
+tflm default turned it off.  Measured then (history; the `null` row is the
+backend #239 removed):
 
 | build | app partition | free |
 |---|---|---|
@@ -328,18 +333,13 @@ The `tflm` + SD row linked but left no room to add anything, which is why the
 tflm default turned the SD off, and since #108 the plugin loader of #78 Step 3b
 would not have fitted beside it at all.
 
-[!] The switch only affects NEW build directories.  `CONFIG_NN_BACKEND` is a cache
-variable, so a tree already configured as `null` stays `null` until it is
-reconfigured.  **This bit issue #108**: its development tree had been configured
-with the SD on (the SD default did not fire in an existing tree either), and the
-plugin work measured as overflowing the partition when the default
-configuration had 34 KB free.
-
-[!] **The tflm build has not been run on hardware.**  It builds and passes every
-gate in both configurations, and `check_cxx_runtime.py` -- which only runs for
-tflm -- is now part of the default build.  But no image from this configuration
-has been flashed, so the first `--target flash` after this change ships something
-new.
+[!] `CONFIG_NN_BACKEND` is a cache variable, so a build directory configured as
+`null` before issue #239 keeps that value and now stops at configure; reconfigure
+it with `-DCONFIG_NN_BACKEND=tflm` or start a new directory.  A cached value
+outliving a default change has bitten before: **issue #108**'s development tree
+had been configured with the SD on (the SD default did not fire in an existing
+tree either), and the plugin work measured as overflowing the partition when the
+default configuration had 34 KB free.
 
 ## Camera stream and preview (issue #142)
 
@@ -647,7 +647,6 @@ table moved to `svc/nn/` in issue #163, see svc/README.md):
 | `port/nn/nn_panel.c` | panel (preview thread, priority 12) | The nn half of the LTDC preview: the may-draw question, the record snapshot and the plugin's `draw()`, with the lease only tried. The display half (frame lock, back buffer, flip) stays in `src/cam_preview.c` and is passed in as hooks (`nn_panel.h`), because `port/nn` may not include `port/ltdc`. Built only with the LCD. |
 | `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | This board's facts for the shared entries (`svc/nn/nn_active_lease.c`, which checks the lease, and `svc/nn/nn_active_core.c` below it): reading an `nn_tensor` as a `svc/nn/tensor.h` descriptor, where a depth sample goes, the frame geometry, and the base vtable's transform and log sink. |
 | `port/nn/nn_model_board.c` | worker (run), console (open / bench / info) | The state and hooks of the shared model API (`svc/nn/nn.c`): its state as plain CPU-only `.bss`, the PRIMASK critical section, the one-tick ThreadX wait, and a DWT cycle counter it only verifies and reads (`svc/timebase.c` owns it). |
-| `port/nn/nn_null.c` | as `svc/nn/nn.c` | The `null` backend: a stub that builds without any runtime or model. |
 | `port/nn/crc32_fdb.c` | console (container validation) | Serves `svc/crc32.h` with the FlashDB CRC-32 this firmware already links. |
 | `port/nn/tflm/nn_tflm_board.cc` | as `svc/nn/tflm/nn_tflm.cc` (worker: invoke; console: load / reload / info) | The state object of the shared tflite-micro backend (`svc/nn/tflm/`, one implementation with f746g-disco since issue #161) as plain CPU-only `.bss` (the facts it held, a model-name prefix that was empty, went in issue #201; model names are printed as given). C++ only because the state holds TFLM objects' storage. |
 | `port/nn/tflm/nn_tflm_bufs.c` | as above | The arena and the one model staging buffer (1 MB since issue #191; two 512 KB slots before, the same bytes) in the cacheable, CPU-only PSRAM carve-out (`.psram_ai`), defined in C so `check_psram_ai_residency.py` sees their plain names, and the staging capacity object `load_region()` hands out. |
@@ -768,9 +767,10 @@ largest class is 1 MB because that is the tflm staging buffer
 (`NN_TFLM_MODEL_KB`): a payload is copied into it whole before it is parsed.
 The shared `cmake/check_blob_staging.py` (repository root) reads the table and
 the buffer's size back out of the linked image and stops the build if any
-slot's payload is larger (with the `null` backend it says NOT APPLICABLE, and
-checks the image has no staging buffer).  This board passes it only its own
-facts (the backend and the 4 KB header unit, `board.cmake`).  Its tests are the
+slot's payload is larger.  This board passes it only its own facts (the
+backend, `tflm` as the one backend that stages, and the 4 KB header unit,
+`board.cmake`); since issue #239 it has no backend without the staging buffer,
+so the check never answers NOT APPLICABLE here.  Its tests are the
 shared `cmake/fixtures/run_blob_staging_tests.py`, which `test/host_tests.sh`
 runs with this board's directory, so the header unit `board.cmake` passes is
 compared with `src/blob.h`.  The host checker `verify_tflite` is built with the same table
@@ -975,9 +975,9 @@ then stays and the account is withheld (*the decoder has decoded a later frame
 since*).  (f746g-disco reads the record the same way; Grove moves to it in
 Phase 2 stage 3c.)
 
-The `null` backend answers the same way and refuses `nn stream start` in its
-own right: it has no plugin mechanism compiled in at all, so nothing there
-could ever decode.  f746g-disco still carries a resident decoder -- that is
+Until issue #239 the `null` backend answered the same way and refused `nn
+stream start` in its own right (it had no plugin mechanism compiled in); that
+backend is gone.  f746g-disco still carries a resident decoder -- that is
 #78's Step 4, not this one.
 
 **[!] The shape question is deliberately NOT the one that refuses.**
@@ -1366,7 +1366,7 @@ every run as `inference failed`.
 
 `nn info` prints two arena figures (issue #131 P3, the same two lines as
 grove-vision-ai-v2): `arena : N B reserved` is the activation arena the backend
-reserves -- `nn_tflm_arena`, 524,288 B on `tflm`, 0 on `null` -- whatever is
+reserves -- `nn_tflm_arena`, 524,288 B (this board's one backend, `tflm`) -- whatever is
 open and even while another command holds the model; `used : N B (activations)`
 is what the open model's activations actually take of it (470,352 B for the
 BlazeFace pin), and is absent with no model.  Until #131 the `arena` line
@@ -2032,8 +2032,8 @@ save`: the card driver, the FileX build settings and the board's state of the
 shared FileX driver and mount glue went too.  With tflm, the default since
 issue #98, the SD did not fit the internal Flash (21,664 B over at issue #232),
 so no default build since then had carried it, and the default image is the
-same bytes as before.  The `null` build gave back 35,160 B of internal Flash and 18,624 B of
-statically allocated AXI-SRAM.  The shared `sd` command, FileX driver and
+same bytes as before.  The `null` build, which issue #239 then removed, gave back
+35,160 B of internal Flash and 18,624 B of statically allocated AXI-SRAM.  The shared `sd` command, FileX driver and
 mount glue stay for f746g-disco
 ([`svc/README.md`](../../svc/README.md#the-sd-command-is-shared-issue-232)).
 

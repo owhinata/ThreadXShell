@@ -194,7 +194,7 @@ static const struct nn_core_frame_ops ops = {
 	.lease_give = lease_give, .lease_note_unheld = lease_note_unheld,
 };
 
-/* A board with no plugin mechanism at all (wio-lite-ai's null backend). */
+/* A board with no plugin mechanism at all (f746g-disco's null backend). */
 static const struct nn_core_frame_ops ops_bare = {
 	.cs_enter = cs_enter, .cs_exit = cs_exit,
 	.prep = prep, .infer_start = infer_start,

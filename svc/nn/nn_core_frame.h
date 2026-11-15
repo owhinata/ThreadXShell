@@ -44,7 +44,7 @@
  * [!] IT OWNS NO STORAGE AND INCLUDES NO BOARD HEADER AND NO tx_api.h.  State is
  * the board's @ref nn_core_frame, properties and hooks its const
  * @ref nn_core_frame_ops; the critical section and the plugin lease are reached
- * through hooks, so a build with no plugin mechanism (wio-lite-ai's `null`
+ * through hooks, so a build with no plugin mechanism (f746g-disco's `null`
  * backend) passes none and links nothing it does not have.
  */
 #ifndef NN_CORE_FRAME_H

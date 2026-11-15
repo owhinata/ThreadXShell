@@ -104,7 +104,7 @@ leaving the helper to read a global.
 ## Building
 
 One build directory per board, `build/<board>/` by convention (variant trees of
-the same board take a suffix, e.g. `build/wio-lite-ai-tflm`). The board is chosen
+the same board take a suffix, e.g. `build/f746g-disco-stedgeai`). The board is chosen
 at configure time and there is no default. The first configure downloads the
 pinned ARM GNU toolchain (~155 MB) into `tools/`, so it needs network access.
 
@@ -151,11 +151,12 @@ tflite-micro, which the `tflm` NN backend of `f746g-disco` and `wio-lite-ai`
 compiles, is the `lib/tflite-micro` submodule (issue #134) and is pinned by its
 gitlink like every other mirror, but it is in no board's `submodules.cmake`: the
 tflm configure fetches it on first use (as `lib/mlperf-tiny` is fetched by
-`CONFIG_MLPERF_TINY`), so a `-DCONFIG_NN_BACKEND=null` configure never touches it
-and stays offline. It is not compiled in place: at configure time the pinned
-commit is exported into `build/<board>/tflm-src` and upstream's
-`create_tflm_tree.py` generates `build/<board>/tflm-tree` from it
-(`cmake/tflm_submodule.cmake`). That generation still downloads tflite-micro's own
+`CONFIG_MLPERF_TINY`), so f746g-disco's `-DCONFIG_NN_BACKEND=null` configure never
+touches it and stays offline (wio-lite-ai has no other backend since issue #239).
+It is not compiled in place: at configure time the pinned commit is exported
+into `build/<board>/tflm-src` and upstream's `create_tflm_tree.py` generates
+`build/<board>/tflm-tree` from it (`cmake/tflm_submodule.cmake`). That
+generation still downloads tflite-micro's own
 third-party dependencies and runs Python, so a tflm configure needs the network
 even with the submodule present. To move the pin, check the submodule out at the
 new commit and commit the gitlink (`git add lib/tflite-micro`); configure refuses a

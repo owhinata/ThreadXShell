@@ -18,8 +18,8 @@
 # CMSIS-NN at ITS OWN pinned SHAs, so configure still needs the network.  The result
 # is a self-contained, glob-able tree under the build directory, which we then
 # compile with OUR flags, so the ABI (cortex-m7 / fpv5-d16 / hard-float /
-# -fno-exceptions) is entirely ours.  Only the tflm build pays the generation cost,
-# and a SHA-keyed stamp makes it a one-time cost.
+# -fno-exceptions) is entirely ours.  The generation is paid once per build
+# directory: a SHA-keyed stamp makes it a one-time cost.
 #
 # [!] lib/cmsis_core is NOT reused for the CMSIS-NN build.  The donor firmware recorded
 # that a vendored CMSIS core/NN pair mismatched against the one tflite-micro expects

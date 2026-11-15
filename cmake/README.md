@@ -556,7 +556,7 @@ The board passes only its own facts, in its `board.cmake`:
 |---|---|---|---|
 | `--backend` | what this build compiled (`CONFIG_NN_BACKEND`) | | |
 | `--staged-backend` | a backend that loads through the tflm buffer, and so must hold it | `tflm` | `tflm` |
-| `--unstaged-backend` | a backend that does not, and so must not | `null` | `null`, `stedgeai`, `stedgeai_reloc` |
+| `--unstaged-backend` | a backend that does not, and so must not | none (not passed; `null` until #239) | `null`, `stedgeai`, `stedgeai_reloc` |
 | `--header-bytes` | the header unit at the top of every slot (`src/blob.h` `BLOB_ERASE_UNIT`) | 4096 | 4096 |
 
 wio-lite-ai runs it only with `BSP_ENABLE_KV` (no KV, no store).  A backend in

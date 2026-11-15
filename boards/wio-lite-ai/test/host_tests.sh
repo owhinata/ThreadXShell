@@ -316,9 +316,10 @@ fi
 # the table entry size) are compared with the real src/blob.h on the host every
 # time, and so are the backend lists against the backends this board offers;
 # the synthetic images -- one rule
-# broken in each, both sides of the boundary, and the null backend's NOT
-# APPLICABLE with the image checked against it -- need the pinned toolchain and
-# SKIP loudly without it, like the reservation tests above.
+# broken in each, both sides of the boundary, and an unstaged backend's NOT
+# APPLICABLE with the image checked against it (the `null` name of the shared
+# cases; this board has no unstaged backend since #239) -- need the pinned
+# toolchain and SKIP loudly without it, like the reservation tests above.
 if [ -n "$gate_cc" ] && [ -x "$gate_cc" ]; then
     python3 "$repo/cmake/fixtures/run_blob_staging_tests.py" \
         --board-dir "$board" --include port/nor --cc "$gate_cc"

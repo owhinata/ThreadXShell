@@ -81,7 +81,8 @@ CANNOT_CHECK = 2   # exit code for "the check could not run", never confused wit
 # (`arm-none-eabi-objdump -h build/wio-lite-ai/boot-reference/boot.elf`; a missing
 # section is 0) and raise it here -- after checking with --list on shell.elf that the
 # new entry is not one of ours.  (Until issue #239 this was measured on the board's
-# no-inference `null` build, which is gone; at that change both read 4 / 4 / 0.)
+# no-inference `null` build, which is gone; at that change both read
+# .init_array 4, .fini_array 4, the rest 0.)
 BASELINE_BYTES = {
     ".preinit_array": 0,
     ".init_array":    4,

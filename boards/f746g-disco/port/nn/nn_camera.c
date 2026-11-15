@@ -391,9 +391,8 @@ static int nncam_is_plugin(void *ctx)
 }
 
 /* The plugin's admission / decode / publish and the lease are tflm's only (the
- * other backends cannot load a container), and stay NULL elsewhere, as in
- * wio-lite-ai's null build: the frame path never reaches them while is_plugin()
- * says no. */
+ * other backends cannot load a container), and stay NULL elsewhere: the
+ * frame path never reaches them while is_plugin() says no. */
 const struct nn_core_frame_ops nncam_frame_ops = {
 	.cs_enter    = nncam_cs_enter,
 	.cs_exit     = nncam_cs_exit,

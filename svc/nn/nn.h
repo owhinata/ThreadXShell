@@ -315,9 +315,9 @@ uint32_t nn_last_cycles(const struct nn_model *m);
  * from the calls below rather than pretending.
  *
  * Which model to load and where it comes from are NOT decided here: that
- * belongs to the board's adapter (a blob slot on wio-lite-ai, a file on the SD
- * card on f746g-disco).  All this API says is: here is a buffer, fill it, tell
- * me you did.
+ * belongs to the board's adapter (a blob slot: the NOR on wio-lite-ai, the
+ * QSPI flash on f746g-disco since issue #194).  All this API says is: here is
+ * a buffer, fill it, tell me you did.
  *
  *   nn_model_load_region(&buf, &cap);    // backend's writable staging buffer
  *   ...fill buf with up to cap bytes...

@@ -659,7 +659,9 @@ There is one `camera` command for all three boards, in the same layering as
 
 ```
 shell/cmds/cmd_camera.c                  one command: grammar, usage, refusals,
-        |                                the holders / warm-up lines, the save /
+        |                                the holders / warm-up lines, the
+        |                                capture's frame / statistics / seam
+        |                                lines (#237), the save /
         |                                send loops; a subcommand whose
         |                                CAMERA_SVC_HAS_* is 0 is not registered;
         |                                the board's own subcommands are
@@ -670,7 +672,10 @@ shell/cmds/cmd_camera.c                  one command: grammar, usage, refusals,
         |                                shell/cmds/xfer_console.c, #231)
         v
 svc/camera/camera_svc.h                  the contract: the camera_svc_*() calls
-svc/camera/camera_svc_adapter.h          static-inline result / line helpers
+svc/camera/camera_svc_adapter.h          static-inline result / line helpers,
+                                         the capture's announcement
+svc/camera/cam_rgb565                    the RGB565 statistics and seam
+                                         (f746g-disco, wio-lite-ai; #237)
         |
         v
 boards/<board>/port/camera/camera_svc_<board>.c   the adapter (no shell instance;
@@ -722,6 +727,49 @@ What the contract fixes, on every board:
   the power on after a TIMEOUT, any other failed stop, or a Ctrl+C.
 - **The capture reports its warm-up** (frames let go, or ms) on the caller's
   stack; the command prints `warm-up  : ...`, 0 included.
+- **The capture report is numbers; the lines are the command's** (issue
+  #237).  `camera_svc_capture_report()` writes nothing: it fills the caller's
+  `struct camera_svc_capture_report` with the frame (the format's word, width,
+  height, bytes), zero to three channels (a name, its bit count, minimum,
+  maximum and the mean x100, truncated), the seam (a row and one to three
+  channels' steps x100, or none), the first 32 bytes, and up to five values of
+  the board's own.  On success the command prints, in this order: the frame
+  line, one line per channel, the seam line, the board's own lines
+  (`camera_svc_capture_board_lines()`, written from those values alone:
+  f746g-disco's JPEG `SOI` / `EOI`, grove-vision-ai-v2's `mosaic` / `bayer`,
+  none on wio-lite-ai), the warm-up and the dump.  A failed report prints its
+  failure alone and a cancelled one nothing, whatever it left in the numbers,
+  and the board's lines are not asked for.  **The first line the console
+  refuses ends the output**: nothing after it is printed, the board's lines,
+  the warm-up and the dump included.
+- **One shape on every board**: the format in the word f746g-disco's `camera
+  format` takes (grove-vision-ai-v2 says `planar B/G/R`), the label of a
+  channel line is the channel and its bits padded to 8, minimum and maximum
+  are 3 wide and the mean has two decimals:
+
+  ```
+  frame    : 320x240 rgb565 (153600 bytes)
+  R(5)     : min   0  max  31  mean  13.06
+  seam     : row 144  dR 0.37  dG 0.86  dB 0.58
+  ```
+
+  The announcement before the capture is the board's to write, but its
+  sentence is `camera_out_capturing()`'s on all three: `camera: capturing live
+  frame ...`, with what the capture costs in between where the board has
+  something to say (wio-lite-ai's warm-up).  A refusal the adapter gives at
+  once comes before it and is not announced (wio-lite-ai's OCTOSPI1 guard,
+  grove-vision-ai-v2's test pattern); a refusal the driver gives (a capture
+  while a stream runs, ...) comes after it on every board, as the
+  announcement and then the failure.
+- **The seam** is the largest step between two adjacent rows' means: each
+  row's mean is taken x100 and truncated, the step to the row above is the
+  absolute difference per channel, ranked on their sum, and the later row's
+  index is printed.  An equal step does not replace an earlier one; a frame
+  with no step answers row 0 and zero.  f746g-disco (RGB565 only) and
+  wio-lite-ai compute it over R, G and B with `cam_rgb565`;
+  grove-vision-ai-v2 over its G plane (`port/camera/cam_convert.c`).  How to
+  read the figure is in
+  [grove-vision-ai-v2's README](../boards/grove-vision-ai-v2/README.md#the-shared-camera-command-info-and-send-issue-143).
 - **[!] The shared command owns no mutable storage**: line buffers, results and
   frame cursors are on the caller's stack.  The storage audit covers every
   source the build compiles under `shell/cmds/` (issue #206), and
@@ -785,7 +833,8 @@ relative to `svc/`.
 | `camera/cam_holders` | Who holds the camera stream open, and the start / stop / refusal each change implies (issue #142). |
 | `camera/cam_step` | One step of the camera sink: may the producer enter it, and has it left (issue #142). |
 | `camera/camera_svc.h` | The contract the shared `camera` command speaks; implemented by each board's adapter (issue #143). |
-| `camera/camera_svc_adapter.h` | Static-inline helpers every camera adapter uses to fill a result and write a line. |
+| `camera/camera_svc_adapter.h` | Static-inline helpers every camera adapter uses to fill a result and write a line, the mean x100 of a capture's channel, and the capture's announcement (issue #237). |
+| `camera/cam_rgb565` | `camera capture`'s RGB565 statistics (issue #237): each channel's minimum, maximum and sum, and the seam, fed the frame's bytes in any even-sized pieces (the row boundary is counted from the width).  No storage: the answer and the state between pieces are the caller's.  f746g-disco and wio-lite-ai; host-tested against both boards' loops as they were. |
 | `camera/cam_gen.h` | Stream generations: has THE stream a stop named ended (pure, shared by f746g-disco and wio-lite-ai). |
 | `net/net_svc.h` | The contract the shared `net` command (`shell/cmds/cmd_net.c`) speaks; implemented by each board's adapter (issue #219; f746g-disco and wio-lite-ai). |
 | `../shell/cmds/net_core` | Under `shell/cmds/`, not `svc/` (it calls NetX and ThreadX): the one implementation of the address read, the static address, DHCP and ping over NetX Duo, and of the reaction to the link -- the notice on the IP thread and the `net-link` worker (issue #220).  It owns no storage: the board defines `net_core_board_state` and `net_core_board_facts`, declared in `net_core.h`.  The adapters call it; first line `optional BOARD_HAS_NETX`. |

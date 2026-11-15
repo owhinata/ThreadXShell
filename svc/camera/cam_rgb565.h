@@ -26,7 +26,10 @@
  * the row boundary itself from the width (f746g-disco reads 512 bytes at a
  * time, which a WVGA row of 1600 bytes does not divide).  A last row shorter
  * than the width (a frame that is not a whole number of rows) counts as a row
- * of its own length, as wio-lite-ai's one-row reads did.
+ * of its own length, as wio-lite-ai's one-row reads did.  Inside a piece the
+ * pixels are walked a row's worth at a time on local copies of the minimum,
+ * maximum and sum (cam_rgb565_add()), so the row bookkeeping costs once per
+ * row and not once per pixel.
  *
  * THE PIXEL.  Little-endian 16-bit: R = bits 15..11 (0..31), G = bits 10..5
  * (0..63), B = bits 4..0 (0..31).  Index 0 / 1 / 2 below is R / G / B.

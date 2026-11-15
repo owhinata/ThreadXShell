@@ -942,7 +942,7 @@ image knobs.
   critical section, because the producer rewrites them on its own thread.
 - **`camera send [name]`** sends the last `camera capture` as it is: 230,400
   bytes, the B plane, then G, then R (WDMA3's order; `camera capture`'s
-  `B(plane 0)` / `G(plane 1)` / `R(plane 2)`).  On the PC (`rb -y`), make a
+  `B(8)` / `G(8)` / `R(8)` lines).  On the PC (`rb -y`), make a
   PNG with
   `python3 boards/grove-vision-ai-v2/scripts/planar_bgr_to_png.py frame.raw out.png`.
   That PNG is the raw planes, and it looks darker and flatter than the panel:
@@ -976,11 +976,50 @@ image knobs.
   at bring-up + 2 s + a quiesce, under 3 s, which is what `CAM_STOP_LOCK_TICKS`
   (8 s) is derived from.  Running out is an ordinary timeout; the frames let go
   stay counted, so the next capture carries on settling.  A Ctrl+C between
-  frames ends the capture silently.
+  frames ends the capture: the announcement stays and nothing follows it.
+- **`camera capture` prints the shared report** (issue #237; the shape, the
+  order and the seam's definition are in
+  [`svc/README.md`](../../svc/README.md#the-camera-command-is-shared-issue-143)),
+  then this board's own lines:
+
+  ```
+  camera: capturing live frame ...
+  frame    : 320x240 planar B/G/R (230400 bytes)
+  B(8)     : min   4  max 255  mean  40.70
+  G(8)     : min   9  max 255  mean  50.79
+  R(8)     : min   1  max 255  mean  44.12
+  seam     : row 110  dG 6.79
+  mosaic   : B 0.97  G 0.99  R 0.98
+  bayer    : bggr   colour separation 11.19
+             (mosaic: single digits = a demosaic ran. colour: bigger = the phase fits)
+  warm-up  : 14 frames dropped
+  bytes[0..31]:
+  00000000  19 19 17 18 17 17 18 1b 1b 19 16 17 17 19 1b 1a  ................
+  00000010  18 1a 1b 1a 19 1b 1a 1b 1a 1c 1a 18 17 18 19 1b  ................
+  ```
+
+  The planes stay in the hardware's order, B first.  The seam is the G
+  plane's alone: single digits mean a settled frame (the line said so itself
+  until issue #237), hundreds an exposure or gain change part-way through the
+  readout.  `mosaic` (one figure per plane, on its own line since issue #237;
+  it used to end each plane's line) and `colour separation` are read as in
+  [Is the demosaic right?](#-is-the-demosaic-right--two-different-questions).
+  Until issue #237 the planes were labelled `B(plane 0)` / `G(plane 1)` /
+  `R(plane 2)`, the frame line had no byte count and the capture was not
+  announced.
 - **Lines read `label    : value`**, which this board already used; the other
   two boards adopted it.
 - Console stack high water after capture / stats (`thread`): 1,936 of 4,096 B at
   the shared command's first version.
+
+Measured for issue #237 (the shared capture report, then the announcement;
+`thread` peaks of the console since the reboot of each test run):
+
+| What | Value |
+|---|---|
+| `.text` + `.rodata` (ITCM and SRAM) | 320,044 B at `34c295a` and `f6e9120` (unchanged by the shared statistics, which this board does not use) -> 320,668 B (`604df35`, the shared report; +624 B) -> 320,748 B (the announcement; +80 B) |
+| ITCM free (`check_placement_budget`) | 19,808 B -> 19,296 B (`604df35`) -> **19,264 B** (the announcement) |
+| Console stack peak (4,096 B) | 1,976 B (`f6e9120`) -> 2,136 B (`604df35`) -> 2,152 B (the announcement) |
 
 ### Who holds the stream (issue #142)
 

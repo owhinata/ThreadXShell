@@ -453,8 +453,31 @@ camera scan | reg <addr> <reg> [value] [-16]   (this board's own)
   carries it.  The capture and the statistics walk over the PSRAM frame run
   inside ONE hold of the OCTOSPI1 guard; the statistics are kept in a small
   record (`cam_last_report`, in DTCM: CPU-only data) with the frame generation
-  and the thread that captured it, and the report prints them only for that
-  thread and that frame.
+  and the thread that captured it, and the report answers them only for that
+  thread and that frame.  Since issue #237 the record also keeps the frame's
+  first 32 bytes, copied from the same read, so the report gives them back
+  without reading the PSRAM again.
+- **`camera capture` prints the shared report** (issue #237; the shape, the
+  order and the seam's definition are in
+  [`svc/README.md`](../../svc/README.md#the-camera-command-is-shared-issue-143)):
+
+  ```
+  camera: capturing live frame (~1 s of warm-up; +0.6 s on the first one after a power cycle) ...
+  frame    : 320x240 rgb565 (153600 bytes)
+  R(5)     : min   0  max  31  mean  13.06
+  G(6)     : min   1  max  63  mean  28.91
+  B(5)     : min   0  max  31  mean  11.72
+  seam     : row 144  dR 0.37  dG 0.86  dB 0.58
+  warm-up  : 15 frames dropped
+  bytes[0..31]:
+  00000000  ab 53 ab 53 ac 53 ac 5b ec 4b 0c 54 0a 4c ea 4b  .S.S.S.[.K.T.L.K
+  00000010  ed 5b ed 5b ec 5b ec 63 eb 5b 0c 5c 0c 5c 2d 5c  .[.[.[.c.[.\.\-\
+  ```
+
+  Until issue #237 the format was `RGB565` (`camera info`'s frame line too, now
+  `rgb565`, the word f746g-disco's `camera format` takes), the means were whole
+  numbers, and there was no dump.  This board has no lines of its own after
+  the seam.
 - **`send` reads the last capture** (the band stream fills no frame).  A
   read that finds the frame replaced fails the transfer with `ymodem: source
   read error` and then `camera: frame changed by a concurrent capture`.
@@ -468,6 +491,16 @@ camera scan | reg <addr> <reg> [value] [-16]   (this board's own)
   form on all three boards.
 - Console stack high water after capture / send (`thread`): 2,260 of 4,096 B at
   the shared command's first version.
+
+Measured for issue #237 (the shared statistics and the shared capture
+report; `thread` peaks of the console since the reboot of each test run):
+
+| What | Value |
+|---|---|
+| `shell.bin` | 381,104 B at `34c295a` -> 381,128 B (`f6e9120`, the shared statistics; +24 B) -> 381,840 B (`604df35`, the shared report and the dump; +712 B) -> **381,856 B** (the shared announcement; +16 B) |
+| Internal flash free (app partition, 393,216 B) | 12,112 B -> 12,088 B -> 11,376 B -> **11,360 B** |
+| `cam_last_report` (DTCM) | 84 B -> **116 B** (the first 32 bytes) |
+| USB console thread (`wio>`, 4,096 B) | peak 2,184 B -> 2,200 B (`f6e9120`) -> **2,368 B** (`604df35`) |
 
 ### The OCTOSPI1 guard: users and one reconfigurer (issue #142)
 

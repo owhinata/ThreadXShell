@@ -2093,6 +2093,44 @@ camera res | format | fps | set   (this board's own)
   101 ms after a colour-bar switch.  0 is printed too.
 - **Lines read `label    : value`** (the label padded to 8 and ` : `; a longer
   label keeps its length), the same form on all three boards.
+- **`camera capture` prints the shared report** (issue #237; the shape, the
+  order and the seam's definition are in
+  [`svc/README.md`](../../svc/README.md#the-camera-command-is-shared-issue-143)).
+  For RGB565, QVGA:
+
+  ```
+  camera: capturing live frame ...
+  frame    : 320x240 rgb565 (153600 bytes)
+  R(5)     : min   0  max  31  mean  12.91
+  G(6)     : min   3  max  63  mean  31.26
+  B(5)     : min   0  max  31  mean  10.64
+  seam     : row 101  dR 1.71  dG 3.40  dB 1.27
+  warm-up  : 632 ms
+  bytes[0..31]:
+  00000000  ac c5 cc cd ef bd 10 be f0 c5 ef bd af c5 af c5  ................
+  00000010  f1 bd b0 b5 ad bd 8d bd 70 ad 70 ad 6e b5 6e b5  ........p.p.n.n.
+  ```
+
+  YUV422 prints `Y(8)`, `Cb(8)` and `Cr(8)` (the chroma means are over the U
+  or V samples, one per two pixels; the `(U)` / `(V)` notes are gone), Y8 one
+  `Y(8)` line, and neither a seam (it is RGB565's only).  JPEG prints no
+  channel and no seam but the two markers, this board's own lines:
+
+  ```
+  frame    : 320x240 jpeg (21482 bytes)
+  SOI      : ok (FFD8)
+  EOI      : ok (FFD9)
+  ```
+
+  The report reads the frame's generation first and the length, format and
+  size after, and every later read (the statistics, a JPEG's head and tail)
+  must come from that generation.  Another console's capture landing in
+  between fails the report with `camera: frame changed mid-read (concurrent
+  capture)`; a `camera res` / `camera format` (which drops the frame) with
+  `camera: no captured frame`.  Either way none of its numbers are printed.  The
+  statistics walk 512 bytes at a time, which a WVGA row (1,600 B) does not
+  divide; the seam's rows are counted from the width
+  (`svc/camera/cam_rgb565`).
 
 Measured / derived for this board:
 
@@ -2101,6 +2139,16 @@ Measured / derived for this board:
 | Console stack high water after save / capture (`thread`) | 2,728 of 4,096 B (at the shared command's first version) |
 | `camera save` deepest path (from the disassembly, dispatch included) | about 3.18 KB to the microSD (the 3.43 KB QSPI write-error path went with the QSPI volume in issue #194) |
 | `CAMERA_SVC_DETAIL_MAX` (the contract's failure text) | 319 B |
+
+Measured for issue #237 (the shared statistics and the shared capture
+report; `thread` peaks of the console since the reboot of each test run):
+
+| What | Value |
+|---|---|
+| Internal flash used (`shell.bin`) | 460,536 B at `34c295a` -> 460,920 B (`f6e9120`, the shared statistics; +384 B) -> **462,072 B** (`604df35`, the shared report; +1,152 B) -> 462,072 B (the shared announcement; unchanged) |
+| Console stack peak (4,096 B) | 1,904 B -> 1,992 B (`f6e9120`) -> **2,140 B** (`604df35`) |
+| The RGB565 statistics, per pixel | 31 instructions (the loop of `34c295a`) -> about 65 (`f6e9120`, through the caller's structure) -> **27** (`604df35`, on locals) |
+| `camera capture` at WVGA (800x480, 768,000 B) | `frame    : 800x480 rgb565 (768000 bytes)`, `seam     : row 203  dR 0.87  dG 2.01  dB 0.80` |
 
 ### [!] Two subscribers share one capture, and each has to drain
 

@@ -2,15 +2,15 @@
 # phase 2c).  Ported from the donor firmware ../stm32f746g-disco, which has been
 # running this exact tree + CMSIS-NN pin on a Cortex-M7 since its owhinata/stm32f746g-disco#88.
 #
-# Included ONLY from the tflm branch of CMakeLists.txt, so C++ is enabled for that one
-# build: the default (`null`) firmware never sees enable_language(CXX) and stays
-# byte-identical.  All C++ is confined to the `tflm` STATIC library so the final link
+# Included from board.cmake's NN wiring; tflm has been this board's only backend
+# since issue #239 (before that, the no-inference `null` build never saw
+# enable_language(CXX)).  All C++ is confined to the `tflm` STATIC library so the final link
 # keeps the C driver (gcc) and does not auto-pull the full libstdc++ -- see
 # nn_tflm_attach() at the bottom, where that is spelled out.
 #
 # The tflite-micro sources come from the lib/tflite-micro submodule (#134), pinned by
-# its gitlink, fetched here on first use (no board's sentinel list names it, so a
-# null configure stays offline) and re-checked against the gitlink on every build.  At CONFIGURE time the pinned commit is written out into the build
+# its gitlink, fetched here on first use (no board's sentinel list names it) and
+# re-checked against the gitlink on every build.  At CONFIGURE time the pinned commit is written out into the build
 # directory (cmake/tflm_submodule.cmake -- the generator never runs inside lib/) and
 # upstream's own create_tflm_tree.py runs there.  It drives tflite-micro's Makefile to
 # list the library sources, download the header-only third-party dependencies

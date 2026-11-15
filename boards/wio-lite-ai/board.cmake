@@ -635,22 +635,25 @@ option(BSP_PSRAM_INIT_IN_APP "Bring up OCTOSPI1 PSRAM app-side (app-first valida
 # options; the rest of the NN wiring stays further down with the other source
 # lists.
 #
-# DEFAULT tflm SINCE ISSUE #98.  This board can afford it and the other two cannot:
-# its models come from the NOR blob region at RUNTIME, so nothing has to be baked
-# into the image and a clean tree still configures with no arguments.  (f746g-disco
-# stays `null` for exactly that reason -- its tflm bakes a .tflite in and this repo
-# ships none, so defaulting it would break `cmake -DBOARD=f746g-disco` for everyone.)
+# TFLM IS THE ONLY BACKEND SINCE ISSUE #239 (the default since issue #98).  Its
+# models come from the NOR blob region at RUNTIME, so nothing has to be baked
+# into the image and a clean tree still configures with no arguments.  The
+# no-inference `null` backend this board used to offer is gone: a value other
+# than tflm stops the configure, so a tree whose cache still says `null` has to
+# be reconfigured with -DCONFIG_NN_BACKEND=tflm (or started again).
 #
 # [!] IT COSTS MOST OF WHAT IS LEFT OF THE 384 KB APP PARTITION.  Measured at the
-# commit that made this change: 305,584 B (77.7%) as `null`, 350,096 B (89.0%) as
+# commit of issue #98: 305,584 B (77.7%) as the old `null`, 350,096 B (89.0%) as
 # `tflm` with the microSD dropped, which is why the tflm default turned the SD off
 # (the microSD was removed altogether in issue #234).  Keeping the SD as well was
 # 384,572 B (97.8%), leaving 8,644 B: enough to link and not enough to add anything.
-#
-# Existing build directories are unaffected: this is a CACHE default, so a tree
-# already configured as `null` stays `null` until someone reconfigures it.
-set(CONFIG_NN_BACKEND "tflm" CACHE STRING "NN inference backend: null | tflm")
-set_property(CACHE CONFIG_NN_BACKEND PROPERTY STRINGS null tflm)
+set(CONFIG_NN_BACKEND "tflm" CACHE STRING "NN inference backend: tflm (the only one)")
+set_property(CACHE CONFIG_NN_BACKEND PROPERTY STRINGS tflm)
+if(NOT CONFIG_NN_BACKEND STREQUAL "tflm")
+    message(FATAL_ERROR
+        "CONFIG_NN_BACKEND must be 'tflm' on this board (got '${CONFIG_NN_BACKEND}'; "
+        "the no-inference `null` backend was removed in issue #239)")
+endif()
 
 # No microSD (removed in issue #234), so no FileX either: the shared storage
 # audit wants shell/cmds/fs_cmd_core.c (#206), cmd_sd.c (#232), sd_fs_glue.c
@@ -816,16 +819,12 @@ endif()
 # On-device NN inference.  Unlike the blocks above there is no
 # BSP_ENABLE_AI: the BSP_ENABLE_* switches all name a piece of HARDWARE, and their
 # point is to build a firmware that leaves those pins and peripherals alone while
-# bisecting a suspicion.  This is a software layer with no hardware of its own, so
-# what varies is not whether it exists but WHICH RUNTIME it dispatches to.
+# bisecting a suspicion.  This is a software layer with no hardware of its own,
+# and since issue #239 it is not optional either: every build has inference.
 #
-# Exactly one backend translation unit is compiled, and that is the whole selection
-# mechanism: nn.c has one `extern const struct nn_backend_vt nn_backend_vt_selected`
-# and the linker resolves it against whichever backend was added here.  No source
-# file has an #ifdef for this, and the default `null` build needs no -D at all.
-#
-# If the app partition ever gets tight again, a `none` value that drops
-# the whole layer is the natural place to add the toggle.
+# Exactly one backend translation unit is linked: nn.c has one `extern const
+# struct nn_backend_vt nn_backend_vt_selected` and the linker resolves it against
+# the tflm backend, the only one this board has.
 #
 # CONFIG_NN_BACKEND itself is declared earlier in this file, with the other build
 # options.
@@ -864,41 +863,32 @@ set(NN_SOURCES "${CMAKE_SOURCE_DIR}/svc/nn/nn.c"   # the dispatcher (shared, #16
                # grove-vision-ai-v2 since issue #164), walked by
                # shell/test/test_nn_decode_count.c
                "${CMAKE_SOURCE_DIR}/svc/nn/nn_decode_count.c")
-# Which buffers the cacheable-carve-out gate must find in the image depends on which
-# backend was selected, and CMake is the only place that knows.  When the list was
-# hard-coded in the script, the script itself refused every tflm build -- the `null`
-# stub's buffers are not in that image.
+# Which buffers the cacheable-carve-out gate must find in the image is passed
+# from here, not hard-coded in the script: CMake is the place that knows what was
+# compiled.  When the list was hard-coded in the script, the script itself refused
+# every tflm build -- it named buffers that were not in that image.
 set(NN_PSRAM_AI_REQUIRED "")
-if(CONFIG_NN_BACKEND STREQUAL "null")
-    list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_null.c")
-    list(APPEND NN_PSRAM_AI_REQUIRED
-         --require null_in_buf --require null_box_buf --require null_scr_buf)
-elseif(CONFIG_NN_BACKEND STREQUAL "tflm")
-    # TensorFlow Lite Micro.  The backend translation unit is NOT
-    # added to SHELL_SOURCES: it is C++ and lives in the `tflm` static library that
-    # this file builds, together with the fetched tflite-micro + CMSIS-NN tree.  Only
-    # nn.c stays here, and it finds nn_backend_vt_selected in that archive at link
-    # time -- the same one-definition mechanism the `null` build uses.
-    include("${BOARD_DIR}/cmake/tflite-micro.cmake")
-    list(APPEND NN_PSRAM_AI_REQUIRED
-         --require nn_tflm_arena --require nn_tflm_model_buf)
-    # Tells the board's nn_svc_config.h that a RUNTIME MODEL LOADER exists, so
-    # the shared `nn` command registers `model load` (issue #50).  The same
-    # spelling f746g-disco already uses: the capability follows the backend, not
-    # the board, because the same board answers differently in two builds.
-    set(NN_BACKEND_DEFINE CONFIG_NN_BACKEND_TFLM=1)
-else()
-    message(FATAL_ERROR "CONFIG_NN_BACKEND must be 'null' or 'tflm'")
-endif()
-# membench's cacheable row is in the carve-out whichever backend is built.
+# TensorFlow Lite Micro.  The backend translation unit is NOT
+# added to SHELL_SOURCES: it is C++ and lives in the `tflm` static library that
+# this file builds, together with the fetched tflite-micro + CMSIS-NN tree.  Only
+# nn.c stays here, and it finds nn_backend_vt_selected in that archive at link
+# time.
+include("${BOARD_DIR}/cmake/tflite-micro.cmake")
+list(APPEND NN_PSRAM_AI_REQUIRED
+     --require nn_tflm_arena --require nn_tflm_model_buf)
+# Tells the board's nn_svc_config.h that a RUNTIME MODEL LOADER exists, so
+# the shared `nn` command registers `model load` (issue #50).  The same
+# spelling f746g-disco uses, where the capability follows the backend because
+# that board still has a build without one.
+set(NN_BACKEND_DEFINE CONFIG_NN_BACKEND_TFLM=1)
+# membench's cacheable row is in the carve-out too.
 list(APPEND NN_PSRAM_AI_REQUIRED --require psram_ai_bench_buf)
 # The descriptor translation, and the published decode record, above the
 # model-agnostic nn API.
 #
 # svc/nn/nn_desc.c is `nn_tensor` -> `tensor_desc` and nothing else (issue
 # #116).  It is not a decoder's: `nn out`, `nn info` and the active-decoder shim
-# need it whatever interprets the tensors, or whether anything does.  Built in
-# BOTH backends, because neither changes what a descriptor is.
+# need it whatever interprets the tensors, or whether anything does.
 #
 # [!] AND THERE IS NO DECODER HERE ANY MORE (issue #116 = #78 Step 3c).  This
 # board linked svc/nn/blazeface.c and a port/nn/nn_decoder.c that owned its state
@@ -940,28 +930,24 @@ list(APPEND SHELL_SOURCES ${NN_SOURCES}
 
 # The plugin loader (issue #110 = #78 Step 3b): the machine in svc/, this
 # board's state, reservation, cache maintenance, Armv7-M MPU read-back and
-# source precondition in port/plugin/.  Only the tflm backend can carry a
-# container -- the null backend has no model to carry one with -- so this
-# follows CONFIG_NN_BACKEND, exactly as the container validation of #108 does.
-if(CONFIG_NN_BACKEND STREQUAL "tflm")
-    list(APPEND SHELL_SOURCES
-         "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_core.c"
-         "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_lease.c"  # its lease-checked entries (#159)
-         "${BOARD_DIR}/port/nn/nn_active.c"
-         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_exec.c"
-         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_budget.c"
-         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_span.c"
-         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_bindings.c"   # the six (#165)
-         "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
-         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_run_core.c"  # its lease checks (#159)
-         "${BOARD_DIR}/port/plugin/plugin_run.c"
-         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_mpu_v7m.c"
-         "${BOARD_DIR}/port/plugin/plugin_paint.c"
-         "${BOARD_DIR}/port/plugin/plugin_lease.c"
-         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_lease_miss.c")  # its miss rules (#130)
-endif()
+# source precondition in port/plugin/.
+list(APPEND SHELL_SOURCES
+     "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_core.c"
+     "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_lease.c"  # its lease-checked entries (#159)
+     "${BOARD_DIR}/port/nn/nn_active.c"
+     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_exec.c"
+     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_budget.c"
+     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_span.c"
+     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_bindings.c"   # the six (#165)
+     "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
+     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_run_core.c"  # its lease checks (#159)
+     "${BOARD_DIR}/port/plugin/plugin_run.c"
+     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_mpu_v7m.c"
+     "${BOARD_DIR}/port/plugin/plugin_paint.c"
+     "${BOARD_DIR}/port/plugin/plugin_lease.c"
+     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_lease_miss.c")  # its miss rules (#130)
 
-# The MLPerf Tiny v1.4 benchmark harness.  Like CONFIG_NN_BACKEND above and
+# The MLPerf Tiny v1.4 benchmark harness.  Like the NN layer above and
 # for the same reason, this is NOT a BSP_ENABLE_* switch -- those all name a piece of
 # hardware, and the point of each is a firmware that leaves those pins alone while
 # bisecting a suspicion.  There is no MLPerf peripheral.
@@ -972,16 +958,6 @@ endif()
 # a deliberate act, so turning it on is one too.
 option(CONFIG_MLPERF_TINY "Build the MLPerf Tiny v1.4 benchmark harness and `mlperf`" OFF)
 if(CONFIG_MLPERF_TINY)
-    # Required, not merely recommended.  The harness runs whatever model `ai model
-    # load` put in the interpreter, and the `null` backend has no interpreter --
-    # nn_model_reload() returns NN_ERR_NOSUP.  The build would succeed and the command
-    # would refuse every model, which is the least useful place to discover this.
-    if(NOT CONFIG_NN_BACKEND STREQUAL "tflm")
-        message(FATAL_ERROR
-            "CONFIG_MLPERF_TINY=ON needs CONFIG_NN_BACKEND=tflm (it benchmarks a model "
-            "the interpreter loads at run time; the `null` backend has no interpreter). "
-            "Configure with -DCONFIG_NN_BACKEND=tflm -DNN_TFLM_OPS=mlperf.")
-    endif()
     # Not fatal: the operator set is a separate decision, and someone may deliberately
     # be measuring a narrower one.  But `blazeface` cannot run a single MLPerf model,
     # so saying nothing would let the failure surface as an unexplained refusal from
@@ -1095,7 +1071,7 @@ target_compile_definitions(shell PRIVATE
     # YMODEM block; 4 KB makes an overrun require the shell thread to be starved
     # for four whole blocks.  `wifi imgload` reports the drop count either way.
     CLI_USBCDC_RX_BUFFER_SIZE=4096
-    ${NN_BACKEND_DEFINE}               # set only for a backend with a loader
+    ${NN_BACKEND_DEFINE}               # the backend has a model loader
     BSP_ENABLE_IWDG=$<BOOL:${BSP_ENABLE_IWDG}>   # IWDG1 arm + petter + wdt
     BSP_ENABLE_WFI=$<BOOL:${BSP_ENABLE_WFI}>      # gates TX_ENABLE_WFI (tx_user.h)
     BSP_ENABLE_PSRAM=$<BOOL:${BSP_ENABLE_PSRAM}>          # PSRAM window + psram cmd
@@ -1143,10 +1119,8 @@ target_link_options(shell PRIVATE ${SHELL_OPT_FLAGS} -ffunction-sections -fdata-
 # Link the C++ TFLM backend in, and force the final link back onto
 # the C driver.  Everything that decision involves is in cmake/tflite-micro.cmake --
 # it has to run here rather than in that file because the `shell` target does not exist
-# yet where the backend selection above includes it.
-if(CONFIG_NN_BACKEND STREQUAL "tflm")
-    nn_tflm_attach(shell)
-endif()
+# yet where the NN wiring above includes it.
+nn_tflm_attach(shell)
 
 # The benchmark harness objects.  An OBJECT library, so these land in the
 # image exactly as if they had been listed in add_executable -- but compiled with the
@@ -1230,7 +1204,7 @@ add_custom_command(TARGET shell POST_BUILD
     COMMENT "check .psram_ai residency and cache safety"
     VERBATIM)
 
-# The C++ containment gate, for the tflm build only.  This firmware
+# The C++ containment gate (the tflm backend is C++).  This firmware
 # had no C++ at all until that phase, and the two things that go wrong when C++ arrives
 # in a bare-metal image are both invisible at link time.
 #
@@ -1246,26 +1220,24 @@ add_custom_command(TARGET shell POST_BUILD
 # Both are checked on the linked image, because a linker-script ASSERT cannot do it:
 # C++ name mangling defeats DEFINED(sym) selectors the same way LTO's renaming does --
 # the condition goes false, the ternary collapses to 1, and the ASSERT passes.
-if(CONFIG_NN_BACKEND STREQUAL "tflm")
-    add_custom_command(TARGET shell POST_BUILD
-        COMMAND "${Python3_EXECUTABLE}"
-                "${BOARD_DIR}/cmake/check_cxx_runtime.py"
-                --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
-                $<TARGET_FILE:shell>
-        COMMENT "check C++ runtime containment: no static ctors, no unwinder"
-        VERBATIM)
+add_custom_command(TARGET shell POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}"
+            "${BOARD_DIR}/cmake/check_cxx_runtime.py"
+            --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
+            $<TARGET_FILE:shell>
+    COMMENT "check C++ runtime containment: no static ctors, no unwinder"
+    VERBATIM)
 
-    # Not a gate -- a report.  The shell thread's stack is 4,096 B and DTCM has under
-    # 8 KB free, so there is very little room to react if a CMSIS-NN kernel turns out to
-    # want a deep frame.  -fstack-usage answers that at build time instead of waiting
-    # for a `free` high-water reading to come back from the board.
-    add_custom_command(TARGET shell POST_BUILD
-        COMMAND "${Python3_EXECUTABLE}"
-                "${BOARD_DIR}/cmake/report_tflm_stack.py"
-                "${CMAKE_BINARY_DIR}/CMakeFiles/tflm.dir"
-        COMMENT "report the deepest tflm stack frames"
-        VERBATIM)
-endif()
+# Not a gate -- a report.  The shell thread's stack is 4,096 B and DTCM has under
+# 8 KB free, so there is very little room to react if a CMSIS-NN kernel turns out to
+# want a deep frame.  -fstack-usage answers that at build time instead of waiting
+# for a `free` high-water reading to come back from the board.
+add_custom_command(TARGET shell POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}"
+            "${BOARD_DIR}/cmake/report_tflm_stack.py"
+            "${CMAKE_BINARY_DIR}/CMakeFiles/tflm.dir"
+    COMMENT "report the deepest tflm stack frames"
+    VERBATIM)
 
 # ---------------------------------------------------------------------------
 # The plugin target word (issue #108 = #78 Step 3a)
@@ -1277,9 +1249,6 @@ endif()
 # this firmware's own predefined macros (svc/plugin/plugin_target.h), which is also the
 # only check of the CMSE bit.  The plugin image gate checks the other bits
 # against each plugin ELF.
-#
-# Defined for every backend: it describes the environment this firmware
-# provides, which does not depend on whether a model can be loaded.
 set(WIO_PLUGIN_TARGET_ID "0x1201")
 target_compile_definitions(shell PRIVATE
     WIO_PLUGIN_TARGET_ID=${WIO_PLUGIN_TARGET_ID})
@@ -1300,8 +1269,8 @@ add_custom_command(TARGET shell POST_BUILD
 # this reads both back out of the LINKED IMAGE (cmake/check_blob_staging.py,
 # shared with f746g-disco since issue #194).  This board passes its own facts:
 # the backend it compiled, which of its backends load through the staging
-# buffer (tflm) and which do not (null, reported NOT APPLICABLE and checked
-# against the image), and the header unit at the top of every slot (src/blob.h
+# buffer (tflm, its only one since issue #239) and which do not (none any more,
+# so no --unstaged-backend), and the header unit at the top of every slot (src/blob.h
 # BLOB_ERASE_UNIT; test/host_tests.sh compares the two).
 # Negative tests: cmake/fixtures/run_blob_staging_tests.py.  A POST_BUILD of the
 # link, like the gates above, so flash and the assets never see an image that
@@ -1318,16 +1287,16 @@ if(BSP_ENABLE_KV)
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_SOURCE_DIR}/cmake/check_blob_staging.py"
                 $<TARGET_FILE:shell> --backend "${CONFIG_NN_BACKEND}"
-                --staged-backend tflm --unstaged-backend null
+                --staged-backend tflm
                 --header-bytes 4096
         COMMENT "check every blob slot's payload fits the model staging buffer"
         VERBATIM)
 endif()
 
-# --- the .plugin reservation's own gate (every backend) ----------------------
+# --- the .plugin reservation's own gate --------------------------------------
 #
-# The reservation is in the linker script whatever the backend, so it is checked
-# whatever the backend.  The linker ASSERTs on it name section boundaries and
+# The reservation is in the linker script of every build, so every build checks
+# it.  The linker ASSERTs on it name section boundaries and
 # survive LTO; this checks the LINKED IMAGE against a literal of its own, and
 # also what no ASSERT can see -- the heap's ceiling, which is not a section.
 # Negative tests: cmake/fixtures/run_reservation_tests.py.
@@ -1349,488 +1318,482 @@ add_custom_command(TARGET shell POST_BUILD
 # .plugin and branches into it.  3c (issue #116) took the resident decoder away,
 # so A PLUGIN IS NOW THE ONLY DECODER THIS BOARD HAS.  See the board README.
 #
-# tflm only: the null backend cannot load a model, so a container would have
-# nowhere to go.
-if(CONFIG_NN_BACKEND STREQUAL "tflm")
-    # --- the policy: ONE declaration, two consumers ----------------------------
-    #
-    # The firmware's policy (plugin_board_policy in port/nn/nn_svc_wio.c, which
-    # the validator reads by name) and the host asset build (verify_container,
-    # which runs the same check, svc/plugin/plugin_load_body.h) take these from
-    # here, so a container cannot pass on the host and be refused on the board
-    # (the shape issue #93 hit).  The reservation's ADDRESS is still stated
-    # independently elsewhere -- see ldscript/plugin_memory.ld.
-    set(WIO_PLUGIN_BASE "0x24048000")
-    set(WIO_PLUGIN_MAX  "32768")
+# --- the policy: ONE declaration, two consumers ----------------------------
+#
+# The firmware's policy (plugin_board_policy in port/nn/nn_svc_wio.c, which
+# the validator reads by name) and the host asset build (verify_container,
+# which runs the same check, svc/plugin/plugin_load_body.h) take these from
+# here, so a container cannot pass on the host and be refused on the board
+# (the shape issue #93 hit).  The reservation's ADDRESS is still stated
+# independently elsewhere -- see ldscript/plugin_memory.ld.
+set(WIO_PLUGIN_BASE "0x24048000")
+set(WIO_PLUGIN_MAX  "32768")
 
-    # What each thread may lend a plugin callback.
-    #
-    # The honest figure is "thread stack - depth already spent at the call site
-    # - asynchronous reserve - margin", and the call-site depth is what
-    # `nn stream stats` measures ("at call") on hardware.  Each is well below
-    # its thread -- nn_svc_wio.c static-asserts it -- because Grove's issue #103
-    # found two placeholders equal to a whole thread stack, which a plugin could
-    # have declared, been admitted with, and overflowed.
-    #
-    # [!] THESE ARE ISSUE #116's MEASUREMENTS, taken on hardware with a plugin
-    # running.  Step 3a's figures (609 / 105, and no measurement at all for the
-    # shell) stood in this comment long after #110 had replaced them in the
-    # board README -- a stale number beside a live one, which is how a reader
-    # ends up deriving from the wrong half.  The README's table is the record;
-    # this comment follows it.
-    #
-    #   nn_work   3072 B  (decode)     at call   49 -> 3072-49-208   = 2815
-    #   cam_prev  1536 B  (draw)       at call  105 -> 1536-105-208  = 1223
-    #   shell     4096 B  (entry / shapes_ok / report / params)
-    #                                  at call 1977 -> 4096-1977-208 = 1911
-    #
-    # (The shell's is #121's, build 5cb217f: the shared command's frame carries
-    # the result's output shapes or classes now, about 300 B.  #110 measured
-    # 641 / 137 for the first two.  The decode site lost 592 B when the
-    # resident decoder went: its frame held the worker's box array, the
-    # bf_result, and what nn_decoder_run() and blazeface_decode() contributed
-    # once LTO inlined them.  A shallower call site does not enlarge the
-    # allowances below -- see the note after them.)
-    #
-    # [!] WHICH THREAD EACH SLOT IS CALLED ON WAS WRONG UNTIL ISSUE #110, and
-    # the slot table below is where it shows.  Step 3a declared the
-    # WORKER's allowance for entry and shapes_ok on the reasoning that a
-    # decoder's callbacks belong to the decoding thread.  They do not: entry is
-    # called from `nn model load` and shapes_ok from the admission that both
-    # `nn run` and `nn stream start` pass through, and BOTH are console
-    # commands.  A bound on the wrong thread's stack is not a bound.
-    #
-    # [!] AND THE ALLOWANCES THEMSELVES ARE NOT DERIVED FROM THOSE NUMBERS.
-    # 1,024 B on each thread is the policy the shipped containers are admitted
-    # under.  Since plugin ABI 2 (issue #111) a container carries the plugin's
-    # own frames and no allowance, so changing one re-packs nothing; lowering
-    # one can make the device refuse a container it admits today ("stack
-    # request refused").  The measurements above are here to show that each
-    # allowance still FITS, which is the check issue #103 found two
-    # placeholders failing.
-    set(WIO_PLUGIN_STACK_NN_WORK 1024)
-    set(WIO_PLUGIN_STACK_PREVIEW 1024)
-    set(WIO_PLUGIN_STACK_SHELL   1024)
-    # [!] THE ONE DECLARATION OF THE SLOT -> ALLOWANCE TABLE (issue #126).  The
-    # plugin gate's --entry, the container's --policy-stack and the firmware's
-    # WIO_PLUGIN_STACK_* definitions are derived from it by the shared helpers,
-    # and the build reads the seven numbers the shipped policy holds back out
-    # of shell.elf and compares them with it (cmake/check_policy_probe.py).
-    # port/nn/nn_svc_wio.c states its own slot -> allowance mapping next to the
-    # asserts against each thread, and that is what the read-back holds to this.
-    include("${CMAKE_SOURCE_DIR}/cmake/plugin_stack_table.cmake")
-    plugin_stack_table(
-        DEFINE_ON  shell
-        ALLOWANCES WIO_PLUGIN_STACK_NN_WORK=${WIO_PLUGIN_STACK_NN_WORK}
-                   WIO_PLUGIN_STACK_PREVIEW=${WIO_PLUGIN_STACK_PREVIEW}
-                   WIO_PLUGIN_STACK_SHELL=${WIO_PLUGIN_STACK_SHELL}
-        SLOTS      entry=WIO_PLUGIN_STACK_SHELL
-                   shapes_ok=WIO_PLUGIN_STACK_SHELL
-                   decode=WIO_PLUGIN_STACK_NN_WORK
-                   draw=WIO_PLUGIN_STACK_PREVIEW
-                   report=WIO_PLUGIN_STACK_SHELL
-                   param_set=WIO_PLUGIN_STACK_SHELL
-                   param_get=WIO_PLUGIN_STACK_SHELL)
-    # The plugin's own string sink (asset/common) -- a leaf that copies bytes
-    # into a caller-owned buffer, so a ceiling small enough to fire.
-    set(WIO_PLUGIN_SBUF_WRITE_MAX 64)
+# What each thread may lend a plugin callback.
+#
+# The honest figure is "thread stack - depth already spent at the call site
+# - asynchronous reserve - margin", and the call-site depth is what
+# `nn stream stats` measures ("at call") on hardware.  Each is well below
+# its thread -- nn_svc_wio.c static-asserts it -- because Grove's issue #103
+# found two placeholders equal to a whole thread stack, which a plugin could
+# have declared, been admitted with, and overflowed.
+#
+# [!] THESE ARE ISSUE #116's MEASUREMENTS, taken on hardware with a plugin
+# running.  Step 3a's figures (609 / 105, and no measurement at all for the
+# shell) stood in this comment long after #110 had replaced them in the
+# board README -- a stale number beside a live one, which is how a reader
+# ends up deriving from the wrong half.  The README's table is the record;
+# this comment follows it.
+#
+#   nn_work   3072 B  (decode)     at call   49 -> 3072-49-208   = 2815
+#   cam_prev  1536 B  (draw)       at call  105 -> 1536-105-208  = 1223
+#   shell     4096 B  (entry / shapes_ok / report / params)
+#                                  at call 1977 -> 4096-1977-208 = 1911
+#
+# (The shell's is #121's, build 5cb217f: the shared command's frame carries
+# the result's output shapes or classes now, about 300 B.  #110 measured
+# 641 / 137 for the first two.  The decode site lost 592 B when the
+# resident decoder went: its frame held the worker's box array, the
+# bf_result, and what nn_decoder_run() and blazeface_decode() contributed
+# once LTO inlined them.  A shallower call site does not enlarge the
+# allowances below -- see the note after them.)
+#
+# [!] WHICH THREAD EACH SLOT IS CALLED ON WAS WRONG UNTIL ISSUE #110, and
+# the slot table below is where it shows.  Step 3a declared the
+# WORKER's allowance for entry and shapes_ok on the reasoning that a
+# decoder's callbacks belong to the decoding thread.  They do not: entry is
+# called from `nn model load` and shapes_ok from the admission that both
+# `nn run` and `nn stream start` pass through, and BOTH are console
+# commands.  A bound on the wrong thread's stack is not a bound.
+#
+# [!] AND THE ALLOWANCES THEMSELVES ARE NOT DERIVED FROM THOSE NUMBERS.
+# 1,024 B on each thread is the policy the shipped containers are admitted
+# under.  Since plugin ABI 2 (issue #111) a container carries the plugin's
+# own frames and no allowance, so changing one re-packs nothing; lowering
+# one can make the device refuse a container it admits today ("stack
+# request refused").  The measurements above are here to show that each
+# allowance still FITS, which is the check issue #103 found two
+# placeholders failing.
+set(WIO_PLUGIN_STACK_NN_WORK 1024)
+set(WIO_PLUGIN_STACK_PREVIEW 1024)
+set(WIO_PLUGIN_STACK_SHELL   1024)
+# [!] THE ONE DECLARATION OF THE SLOT -> ALLOWANCE TABLE (issue #126).  The
+# plugin gate's --entry, the container's --policy-stack and the firmware's
+# WIO_PLUGIN_STACK_* definitions are derived from it by the shared helpers,
+# and the build reads the seven numbers the shipped policy holds back out
+# of shell.elf and compares them with it (cmake/check_policy_probe.py).
+# port/nn/nn_svc_wio.c states its own slot -> allowance mapping next to the
+# asserts against each thread, and that is what the read-back holds to this.
+include("${CMAKE_SOURCE_DIR}/cmake/plugin_stack_table.cmake")
+plugin_stack_table(
+    DEFINE_ON  shell
+    ALLOWANCES WIO_PLUGIN_STACK_NN_WORK=${WIO_PLUGIN_STACK_NN_WORK}
+               WIO_PLUGIN_STACK_PREVIEW=${WIO_PLUGIN_STACK_PREVIEW}
+               WIO_PLUGIN_STACK_SHELL=${WIO_PLUGIN_STACK_SHELL}
+    SLOTS      entry=WIO_PLUGIN_STACK_SHELL
+               shapes_ok=WIO_PLUGIN_STACK_SHELL
+               decode=WIO_PLUGIN_STACK_NN_WORK
+               draw=WIO_PLUGIN_STACK_PREVIEW
+               report=WIO_PLUGIN_STACK_SHELL
+               param_set=WIO_PLUGIN_STACK_SHELL
+               param_get=WIO_PLUGIN_STACK_SHELL)
+# The plugin's own string sink (asset/common) -- a leaf that copies bytes
+# into a caller-owned buffer, so a ceiling small enough to fire.
+set(WIO_PLUGIN_SBUF_WRITE_MAX 64)
 
-    # The device's validator: the check in svc/plugin/plugin_load_body.h,
-    # entered through plugin_load_board.c (plugin_load.c adds the probe and the
-    # result names) -- the same check verify_container runs on the host, through
-    # plugin_load_host.c.  The CRC-32 it checks the plugin digest with is the
-    # one FlashDB already provides (port/nn/crc32_fdb.c says why), compiled with
-    # the blob store in the BSP_ENABLE_KV block above since issue #193.
-    target_sources(shell PRIVATE
-        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
-        # Its firmware entry: the board's policy by name (issue #165).
-        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_board.c"
-        # `nn info`'s plugin stack lines, shared with Grove (issue #111) and
-        # f746 (#159).
-        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"
-        # ...and the open model's claims around them, shared with f746 (#159)
-        # and Grove (#174).
-        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c")
+# The device's validator: the check in svc/plugin/plugin_load_body.h,
+# entered through plugin_load_board.c (plugin_load.c adds the probe and the
+# result names) -- the same check verify_container runs on the host, through
+# plugin_load_host.c.  The CRC-32 it checks the plugin digest with is the
+# one FlashDB already provides (port/nn/crc32_fdb.c says why), compiled with
+# the blob store in the BSP_ENABLE_KV block above since issue #193.
+target_sources(shell PRIVATE
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+    # Its firmware entry: the board's policy by name (issue #165).
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_board.c"
+    # `nn info`'s plugin stack lines, shared with Grove (issue #111) and
+    # f746 (#159).
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"
+    # ...and the open model's claims around them, shared with f746 (#159)
+    # and Grove (#174).
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c")
 
-    target_compile_definitions(shell PRIVATE
-        WIO_PLUGIN_BASE=${WIO_PLUGIN_BASE}u
-        WIO_PLUGIN_MAX=${WIO_PLUGIN_MAX}u)
-    # (WIO_PLUGIN_STACK_* are defined on shell by plugin_stack_table().)
+target_compile_definitions(shell PRIVATE
+    WIO_PLUGIN_BASE=${WIO_PLUGIN_BASE}u
+    WIO_PLUGIN_MAX=${WIO_PLUGIN_MAX}u)
+# (WIO_PLUGIN_STACK_* are defined on shell by plugin_stack_table().)
 
-    # --- what the shared image gate is told about this board ------------------
-    #
-    # [!] THE RESERVATION IS WRITTEN OUT AGAIN HERE, ON PURPOSE.  It is also in
-    # ldscript/plugin_memory.ld (what a plugin links against), in the firmware's
-    # own script, and in cmake/check_plugin_reservation.py.  The gate checks the
-    # plugin against exactly this, so deriving it from any of those would let the
-    # gate pass whatever address that one said.
-    set(WIO_PLUGIN_GATE_BASE 0x24048000)
-    set(WIO_PLUGIN_GATE_END  0x24050000)
-    # Entry points a plugin may never reach on this board.  A plugin links no
-    # firmware code at all (-nostdlib, and the gate refuses an undefined symbol),
-    # so this matters for what a plugin might DEFINE under one of these names --
-    # which on this board means the paths that can brick it or undo what the app
-    # is forbidden to touch: the internal-flash and option-byte writers (sector 0
-    # is the bootloader), the NOR writers (the blob store and the KV partition),
-    # the clock and supply configuration the app inherits and must not change,
-    # and the MPU / cache / NVIC state the base owns.
-    set(WIO_PLUGIN_FORBIDDEN
-        HAL_FLASH_Unlock
-        HAL_FLASH_Program
-        HAL_FLASHEx_Erase
-        HAL_FLASH_OB_Unlock
-        HAL_FLASH_OB_Launch
-        HAL_FLASHEx_OBProgram
-        nor_write
-        nor_erase
-        blob_erase_header
-        blob_erase_span
-        # The shared `blob` command's writers over them (src/blob_writer.c,
-        # issue #194).
-        blob_svc_erase_header
-        blob_svc_erase_span
-        blob_svc_program
-        # The key-value store's writers (issue #214): FAL's write and erase,
-        # which every FlashDB program and erase goes through, and the shared
-        # store's entry points that change the partition (svc/kv/kv.c;
-        # kv_init() formats a blank one).
-        fal_partition_write
-        fal_partition_erase
-        fal_partition_erase_all
-        kv_init
-        kv_set
-        kv_set_desc
-        kv_del
-        kv_format
-        HAL_RCC_OscConfig
-        HAL_RCC_ClockConfig
-        HAL_RCCEx_PeriphCLKConfig
-        HAL_PWREx_ConfigSupply
-        HAL_PWREx_ControlVoltageScaling
-        HAL_MPU_ConfigRegion
-        HAL_MPU_Enable
-        HAL_MPU_Disable
-        ARM_MPU_Enable
-        ARM_MPU_Disable
-        ARM_MPU_SetRegion
-        SCB_EnableDCache
-        SCB_DisableDCache
-        SCB_InvalidateICache
-        NVIC_EnableIRQ
-        NVIC_DisableIRQ)
-    # What the base itself may spend below one veneer, charged at each indirect
-    # call because the gate cannot see across it.
-    #
-    # [!] DERIVED FROM THE SHIPPED IMAGE AND CHECKED HERE, EVERY BUILD (issue
-    # #112).  It was hand-summed before: issue #110 measured the callbacks with
-    # -fstack-usage and added up the deepest chain a veneer reaches, which ran
-    # through the formatter and its 64-bit division helpers and came to 528 B.
-    # #112 took the formatter out from under that veneer -- a plugin's bytes go
-    # to the log ring by length -- and derives what is left from the LTO image:
-    # 176 B, the ring append.  A hand sum is what the check below replaces; it
-    # is no longer re-derived by anyone reading this file.
-    #
-    # 640 rather than the derived number: over-estimating is the safe direction,
-    # because a larger charge makes a plugin's computed requirement larger, not
-    # smaller.  Since ABI 2 (issue #111) a container no longer carries this
-    # number -- the loader adds it to the plugin's own frames at load time, from
-    # the PLUGIN_VENEER_BASE_COST that veneer_cost_gate() compiles in -- so
-    # changing it re-packs nothing; a container whose crossing no longer fits
-    # under a raised cost is refused on the device, as "stack request refused".
-    set(WIO_PLUGIN_VENEER_BASE_COST 640)
+# --- what the shared image gate is told about this board ------------------
+#
+# [!] THE RESERVATION IS WRITTEN OUT AGAIN HERE, ON PURPOSE.  It is also in
+# ldscript/plugin_memory.ld (what a plugin links against), in the firmware's
+# own script, and in cmake/check_plugin_reservation.py.  The gate checks the
+# plugin against exactly this, so deriving it from any of those would let the
+# gate pass whatever address that one said.
+set(WIO_PLUGIN_GATE_BASE 0x24048000)
+set(WIO_PLUGIN_GATE_END  0x24050000)
+# Entry points a plugin may never reach on this board.  A plugin links no
+# firmware code at all (-nostdlib, and the gate refuses an undefined symbol),
+# so this matters for what a plugin might DEFINE under one of these names --
+# which on this board means the paths that can brick it or undo what the app
+# is forbidden to touch: the internal-flash and option-byte writers (sector 0
+# is the bootloader), the NOR writers (the blob store and the KV partition),
+# the clock and supply configuration the app inherits and must not change,
+# and the MPU / cache / NVIC state the base owns.
+set(WIO_PLUGIN_FORBIDDEN
+    HAL_FLASH_Unlock
+    HAL_FLASH_Program
+    HAL_FLASHEx_Erase
+    HAL_FLASH_OB_Unlock
+    HAL_FLASH_OB_Launch
+    HAL_FLASHEx_OBProgram
+    nor_write
+    nor_erase
+    blob_erase_header
+    blob_erase_span
+    # The shared `blob` command's writers over them (src/blob_writer.c,
+    # issue #194).
+    blob_svc_erase_header
+    blob_svc_erase_span
+    blob_svc_program
+    # The key-value store's writers (issue #214): FAL's write and erase,
+    # which every FlashDB program and erase goes through, and the shared
+    # store's entry points that change the partition (svc/kv/kv.c;
+    # kv_init() formats a blank one).
+    fal_partition_write
+    fal_partition_erase
+    fal_partition_erase_all
+    kv_init
+    kv_set
+    kv_set_desc
+    kv_del
+    kv_format
+    HAL_RCC_OscConfig
+    HAL_RCC_ClockConfig
+    HAL_RCCEx_PeriphCLKConfig
+    HAL_PWREx_ConfigSupply
+    HAL_PWREx_ControlVoltageScaling
+    HAL_MPU_ConfigRegion
+    HAL_MPU_Enable
+    HAL_MPU_Disable
+    ARM_MPU_Enable
+    ARM_MPU_Disable
+    ARM_MPU_SetRegion
+    SCB_EnableDCache
+    SCB_DisableDCache
+    SCB_InvalidateICache
+    NVIC_EnableIRQ
+    NVIC_DisableIRQ)
+# What the base itself may spend below one veneer, charged at each indirect
+# call because the gate cannot see across it.
+#
+# [!] DERIVED FROM THE SHIPPED IMAGE AND CHECKED HERE, EVERY BUILD (issue
+# #112).  It was hand-summed before: issue #110 measured the callbacks with
+# -fstack-usage and added up the deepest chain a veneer reaches, which ran
+# through the formatter and its 64-bit division helpers and came to 528 B.
+# #112 took the formatter out from under that veneer -- a plugin's bytes go
+# to the log ring by length -- and derives what is left from the LTO image:
+# 176 B, the ring append.  A hand sum is what the check below replaces; it
+# is no longer re-derived by anyone reading this file.
+#
+# 640 rather than the derived number: over-estimating is the safe direction,
+# because a larger charge makes a plugin's computed requirement larger, not
+# smaller.  Since ABI 2 (issue #111) a container no longer carries this
+# number -- the loader adds it to the plugin's own frames at load time, from
+# the PLUGIN_VENEER_BASE_COST that veneer_cost_gate() compiles in -- so
+# changing it re-packs nothing; a container whose crossing no longer fits
+# under a raised cost is refused on the device, as "stack request refused".
+set(WIO_PLUGIN_VENEER_BASE_COST 640)
 
-    # The firmware side of that charge (issue #112): the build derives the
-    # stack below each veneer from the shipped LTO image and refuses a
-    # declaration under it, and `dfu-shell` / `flash` and every container's
-    # pack wait for that to pass.  What is stated here is this board's: the
-    # charge -- the SAME variable every add_plugin() below is given -- and where
-    # the toolchain's archives live.  The function behind each veneer is read
-    # out of the image, from plugin_board_bindings (port/nn/nn_active.c, issue
-    # #165).  What gets -fstack-usage, the LTO
-    # partition records included, is derived by the helper; the boot reference
-    # build is not one of the firmware's link inputs and is never touched.
-    get_filename_component(_wio_gcc_bin "${CMAKE_C_COMPILER}" DIRECTORY)
-    get_filename_component(WIO_TOOLCHAIN_ROOT "${_wio_gcc_bin}" DIRECTORY)
-    include("${CMAKE_SOURCE_DIR}/cmake/veneer_cost_gate.cmake")
-    veneer_cost_gate(
-        FIRMWARE shell
-        MAP      "${CMAKE_BINARY_DIR}/shell.map"
-        DECLARED ${WIO_PLUGIN_VENEER_BASE_COST}
-        PREBUILT_ROOTS "${WIO_TOOLCHAIN_ROOT}"
-        DELIVERY dfu-shell flash)
+# The firmware side of that charge (issue #112): the build derives the
+# stack below each veneer from the shipped LTO image and refuses a
+# declaration under it, and `dfu-shell` / `flash` and every container's
+# pack wait for that to pass.  What is stated here is this board's: the
+# charge -- the SAME variable every add_plugin() below is given -- and where
+# the toolchain's archives live.  The function behind each veneer is read
+# out of the image, from plugin_board_bindings (port/nn/nn_active.c, issue
+# #165).  What gets -fstack-usage, the LTO
+# partition records included, is derived by the helper; the boot reference
+# build is not one of the firmware's link inputs and is never touched.
+get_filename_component(_wio_gcc_bin "${CMAKE_C_COMPILER}" DIRECTORY)
+get_filename_component(WIO_TOOLCHAIN_ROOT "${_wio_gcc_bin}" DIRECTORY)
+include("${CMAKE_SOURCE_DIR}/cmake/veneer_cost_gate.cmake")
+veneer_cost_gate(
+    FIRMWARE shell
+    MAP      "${CMAKE_BINARY_DIR}/shell.map"
+    DECLARED ${WIO_PLUGIN_VENEER_BASE_COST}
+    PREBUILT_ROOTS "${WIO_TOOLCHAIN_ROOT}"
+    DELIVERY dfu-shell flash)
 
-    set(WIO_PLUGIN_COMMON "${CMAKE_SOURCE_DIR}/asset/common")
-    set(WIO_PLUGIN_MEMORY_LD "${BOARD_DIR}/ldscript/plugin_memory.ld")
-    # The firmware's own architecture, and only that -- add_plugin() owns what
-    # makes a plugin a plugin.  The float ABI is the firmware's, because a
-    # plugin's callbacks are called with it.
-    set(WIO_PLUGIN_ARCH_FLAGS
-        -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard)
-    set(WIO_PLUGIN_CFLAGS
-        ${WIO_PLUGIN_ARCH_FLAGS}
-        -Os -std=c11 -Wall -Wextra -Werror
-        -ffreestanding -fno-builtin -fno-common
-        -ffunction-sections -fdata-sections
-        # Both add sections the loader would have to service, and the image gate
-        # refuses them; off here so the failure is a missing feature rather than
-        # a rejected artifact.
-        -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables
-        # The stack gate's input.
-        -fstack-usage
-        -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob" -I "${WIO_PLUGIN_COMMON}")
+set(WIO_PLUGIN_COMMON "${CMAKE_SOURCE_DIR}/asset/common")
+set(WIO_PLUGIN_MEMORY_LD "${BOARD_DIR}/ldscript/plugin_memory.ld")
+# The firmware's own architecture, and only that -- add_plugin() owns what
+# makes a plugin a plugin.  The float ABI is the firmware's, because a
+# plugin's callbacks are called with it.
+set(WIO_PLUGIN_ARCH_FLAGS
+    -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard)
+set(WIO_PLUGIN_CFLAGS
+    ${WIO_PLUGIN_ARCH_FLAGS}
+    -Os -std=c11 -Wall -Wextra -Werror
+    -ffreestanding -fno-builtin -fno-common
+    -ffunction-sections -fdata-sections
+    # Both add sections the loader would have to service, and the image gate
+    # refuses them; off here so the failure is a missing feature rather than
+    # a rejected artifact.
+    -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables
+    # The stack gate's input.
+    -fstack-usage
+    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob" -I "${WIO_PLUGIN_COMMON}")
 
-    include("${CMAKE_SOURCE_DIR}/cmake/add_plugin.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/add_plugin.cmake")
 
-    # [!] svc/nn/blazeface.c IS NOW COMPILED ONLY HERE (issue #116).  The firmware
-    # used to link it too, as the resident decoder; this is the one compile of
-    # it this board produces, and AUDIT_SHARED is what keeps the
-    # no-mutable-storage rule on it -- on the object that actually ships inside
-    # a container.
-    #
-    # [!] ONE VARIABLE FOR ITS PATH, and the reason is no longer the one issue
-    # #97 had.  It used to keep the firmware's source list and the residency
-    # gate naming the same file; both of those consumers went with the resident
-    # decoder.  What it keeps in step now is SOURCES and AUDIT_SHARED below --
-    # spell the path twice and they can drift, which would audit one file and
-    # compile another.  That is a fail-OPEN, so the file is also required to
-    # exist, HERE rather than at the top of this script: nothing outside this
-    # block compiles it, and a `null` build that refused to configure over a
-    # file it never reads would be a gate firing for a build it does not guard.
-    get_filename_component(WIO_SHARED_DECODER
-                           "${CMAKE_SOURCE_DIR}/svc/nn/blazeface.c" ABSOLUTE)
-    if(NOT EXISTS "${WIO_SHARED_DECODER}")
-        message(FATAL_ERROR
-            "shared BlazeFace decoder not found:\n  ${WIO_SHARED_DECODER}\n"
-            "The blazeface plugin is built from it; it is not optional.")
-    endif()
-
-    set(WIO_PLUGIN_ELFS "")
-    add_plugin(blazeface
-        CFLAGS ${WIO_PLUGIN_CFLAGS}
-        ARCH_FLAGS ${WIO_PLUGIN_ARCH_FLAGS}
-        MEMORY_LD "${WIO_PLUGIN_MEMORY_LD}"
-        IMAGE_BASE ${WIO_PLUGIN_GATE_BASE}
-        IMAGE_END  ${WIO_PLUGIN_GATE_END}
-        FORBIDDEN  ${WIO_PLUGIN_FORBIDDEN}
-        VENEER_BASE_COST ${WIO_PLUGIN_VENEER_BASE_COST}
-        TARGET_ID  ${WIO_PLUGIN_TARGET_ID}
-        OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
-        OUT_VAR WIO_PLUGIN_ELFS
-        SOURCES "${WIO_SHARED_DECODER}"
-        AUDIT_SHARED "${WIO_SHARED_DECODER}"
-        SLOTS   entry shapes_ok decode draw report param_set param_get
-        SBUF_WRITE_MAX ${WIO_PLUGIN_SBUF_WRITE_MAX})
-
-    # Built to prove the M7 build and to measure it.  No asset carries it in 3a:
-    # no CIFAR-10 model is established on this board, and the classifier
-    # demonstration is 3b's.
-    add_plugin(cifar10
-        CFLAGS ${WIO_PLUGIN_CFLAGS}
-        ARCH_FLAGS ${WIO_PLUGIN_ARCH_FLAGS}
-        MEMORY_LD "${WIO_PLUGIN_MEMORY_LD}"
-        IMAGE_BASE ${WIO_PLUGIN_GATE_BASE}
-        IMAGE_END  ${WIO_PLUGIN_GATE_END}
-        FORBIDDEN  ${WIO_PLUGIN_FORBIDDEN}
-        VENEER_BASE_COST ${WIO_PLUGIN_VENEER_BASE_COST}
-        TARGET_ID  ${WIO_PLUGIN_TARGET_ID}
-        OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
-        OUT_VAR WIO_PLUGIN_ELFS
-        SLOTS   entry shapes_ok decode draw report
-        SBUF_WRITE_MAX ${WIO_PLUGIN_SBUF_WRITE_MAX})
-
-    add_custom_target(plugin ALL DEPENDS ${WIO_PLUGIN_ELFS})
-
-    # --- the container chain's host tools --------------------------------------
-    #
-    # The same three Grove builds, the same way (explicit host-compiler commands,
-    # because every CMake target in this project cross-compiles):
-    #   abi_layout        svc/plugin/plugin_abi.h's layout as JSON, for the packer
-    #   slot_table        THIS board's slot capacities, from src/blob_slots.c
-    #   verify_container  svc/plugin/plugin_load_body.h -- the device's validator --
-    #                     on the host, entered through plugin_load_host.c, so a
-    #                     container cannot pass here and fail there
-    set(WIO_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
-    set(WIO_SLOT_TABLE_JSON "${CMAKE_BINARY_DIR}/plugin/slot_table.json")
-    set(WIO_CONTAINER_VERIFIER "${CMAKE_BINARY_DIR}/verify_container")
-    set(WIO_PACKER "${CMAKE_SOURCE_DIR}/asset/tools/pack_container.py")
-
-    find_program(WIO_HOST_CC NAMES cc gcc clang)
-    if(WIO_HOST_CC)
-        add_custom_command(
-            OUTPUT "${WIO_ABI_LAYOUT_JSON}"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
-            COMMAND "${WIO_HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
-                    "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
-                    -o "${CMAKE_BINARY_DIR}/plugin/abi_layout"
-            COMMAND "${CMAKE_BINARY_DIR}/plugin/abi_layout"
-                    > "${WIO_ABI_LAYOUT_JSON}"
-            DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
-            COMMENT "host cc -> abi_layout.json (the packer's view of the ABI)"
-            VERBATIM)
-
-        # [!] THE TABLE IS THE ONE THE FIRMWARE LINKS, RUN THROUGH THE SAME
-        # LOOKUPS (issue #193): the shared tool asset/tools/slot_table.c
-        # (issue #195) compiles this board's src/blob_slots.c with
-        # svc/blob/blob_map.c and takes the interval and the erase unit from
-        # src/blob.h -- whose closure reaches nor_flash.h -- so the compiler's
-        # own depfile lists every header it opened and a stale table cannot
-        # survive a change the firmware itself recompiles for.  [!] slot_table.c
-        # is the LAST source on the line:
-        # with several inputs gcc writes the depfile of the last one only, and
-        # that is the one whose closure has the interval in it (the other two
-        # are DEPENDS, and their one header is in that closure).  It refuses
-        # (and the build stops) on a table the store would refuse at run time.
-        add_custom_command(
-            OUTPUT "${WIO_SLOT_TABLE_JSON}"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
-            COMMAND "${WIO_HOST_CC}" -std=c11 -O1 -Wall -Wextra -Werror
-                    -MD -MF "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
-                    -MT "${WIO_SLOT_TABLE_JSON}"
-                    -I "${BOARD_DIR}/src" -I "${BOARD_DIR}/port/nor"
-                    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
-                    "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
-                    "${BOARD_DIR}/src/blob_slots.c"
-                    -include "${BOARD_DIR}/src/blob.h"
-                    -DSLOT_TABLE_LO=BLOB_REGION_BASE
-                    -DSLOT_TABLE_HI=BLOB_REGION_END
-                    -DSLOT_TABLE_UNIT=BLOB_ERASE_UNIT
-                    "${CMAKE_SOURCE_DIR}/asset/tools/slot_table.c"
-                    -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
-            COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table"
-                    "${WIO_SLOT_TABLE_JSON}"
-            DEPFILE "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
-            DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/slot_table.c"
-                    "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
-                    "${BOARD_DIR}/src/blob_slots.c"
-            COMMENT "host cc -> slot_table.json (payload capacity per blob slot)"
-            VERBATIM)
-
-        add_custom_command(
-            OUTPUT "${WIO_CONTAINER_VERIFIER}"
-            COMMAND "${WIO_HOST_CC}" -std=c11 -O1 -Wall -Wextra
-                    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
-                    "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"
-                    "${CMAKE_SOURCE_DIR}/svc/crc32.c"
-                    -o "${WIO_CONTAINER_VERIFIER}"
-            DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.h"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_body.h"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.h"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
-            COMMENT "host cc -> verify_container (the device's own validator)"
-            VERBATIM)
-
-        add_custom_target(container-tools ALL
-            DEPENDS "${WIO_ABI_LAYOUT_JSON}" "${WIO_SLOT_TABLE_JSON}"
-                    "${WIO_CONTAINER_VERIFIER}")
-    else()
-        message(STATUS "wio: no host C compiler -- asset-* targets will refuse")
-    endif()
-
-    execute_process(COMMAND ${FETCH_UPSTREAM_GIT} -C "${CMAKE_SOURCE_DIR}" rev-parse --short HEAD
-                    OUTPUT_VARIABLE WIO_PLUGIN_BUILD_ID
-                    OUTPUT_STRIP_TRAILING_WHITESPACE
-                    ERROR_QUIET)
-    if(NOT WIO_PLUGIN_BUILD_ID)
-        set(WIO_PLUGIN_BUILD_ID "nogit")
-    endif()
-
-    # --- sendable assets --------------------------------------------------------
-    #
-    # `--target asset-<name>` produces build/<board>/asset/<name>.nnc: a container
-    # that has already been through every gate, published only after passing
-    # (cmake/build_asset.py).  The fetch, the pack-verify-publish chain and the
-    # receipt are shared by every board; the INGEST is this board's -- float32
-    # I/O as the zoo ships it (the shared decoder reads float32), no strip and
-    # no vela (there is no NPU here), and the model gate is this board's own
-    # verify_tflite, which checks the model against the operators THIS firmware
-    # registers.
-    #
-    # [!] THE GATES RUN AT BUILD TIME, NOT AT SEND TIME.  picocom's `sb -k` sends
-    # whatever path is typed, so nothing checks that the file sent is the file
-    # built -- the receipt's CRC, compared with `blob list` afterwards, is the
-    # only "built bytes = stored bytes" check.  See the board README.
-    #
-    # [!] AND NEITHER THE ASSET NOR THE FETCH IS IN ALL: a tree with no access to
-    # the model host must still build the firmware (issue #94's lesson).
-    #
-    # wio_add_asset(<name>
-    #     PLUGIN <name>    a plugin built by add_plugin() above
-    #     SLOT   <n>       checked for capacity, printed on the receipt
-    #     FILE <path> | URL <git> COMMIT <sha> PATH_IN <p> SHA256 <hash>)
-    #
-    # The rule itself is shared by every board (cmake/add_asset.cmake, issue
-    # #126): it takes the stack policy, the veneer cost and the plugin's image
-    # from their own registrations, so what is passed below is only this
-    # board's -- its tools, its reservation and target word, and its slot (the
-    # receipt's text is shared since issue #195).
-    if(HOST_CXX)
-        set(WIO_MODEL_VERIFIER "${CMAKE_BINARY_DIR}/verify_tflite")
-    else()
-        # Left EMPTY on purpose: build_asset.py refuses on an empty verifier
-        # rather than publishing an unchecked model.
-        set(WIO_MODEL_VERIFIER "")
-    endif()
-    include("${CMAKE_SOURCE_DIR}/cmake/add_asset.cmake")
-
-    function(wio_add_asset _name)
-        cmake_parse_arguments(A ""
-            "PLUGIN;SLOT;FILE;URL;COMMIT;PATH_IN;SHA256" "" ${ARGN})
-        if(A_UNPARSED_ARGUMENTS)
-            message(FATAL_ERROR
-                "wio_add_asset(${_name}): unrecognised: ${A_UNPARSED_ARGUMENTS}")
-        endif()
-        set(_pin "")
-        foreach(_k FILE URL COMMIT PATH_IN SHA256)
-            if(DEFINED A_${_k})
-                list(APPEND _pin ${_k} "${A_${_k}}")
-            endif()
-        endforeach()
-        # No ingest: float32 I/O as the zoo ships it, no strip, no vela.
-        asset_model_source(${_name}
-            OVERRIDE_VAR WIO_ASSET_${_name}_FILE OUT_VAR _src ${_pin})
-        # The receipt's commands are the shared `blob` command's, printed by
-        # cmake/asset_receipt.py for every board (issue #195): no RECEIPT_* here.
-        add_asset(${_name}
-            # No ingest, so the packer is the pin's first consumer and
-            # re-checks it on the bytes it packs (issue #132).
-            MODEL "${_src}"  MODEL_SHA256 "${_src_SHA256}"
-            PLUGIN ${A_PLUGIN}  SLOT ${A_SLOT}
-            PACKER "${WIO_PACKER}"  LAYOUT "${WIO_ABI_LAYOUT_JSON}"
-            MODEL_VERIFIER "${WIO_MODEL_VERIFIER}"
-            CONTAINER_VERIFIER "${WIO_CONTAINER_VERIFIER}"
-            SLOT_TABLE "${WIO_SLOT_TABLE_JSON}"
-            BUILD_ID "${WIO_PLUGIN_BUILD_ID}"
-            TARGET_ID "${WIO_PLUGIN_TARGET_ID}"
-            LINK_ADDR "${WIO_PLUGIN_BASE}"
-            CAPACITY "${WIO_PLUGIN_MAX}")
-    endfunction()
-
-    # The file #107 pins for Grove -- the same commit and the same SHA-256, from
-    # the ST model zoo.  Wio has run a model of the same NAME before, and #108
-    # established that it is the SAME BYTES: the board's slot 4 stores CRC-32
-    # 3A210F57 over 189,816 B, which is what verify_tflite reports for this
-    # fetch.  Nothing in the tree had recorded that identity, so the plan
-    # expected only a differential check on hardware; the blob store's own CRC
-    # answered it outright.  Licence: model-zoo weights, fetched into the build
-    # tree only, never committed.
-    #
-    # [!] THE SLOT IS A DECLARATION THE BOARD CANNOT CHECK.  The build refuses a
-    # container too large for it, but it never sees the slot number typed on
-    # the board.  There `blob write` rewrites a slot that holds the same name
-    # (erasing the whole slot before the transfer) and refuses, before any
-    # erase, one holding another blob or a name already stored elsewhere.
-    # Read `blob list` first.  Slot 12 is
-    # the last 256 KB slot (src/blob_slots.c; 258,048 B of payload).
-    wio_add_asset(blazeface
-        PLUGIN  blazeface  SLOT 12
-        URL     "https://github.com/STMicroelectronics/stm32ai-modelzoo.git"
-        COMMIT  "1423c78953a830903485135febe1dd98ff31aed8"
-        PATH_IN "face_detection/facedetect_front/Public_pretrainedmodel_public_dataset/widerface/blazeface_front_128/blazeface_front_128_int8.tflite"
-        SHA256  "e803bb4e93b10f7a19d4243bcc39698599a723f3128e19d3f90e0b1c0bc88dd8")
+# [!] svc/nn/blazeface.c IS NOW COMPILED ONLY HERE (issue #116).  The firmware
+# used to link it too, as the resident decoder; this is the one compile of
+# it this board produces, and AUDIT_SHARED is what keeps the
+# no-mutable-storage rule on it -- on the object that actually ships inside
+# a container.
+#
+# [!] ONE VARIABLE FOR ITS PATH, and the reason is no longer the one issue
+# #97 had.  It used to keep the firmware's source list and the residency
+# gate naming the same file; both of those consumers went with the resident
+# decoder.  What it keeps in step now is SOURCES and AUDIT_SHARED below --
+# spell the path twice and they can drift, which would audit one file and
+# compile another.  That is a fail-OPEN, so the file is also required to
+# exist, here next to the plugin build that compiles it.
+get_filename_component(WIO_SHARED_DECODER
+                       "${CMAKE_SOURCE_DIR}/svc/nn/blazeface.c" ABSOLUTE)
+if(NOT EXISTS "${WIO_SHARED_DECODER}")
+    message(FATAL_ERROR
+        "shared BlazeFace decoder not found:\n  ${WIO_SHARED_DECODER}\n"
+        "The blazeface plugin is built from it; it is not optional.")
 endif()
+
+set(WIO_PLUGIN_ELFS "")
+add_plugin(blazeface
+    CFLAGS ${WIO_PLUGIN_CFLAGS}
+    ARCH_FLAGS ${WIO_PLUGIN_ARCH_FLAGS}
+    MEMORY_LD "${WIO_PLUGIN_MEMORY_LD}"
+    IMAGE_BASE ${WIO_PLUGIN_GATE_BASE}
+    IMAGE_END  ${WIO_PLUGIN_GATE_END}
+    FORBIDDEN  ${WIO_PLUGIN_FORBIDDEN}
+    VENEER_BASE_COST ${WIO_PLUGIN_VENEER_BASE_COST}
+    TARGET_ID  ${WIO_PLUGIN_TARGET_ID}
+    OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
+    OUT_VAR WIO_PLUGIN_ELFS
+    SOURCES "${WIO_SHARED_DECODER}"
+    AUDIT_SHARED "${WIO_SHARED_DECODER}"
+    SLOTS   entry shapes_ok decode draw report param_set param_get
+    SBUF_WRITE_MAX ${WIO_PLUGIN_SBUF_WRITE_MAX})
+
+# Built to prove the M7 build and to measure it.  No asset carries it in 3a:
+# no CIFAR-10 model is established on this board, and the classifier
+# demonstration is 3b's.
+add_plugin(cifar10
+    CFLAGS ${WIO_PLUGIN_CFLAGS}
+    ARCH_FLAGS ${WIO_PLUGIN_ARCH_FLAGS}
+    MEMORY_LD "${WIO_PLUGIN_MEMORY_LD}"
+    IMAGE_BASE ${WIO_PLUGIN_GATE_BASE}
+    IMAGE_END  ${WIO_PLUGIN_GATE_END}
+    FORBIDDEN  ${WIO_PLUGIN_FORBIDDEN}
+    VENEER_BASE_COST ${WIO_PLUGIN_VENEER_BASE_COST}
+    TARGET_ID  ${WIO_PLUGIN_TARGET_ID}
+    OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
+    OUT_VAR WIO_PLUGIN_ELFS
+    SLOTS   entry shapes_ok decode draw report
+    SBUF_WRITE_MAX ${WIO_PLUGIN_SBUF_WRITE_MAX})
+
+add_custom_target(plugin ALL DEPENDS ${WIO_PLUGIN_ELFS})
+
+# --- the container chain's host tools --------------------------------------
+#
+# The same three Grove builds, the same way (explicit host-compiler commands,
+# because every CMake target in this project cross-compiles):
+#   abi_layout        svc/plugin/plugin_abi.h's layout as JSON, for the packer
+#   slot_table        THIS board's slot capacities, from src/blob_slots.c
+#   verify_container  svc/plugin/plugin_load_body.h -- the device's validator --
+#                     on the host, entered through plugin_load_host.c, so a
+#                     container cannot pass here and fail there
+set(WIO_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
+set(WIO_SLOT_TABLE_JSON "${CMAKE_BINARY_DIR}/plugin/slot_table.json")
+set(WIO_CONTAINER_VERIFIER "${CMAKE_BINARY_DIR}/verify_container")
+set(WIO_PACKER "${CMAKE_SOURCE_DIR}/asset/tools/pack_container.py")
+
+find_program(WIO_HOST_CC NAMES cc gcc clang)
+if(WIO_HOST_CC)
+    add_custom_command(
+        OUTPUT "${WIO_ABI_LAYOUT_JSON}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
+        COMMAND "${WIO_HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
+                "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
+                -o "${CMAKE_BINARY_DIR}/plugin/abi_layout"
+        COMMAND "${CMAKE_BINARY_DIR}/plugin/abi_layout"
+                > "${WIO_ABI_LAYOUT_JSON}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
+        COMMENT "host cc -> abi_layout.json (the packer's view of the ABI)"
+        VERBATIM)
+
+    # [!] THE TABLE IS THE ONE THE FIRMWARE LINKS, RUN THROUGH THE SAME
+    # LOOKUPS (issue #193): the shared tool asset/tools/slot_table.c
+    # (issue #195) compiles this board's src/blob_slots.c with
+    # svc/blob/blob_map.c and takes the interval and the erase unit from
+    # src/blob.h -- whose closure reaches nor_flash.h -- so the compiler's
+    # own depfile lists every header it opened and a stale table cannot
+    # survive a change the firmware itself recompiles for.  [!] slot_table.c
+    # is the LAST source on the line:
+    # with several inputs gcc writes the depfile of the last one only, and
+    # that is the one whose closure has the interval in it (the other two
+    # are DEPENDS, and their one header is in that closure).  It refuses
+    # (and the build stops) on a table the store would refuse at run time.
+    add_custom_command(
+        OUTPUT "${WIO_SLOT_TABLE_JSON}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
+        COMMAND "${WIO_HOST_CC}" -std=c11 -O1 -Wall -Wextra -Werror
+                -MD -MF "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
+                -MT "${WIO_SLOT_TABLE_JSON}"
+                -I "${BOARD_DIR}/src" -I "${BOARD_DIR}/port/nor"
+                -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+                "${BOARD_DIR}/src/blob_slots.c"
+                -include "${BOARD_DIR}/src/blob.h"
+                -DSLOT_TABLE_LO=BLOB_REGION_BASE
+                -DSLOT_TABLE_HI=BLOB_REGION_END
+                -DSLOT_TABLE_UNIT=BLOB_ERASE_UNIT
+                "${CMAKE_SOURCE_DIR}/asset/tools/slot_table.c"
+                -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
+        COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table"
+                "${WIO_SLOT_TABLE_JSON}"
+        DEPFILE "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
+        DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/slot_table.c"
+                "${CMAKE_SOURCE_DIR}/svc/blob/blob_map.c"
+                "${BOARD_DIR}/src/blob_slots.c"
+        COMMENT "host cc -> slot_table.json (payload capacity per blob slot)"
+        VERBATIM)
+
+    add_custom_command(
+        OUTPUT "${WIO_CONTAINER_VERIFIER}"
+        COMMAND "${WIO_HOST_CC}" -std=c11 -O1 -Wall -Wextra
+                -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${CMAKE_SOURCE_DIR}/svc/blob"
+                "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"
+                "${CMAKE_SOURCE_DIR}/svc/crc32.c"
+                -o "${WIO_CONTAINER_VERIFIER}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_host.h"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load_body.h"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.h"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
+        COMMENT "host cc -> verify_container (the device's own validator)"
+        VERBATIM)
+
+    add_custom_target(container-tools ALL
+        DEPENDS "${WIO_ABI_LAYOUT_JSON}" "${WIO_SLOT_TABLE_JSON}"
+                "${WIO_CONTAINER_VERIFIER}")
+else()
+    message(STATUS "wio: no host C compiler -- asset-* targets will refuse")
+endif()
+
+execute_process(COMMAND ${FETCH_UPSTREAM_GIT} -C "${CMAKE_SOURCE_DIR}" rev-parse --short HEAD
+                OUTPUT_VARIABLE WIO_PLUGIN_BUILD_ID
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET)
+if(NOT WIO_PLUGIN_BUILD_ID)
+    set(WIO_PLUGIN_BUILD_ID "nogit")
+endif()
+
+# --- sendable assets --------------------------------------------------------
+#
+# `--target asset-<name>` produces build/<board>/asset/<name>.nnc: a container
+# that has already been through every gate, published only after passing
+# (cmake/build_asset.py).  The fetch, the pack-verify-publish chain and the
+# receipt are shared by every board; the INGEST is this board's -- float32
+# I/O as the zoo ships it (the shared decoder reads float32), no strip and
+# no vela (there is no NPU here), and the model gate is this board's own
+# verify_tflite, which checks the model against the operators THIS firmware
+# registers.
+#
+# [!] THE GATES RUN AT BUILD TIME, NOT AT SEND TIME.  picocom's `sb -k` sends
+# whatever path is typed, so nothing checks that the file sent is the file
+# built -- the receipt's CRC, compared with `blob list` afterwards, is the
+# only "built bytes = stored bytes" check.  See the board README.
+#
+# [!] AND NEITHER THE ASSET NOR THE FETCH IS IN ALL: a tree with no access to
+# the model host must still build the firmware (issue #94's lesson).
+#
+# wio_add_asset(<name>
+#     PLUGIN <name>    a plugin built by add_plugin() above
+#     SLOT   <n>       checked for capacity, printed on the receipt
+#     FILE <path> | URL <git> COMMIT <sha> PATH_IN <p> SHA256 <hash>)
+#
+# The rule itself is shared by every board (cmake/add_asset.cmake, issue
+# #126): it takes the stack policy, the veneer cost and the plugin's image
+# from their own registrations, so what is passed below is only this
+# board's -- its tools, its reservation and target word, and its slot (the
+# receipt's text is shared since issue #195).
+if(HOST_CXX)
+    set(WIO_MODEL_VERIFIER "${CMAKE_BINARY_DIR}/verify_tflite")
+else()
+    # Left EMPTY on purpose: build_asset.py refuses on an empty verifier
+    # rather than publishing an unchecked model.
+    set(WIO_MODEL_VERIFIER "")
+endif()
+include("${CMAKE_SOURCE_DIR}/cmake/add_asset.cmake")
+
+function(wio_add_asset _name)
+    cmake_parse_arguments(A ""
+        "PLUGIN;SLOT;FILE;URL;COMMIT;PATH_IN;SHA256" "" ${ARGN})
+    if(A_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR
+            "wio_add_asset(${_name}): unrecognised: ${A_UNPARSED_ARGUMENTS}")
+    endif()
+    set(_pin "")
+    foreach(_k FILE URL COMMIT PATH_IN SHA256)
+        if(DEFINED A_${_k})
+            list(APPEND _pin ${_k} "${A_${_k}}")
+        endif()
+    endforeach()
+    # No ingest: float32 I/O as the zoo ships it, no strip, no vela.
+    asset_model_source(${_name}
+        OVERRIDE_VAR WIO_ASSET_${_name}_FILE OUT_VAR _src ${_pin})
+    # The receipt's commands are the shared `blob` command's, printed by
+    # cmake/asset_receipt.py for every board (issue #195): no RECEIPT_* here.
+    add_asset(${_name}
+        # No ingest, so the packer is the pin's first consumer and
+        # re-checks it on the bytes it packs (issue #132).
+        MODEL "${_src}"  MODEL_SHA256 "${_src_SHA256}"
+        PLUGIN ${A_PLUGIN}  SLOT ${A_SLOT}
+        PACKER "${WIO_PACKER}"  LAYOUT "${WIO_ABI_LAYOUT_JSON}"
+        MODEL_VERIFIER "${WIO_MODEL_VERIFIER}"
+        CONTAINER_VERIFIER "${WIO_CONTAINER_VERIFIER}"
+        SLOT_TABLE "${WIO_SLOT_TABLE_JSON}"
+        BUILD_ID "${WIO_PLUGIN_BUILD_ID}"
+        TARGET_ID "${WIO_PLUGIN_TARGET_ID}"
+        LINK_ADDR "${WIO_PLUGIN_BASE}"
+        CAPACITY "${WIO_PLUGIN_MAX}")
+endfunction()
+
+# The file #107 pins for Grove -- the same commit and the same SHA-256, from
+# the ST model zoo.  Wio has run a model of the same NAME before, and #108
+# established that it is the SAME BYTES: the board's slot 4 stores CRC-32
+# 3A210F57 over 189,816 B, which is what verify_tflite reports for this
+# fetch.  Nothing in the tree had recorded that identity, so the plan
+# expected only a differential check on hardware; the blob store's own CRC
+# answered it outright.  Licence: model-zoo weights, fetched into the build
+# tree only, never committed.
+#
+# [!] THE SLOT IS A DECLARATION THE BOARD CANNOT CHECK.  The build refuses a
+# container too large for it, but it never sees the slot number typed on
+# the board.  There `blob write` rewrites a slot that holds the same name
+# (erasing the whole slot before the transfer) and refuses, before any
+# erase, one holding another blob or a name already stored elsewhere.
+# Read `blob list` first.  Slot 12 is
+# the last 256 KB slot (src/blob_slots.c; 258,048 B of payload).
+wio_add_asset(blazeface
+    PLUGIN  blazeface  SLOT 12
+    URL     "https://github.com/STMicroelectronics/stm32ai-modelzoo.git"
+    COMMIT  "1423c78953a830903485135febe1dd98ff31aed8"
+    PATH_IN "face_detection/facedetect_front/Public_pretrainedmodel_public_dataset/widerface/blazeface_front_128/blazeface_front_128_int8.tflite"
+    SHA256  "e803bb4e93b10f7a19d4243bcc39698599a723f3128e19d3f90e0b1c0bc88dd8")

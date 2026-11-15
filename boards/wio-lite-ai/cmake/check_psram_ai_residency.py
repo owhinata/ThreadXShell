@@ -34,11 +34,11 @@ image really does contain `cam_frame.lto_priv.0`):
 
      The names come from the command line rather than from a constant in here, and
      that is owhinata/wio-lite-ai#9 phase 2c's doing.  Which buffers belong in the
-     carve-out depends on which NN backend was compiled in -- the `null` stub's three
-     tensors, or the TFLM arena and its model slots -- and CMakeLists.txt is the one place
-     that knows.  While the list was hard-coded here it named the `null` buffers, so this
-     gate failed EVERY tflm build with "no such object in the image", which reads exactly
-     like a placement bug and is not one.
+     carve-out depends on what was compiled in -- the TFLM arena and its model slots,
+     and membench's row -- and board.cmake is the one place that knows.  While the list
+     was hard-coded here it named the buffers of the no-inference `null` stub (removed
+     from this board in issue #239), so this gate failed EVERY tflm build with "no such
+     object in the image", which reads exactly like a placement bug and is not one.
 
   3. AGREEMENT -- the section starts exactly at the MPU region base.  That address is
      stated three times in three languages (the linker script, app/mpu.c, and the
@@ -63,9 +63,8 @@ PSRAM_AI_ORIGIN = 0x90600000
 PSRAM_AI_LENGTH = 2 * 1024 * 1024
 
 # What must be INSIDE the carve-out is passed with --require (see check 2 above): it is
-# backend-dependent, and CMakeLists.txt owns that choice.  Today's callers pass
-#   null:  null_in_buf, null_box_buf, null_scr_buf, psram_ai_bench_buf
-#   tflm:  nn_tflm_arena, nn_tflm_model_buf, psram_ai_bench_buf
+# build-dependent, and board.cmake owns that choice.  Today's one caller passes
+#   nn_tflm_arena, nn_tflm_model_buf, psram_ai_bench_buf
 
 # Must stay OUTSIDE it: every PSRAM buffer a bus master touches.  These are coherent
 # today only because the window they sit in is non-cacheable, and none of the drivers
@@ -192,7 +191,7 @@ def main():
     ap.add_argument("--nm", required=True)
     ap.add_argument("--require", action="append", metavar="SYMBOL", default=[],
                     help="base name of an object that must live in .psram_ai; repeat "
-                         "once per object (the set depends on CONFIG_NN_BACKEND)")
+                         "once per object (the set is board.cmake's, from what it compiles)")
     ap.add_argument("--internal-ram", action="append", metavar="SYMBOL", default=[],
                     help="object that must NOT be in the PSRAM carve-out at all -- "
                          "for state that has to be INITIALISED, since .psram_ai is "

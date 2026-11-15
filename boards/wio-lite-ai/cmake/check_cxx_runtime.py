@@ -58,8 +58,10 @@ import sys
 
 CANNOT_CHECK = 2   # exit code for "the check could not run", never confused with pass
 
-# Bytes each static-initialisation table already carries in the DEFAULT (`null`, pure C)
-# firmware.  .init_array's single entry is crtbegin's frame_dummy, which registers the
+# Bytes each static-initialisation table already carries in a pure C image built with
+# the same toolchain and the same float ABI -- the boot reference build
+# (boot-reference/boot.elf in the build directory).  .init_array's single entry is
+# crtbegin's frame_dummy, which registers the
 # exception-frame tables and is emitted for every image whether or not any C++ exists;
 # .fini_array's is its counterpart.
 #
@@ -75,9 +77,11 @@ CANNOT_CHECK = 2   # exit code for "the check could not run", never confused wit
 # failure blamed on a source change that is perfectly correct.  What we care about is
 # that OUR code contributed nothing, and "did not grow past the C-only baseline" says
 # that without asserting anything about the toolchain's own entries.  If a toolchain
-# bump does raise one, re-measure on the `null` build
-# (`arm-none-eabi-objdump -h build/shell.elf`) and raise it here -- after checking with
-# --list that the new entry is not one of ours.
+# bump does raise one, re-measure on the boot reference build
+# (`arm-none-eabi-objdump -h build/wio-lite-ai/boot-reference/boot.elf`; a missing
+# section is 0) and raise it here -- after checking with --list on shell.elf that the
+# new entry is not one of ours.  (Until issue #239 this was measured on the board's
+# no-inference `null` build, which is gone; at that change both read 4 / 4 / 0.)
 BASELINE_BYTES = {
     ".preinit_array": 0,
     ".init_array":    4,

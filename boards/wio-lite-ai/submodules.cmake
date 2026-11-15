@@ -14,9 +14,10 @@
 #  lib/mlperf-tiny is deliberately absent: it is a ~340 MB shallow mirror behind
 #  CONFIG_MLPERF_TINY (OFF by default) whose own fetch-on-demand lives in
 #  cmake/mlperf-tiny.cmake, so a default configure must neither be triggered by
-#  its absence nor drag it in.  lib/tflite-micro is absent for the same reason:
-#  only the tflm backend reads it, and cmake/tflm_submodule.cmake fetches it on
-#  first use, so a CONFIG_NN_BACKEND=null configure stays offline.  The ST Cube
+#  its absence nor drag it in.  lib/tflite-micro is absent too, because its one
+#  user, cmake/tflm_submodule.cmake, fetches it on first use.  On this board
+#  that is every configure (tflm is the only backend since issue #239), so a
+#  first configure here always needs the network.  The ST Cube
 #  set (H7 HAL, CMSIS device, CMSIS core) is not a submodule at all: board.cmake
 #  pins it per board and fetches it with cmake/fetch_upstream.cmake (issue #136).
 # ============================================================================

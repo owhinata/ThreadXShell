@@ -134,11 +134,9 @@ void nncam_infer_start(void *ctx);
 void nncam_entry(ULONG arg);
 int  nncam_publish_raw_hook(void *ctx, uint32_t gen);
 void nncam_account(void *ctx, enum nn_core_done what, int n, int took);
-#if defined(CONFIG_NN_BACKEND_TFLM)
 int  nncam_admits_hook(void *ctx, uint32_t gen);
 int  nncam_decode(void *ctx, int *n);
 int  nncam_publish_hook(void *ctx, int n, uint32_t gen);
-#endif
 
 /* ---- helpers used by more than one thread --------------------------------- */
 

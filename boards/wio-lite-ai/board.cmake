@@ -876,11 +876,6 @@ set(NN_PSRAM_AI_REQUIRED "")
 include("${BOARD_DIR}/cmake/tflite-micro.cmake")
 list(APPEND NN_PSRAM_AI_REQUIRED
      --require nn_tflm_arena --require nn_tflm_model_buf)
-# Tells the board's nn_svc_config.h that a RUNTIME MODEL LOADER exists, so
-# the shared `nn` command registers `model load` (issue #50).  The same
-# spelling f746g-disco uses, where the capability follows the backend because
-# that board still has a build without one.
-set(NN_BACKEND_DEFINE CONFIG_NN_BACKEND_TFLM=1)
 # membench's cacheable row is in the carve-out too.
 list(APPEND NN_PSRAM_AI_REQUIRED --require psram_ai_bench_buf)
 # The descriptor translation, and the published decode record, above the
@@ -1071,7 +1066,6 @@ target_compile_definitions(shell PRIVATE
     # YMODEM block; 4 KB makes an overrun require the shell thread to be starved
     # for four whole blocks.  `wifi imgload` reports the drop count either way.
     CLI_USBCDC_RX_BUFFER_SIZE=4096
-    ${NN_BACKEND_DEFINE}               # the backend has a model loader
     BSP_ENABLE_IWDG=$<BOOL:${BSP_ENABLE_IWDG}>   # IWDG1 arm + petter + wdt
     BSP_ENABLE_WFI=$<BOOL:${BSP_ENABLE_WFI}>      # gates TX_ENABLE_WFI (tx_user.h)
     BSP_ENABLE_PSRAM=$<BOOL:${BSP_ENABLE_PSRAM}>          # PSRAM window + psram cmd

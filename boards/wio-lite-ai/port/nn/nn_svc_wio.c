@@ -102,11 +102,10 @@ _Static_assert(WIO_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
  * [!] 3a NEVER CALLS THROUGH ANY OF THIS.  A container is validated and its
  * claims recorded; the plugin section is never copied and never branched into.
  */
-#if defined(CONFIG_NN_BACKEND_TFLM)
 #if !defined(WIO_PLUGIN_BASE) || !defined(WIO_PLUGIN_MAX) ||                  \
     !defined(WIO_PLUGIN_STACK_NN_WORK) || !defined(WIO_PLUGIN_STACK_PREVIEW) || \
     !defined(WIO_PLUGIN_STACK_SHELL)
-#error "board.cmake must define the WIO_PLUGIN_* policy for a tflm build"
+#error "board.cmake must define the WIO_PLUGIN_* policy"
 #endif
 
 /*
@@ -166,7 +165,6 @@ const struct plugin_policy plugin_board_policy = {
 	.veneer_cost    = PLUGIN_VENEER_BASE_COST,     /* veneer_cost_gate() */
 	.stack_accounting = PLUGIN_STACK_ACCOUNTING,
 };
-#endif /* CONFIG_NN_BACKEND_TFLM */
 
 /*
  * What the container of the OPEN model claimed, or nothing -- the store, its
@@ -210,10 +208,8 @@ static void nn_claims_set(const struct plugin_claims *c)
 	TX_RESTORE
 }
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 /*
- * Only `nn info`'s plugin lines read the claims, and the null backend prints
- * none (it cannot open a model) -- so the reader exists only beside its caller.
+ * Only `nn info`'s plugin lines read the claims.
  *
  * @param running  optional; whether a plugin is LOADED AND STARTED, taken in
  *                 the same masked section as the claims.
@@ -239,7 +235,6 @@ static enum plugin_claims_seen nn_claims_snapshot(const struct nn_svc_info *info
 	TX_RESTORE
 	return seen;
 }
-#endif /* CONFIG_NN_BACKEND_TFLM */
 
 /* [!] A legal asset name must survive `nn info`'s copy whole (issue #122 P10):
  * a truncated one can read as a different, equally legal, name. */
@@ -317,8 +312,9 @@ static void nn_guards_give(void)
 /*
  * The transition counter for `nn info`, read under this board's critical
  * section -- what nn_core_model_seq() does, without naming the order's board
- * table: `nn info` is in every build, and a build with no `nn model load` (the
- * null backend) must not keep the whole load path alive through it.
+ * table: `nn info` is in every build, and a build with no `nn model load` (one
+ * without the external NOR, BSP_ENABLE_KV=OFF) must not keep the whole load
+ * path alive through it.
  */
 static uint32_t nn_life_seq(void)
 {
@@ -352,9 +348,9 @@ int nn_svc_info_stands(const struct nn_svc_info *info)
  * replaces one model with another, and what the open container claimed.
  *
  * [!] THE PSRAM GUARD OF A LOAD IS TAKEN IN prepare() AND GIVEN BACK WITH THE
- * SESSION.  On a tflm build the shared order takes the open model down before
- * fetch() (issue #191, staging_is_open), and destroying the interpreter reads
- * the arena -- PSRAM -- so the guard must be held by then.  prepare() takes it
+ * SESSION.  The shared order takes the open model down before fetch() (issue
+ * #191, staging_is_open), and destroying the interpreter reads the arena --
+ * PSRAM -- so the guard must be held by then.  prepare() takes it
  * last, after the read-only checks of the slot, so a refusal there still costs
  * no `lcd on` anything; claim_give() gives it back, after the session's last
  * use.  Whether it is held is this flag, written and read only by the holder of
@@ -398,9 +394,8 @@ struct nn_wio_job {
 
 /*
  * The backend's reload: nn_model_reload() adopts the new model, or leaves none
- * if it is refused.  On a tflm build the shared order took the previous model
- * down before the bytes were read (issue #191), so there is nothing to restore;
- * the null backend refuses every load.
+ * if it is refused.  The shared order took the previous model down before the
+ * bytes were read (issue #191), so there is nothing to restore.
  *
  * [!] THE RESULTING MODEL STATE IS THE RELOAD'S OWN OUTCOME, NOT A QUESTION
  * ASKED AFTERWARDS.  This board's dispatcher adopts whatever handle the backend
@@ -440,8 +435,7 @@ static int nn_life_swap(struct nn_core_model_job *j, int *model_after)
 
 /*
  * An unload, and every load that ends EMPTY: the singleton stays open with NO
- * model -- not a built-in one; this board has none (issue #122 P11).  The
- * `null` backend has no release and answers NN_ERR_NOSUP, as its reload did.
+ * model -- not a built-in one; this board has none (issue #122 P11).
  */
 static void nn_life_release(void)
 {
@@ -451,7 +445,7 @@ static void nn_life_release(void)
 /*
  * [!] staging_is_open IS THE BACKEND'S ANSWER (issues #191, #200): tflm's one
  * staging buffer is where the open model lives, so the shared order takes that
- * model down before fetch() writes over it; the null backend stages nothing.
+ * model down before fetch() writes over it.
  * The fact is in the backend's table, not written here.
  */
 static const struct nn_core_model_backend nn_life_backend = {
@@ -550,8 +544,7 @@ static void nn_life_claim_give(void)
  *
  * The capacity is asked apart from the buffer (nn_model_stage_capacity()):
  * the tflm backend hands its one buffer out only once no model is open, so
- * fetch() asks for it after the order took the model down.  The null backend
- * stages nothing and is refused first, as before, at no NOR traffic.
+ * fetch() asks for it after the order took the model down.
  */
 static int nn_life_prepare(struct nn_core_model_job *j)
 {
@@ -560,11 +553,7 @@ static int nn_life_prepare(struct nn_core_model_job *j)
 	const struct nn_spec *spec = j->spec;
 	int rc;
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	rc = nn_model_stage_capacity(&w->cap);
-#else
-	rc = nn_model_load_region(&w->stage, &w->cap);
-#endif
 	if (rc != 0) {
 		nn_detail_set("%s", nn_model_strerror(rc));
 		return NN_SVC_ERR_NOSUP;
@@ -618,7 +607,7 @@ static int nn_life_prepare(struct nn_core_model_job *j)
 		return NN_SVC_ERR_ARG;
 	}
 
-	/* From here the PSRAM is written and interpreted -- and on tflm the open
+	/* From here the PSRAM is written and interpreted -- and the open
 	   model's interpreter is destroyed, which reads the arena -- so take the
 	   hardware guard too, software claim first, as nn_guards_take() explains. */
 	if (!psram_ready() || !psram_acquire_shared()) {
@@ -632,9 +621,8 @@ static int nn_life_prepare(struct nn_core_model_job *j)
 
 /*
  * The bytes: into the staging buffer, the CRC over the copy, the container
- * split.  On a tflm build the open model is already down (issue #191), so a
- * failure here ends with no model; the operator loads the previous one again
- * by its name.
+ * split.  The open model is already down (issue #191), so a failure here ends
+ * with no model; the operator loads the previous one again by its name.
  */
 static int nn_life_fetch(struct nn_core_model_job *j)
 {
@@ -645,7 +633,6 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 
 	j->bare = 1;
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	/* [!] ONLY NOW, WITH NO MODEL OPEN, IS THE BUFFER HANDED OUT: it is the
 	 * one the previous model lived in, and the backend refuses it while a
 	 * model is open -- which is what stops a load that skipped the take-down
@@ -662,7 +649,6 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 		              (unsigned long)w->cap);
 		return NN_SVC_ERR_HW;
 	}
-#endif
 
 	rc = blob_read(w->slot, 0u, w->stage, w->info.length);
 	nn_life_blob_give();          /* the NOR is done with; the rest is PSRAM */
@@ -710,7 +696,6 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 	 */
 	w->model_at  = w->stage;
 	w->model_len = w->info.length;
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	if (plugin_probe(w->stage, w->info.length) == PLUGIN_KIND_CONTAINER) {
 		enum plugin_result pr;
 
@@ -734,11 +719,9 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 		w->model_at  = (const uint8_t *)w->stage + w->claims.view.model_off;
 		w->model_len = w->claims.view.model_len;
 	}
-#endif
 	return NN_SVC_OK;
 }
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 /*
  * [!] THE LEASE IS TAKEN BEFORE ANYTHING CHANGES, AND ITS FAILURE IS AN ANSWER
  * (issue #110).
@@ -807,7 +790,6 @@ static void nn_life_plugin_unload(void)
 {
 	plugin_run_unload();
 }
-#endif /* CONFIG_NN_BACKEND_TFLM */
 
 /*
  * [!] THE LAST RESULT GOES WITH THE MODEL IT CAME FROM (issue #118), whenever
@@ -843,10 +825,7 @@ static void nn_life_commit(struct nn_core_model_job *j)
 
 /*
  * hw_down is NULL: this board has no NPU of its own, and what an EMPTY ending
- * must bring down is the backend's model, which the order releases itself.  The
- * plugin hooks exist only in a tflm build -- the null backend cannot load a
- * model, so no container can be open (lease_take NULL: no plugin hook is ever
- * called).
+ * must bring down is the backend's model, which the order releases itself.
  */
 static const struct nn_core_model_board nn_life_board = {
 	.cs_enter      = nn_core_cs_enter,
@@ -858,17 +837,10 @@ static const struct nn_core_model_board nn_life_board = {
 	.claim_give    = nn_life_claim_give,
 	.prepare       = nn_life_prepare,
 	.fetch         = nn_life_fetch,
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	.lease_take    = nn_life_lease_take,
 	.lease_give    = plugin_lease_give,
 	.plugin_start  = nn_life_plugin_start,
 	.plugin_unload = nn_life_plugin_unload,
-#else
-	.lease_take    = NULL,
-	.lease_give    = NULL,
-	.plugin_start  = NULL,
-	.plugin_unload = NULL,
-#endif
 	.hw_down       = NULL,
 	.invalidate    = nn_life_invalidate,
 	.forget        = nn_life_forget,
@@ -1691,7 +1663,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	   the same sample of the worker's counters. */
 	memset(&board, 0, sizeof board);
 	nn_core_take_final(&nn_core, &nn_core_board, &final, &board.cam);
-#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
+#if BSP_ENABLE_LCD
 	cam_preview_plugin_draw_stats(&board.spent, &board.refused);
 	plugin_lease_misses(&board.miss, &board.run);
 #endif
@@ -1770,7 +1742,7 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 	struct nn_camera_stats st;
 	unsigned i, n;
 	int ended = 0;
-#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
+#if BSP_ENABLE_LCD
 	uint32_t fin_spent = 0u, fin_refused = 0u, fin_miss = 0u, fin_run = 0u;
 #endif
 
@@ -1801,7 +1773,7 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 			st.holds_guards = live.holds_guards;
 			st.stream_lost  = live.stream_lost;
 			st.norm_signed  = live.norm_signed;
-#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
+#if BSP_ENABLE_LCD
 			fin_spent   = nn_stream_final.spent;
 			fin_refused = nn_stream_final.refused;
 			fin_miss    = nn_stream_final.miss;
@@ -1810,11 +1782,11 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		}
 		TX_RESTORE
 	}
-	(void)ended;   /* read only by the plugin line, which some builds lack */
+	(void)ended;   /* read only by the plugin line, which LCD-less builds lack */
 	for (i = 0u, n = 0u; i < 9u; i++) {
 		if (i == 1u && !st.stream_lost)
 			continue;                       /* only worth a line when true */
-#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
+#if BSP_ENABLE_LCD
 		/* [!] THE PANEL'S PLUGIN NUMBERS, and only when a plugin is what
 		 * draws.  Without a line nobody can read them, and counters nobody
 		 * reads are counters nobody can hold to a threshold -- which is the
@@ -1888,7 +1860,7 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 				             (unsigned long)st.depth_shell,
 				             (unsigned long)CLI_INSTANCE_STACK_SIZE);
 			return 1;
-#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
+#if BSP_ENABLE_LCD
 		case 7u:
 		case 8u: {
 			uint32_t spent = 0u, refused = 0u, miss = 0u, run = 0u;
@@ -1965,19 +1937,14 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
  * loaded plugin carries its OWN threshold.  The order -- lease, entry, lease
  * back -- and the answers are svc/nn/nn_svc_common.c's, the same on every
  * board (issue #174); this board protects the plugin with the lease alone, so
- * it counts nothing in.  A build with no decoder passes no entries and gets the
- * answers a decoder with none loaded gives (issue #116).
+ * it counts nothing in.
  */
 static const struct nn_svc_thresh_ops nn_thresh_ops = {
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	.lease_take = plugin_lease_take,
 	.lease_give = plugin_lease_give,
 	.get        = nn_active_get_thresh_milli,
 	.set        = nn_active_set_thresh_milli,
 	.not_held   = NN_ACTIVE_NOT_HELD,
-#else
-	.not_held   = 0,
-#endif
 };
 
 int nn_svc_thresh_get(unsigned *milli)
@@ -2012,7 +1979,6 @@ extern uint8_t __plugin_start[], __plugin_end[];   /* the linker's reservation *
 void nn_svc_info_extra(const struct nn_svc_info *info, nn_svc_write_fn write,
                        void *ctx)
 {
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	struct plugin_claims c;
 	enum plugin_claims_seen seen;
 	int running = 0;
@@ -2027,12 +1993,6 @@ void nn_svc_info_extra(const struct nn_svc_info *info, nn_svc_write_fn write,
 	                   (uint32_t)(uintptr_t)__plugin_start,
 	                   (uint32_t)(__plugin_end - __plugin_start),
 	                   plugin_board_policy.veneer_cost);
-#else
-	/* The null backend cannot load a model, so no container can be open. */
-	(void)info;
-	(void)write;
-	(void)ctx;
-#endif
 }
 
 /* There is no separate report call any more (issue #110): a board captures an

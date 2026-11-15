@@ -103,7 +103,6 @@ static int nncam_publish_raw(uint32_t gen)
 	return took;
 }
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 /*
  * The same, for a decode whose RESULT STAYED WITH THE PLUGIN (issue #110).
  *
@@ -126,9 +125,7 @@ static int nncam_publish_plugin(int n, uint32_t gen)
 	(void)tx_mutex_put(&nncam_det_lock);
 	return took;
 }
-#endif
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 /* Is a decode armed at @p gen still going to be published?  Asked by the worker
  * UNDER THE LEASE, before it lets a plugin rewrite its private result -- see
  * nncam_record_boundary() and nn_det_record_admits(). */
@@ -142,7 +139,6 @@ static int nncam_admits(uint32_t gen)
 	(void)tx_mutex_put(&nncam_det_lock);
 	return ok;
 }
-#endif
 
 /* The generation the worker remembers when it ARMS -- see nn_det_record.h for
  * why sampling it after the wait would leave the re-arm boundary open. */
@@ -230,7 +226,6 @@ int nncam_publish_raw_hook(void *ctx, uint32_t gen)
 	return nncam_publish_raw(gen);
 }
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 int nncam_admits_hook(void *ctx, uint32_t gen)
 {
 	(void)ctx;
@@ -260,7 +255,6 @@ int nncam_publish_hook(void *ctx, int n, uint32_t gen)
 	(void)ctx;
 	return nncam_publish_plugin(n, gen);
 }
-#endif
 
 /*
  * This board's counting: the one tally of all three boards
@@ -399,7 +393,6 @@ static void nncam_step(int first)
 	}
 	nncam_infer_cyc = nn_last_cycles(nncam_model);
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	/*
 	 * [!] THE LEASE SPANS THE DECODE AND THE PUBLISH, and it is taken
 	 * BEFORE the slot is looked up.  The panel runs at a higher priority
@@ -424,7 +417,6 @@ static void nncam_step(int first)
 		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, 0);
 		return;
 	}
-#endif
 	/*
 	 * The generation question, the decode and the publish under the lease --
 	 * or, with no plugin, the publish of an inference nothing decoded (issue

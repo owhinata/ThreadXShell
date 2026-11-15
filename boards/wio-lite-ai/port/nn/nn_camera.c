@@ -193,7 +193,6 @@ void nncam_guards_give(void)
  * after a `nn run` or a stopped stream reads it. */
 static void nncam_record_boundary(void)
 {
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	/*
 	 * [!] UNDER THE RESULT LEASE WHEN IT CAN BE HAD (issue #118).  The worker
 	 * asks "is my generation still current?" and then decodes and publishes,
@@ -211,16 +210,13 @@ static void nncam_record_boundary(void)
 	 * the account is withheld.  Lease before the record lock, as everywhere.
 	 */
 	int leased = plugin_lease_take();
-#endif
 
 	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) == TX_SUCCESS) {
 		nn_det_record_boundary(&nncam_rec);
 		(void)tx_mutex_put(&nncam_det_lock);
 	}
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	if (leased)
 		plugin_lease_give();
-#endif
 }
 
 /* See nn_camera.h. */
@@ -278,11 +274,7 @@ static void nncam_cs_exit(unsigned posture)
 static int nncam_is_plugin(void *ctx)
 {
 	(void)ctx;
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	return nn_active_is_plugin();
-#else
-	return 0;   /* the null backend carries no plugin mechanism */
-#endif
 }
 
 const struct nn_core_frame_ops nncam_frame_ops = {
@@ -295,7 +287,6 @@ const struct nn_core_frame_ops nncam_frame_ops = {
 	.publish_raw       = nncam_publish_raw_hook,
 	.outputs           = NULL,   /* nn_active_decode() reads them itself */
 	.account           = nncam_account,
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	.admits            = nncam_admits_hook,
 	.decode            = nncam_decode,
 	.publish           = nncam_publish_hook,
@@ -303,7 +294,6 @@ const struct nn_core_frame_ops nncam_frame_ops = {
 	.lease_held        = plugin_lease_held,
 	.lease_give        = plugin_lease_give,
 	.lease_note_unheld = plugin_lease_note_unheld,
-#endif
 };
 
 /* ------------------------------------------------------------------- API ------ */
@@ -521,7 +511,6 @@ int nn_camera_start(int colorbar, int require_draw)
 	}
 	nncam_holds_guards = 1;
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	/*
 	 * [!] ASK THE DECODER BEFORE LIGHTING A CAMERA (issue #110).  This is the
 	 * one admission point both `nn run` and `nn stream start` pass through, and
@@ -577,21 +566,6 @@ int nn_camera_start(int colorbar, int require_draw)
 			return NNCAM_ERR_NODRAW;
 		}
 	}
-#else
-	/*
-	 * [!] THE SAME ANSWER WITHOUT THE MACHINERY (issue #116).  The `null`
-	 * backend has no plugin mechanism compiled in at all, so there is nothing
-	 * that could ever decode here -- which makes the answer to "will anything
-	 * annotate this stream" a constant no.  Saying it here rather than
-	 * leaving the block out is the point: a refusal that exists only inside
-	 * the TFLM branch is a build where `nn stream start` lights a camera and
-	 * a panel for a stream that can never draw.
-	 */
-	if (require_draw) {
-		nncam_guards_give();
-		return NNCAM_ERR_NODRAW;
-	}
-#endif
 
 	rc = nncam_create_objects();
 	if (rc != NNCAM_OK) {
@@ -618,7 +592,7 @@ int nn_camera_start(int colorbar, int require_draw)
 	/* [!] depth_shell is NOT reset here.  Its deepest site is `nn model load`,
 	 * which happens before any stream and would otherwise be forgotten by the
 	 * first start -- the one number a per-start reset would always erase. */
-#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
+#if BSP_ENABLE_LCD
 	/* Armed here and not reset on stop, so `nn stream stats` right after a
 	 * stop still describes the run that just ended (issue #110). */
 	cam_preview_plugin_draw_arm();
@@ -817,14 +791,11 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
                          struct nn_result_extra *ext)
 {
 	struct nn_det_snapshot snap;
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	int leased = 0;
-#endif
 
 	if (out == NULL || !nncam_created)
 		return 0;
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	/*
 	 * [!] THE LEASE FIRST, AND ONLY FOR A CAPTURE.  A plugin's account of its
 	 * result has to be taken in the same breath as the snapshot that describes
@@ -842,13 +813,10 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
 			nn_report_set(rep, NN_REPORT_STALE);
 		}
 	}
-#endif
 
 	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS) {
-#if defined(CONFIG_NN_BACKEND_TFLM)
 		if (leased)
 			plugin_lease_give();
-#endif
 		return 0;
 	}
 	/*
@@ -877,7 +845,6 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
 	out->accepted   = snap.accepted;
 	out->epoch      = snap.epoch;
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	if (leased) {
 		/* Still under the lease: the snapshot above and this account of it
 		 * describe the same decode because nothing has run in between. */
@@ -911,7 +878,6 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
 		}
 		plugin_lease_give();
 	}
-#endif
 	return 1;
 }
 

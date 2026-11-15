@@ -49,7 +49,6 @@ int  nn_camera_draw(const struct nn_core_panel *p, void *ctx);
 /** The painted frame is out (svc/nn/nn_core_frame.h). */
 void nn_camera_present_done(void);
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 /**
  * nn_camera_draw() with this board's panel hooks over @p d.  Same return and
  * the same frame-lock rule: on DECLINED or PAINTED the lock is held.
@@ -74,7 +73,6 @@ void cam_preview_plugin_draw_stats(uint32_t *spent, uint32_t *refused);
  * after a stop still has to describe the run that just ended.
  */
 void cam_preview_plugin_draw_arm(void);
-#endif
 
 #ifdef __cplusplus
 }

@@ -65,9 +65,7 @@
 #include "camera.h"
 #include "ltdc_display.h"
 #include "nn_panel.h"     /* issue #140: the nn half of this thread */
-#if defined(CONFIG_NN_BACKEND_TFLM)
 #include "nn_active.h"   /* NN_ACTIVE_FRAME_W / _H, checked against the surface */
-#endif
 #include "stm32h7xx.h"   /* DWT->CYCCNT: time the rotating blit */
 #include "tx_api.h"
 
@@ -182,7 +180,6 @@ static void preview_band(unsigned band, const uint16_t *px, unsigned rows)
  * which is a different decision made for a different reason.
  */
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 /*
  * The surface this panel draws on and the frame nn_active maps boxes into are
  * the same rectangle, stated in two places because port/nn may not include
@@ -216,8 +213,6 @@ static const struct nn_panel_display preview_display = {
 	.surface_h   = ltdc_surface_h,
 };
 
-#endif /* CONFIG_NN_BACKEND_TFLM */
-
 static void preview_entry(ULONG arg)
 {
 	(void)arg;
@@ -225,7 +220,6 @@ static void preview_entry(ULONG arg)
 		if (tx_semaphore_get(&preview_flip_sem, TX_WAIT_FOREVER) != TX_SUCCESS)
 			continue;
 		{
-#if defined(CONFIG_NN_BACKEND_TFLM)
 			/* [!] THE LEASE COMES BEFORE THE FRAME LOCK (issue #110), because
 			   that is the order every other holder uses and an inversion is a
 			   deadlock waiting for somebody to make one of these waits
@@ -261,18 +255,13 @@ static void preview_entry(ULONG arg)
 			if (drew != (int)NN_CORE_DRAW_DECLINED &&
 			    drew != (int)NN_CORE_DRAW_PAINTED)
 				ltdc_lock_frame();
-#else
-			ltdc_lock_frame();
-#endif
 			if (ltdc_flip() == LTDC_OK)
 				preview_shown++;
 			else
 				preview_dropped++;
 			ltdc_unlock_frame();
-#if defined(CONFIG_NN_BACKEND_TFLM)
 			/* The painted frame is out (svc/nn/nn_core_frame.h). */
 			nn_camera_present_done();
-#endif
 		}
 		/* Unconditionally, including after a failed flip: leaving it set would
 		   stop the producer from ever starting another frame. */
@@ -286,9 +275,7 @@ int cam_preview_init(void)
 		LOG_ERR("preview semaphore create failed");
 		return -1;
 	}
-#if defined(CONFIG_NN_BACKEND_TFLM)
 	preview_check_plugin_frame();
-#endif
 	if (tx_thread_create(&preview_thread, "cam_prev", preview_entry, 0,
 	                     preview_stack, sizeof preview_stack,
 	                     PREVIEW_PRIO, PREVIEW_PRIO,

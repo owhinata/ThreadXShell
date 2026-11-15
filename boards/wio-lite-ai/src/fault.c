@@ -28,9 +28,7 @@
 #define LOG_TAG "fault"
 #include "log.h"
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 #include "plugin_run_core.h"
-#endif
 
 #include <stdint.h>
 
@@ -145,7 +143,6 @@ __attribute__((used)) void fault_handler_c(uint32_t *frame, uint32_t exc_return)
 		LOG_ERR("pc=%08lx lr=%08lx psr=%08lx sp=%08lx exc=%08lx",
 		        (unsigned long)pc, (unsigned long)lr, (unsigned long)xpsr,
 		        (unsigned long)sp, (unsigned long)exc_return);
-#if defined(CONFIG_NN_BACKEND_TFLM)
 		/*
 		 * Was it a loaded plugin (issue #110)?
 		 *
@@ -172,7 +169,6 @@ __attribute__((used)) void fault_handler_c(uint32_t *frame, uint32_t exc_return)
 				LOG_ERR("pc is in plugin '%s' +0x%lx", who,
 				        (unsigned long)off);
 		}
-#endif
 	} else
 		LOG_ERR("frame lost (stacking fault?) frame=%08lx exc=%08lx",
 		        (unsigned long)(uintptr_t)frame, (unsigned long)exc_return);

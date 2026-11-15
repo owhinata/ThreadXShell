@@ -13,13 +13,13 @@
 #define NN_SVC_CONFIG_H
 
 /*
- * [!] TWO CONDITIONS, AND BOTH ARE PROPERTIES RATHER THAN THE BOARD.  A model
- * can be pointed somewhere new only if a backend can interpret one at run time
- * AND there is an asset store to read it out of.  The `null` backend has no
- * loader, and a build without the external NOR has nowhere to load FROM, so in
- * either case `nn model load` would be a subcommand that always refuses.
+ * [!] A PROPERTY RATHER THAN THE BOARD.  A model can be pointed somewhere new
+ * only if there is an asset store to read it out of.  The backend (TFLM, the
+ * only one on this board since issue #239) always has a run-time loader, but a
+ * build without the external NOR has nowhere to load FROM, so there `nn model
+ * load` would be a subcommand that always refuses.
  */
-#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_KV
+#if BSP_ENABLE_KV
 #define NN_SVC_HAS_MODEL_LOAD  1
 #endif
 

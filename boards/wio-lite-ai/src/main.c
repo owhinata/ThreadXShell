@@ -42,9 +42,7 @@
 #if BSP_ENABLE_LCD
 #include "cam_preview.h"
 #endif
-#if defined(CONFIG_NN_BACKEND_TFLM)
 #include "plugin_lease.h" /* who may touch a plugin's result (issue #110)      */
-#endif
 /* [!] UNCONDITIONAL, and it has to be (issue #50).  usb_stack and iwdg_stack
  * below are DTCM_BSS in every configuration, so this include cannot sit inside
  * an option's guard (it once sat inside the LCD one): turning that option off
@@ -204,7 +202,6 @@ void tx_application_define(void *first_unused_memory)
   (void) cam_preview_init();
 #endif
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
   /* The lease that decides who may touch a loaded plugin's private result
    * (issue #110).  Created here because three threads reach for it -- the
    * inference worker, the preview and a console -- and the first of them may
@@ -213,7 +210,6 @@ void tx_application_define(void *first_unused_memory)
    * which is the same answer a contended lease gives, so a panel presents its
    * picture bare rather than reading half-written state. */
   (void) plugin_lease_init();
-#endif
 
   /* The host's own IP stack (owhinata/wio-lite-ai#23 U3): NetX Duo plus the thread that owns a bridge
    * session.  Object creation only -- the IP instance comes up with address 0.0.0.0 and

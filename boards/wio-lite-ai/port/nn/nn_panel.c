@@ -17,16 +17,13 @@
 #include "nn_camera.h"       /* nn_camera_decode_get(), nn_camera_overlay() */
 #include "nn_camera_priv.h"  /* nncam_frame, nncam_frame_ops */
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 #include "nn_active.h"
 #include "plugin_lease.h"
 #include "plugin_paint.h"
-#endif
 #include "tx_api.h"
 
 #include <string.h>
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
 /*
  * What one plugin draw() may spend.
  *
@@ -172,8 +169,6 @@ int nn_panel_draw(const struct nn_panel_display *d)
 {
 	return nn_camera_draw(&preview_panel, (void *)d);
 }
-
-#endif /* CONFIG_NN_BACKEND_TFLM */
 
 int nn_camera_draw(const struct nn_core_panel *p, void *ctx)
 {

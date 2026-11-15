@@ -141,9 +141,17 @@ static void flash_session_recover(struct cli_instance *sh)
 	/* The session dropped the firmware proof along with everything else the host
 	 * believed (rtl_link_force_quiesce -> rtl_link_forget_module), and `wifi connect`
 	 * now needs it in order to bridge.  Say so here rather than letting the next
-	 * connect discover it. */
+	 * connect discover it.  `wifi reconnect` (issue #238) earns it by itself, as
+	 * the boot does; it is offered, never run from here -- and only where it
+	 * exists (a build with the KV store). */
+#if BSP_ENABLE_KV
+	cli_print(sh, "  WiFi is not connected.  `wifi reconnect` connects again with the "
+	          "saved settings;\r\n  by hand, `wifi ver` and then `wifi connect` (this "
+	          "session dropped the firmware proof)\r\n");
+#else
 	cli_print(sh, "  run `wifi ver` before `wifi connect` (this session dropped the "
 	          "firmware proof)\r\n");
+#endif
 }
 
 /* Open a download session: enter download mode + load the flashloader at 1.5 Mbaud.

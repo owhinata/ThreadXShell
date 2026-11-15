@@ -255,7 +255,8 @@ void net_core_ping(uint32_t ip, unsigned timeout_ms, unsigned *rtt_ms,
                    struct net_svc_result *res);
 
 /**
- * wio-lite-ai's KV boot `net.mode=dhcp`: make DHCP the source and wake the
+ * wio-lite-ai's KV `net.mode=dhcp` (the boot, and `wifi reconnect` since issue
+ * #238): make DHCP the source and wake the
  * worker, which starts the client when the recorded link is up -- now, if the
  * up was already handled, or when it comes.  Unlike `net dhcp` it is not
  * refused with the link down: right after the bridge comes up the recorded

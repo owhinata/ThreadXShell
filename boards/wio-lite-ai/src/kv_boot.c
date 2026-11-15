@@ -50,6 +50,12 @@
  * #229 that claim is counted on this instance alone, so USB CDC printf and Ctrl+C
  * stay live during a boot association (it used to be one global flag).
  *
+ * `wifi reconnect` (issue #238) runs the same WiFi and net.mode steps
+ * (kv_apply()) from a console: it reports to that console as well as to the log,
+ * does not read wifi.enable / wifi.autoconnect (src/kv_wifi.h), and applies
+ * net.mode only after a connection.  It and this thread never run at once
+ * (kv_apply_owner).
+ *
  * Priority 15: above the shell (16) so the configuration is settled before a user
  * can reasonably type, but below the USB pump (8) and the IWDG petter (5), neither
  * of which may ever wait behind a flash erase or a 22 s association.
@@ -66,6 +72,7 @@
 
 #include "cli.h"
 #include "cli_backend_log.h"
+#include "fmt.h"         /* fmt_vsnformat(): a report line for the console */
 #include "link_bridge.h"
 #include "rtl8720.h"
 #include "wifi_auto.h"
@@ -109,16 +116,68 @@ _Static_assert(KV_CFG_REPORT_ERR == LOG_LEVEL_ERR && KV_CFG_REPORT_WRN == LOG_LE
                KV_CFG_REPORT_INF == LOG_LEVEL_INF,
                "kv_cfg report weights must be this board's log levels");
 
+/* ------------------------------------------------------------------ *
+ *  Who is applying the configuration (issue #238)
+ * ------------------------------------------------------------------ */
+
+/*
+ * The boot sequence and `wifi reconnect` are one implementation (kv_apply()
+ * below), and only one of them runs at a time: this word says which.  FREE at
+ * reset (DTCM_BSS is zeroed by SystemInit()); kv_boot_init() sets BOOT just
+ * before it creates the thread -- the scheduler is not running yet, so no
+ * command can have taken it first -- and puts it back if the thread was not
+ * created.  The thread gives it back on every way out.  A command takes it
+ * with one test-and-set with interrupts masked and holds it until its net.mode
+ * step (up to KV_CFG_DHCP_WAIT_MS) has finished.
+ *
+ * It separates these two and nothing else: no other command reads it.  A
+ * `wifi reconnect` runs in the USB console's foreground only (telnet and `&`
+ * are refused first), so nothing else is typed on that console meanwhile, and
+ * what telnet can still run beside it is what can run beside `wifi connect` or
+ * the boot sequence today.
+ */
+enum { KV_APPLY_FREE = 0u, KV_APPLY_BOOT = 1u, KV_APPLY_CONSOLE = 2u };
+static volatile uint8_t kv_apply_owner DTCM_BSS;
+
+/* The console a `wifi reconnect` is running on, or NULL: the report below also
+ * writes every line there.  Only the owner of kv_apply_owner writes it, and it
+ * is cleared BEFORE the word is given back, so a line can never land on a
+ * console whose command has ended. */
+static struct cli_instance *volatile kv_report_sh DTCM_BSS;
+
+/*
+ * Every line this file and the shared steps report: to the log, as before, and
+ * -- while a `wifi reconnect` runs -- to its console too.  The arguments are
+ * walked twice, each with its own va_start, so the second walk never reads a
+ * list the first one consumed.
+ */
 static void kv_boot_report(unsigned level, const char *fmt, ...)
 {
+	struct cli_instance *sh = kv_report_sh;
 	va_list ap;
 
-	if (level > LOG_COMPILE_LEVEL)   /* the LOG_*() macros' build-time floor */
-		return;
-	va_start(ap, fmt);
-	log_vwrite(level, LOG_TAG, fmt, ap);
-	va_end(ap);
+	if (level <= LOG_COMPILE_LEVEL) {   /* the LOG_*() macros' build-time floor */
+		va_start(ap, fmt);
+		log_vwrite(level, LOG_TAG, fmt, ap);
+		va_end(ap);
+	}
+	if (sh != NULL) {
+		char line[LOG_MSG_MAX + 1];   /* what one log record holds */
+
+		va_start(ap, fmt);
+		(void)fmt_vsnformat(line, sizeof line, fmt, ap);
+		va_end(ap);
+		if (level == KV_CFG_REPORT_ERR)
+			(void)cli_error(sh, "%s\r\n", line);
+		else if (level == KV_CFG_REPORT_WRN)
+			(void)cli_warn(sh, "%s\r\n", line);
+		else
+			(void)cli_print(sh, "%s\r\n", line);
+	}
 }
+
+#define KV_INF(...) kv_boot_report(KV_CFG_REPORT_INF, __VA_ARGS__)
+#define KV_WRN(...) kv_boot_report(KV_CFG_REPORT_WRN, __VA_ARGS__)
 
 const struct kv_cfg_facts kv_cfg_board_facts = {
 	.report      = kv_boot_report,
@@ -130,14 +189,31 @@ const struct kv_cfg_facts kv_cfg_board_facts = {
  *  Steps
  * ------------------------------------------------------------------ */
 
-static void cfg_wifi(void)
+/* How the WiFi step ended, for the caller that decides whether net.mode follows. */
+enum cfg_wifi_end {
+	CFG_WIFI_CONNECTED = 0,   /* associated, and the host stack came up       */
+	CFG_WIFI_NOT_CONNECTED,   /* nothing to do, refused, or the sequence failed */
+	CFG_WIFI_CANCELLED,       /* Ctrl+C was asked for on the caller's console  */
+};
+
+/*
+ * The WiFi step.  @sh is the shell the association sequence reports through and
+ * is cancelled from: the log instance at boot, the operator's console for
+ * `wifi reconnect`.  @caller decides what src/kv_wifi.h asks for: the boot
+ * reads wifi.enable and wifi.autoconnect and may power the radio only; a
+ * console caller does neither -- the power-only path takes no lock and does not
+ * forget the module, which is only right straight after reset.
+ */
+static enum cfg_wifi_end cfg_wifi(struct cli_instance *sh, enum kv_wifi_caller caller,
+                                  int store_open)
 {
 	char ssid[WIFI_AUTO_SSID_MAX + 1];
 	char psk[WIFI_AUTO_PASS_MAX + 1];
 	uint32_t security = 0u;
-	struct kv_wifi_in in = { .caller = KV_WIFI_BOOT, .store_open = 1 };
+	struct kv_wifi_in in = { .caller = caller, .store_open = store_open };
 	struct kv_wifi_answer a;
 	unsigned reads;
+	int rc;
 
 	/* Read the keys one at a time, as src/kv_wifi.h asks for them: a key the
 	 * answer does not depend on is never read, so it never warns. */
@@ -166,8 +242,8 @@ static void cfg_wifi(void)
 		 * rather than left floating.  That call is unconditional -- it is what
 		 * makes the module's state defined at all -- and only powering it ON is
 		 * what this setting gates. */
-		LOG_INF("wifi.enable is not set -- radio stays off");
-		return;
+		KV_INF("wifi.enable is not set -- radio stays off");
+		return CFG_WIFI_NOT_CONNECTED;
 	}
 
 	if (a.step == KV_WIFI_POWER_ONLY) {
@@ -181,8 +257,8 @@ static void cfg_wifi(void)
 		 */
 		rtl8720_power(true);
 		tx_thread_sleep(1500u);
-		LOG_INF("radio powered (no autoconnect)");
-		return;
+		KV_INF("radio powered (no autoconnect)");
+		return CFG_WIFI_NOT_CONNECTED;
 	}
 
 	/*
@@ -193,13 +269,22 @@ static void cfg_wifi(void)
 	 * wire while the module was still starting.
 	 */
 	if (a.step == KV_WIFI_NO_SSID) {
-		LOG_WRN("wifi.autoconnect is set but wifi.ssid is not -- not associating");
-		return;
+		if (caller == KV_WIFI_BOOT)
+			KV_WRN("wifi.autoconnect is set but wifi.ssid is not -- not associating");
+		else
+			(void)cli_error(sh, "wifi reconnect: no saved network (wifi.ssid is "
+			                "not set)\r\n");
+		return CFG_WIFI_NOT_CONNECTED;
+	}
+	if (a.step == KV_WIFI_NO_STORE) {
+		/* Only a console caller gets here: the boot runs this step only when
+		 * the store opened. */
+		(void)cli_error(sh, "wifi reconnect: the configuration store is not open "
+		                "(%s)\r\n", kv_state_str());
+		return CFG_WIFI_NOT_CONNECTED;
 	}
 	if (a.step != KV_WIFI_CONNECT)
-		return;   /* not reached: with the store open the boot is answered
-		           * radio off, power only, no ssid or connect
-		           * (test/test_kv_wifi.c) */
+		return CFG_WIFI_NOT_CONNECTED;   /* not reached: see test/test_kv_wifi.c */
 	if (in.security != KV_WIFI_YES)
 		security = a.default_security;
 
@@ -225,22 +310,50 @@ static void cfg_wifi(void)
 	 * growing rtl_link_begin()'s 1.5 s boot wait: a join issued 20 s after CHIP_EN goes
 	 * high fails just as readily as one at 1.7 s (measured).
 	 */
-	LOG_INF("associating with \"%s\"", ssid);
-	if (wifi_connect_run(&kv_boot_sh, ssid, (in.psk == KV_WIFI_YES) ? psk : NULL,
-	                     security, in.security == KV_WIFI_YES,
-	                     /* earn_gen */ true) != 0)
-		LOG_WRN("automatic association failed -- `wifi connect` by hand");
+	/*
+	 * The firmware generation is earned here for both callers (decision 2 of
+	 * issue #238): a console caller after `wifi flash` faces a module whose
+	 * generation the host has forgotten, exactly as the boot does.  The pre-N2
+	 * heap hazard of the version query (owhinata/wio-lite-ai#20) is the one the
+	 * boot already takes on every start.
+	 */
+	KV_INF("associating with \"%s\"", ssid);
+	rc = wifi_connect_run(sh, ssid, (in.psk == KV_WIFI_YES) ? psk : NULL,
+	                      security, in.security == KV_WIFI_YES, /* earn_gen */ true);
 
 	/* The passphrase is on the stack here and in host RAM inside wifi_auto after
 	 * this; wipe our copy on the way out so it is not left in a thread stack that
 	 * `devmem` can read.  This is hygiene, not protection -- the value is stored
 	 * in the clear on the external flash regardless (see kv.h). */
 	memset(psk, 0, sizeof psk);
+
+	if (caller == KV_WIFI_BOOT) {
+		if (rc != 0)
+			KV_WRN("automatic association failed -- `wifi connect` by hand");
+		return (rc == 0) ? CFG_WIFI_CONNECTED : CFG_WIFI_NOT_CONNECTED;
+	}
+	/*
+	 * wifi_connect_run() answers a Ctrl+C and a failure alike (1), so a cancel
+	 * is told apart by the console's request, asked straight after it returns
+	 * and on success too: the request stays set for the rest of the command.
+	 * It says Ctrl+C was pressed, not that it caused the failure.  A cancel
+	 * while the host stack was coming up stops only the wait; the bring-up
+	 * goes on in the background, as after `wifi connect`.
+	 */
+	if (cli_cancel_requested(sh)) {
+		KV_INF("wifi reconnect: stopped by Ctrl+C -- net.mode not applied");
+		return CFG_WIFI_CANCELLED;
+	}
+	if (rc != 0) {
+		KV_WRN("wifi reconnect: not connected -- net.mode not applied");
+		return CFG_WIFI_NOT_CONNECTED;
+	}
+	return CFG_WIFI_CONNECTED;
 }
 
 /* net.mode, through the shared steps.  Between reading it and applying it is the
  * one check that is this board's (decision D4 of issue #214). */
-static void cfg_net(void)
+static void cfg_net(enum kv_wifi_caller caller)
 {
 	char mode[16];
 
@@ -250,11 +363,36 @@ static void cfg_net(void)
 	if (!link_bridge_is_up()) {
 		/* Not a failure of this step: without an association there is no host
 		 * stack to address, and saying so is more useful than a DHCP timeout. */
-		LOG_WRN("net.mode=%s ignored -- the host stack is not up", mode);
+		KV_WRN("net.mode=%s ignored -- the host stack is not up", mode);
 		return;
 	}
 
+	/* The DHCP wait does not answer Ctrl+C (the shared step has no way to ask),
+	 * so a console caller is told how long it can take before it starts.  The
+	 * boot says nothing new: its log stays what it was. */
+	if (caller != KV_WIFI_BOOT && strcmp(mode, "dhcp") == 0)
+		KV_INF("net.mode=dhcp: waiting up to %u s for a lease (Ctrl+C does not "
+		       "stop this wait)", KV_CFG_DHCP_WAIT_MS / 1000u);
+
 	kv_cfg_net_apply(mode);
+}
+
+/*
+ * The configuration, applied: the WiFi step, then net.mode.  One implementation
+ * for the boot thread and for `wifi reconnect` (issue #238); the caller holds
+ * kv_apply_owner.  The boot runs net.mode whatever the WiFi step did, as it
+ * always has (with the host stack down it says so and skips); a console caller
+ * runs it only after a connection, so a failed or cancelled association never
+ * walks into a 30 s wait that cannot be stopped.
+ */
+static enum cfg_wifi_end kv_apply(struct cli_instance *sh, enum kv_wifi_caller caller,
+                                  int store_open)
+{
+	enum cfg_wifi_end end = cfg_wifi(sh, caller, store_open);
+
+	if (caller == KV_WIFI_BOOT || end == CFG_WIFI_CONNECTED)
+		cfg_net(caller);
+	return end;
 }
 
 /* ------------------------------------------------------------------ *
@@ -266,17 +404,20 @@ static void kv_boot_entry(ULONG arg)
 
 	if (kv_cfg_open() != 0) {
 		kv_cfg_tty_port();   /* the default, once */
+		kv_apply_owner = KV_APPLY_FREE;
 		return;   /* nothing to apply; every command still works by hand */
 	}
 
 	/* Before the association, so telnet listens as soon as an address comes. */
 	kv_cfg_tty_port();
-	cfg_wifi();
-	cfg_net();
+	(void)kv_apply(&kv_boot_sh, KV_WIFI_BOOT, /* store_open */ 1);
 
 	/* The sequence may have ended mid-line (a module that printed without a
 	 * newline); flush it so nothing is left sitting in the assembler. */
 	cli_backend_log_flush(&kv_boot_tr);
+
+	/* The boot never sets kv_report_sh, so there is nothing to clear first. */
+	kv_apply_owner = KV_APPLY_FREE;
 
 	/* Done.  Returning leaves the thread TERMINATED rather than parked on a
 	 * sleep it would never wake from; its stack is not reclaimed either way, but
@@ -293,12 +434,57 @@ int kv_boot_init(void)
 	 * this instance, so without it the wifi/net steps have nowhere to write and
 	 * are skipped rather than run blind. */
 	if (cli_init(&kv_boot_sh) != 0)
-		return -1;
+		return -1;   /* kv_apply_owner untouched: FREE, nothing to give back */
 
+	/* Before the thread exists, and before the scheduler runs: no command can
+	 * have taken the word first, and the thread can only start with it set. */
+	kv_apply_owner = KV_APPLY_BOOT;
 	rc = tx_thread_create(&kv_boot_thread, "cfg", kv_boot_entry, 0,
 	                      kv_boot_stack, sizeof kv_boot_stack,
 	                      KV_BOOT_PRIORITY, KV_BOOT_PRIORITY,
 	                      TX_NO_TIME_SLICE, TX_AUTO_START);
+	if (rc != TX_SUCCESS) {
+		kv_apply_owner = KV_APPLY_FREE;
+		return -1;
+	}
+	return 0;
+}
 
-	return (rc == TX_SUCCESS) ? 0 : -1;
+/* ------------------------------------------------------------------ *
+ *  `wifi reconnect` (issue #238)
+ * ------------------------------------------------------------------ */
+int kv_boot_reconnect(struct cli_instance *sh)
+{
+	TX_INTERRUPT_SAVE_AREA
+	uint8_t was;
+	enum cfg_wifi_end end;
+
+	/* Test and set in one masked section: the boot thread gives the word back
+	 * from a lower priority, and another console could be asking too. */
+	TX_DISABLE
+	was = kv_apply_owner;
+	if (was == KV_APPLY_FREE)
+		kv_apply_owner = KV_APPLY_CONSOLE;
+	TX_RESTORE
+
+	if (was == KV_APPLY_BOOT) {
+		(void)cli_error(sh, "wifi reconnect: the boot configuration is still running "
+		                "-- see dmesg; retry when it ends\r\n");
+		return 1;
+	}
+	if (was != KV_APPLY_FREE) {
+		(void)cli_error(sh, "wifi reconnect: already running\r\n");
+		return 1;
+	}
+
+	kv_report_sh = sh;
+	/* So the log tells this run apart from the boot's, whose lines it repeats. */
+	KV_INF("wifi reconnect: applying the saved settings");
+	end = kv_apply(sh, KV_WIFI_CONSOLE, kv_state() == KV_STATE_READY);
+	/* The console first, then the word: a line reported after the word is free
+	 * must never find this command's console. */
+	kv_report_sh = NULL;
+	kv_apply_owner = KV_APPLY_FREE;
+
+	return (end == CFG_WIFI_CONNECTED) ? 0 : 1;
 }

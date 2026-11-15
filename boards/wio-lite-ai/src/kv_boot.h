@@ -21,6 +21,19 @@ extern "C" {
  */
 int kv_boot_init(void);
 
+struct cli_instance;
+
+/**
+ * `wifi reconnect` (issue #238): apply the saved WiFi settings and then
+ * net.mode, with the boot's own implementation, reporting to @p sh as well as
+ * to the log.  wifi.enable and wifi.autoconnect are not read; there must be a
+ * wifi.ssid.  net.mode is applied only after a connection.  Refused while the
+ * boot configuration or another `wifi reconnect` runs.  The caller has already
+ * refused the telnet console and a background job.  Returns 0 when connected
+ * (whatever net.mode then did), 1 otherwise; every refusal is printed.
+ */
+int kv_boot_reconnect(struct cli_instance *sh);
+
 #ifdef __cplusplus
 }
 #endif

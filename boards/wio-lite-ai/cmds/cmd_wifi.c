@@ -55,6 +55,9 @@
 #include "wifi_connect.h" /* the association sequence, shared with boot (#37) */
 #include "net_tty.h"
 #include "link_bridge.h" /* the host stack owns the module while it is up (issue #23 U3) */
+#if BSP_ENABLE_KV
+#include "kv_boot.h"     /* `wifi reconnect`: the boot's sequence (issue #238) */
+#endif
 #include "stm32h7xx_hal.h"   /* #5 inc 6: HAL_GetTick (1 ms SysTick, fed via tx_glue.c)
                               * for the scan-wait deadline -- read-only, no HAL init. */
 
@@ -554,6 +557,38 @@ static int cmd_wifi_connect(struct cli_instance *sh, int argc, char **argv)
 	return wifi_connect_run(sh, ssid, pass, security, security_explicit, false);
 }
 
+#if BSP_ENABLE_KV
+/*
+ * wifi reconnect (issue #238): connect again with the saved settings -- the
+ * boot's own sequence (src/kv_boot.c), from the firmware check to net.mode.
+ *
+ * Both refusals come before a key is read.  Not from telnet: the association
+ * drops the link the session rides on (the same question `wifi connect`
+ * asks).  Not as `... &`: the association claims the console, which a
+ * background job cannot -- asked here so a refusal costs nothing; the claim
+ * itself can still fail later, and is then reported by the sequence.
+ */
+static int cmd_wifi_reconnect(struct cli_instance *sh, int argc, char **argv)
+{
+	int rc;
+
+	(void)argc;
+	(void)argv;
+	if (net_tty_guard(sh, "wifi reconnect"))
+		return 1;
+	rc = cli_console_claimable(sh);
+	if (rc == -2) {
+		cli_error(sh, "wifi reconnect: run in the foreground (not `... &`)\r\n");
+		return 1;
+	}
+	if (rc != 0) {
+		cli_error(sh, "wifi reconnect: the console could not be claimed (%d)\r\n", rc);
+		return 1;
+	}
+	return kv_boot_reconnect(sh);
+}
+#endif
+
 /* wifi disconnect: drop the current association (no power-on -- pure query). */
 static int cmd_wifi_disconnect(struct cli_instance *sh, int argc, char **argv)
 {
@@ -1020,6 +1055,17 @@ fail:
 }
 
 
+/* A directive cannot sit inside the macro's arguments, so the optional entry is
+ * spelled here: `wifi reconnect` exists only with the KV store. */
+#if BSP_ENABLE_KV
+#define WIFI_RECONNECT_ENTRY                                                         \
+	CLI_CMD_ARG(reconnect, NULL,                                                 \
+	            "connect again with the saved settings (wifi.*, then net.mode)", \
+	            cmd_wifi_reconnect, 1, 0),
+#else
+#define WIFI_RECONNECT_ENTRY
+#endif
+
 CLI_SUBCMD_SET_CREATE(wifi_subcmds,
 	CLI_CMD_ARG(info,  NULL, "show RTL8720 wiring + CHIP_EN state",       cmd_wifi_info,  1, 0),
 	CLI_CMD_ARG(on,    NULL, "CHIP_EN high (power on RTL8720); no-op if already on",
@@ -1033,6 +1079,7 @@ CLI_SUBCMD_SET_CREATE(wifi_subcmds,
 	            cmd_wifi_ver, 1, 0),
 	CLI_CMD_ARG_USAGE(connect, NULL, "associate with an AP: connect <ssid> [pw] [sec_hex]",
 	                  "<ssid> [pw] [sec_hex]", cmd_wifi_connect, 2, 2),
+	WIFI_RECONNECT_ENTRY
 	CLI_CMD_ARG(disconnect, NULL, "drop the current WiFi association",     cmd_wifi_disconnect, 1, 0),
 	CLI_CMD_ARG_USAGE(autoreconnect, NULL,
 	                  "re-associate by ourselves when the AP goes away: autoreconnect [on|off]",

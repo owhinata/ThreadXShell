@@ -108,8 +108,11 @@ int kv_cfg_net_mode(char *mode, size_t size);
  * wait up to KV_CFG_DHCP_WAIT_MS for an address) or static (net.ip, net.mask and
  * net.gw, all three).  Anything that cannot be applied is reported; on a board
  * whose default is DHCP it then says so and falls back to DHCP, once.  Call it
- * only when the
- * board has NetX, and only once.
+ * only when the board has NetX.  "Once" is the caller's promise, not a need of
+ * this function: what it does -- the static address `net ip` sets, or making
+ * DHCP the source -- is done again and again on a running stack.  The boot
+ * calls it once; wio-lite-ai's `wifi reconnect` (issue #238) calls it again,
+ * on a run that connected and found a `net.mode` to apply.
  */
 void kv_cfg_net_apply(const char *mode);
 

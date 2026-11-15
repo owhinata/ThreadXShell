@@ -80,6 +80,11 @@ COMMANDS = {
     "shell/cmds/cmd_blob.c": REQUIRED + "int cmd_blob(void) { return 0; }\n",
     "shell/cmds/fs_core.c": "/* shared-command: optional BOARD_HAS_FS */\nint fs_core(void) { return 0; }\n",
 }
+# issue #246: the fixture's shell core. It owns state, as the real core does,
+# but only file-local: a file static and a static inside a function.
+CORE_SRC = "shell/core/core_fix.c"
+CORE_STATIC = "static int core_count;\n"
+CORE = CORE_STATIC + "int core_fix(void) { static int calls; return ++core_count + ++calls; }\n"
 
 
 def project(root, args):
@@ -89,6 +94,7 @@ def project(root, args):
         shutil.copy2(CMAKE / name, root / "cmake" / name)
     for name, text in COMMANDS.items():
         write(root, name, text)
+    write(root, CORE_SRC, CORE)
     write(root, "svc/pure.c", "int pure(void) { return 1; }\n")
     write(root, "svc/ymodem.c", YMODEM)
     write(root, "svc/header_only.c", "#error not compiled\n")
@@ -118,6 +124,10 @@ if(NOT FS_STATE STREQUAL "UNSET")
 endif()
 if(FS_COMPILED)
     list(APPEND CMDS shell/cmds/fs_core.c)
+endif()
+# issue #246: NO_CORE leaves the shell core out of the link.
+if(NOT NO_CORE)
+    list(APPEND CMDS shell/core/core_fix.c)
 endif()
 foreach(_cmd IN ITEMS ${OMIT_CMD} ${SIDE_CMD} ${ARCHIVE_CMD})
     list(REMOVE_ITEM CMDS "${_cmd}")
@@ -220,6 +230,37 @@ def replay_mutations(args):
                          "--objdump", args.objdump, "--nm", args.nm, str(tmp / "good.o")], True,
                         "owns no mutable storage")
             print("ok board source mutation:", name, guard)
+
+    # issue #246: rule (d) on the real shell core in this board's context. A copy
+    # of shell/core/cli_job.c with `static` taken off its job table is compiled
+    # with the board's own argv and must be refused; the real file must pass.
+    source = root / "shell" / "core" / "cli_job.c"
+    entries = [e for e in database if Path(e["file"]).resolve() == source]
+    assert entries, "board does not compile shell/core/cli_job.c"
+    original = source.read_text()
+    needle = "static struct cli_job  cli_jobs["
+    assert original.count(needle) == 1, "shell/core/cli_job.c no longer declares " + needle
+    for entry in entries:
+        with tempfile.TemporaryDirectory(prefix="core-regression-") as tmp:
+            tmp = Path(tmp)
+            copy = tmp / source.name
+            copy.write_text(original.replace(needle, "struct cli_job  cli_jobs["))
+            argv = [str(copy) if a == str(source) else a for a in gate.entry_argv(entry)]
+            argv += ["-iquote", str(source.parent)]
+            command = gate.replay_argv(argv, copy, entry["directory"], Path(args.cc).resolve(),
+                                       tmp / "bad.o", Path(args.cxx).resolve())
+            run(command, cwd=entry["directory"])
+            found = gate.core_storage_offenders(tmp / "bad.o")
+            assert [(s, sec) for s, sec, _ in found] == [("cli_jobs", ".bss.cli_jobs")], found
+            verdict()
+            print("ok board core mutation: shell/core/cli_job.c without static on cli_jobs:")
+            print("  " + gate.core_refusal([("shell/core/cli_job.c",) + f for f in found]))
+            clean = gate.replay_argv(gate.entry_argv(entry), source, entry["directory"],
+                                     Path(args.cc).resolve(), tmp / "good.o", Path(args.cxx).resolve())
+            run(clean, cwd=entry["directory"])
+            assert gate.core_storage_offenders(tmp / "good.o") == [], "the real cli_job.c is refused"
+            verdict()
+            print("ok board core: the real shell/core/cli_job.c passes rule (d)")
 
     # [!] The C++ path of the audit in a REAL board context (#161): a copy of the
     # shared TFLM backend with one `static` injected, compiled with the tflm
@@ -389,6 +430,66 @@ def commands(root, build, args, shell, bad):
     (root / "shell/cmds/to_svc.c").unlink()
     print("ok (5) a link from shell/cmds/ into svc/ refused")
     run(shell, contains="coverage verified")
+
+
+def core(root, build, args, shell, audit):
+    """issue #246: rule (d), the shell core's state is file-local, by directory.
+
+    Not the shell/cmds/ rule: the same static passes in shell/core/ and is still
+    refused in shell/cmds/ by the storage rule (and not by rule (d)). The shapes
+    of rule (d) itself are run_core_storage_tests.py's; here only that it is
+    wired into the build, and the layout checks into the audit (#246 review).
+    """
+    reset = ["-DEXTRA_CMD=", "-DNO_CORE=OFF"]
+    configure(root, build, args, *reset)
+    text = run(shell, contains="coverage verified")
+    assert re.search(r"^shared_storage: core: 1 shell core TUs in the shell link", text, re.M), text
+    report = json.loads((build / "shared-storage/last-audit.json").read_text())
+    assert report["rules"]["core_sources"] == [CORE_SRC], report["rules"]
+    print("ok (d) a file static and a function static in shell/core/ pass, counted and recorded")
+    write(root, CORE_SRC, "int core_state;\n" + CORE)
+    text = run(shell, False, "rule (d): the shell core's state must be file-local")
+    assert f"core_state (in .bss: not a constant in a read-only .rodata section" in text and f"defined by {CORE_SRC}" in text \
+        and "Make it static" in text, text
+    write(root, CORE_SRC, CORE)
+    print("ok (d) a global variable in shell/core/ refused, named with its section")
+    # The same static, in shell/cmds/: the storage rule refuses it, not rule (d).
+    write(root, "shell/cmds/cmd_blob.c", COMMANDS["shell/cmds/cmd_blob.c"] + CORE_STATIC
+          + "int blob_count(void) { return ++core_count; }\n")
+    text = run(shell, False, "shell: shell/cmds/cmd_blob.c owns mutable storage")
+    assert "rule (d)" not in text, text
+    write(root, "shell/cmds/cmd_blob.c", COMMANDS["shell/cmds/cmd_blob.c"])
+    print("ok (d) the same static in shell/cmds/ is still refused by the storage rule")
+    # The layout, through the audit itself (no configure needed): a link out of
+    # the core, and a build directory inside shell/.
+    write(root, "elsewhere/state.c", "int board_state;\n")
+    (root / "shell/core/state.c").symlink_to(root / "elsewhere/state.c")
+    run(audit, False, "rule (d): core symlink escapes scope: shell/core/state.c")
+    (root / "shell/core/state.c").unlink()
+    inner = root / "shell/core/build"
+    inner.mkdir()
+    shutil.copy2(build / "build.ninja", inner / "build.ninja")
+    command = list(audit)
+    command[command.index("--ninja") + 1] = str(inner / "build.ninja")
+    run(command, False, "is inside shell/ or holds it")
+    shutil.rmtree(inner)
+    print("ok (d) a link out of the core and a build directory inside shell/ refused")
+    # A new directory under shell/ is the core too, with no list to add it to.
+    write(root, "shell/newdir/fresh.c", "int fresh_state = 1;\n")
+    configure(root, build, args, "-DEXTRA_CMD=shell/newdir/fresh.c")
+    run(shell, False, "fresh_state (in .data: not a constant in a read-only .rodata section")
+    print("ok (d) a global in a new directory under shell/ refused")
+    # A host-test source in the link is refused, not left out of rule (d).
+    write(root, "shell/test/probe.c", "int test_state = 1;\n")
+    configure(root, build, args, "-DEXTRA_CMD=shell/test/probe.c")
+    run(shell, False, "rule (d): the shell link takes host-test sources, which the core "
+        "rule does not look at: shell/test/probe.c")
+    print("ok (d) a shell/test/ source in the link refused")
+    configure(root, build, args, "-DEXTRA_CMD=", "-DNO_CORE=ON")
+    run(shell, False, "rule (d): no translation unit of the shell core")
+    configure(root, build, args, *reset)
+    run(shell, contains="coverage verified")
+    print("ok (d) a link with no shell core TU refused")
 
 
 def rules(root, tmp, args):
@@ -584,6 +685,12 @@ def main():
         run(shell, contains="coverage verified")
         print("ok svc/ymodem.c with storage refused (no exception for its path)")
         commands(root, build, args, shell, bad)
+        core(root, build, args, shell, [
+            sys.executable, str(CMAKE / "check_shared_storage_build.py"), "--root", str(root),
+            "--database", str(build / "compile_commands.json"),
+            "--inventory", str(build / "shared-storage/inventory"), "--ninja", str(build / "build.ninja"),
+            "--capabilities", str(build / "shared-storage/capabilities.txt"),
+            "--cc", args.cc, "--cxx", args.cxx, "--objdump", args.objdump, "--nm", args.nm])
         rules(root, Path(tmp), args)
         configure(root, Path(tmp) / "no-export", args, "-DDISABLE_EXPORT=ON", expected=False, contains="must export compile commands")
         configure(root, Path(tmp) / "unity", args, "-DENABLE_UNITY=ON", expected=False, contains="use unity builds")

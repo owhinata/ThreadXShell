@@ -904,6 +904,8 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
 neg_table="$out/neg_table"
 cat > "$neg_table" <<'EOF'
 cmake/fixtures/run_storage_gate_tests.py                         shared             always      8
+cmake/fixtures/run_core_storage_tests.py                         shared             toolchain   72
+cmake/fixtures/run_core_storage_tests.py                         shared             !toolchain  42
 cmake/fixtures/run_add_plugin_arg_tests.py                       shared             always      103
 cmake/fixtures/run_asset_dest_tests.py                           shared             always      45
 cmake/fixtures/run_slot_table_tests.py                           shared             always      12
@@ -923,7 +925,7 @@ cmake/fixtures/run_plugin_gate_tests.py                          grove-vision-ai
 cmake/fixtures/run_veneer_cost_tests.py                          grove-vision-ai-v2 toolchain   302
 cmake/fixtures/run_veneer_gate_build_tests.py                    grove-vision-ai-v2 toolchain   385
 boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py    grove-vision-ai-v2 tree:grove-vision-ai-v2+toolchain  25
-cmake/fixtures/run_shared_storage_build_tests.py                 grove-vision-ai-v2 tree:grove-vision-ai-v2+toolchain  151
+cmake/fixtures/run_shared_storage_build_tests.py                 grove-vision-ai-v2 tree:grove-vision-ai-v2+toolchain  169
 cmake/fixtures/run_model_io_gate_tests.py                        grove-vision-ai-v2 target:grove-vision-ai-v2:verify_vela_model  486
 boards/wio-lite-ai/test/test_lease_entries.py                    wio-lite-ai        always      2
 boards/wio-lite-ai/cmake/fixtures/run_reservation_tests.py       wio-lite-ai        toolchain   10
@@ -1126,6 +1128,20 @@ shared_py() {  # <python3 arguments...>
 # than once here.  The boards run this same script with their own toolchain.
 shared_py "$repo/cmake/fixtures/run_storage_gate_tests.py" \
     --cc gcc --objdump objdump --nm nm
+
+# issue #246 -- rule (d) of the shared storage audit (the shell core's mutable
+# state is file-local) on single objects: each refused shape (a global, weak,
+# COMMON, thread-local, inline-asm, alias-of-a-static or own-section variable,
+# a `const` in a RAM-placed section, a data label in code), each passing one,
+# objects it cannot read, and the layout checks (links out of the core, a
+# build directory inside shell/).  With the host compiler always,
+# and with the pinned toolchain too when it is there (its own row below).
+_core_cc=$(ls -d "$repo"/tools/arm-gnu-toolchain-*/bin/arm-none-eabi-gcc 2>/dev/null | tail -1)
+if [ -n "$_core_cc" ] && [ -x "$_core_cc" ]; then
+    shared_py "$repo/cmake/fixtures/run_core_storage_tests.py" --cc gcc --cross-cc "$_core_cc"
+else
+    shared_py "$repo/cmake/fixtures/run_core_storage_tests.py" --cc gcc
+fi
 
 # issue #108 -- the plugin image gate is shared, and the three facts that differ
 # per board (the reservation it checks against, the forbidden table, the stack

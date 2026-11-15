@@ -9,7 +9,8 @@ resolve under that same tree -- a symlink out of it is refused, both in the
 build's inventory and in a walk of `shell/cmds/` on disk. No file is exempt:
 `svc/ymodem.c`, the last exception, now takes its send and receive areas and its
 receive record from the caller (#230; `svc/README.md`). This is not a stateless
-rule for the entire shell; instances and job pools intentionally own state.
+rule for the entire shell; instances and job pools intentionally own state --
+but only file-local state, which rule (d) below holds them to (#246).
 
 `shared_storage_gate.cmake` recursively discovers normal CMake targets and
 emits their generator-evaluated sources. `check_shared_storage_build.py` requires
@@ -138,6 +139,113 @@ not a defence against a hostile change; these are left to diff review:
 
 An object the link takes that a custom command makes, rather than a compile in
 `compile_commands.json`, is not among these: the audit refuses that form (above).
+
+## The shell core keeps its state to itself (#246)
+
+Rule (d) holds the shell core to a different rule from `svc/` and `shell/cmds/`.
+Those own no mutable storage at all; the core (the console instances, the job
+pool, the thread map) is allowed to, but only as its own: every mutable
+variable it defines must be file-local (`static` at file scope, or a `static`
+inside a function). #229 was a core variable shared by every console's output
+path; this rule refuses the step that made it possible -- a core variable
+another file can name -- when it is written, rather than in review.
+
+**Which files.** Every translation unit the `shell` link takes (the same set,
+replayed objects and parallel run as rules (a) to (c)) whose source is under
+`shell/` but not under `shell/cmds/` (audited above as shared commands) or
+`shell/test/` (host tests). There is no list of files: today that is
+`shell/core/` and `shell/backend/`, and a new directory under `shell/` is in
+scope when it appears. A build in which no such unit reaches the link fails.
+Three layout checks keep that set from shrinking quietly (#246 review): a
+`shell/test/` source in the `shell` link fails (host tests are left out of the
+rule because they are never linked, so one that is would ship unchecked); a
+link under `shell/` (outside `shell/cmds/`, which the command walk already
+holds to its own tree, and `shell/test/`) that resolves outside the core -- to
+a board file, into `shell/cmds/` or `shell/test/` -- fails, as does `shell/`
+itself being a link, the same refusal `svc/` and `shell/cmds/` have; and a
+build directory inside `shell/` or holding it fails. The rules over linked
+sources leave out everything under the build directory (generated sources are
+not the repository's own), so a build directory at `shell/core` would leave
+out the core with it and the count could fall from 10 to the one file outside
+it and still pass. Refusing that layout keeps one selection of sources rather
+than adding a second one for this rule alone.
+The audit prints the count (`shared_storage: core: N shell core TUs ...`, 10 on
+each of the four configurations on 2026-11-16) and `last-audit.json` records
+the sources under `rules.core_sources`.
+
+**What passes, and only that.** Read from the replayed object's ELF symbol and
+section tables directly (no tool's text in between), every symbol another file
+can name -- binding not LOCAL (global, weak, unique), and neither undefined nor
+absolute -- must be one of two shapes:
+
+- a function (`STT_FUNC`) in an allocated, executable, non-writable section;
+- any other symbol in an allocated, non-writable, non-executable section named
+  `.rodata` or `.rodata.<...>`.
+
+Everything else is refused, and so is every COMMON symbol
+(`__attribute__((common))`, which `-fno-common` does not stop). The passing
+side is closed because a section's flags do not say where it ends up: a
+`const` in `.sdram`, `.RamFunc`, `.log_noinit` or `.sram1_dma` carries no
+write flag, yet the board's linker script puts it in RAM, and a data label in
+an executable section can sit in wio's ITCM. So the refused shapes include a
+global variable in `.data`/`.bss` (or any section), thread-local storage, an
+untyped label from inline assembly outside `.rodata`, a global alias of a
+`static`, a constant in any section not named `.rodata(.<...>)` (`.rodataX`
+included), a data label in code, a function outside read-only code, and a
+symbol in a section that is not allocated. `.data.rel.ro` gets no exception (on
+these boards nothing is position-independent and a constant table lands in
+`.rodata`). On 2026-11-16 the ten core objects of each of the four
+configurations export 70 functions in `.text.*` and one constant in `.rodata.*`,
+and nothing in a section that is not allocated.
+
+File-scope and function-scope `static` variables are local and pass, as do
+undefined (referenced) symbols and absolute symbols (`.set <name>, <address>`,
+which define no storage). There is no list of allowed symbols. An object it
+cannot read -- not an ELF relocatable, LTO bytecode, no symbol table or more
+than one, a symbol whose section index is not in the section table (including
+extended indices) -- fails the audit as "cannot be checked", never as a pass.
+The failure names the source, the symbol, its section and why it is refused,
+and says how to fix it: make it `static`, or decide which side owns the state
+and hand it over through a function. It is a rule of its own, with its own
+message, and is not folded into the "owns no mutable storage" rule for `svc/`
+and `shell/cmds/`.
+
+**What it does not stop.** The rule looks at what an object exports, so it
+cannot see a file-local variable reached some other way. Left to review:
+
+- a global constant pointer, or a constant table, that holds the address of a
+  `static` (it is read-only, so it passes, and anyone can follow it);
+- a function that returns the address of a `static`;
+- a linker script that names the variable's own input section
+  (`.bss.<name>` under `-fdata-sections`) and defines a symbol for it;
+- the core handing the address of its state to a board callback at run time;
+- code written so the preprocessor resolves differently in the audit than in
+  the shipped build (the audit replays the real compile commands with
+  `-fno-lto` added, as the rest of this audit does);
+- the opposite direction, the shared code naming a board's variable (#236
+  counted 12, all intended; they are not checked by any rule);
+- a write that breaks `const`: on grove-vision-ai-v2 the linker script places
+  `.rodata` in SRAM (and no MPU setting that makes it read-only was found), so
+  a board file that casts away `const` on a core constant can change it at run
+  time; this rule sees the definition, not the writes;
+- sources generated in the build directory, which is outside `shell/` (it is
+  refused inside it): one made from a core template is compiled and linked like
+  any generated source, and no part of this audit holds it to the core's rule.
+
+`fixtures/run_core_storage_tests.py` compiles each shape above (the refused
+ones, and the passing ones, including the two ways around: a constant pointer
+to a `static` and a function returning one) and holds the rule's answer on each
+object to what it must be, with the host compiler and, when present, the pinned
+toolchain; it also feeds the rule objects it cannot read, and holds the link
+and build-directory checks to their answers on a small directory tree. The
+integration runner adds the build-level cases (a global in `shell/core/`
+refused, a `static` there passes; the same `static` in `shell/cmds/` is still
+refused by the storage rule; a link out of the core and a build directory
+inside `shell/` refused by the audit; a global in a new directory under
+`shell/` refused; a `shell/test/` source in the link refused; no core unit at
+all refused) and, with `--board-build`, a copy of the real
+`shell/core/cli_job.c` with `static` removed from `cli_jobs`, compiled with that
+board's own command, which must be refused while the unmodified file passes.
 
 ## Negative tests
 

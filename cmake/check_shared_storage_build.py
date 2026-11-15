@@ -38,6 +38,18 @@ as the storage audit (an argv that cannot be replayed fails).
       whose name starts with .shell_root_cmds, and none may own the bare
       .shell_root_cmds (CLI_CMD_REGISTER always names the root command).
   (c) the root names collected from those sections are unique across the link.
+
+Rule (d) (#246) is a rule of its own, not the storage rule above. In the same
+replayed objects, a TU whose source is under shell/ but outside shell/cmds/ and
+shell/test/ (the shell core: today shell/core/ and shell/backend/, with no list)
+may own mutable storage, but only file-local. What another file can name is
+closed to two shapes: a function in an executable, read-only section, and any
+other symbol in a read-only, non-executable `.rodata`/`.rodata.<...>` section.
+Every other non-LOCAL definition, and any COMMON symbol, is refused. The symbol
+and section tables are read from the ELF directly; an object they cannot be
+read from fails. A build in which no core TU reaches the link fails too, as
+does a shell/test/ source in the link, a link under shell/ (outside shell/cmds/)
+that resolves outside the core, and a build directory inside shell/ or holding it.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -46,6 +58,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import struct
 import subprocess
 import sys
 import tempfile
@@ -403,6 +416,195 @@ def linked_units(database, root, build, origin):
     return units
 
 
+# Rule (d) (#246): the shell core keeps its mutable state to itself. It is
+# looked at in the same replayed objects as rules (a)(b)(c), for every TU whose
+# source is under shell/ but not under shell/cmds/ (audited as shared commands,
+# which own no storage at all) or shell/test/ (host tests, never linked). No
+# list of files: a new directory under shell/ is in scope as it appears.
+CORE = "shell"
+CORE_OUTSIDE = ("shell/cmds", "shell/test")
+SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR = 0x1, 0x2, 0x4
+SHT_SYMTAB = 2
+STT_FUNC = 2
+STB_LOCAL = 0
+SHN_UNDEF, SHN_LORESERVE, SHN_ABS, SHN_COMMON = 0, 0xFF00, 0xFFF1, 0xFFF2
+
+
+def core_source(src, root):
+    """Whether rule (d) looks at this source: shell/, outside shell/cmds and shell/test."""
+    if not src.is_relative_to(root / CORE):
+        return False
+    return not any(src.is_relative_to(root / d) for d in CORE_OUTSIDE)
+
+
+def core_links(root):
+    """Refuse a link under shell/ (outside shell/cmds/, which command_marks()
+    walks, and shell/test/) that resolves outside the shell core (#246 review).
+
+    Rule (d) classifies a source by its real path, so a shell/core/x.c that is
+    a link to a board file would otherwise be audited as that board file -- the
+    same escape svc/ and shell/cmds/ already refuse. The walk does not follow
+    links; a link to a file or to a directory is held to the same rule, and so
+    is shell/ itself.
+    """
+    base = root / CORE
+    need(base.is_dir() and not base.is_symlink(),
+         f"rule (d): {CORE}/ must be a directory of this repository, not a link")
+    skip = {root / d for d in CORE_OUTSIDE}
+    for directory, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if Path(directory) / d not in skip]
+        for name in dirs + files:
+            entry = Path(directory) / name
+            if entry.is_symlink():
+                need(core_source(entry.resolve(), root),
+                     f"rule (d): core symlink escapes scope: {entry.relative_to(root).as_posix()} "
+                     f"resolves to {entry.resolve()}, outside {CORE}/ (less {', '.join(CORE_OUTSIDE)})")
+
+
+def core_build_dir(build, root):
+    """Refuse a build directory inside shell/ or holding it (#246 review).
+
+    The rules over the linked own sources leave out everything under the build
+    directory (generated sources are not the repository's own). With the build
+    directory at shell/core, every core source would be left out with it and
+    the count could fall to the one file still outside -- and pass. One
+    selection, and a layout that cannot shrink it, rather than a second
+    selection of core sources that bypasses the build-directory exclusion.
+    """
+    base = root / CORE
+    need(not build.is_relative_to(base) and not base.is_relative_to(build),
+         f"rule (d): the build directory {build} is inside {CORE}/ or holds it; the "
+         f"core rule would not see the core sources under it. Build outside {CORE}/")
+
+
+def core_storage_offenders(path):
+    """[(symbol, section, why)] for every symbol of a relocatable ELF object
+    that another file could name and that is not one of the two shapes
+    core_export_refused() lets through (a function in read-only code, or a
+    constant in .rodata), and every COMMON symbol (whatever its binding).
+    Undefined and absolute symbols define nothing here and are not looked at.
+
+    Read from the ELF directly (as check_plugin_image.py reads its images), not
+    from a tool's text: there is no spelling of a symbol class to miss. Anything
+    this reading cannot account for -- not an ELF relocatable, not little-endian,
+    no symbol table or two, a section index outside the table or one of the
+    reserved indices it does not know -- raises AuditError: an object this rule
+    could not read is not one that passed it.
+    """
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as exc:
+        raise AuditError(f"rule (d): cannot read {path}: {exc}") from exc
+    try:
+        return _core_offenders(raw, path)
+    except (struct.error, IndexError, ValueError) as exc:
+        raise AuditError(f"rule (d): cannot read the ELF {path}: {exc}") from exc
+
+
+def core_refusal(exported):
+    """The rule (d) failure for [(source, symbol, section, why)]."""
+    return ("rule (d): the shell core's state must be file-local; another file may "
+            "name only its functions (in read-only code) and its constants in .rodata, "
+            "but it can name: " + "; ".join(
+                f"{symbol} ({'a COMMON symbol' if section == 'COMMON' else 'in ' + section}: "
+                f"{why}) defined by {name}" for name, symbol, section, why in exported)
+            + ". Make it static, or decide which side owns the state and hand it over "
+            "through a function (#246); this is not the svc/ and shell/cmds/ rule, the "
+            "core may own state, but only its own")
+
+
+def _core_offenders(raw, path):
+    need(raw[:4] == b"\x7fELF", f"rule (d): {path} is not an ELF file")
+    need(raw[5] == 1, f"rule (d): {path} is not little-endian ELF")
+    wide = {1: False, 2: True}.get(raw[4])
+    need(wide is not None, f"rule (d): {path} has an unknown ELF class {raw[4]}")
+    e_type, = struct.unpack_from("<H", raw, 16)
+    need(e_type == 1, f"rule (d): {path} is not a relocatable object (e_type {e_type})")
+    if wide:
+        shoff, = struct.unpack_from("<Q", raw, 0x28)
+        shentsize, shnum, shstrndx = struct.unpack_from("<HHH", raw, 0x3A)
+        shdr, sym = "<IIQQQQIIQQ", "<IBBHQQ"
+    else:
+        shoff, = struct.unpack_from("<I", raw, 0x20)
+        shentsize, shnum, shstrndx = struct.unpack_from("<HHH", raw, 0x2E)
+        shdr, sym = "<IIIIIIIIII", "<IIIBBH"
+    need(shentsize == struct.calcsize(shdr) and 0 < shnum < SHN_LORESERVE
+         and shoff + shnum * shentsize <= len(raw),
+         f"rule (d): {path} has a section header table this reading does not support")
+    # (name, type, flags, offset, size, link, entsize)
+    heads = []
+    for i in range(shnum):
+        f = struct.unpack_from(shdr, raw, shoff + i * shentsize)
+        heads.append((f[0], f[1], f[2], f[4], f[5], f[6], f[9]))
+
+    def blob(index):
+        _, kind, _, offset, size, _, _ = heads[index]
+        need(kind != 8 and offset + size <= len(raw),
+             f"rule (d): {path}: section {index} lies outside the file")
+        return raw[offset:offset + size]
+
+    def string(table, offset):
+        end = table.index(b"\0", offset)
+        return table[offset:end].decode("utf-8")
+
+    need(shstrndx < shnum, f"rule (d): {path} has no section name table")
+    names = blob(shstrndx)
+    need(not any(string(names, h[0]).startswith(".gnu.lto_") for h in heads),
+         f"rule (d): {path} holds LTO bytecode, not native code, so its symbols cannot be checked")
+    symtabs = [i for i, h in enumerate(heads) if h[1] == SHT_SYMTAB]
+    need(len(symtabs) == 1,
+         f"rule (d): {path} has {len(symtabs)} symbol tables, not one, so its symbols cannot be read")
+    _, _, _, _, size, link, entsize = heads[symtabs[0]]
+    need(entsize == struct.calcsize(sym) and size % entsize == 0 and link < shnum,
+         f"rule (d): {path} has a symbol table this reading does not support")
+    table, strings = blob(symtabs[0]), blob(link)
+    found = []
+    for n in range(1, size // entsize):
+        f = struct.unpack_from(sym, table, n * entsize)
+        if wide:
+            name, info, shndx = f[0], f[1], f[3]
+        else:
+            name, info, shndx = f[0], f[3], f[5]
+        symbol = string(strings, name) or f"<unnamed symbol {n}>"
+        if shndx == SHN_COMMON:
+            found.append((symbol, "COMMON", "a COMMON symbol (storage the link allocates)"))
+            continue
+        if info >> 4 == STB_LOCAL or shndx in (SHN_UNDEF, SHN_ABS):
+            continue
+        need(shndx < shnum,
+             f"rule (d): {path}: {symbol} is defined in section index {shndx}, which is "
+             "not in its section table (extended or unknown index), so it cannot be checked")
+        _, _, flags, _, _, _, _ = heads[shndx]
+        section = string(names, heads[shndx][0])
+        why = core_export_refused(info & 0xF, section, flags)
+        if why:
+            found.append((symbol, section, why))
+    return found
+
+
+def core_export_refused(kind, section, flags):
+    """Why a definition another file can name is refused, or None (#246 review).
+
+    Closed on the side that passes: whether a section is writable at run time
+    is decided by where the board's linker script puts it, not by its flags
+    (a `const` in `.sdram` or `.RamFunc` has no write flag and lands in RAM),
+    so only two shapes pass and everything else is refused:
+      - a function (STT_FUNC) in an allocated, executable, non-writable section;
+      - any other symbol in an allocated, non-writable, non-executable section
+        named `.rodata` or `.rodata.<...>`.
+    """
+    alloc, write, execute = (flags & SHF_ALLOC, flags & SHF_WRITE, flags & SHF_EXECINSTR)
+    if kind == STT_FUNC:
+        if alloc and execute and not write:
+            return None
+        return "a function defined outside an executable, read-only section"
+    if (section == ".rodata" or section.startswith(".rodata.")) and alloc \
+            and not write and not execute:
+        return None
+    return ("not a constant in a read-only .rodata section (another file can name "
+            "it, and it is not static)")
+
+
 def make_deps(text):
     """The prerequisites of a `gcc -M` rule, unescaped, without its target."""
     tokens = re.findall(r"(?:\\.|[^\s\\])+", text.replace("\\\n", " "))
@@ -417,7 +619,13 @@ def section_names(objdump_text):
 
 
 def check_units(units, root, cc, cxx, objdump, scratch):
-    """Rules (a)(b)(c) over the linked own sources (#206)."""
+    """Rules (a)(b)(c) over the linked own sources (#206), and rule (d) (#246)."""
+    # Rule (d) leaves shell/test/ out because host tests are never linked; one
+    # that is would ship unaudited by it, so that is refused instead.
+    tests = sorted(src.relative_to(root).as_posix() for src, _, _ in units
+                   if src.is_relative_to(root / "shell/test"))
+    need(not tests, "rule (d): the shell link takes host-test sources, which the core "
+         "rule does not look at: " + ", ".join(tests))
     jobs = []
     for index, (src, entry, argv) in enumerate(units):
         name = src.relative_to(root).as_posix()
@@ -434,12 +642,23 @@ def check_units(units, root, cc, cxx, objdump, scratch):
         # [!] -M, not -MM: a header (or .c) found through -isystem is listed too.
         deps = make_deps(run(command[:-2] + ["-M"], cwd))
         run(command, cwd)
-        return deps, section_names(run([objdump, "-h", "-w", str(obj)], cwd))
+        # Rule (d) reads the same replayed object; None = not a core TU.
+        offenders = core_storage_offenders(obj) if core_source(src, root) else None
+        return deps, section_names(run([objdump, "-h", "-w", str(obj)], cwd)), offenders
 
     with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
         results = list(pool.map(one, jobs))
+    core, exported = [], []
+    for (_, name, _, _, _), (_, _, offenders) in zip(jobs, results):
+        if offenders is not None:
+            core.append(name)
+            exported += [(name, symbol, section, why) for symbol, section, why in offenders]
+    need(core, "rule (d): no translation unit of the shell core (a source under shell/ "
+         "outside shell/cmds/ and shell/test/) reaches the shell link, so there is "
+         "nothing to hold to the core's rule")
+    need(not exported, core_refusal(exported))
     roots, registering = {}, 0
-    for (src, name, cwd, _, _), (deps, sections) in zip(jobs, results):
+    for (src, name, cwd, _, _), (deps, sections, _) in zip(jobs, results):
         included = sorted({canonical(d, cwd) for d in deps
                            if Path(d).suffix in INCLUDED_SOURCE_SUFFIXES} - {src})
         need(not included, f"rule (a): {name} includes a source file: "
@@ -461,7 +680,8 @@ def check_units(units, root, cc, cxx, objdump, scratch):
     twice = {r: f for r, f in roots.items() if len(f) > 1}
     need(not twice, "rule (c): root command registered more than once: " + "; ".join(
         f"{r} in {' and '.join(sorted(f))}" for r, f in sorted(twice.items())))
-    return {"units": len(units), "registering": registering, "roots": len(roots)}
+    return {"units": len(units), "registering": registering, "roots": len(roots),
+            "core": len(core), "core_sources": sorted(core)}
 
 
 def check_commands(selected, root, marks, caps, direct, archived):
@@ -593,6 +813,11 @@ def audit(args):
     if cxx is not None:
         need(cxx.is_file(), f"missing C++ compiler: {cxx}")
         need(cxx != cc, "the C and C++ compilers must be distinct drivers")
+    # Rule (d)'s layout first (#246 review): which sources it sees must not
+    # depend on where the build directory is or on links under shell/.
+    build = Path(args.ninja).parent.resolve()
+    core_build_dir(build, root)
+    core_links(root)
     targets, wanted = inventory(args.inventory, root)
     selected = select(args.database, targets, wanted, root)
     marks = command_marks(root)
@@ -600,7 +825,6 @@ def audit(args):
     report["commands"] = check_commands(selected, root, marks, capabilities(args.capabilities),
                                         direct, archived)
     shipped = sum(bool(r["shipped_by"]) for r in report["commands"])
-    build = Path(args.ninja).parent.resolve()
     with tempfile.TemporaryDirectory(prefix="shared-storage-") as scratch:
         rules = check_units(linked_units(args.database, root, build, origin),
                             root, cc, cxx, args.objdump, scratch)
@@ -608,6 +832,9 @@ def audit(args):
         print(f"shared_storage: rules: {rules['units']} own TUs in the {args.link_target} link "
               f"checked for included sources, {rules['registering']} register "
               f"{rules['roots']} distinct root commands")
+        print(f"shared_storage: core: {rules['core']} shell core TUs in the {args.link_target} "
+              "link (shell/ outside shell/cmds/ and shell/test/) define no mutable storage "
+              "another file can name")
         for index, ((target, source), entry, argv) in enumerate(selected):
             relative = source.relative_to(root).as_posix()
             obj = Path(scratch) / f"{index}.o"

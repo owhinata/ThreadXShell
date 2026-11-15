@@ -45,6 +45,7 @@
 #include "rtl_link.h"
 #include "wifi_auto.h"       /* #32: a flash session disarms the host's re-association */
 #include "link_bridge.h"   /* the bridge has to be given back before we take the link */
+#include "net_tty.h"       /* net_tty_guard(): taking the link down ends a telnet session */
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -58,6 +59,10 @@
  * would refuse EVERY flash command, i.e. it would take away the owhinata/wio-lite-ai#19 recovery
  * path exactly when it is most needed.  Flashing is a recovery path and has to work when the
  * link is occupied, like `wifi on/off/reset`.
+ *
+ * Not on the telnet console (issue #235): every step below takes the WiFi link -- and
+ * with it the session running the command -- away, so @what is refused there before
+ * anything moves, the same question `wifi on/off/reset` ask (wifi_power_claim()).
  *
  * The order matters and each step earns its place:
  *   1. ask the interface to unwind PROPERLY (it closes its driver's gate, asks the telnet
@@ -73,9 +78,13 @@
 #define FLASH_STOP_POLL_MS   100u
 #define FLASH_STOP_WAIT_MS   10000u
 
-static int flash_claim(struct cli_instance *sh)
+static int flash_claim(struct cli_instance *sh, const char *what)
 {
 	unsigned waited = 0u;
+
+	/* Before the disarm, which drops the stored credentials: a refusal changes nothing. */
+	if (net_tty_guard(sh, what))
+		return -1;
 
 	/*
 	 * First line, before the teardown below (owhinata/wio-lite-ai#32): an automatic re-association
@@ -196,7 +205,7 @@ static int cmd_flash_read(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "wifi: bad nsectors (1..64)\r\n");
 		return 1;
 	}
-	if (flash_claim(sh) != 0)
+	if (flash_claim(sh, "wifi flash read") != 0)
 		return 1;
 
 	cli_print(sh, "wifi: reading flash (NON-DESTRUCTIVE)...\r\n");
@@ -249,7 +258,7 @@ static int cmd_flash_info(struct cli_instance *sh, int argc, char **argv)
 
 	(void)argc; (void)argv;
 
-	if (flash_claim(sh) != 0)
+	if (flash_claim(sh, "wifi flash info") != 0)
 		return 1;
 
 	cli_print(sh, "wifi: identifying RTL8720 flash (NON-DESTRUCTIVE)...\r\n");
@@ -439,7 +448,7 @@ static int cmd_flash_backup(struct cli_instance *sh, int argc, char **argv)
 	 * The shared question, the same one the wiring asks (issue #231). */
 	if (xfer_refuse_if_telnet(sh))
 		return 1;
-	if (flash_claim(sh) != 0)
+	if (flash_claim(sh, "wifi flash backup") != 0)
 		return 1;
 
 	cli_print(sh, "wifi: flash backup (NON-DESTRUCTIVE)...\r\n");
@@ -716,6 +725,12 @@ static int cmd_flash_write(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "wifi: bad offset (hex, e.g. 0x0)\r\n");
 		return 1;
 	}
+	/* Before the staged-image check and the `confirm` prompt (issue #235): telling a
+	 * telnet operator to re-run with `confirm` -- or to run `imgload`, which telnet
+	 * refuses too -- only to refuse the re-run would be advice that cannot be followed.
+	 * flash_claim() asks the same question again and gets the same answer. */
+	if (net_tty_guard(sh, "wifi flash write"))
+		return 1;
 	if (!im->valid) {
 		cli_error(sh, "wifi: no image staged -- run `wifi flash imgload` first\r\n");
 		return 1;
@@ -734,7 +749,7 @@ static int cmd_flash_write(struct cli_instance *sh, int argc, char **argv)
 		cli_warn(sh, "wifi: NOTE this range covers 0x105000, the factory WiFi settings "
 		         "sector -- the stored SSID/password will be replaced\r\n");
 
-	if (flash_claim(sh) != 0)
+	if (flash_claim(sh, "wifi flash write") != 0)
 		return 1;
 	if (!psram_acquire()) {                 /* the image is read straight out of PSRAM */
 		rtl_link_hw_release(sh);

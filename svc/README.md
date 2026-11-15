@@ -1415,7 +1415,7 @@ returns 0.  Which commands ask is the board's:
 | Board | Refused on the telnet console | `<other>` |
 |---|---|---|
 | f746g-disco | every YMODEM transfer (`camera send`, `blob write`) | `VCP` |
-| wio-lite-ai | `wifi connect` / `disconnect` / `on` / `off` / `reset`, `mlperf`, and every YMODEM transfer (`camera send`, `blob write`, `wifi flash imgload` / `backup`) | `USB CDC` |
+| wio-lite-ai | `wifi connect` / `disconnect` / `on` / `off` / `reset`, `wifi flash info` / `read` / `write` (issue #235; until then they took the link down, and the session with it), `mlperf`, and every YMODEM transfer (`camera send`, `blob write`, `wifi flash imgload` / `backup`) | `USB CDC` |
 
 grove-vision-ai-v2 has no telnet console and refuses nothing.  The YMODEM
 transfers ask through one shared question, `xfer_refuse_if_telnet()` in the
@@ -1574,7 +1574,7 @@ way (#221):
 | `net_tty.c`'s mutable state, `struct net_tty_state net_tty_board_state`, and its constant facts, `const struct net_tty_facts net_tty_board_facts` (#221): the `NX_IP`, the pool, the receive ring (512 B), the extraction buffer (1,500 B), the transmit ring (4,096 B), the listener's stack (2,560 B), the socket's transmit queue depth and retransmit settings, the other console's name | f746g-disco `port/netxduo/nx_glue.c`, all in internal SRAM; wio-lite-ai `src/nx_net.c`, the transmit ring and the stack in DTCM (`net_tty_tx_buf`, `net_tty_stack`, names `cmake/check_dtcm_residency.py` requires), the rest in AXI-SRAM `.bss`.  Until #221 these were `port/netxduo/nx_shell.c` and `src/net_shell.c` |
 | The telnet transport object (`NET_TTY_TRANSPORT_DEFINE()`) and the `CLI_INSTANCE_DEFINE` bound to it | `src/main.c` on each board |
 | The telnet console's port, handed over once (`net_tty_port_set()`) | on both boards the configuration thread (`src/kv_boot.c`) through the shared `kv_cfg_tty_port()` (`shell/cmds/kv_cfg.c`, issue #214): `net.shell.port`, or 23; `src/main.c` hands over 23 itself when that thread does not run (wio-lite-ai also in a build without the store). Until #214 f746g-disco's `src/main.c` handed over 23, fixed |
-| The commands that refuse on the telnet console (`net_tty_guard()`) | the YMODEM transfers through the telnet field of `xfer_console_board_facts` (`cmds/cmd_xfer_board.c` on both boards; the shared wiring and `blob write` ask it, issue #231); wio-lite-ai also `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c`, and `cmds/cmd_wifi_flash.c` through the shared question |
+| The commands that refuse on the telnet console (`net_tty_guard()`) | the YMODEM transfers through the telnet field of `xfer_console_board_facts` (`cmds/cmd_xfer_board.c` on both boards; the shared wiring and `blob write` ask it, issue #231); wio-lite-ai also `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c`, and `cmds/cmd_wifi_flash.c` (directly before it takes the link down, issue #235, and through the shared question for `imgload` / `backup`) |
 | The adapter behind `svc/net/net_svc.h` (#219) | f746g-disco `port/netxduo/net_svc_f746.c`; wio-lite-ai `src/net_svc_wio.c` |
 | The properties (#219) | `svc/net_svc_config.h` on each board |
 | The lines of `net info` after the address | f746g-disco `port/netxduo/net_svc_f746.c` (`net_svc_board_lines()`); wio-lite-ai `src/nx_net.c` (`nx_net_write_status()`, reached through its adapter) |

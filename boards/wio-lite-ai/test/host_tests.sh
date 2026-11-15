@@ -491,6 +491,23 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 -DTX_TIMER_TICKS_PER_SECOND=1000 \
     $LDFLAGS -o "$out/test_net_table_wio"
 "$out/test_net_table_wio"
 
+# issue #235 -- `wifi flash` on the telnet console: info / read / backup / write
+# take the WiFi link down, which ends the session they were typed on, so each is
+# refused before it disarms the re-association or asks the bridge down, and with
+# valid arguments before it prints anything (write's `confirm` prompt included);
+# imginfo is not refused.  Only the console the test calls telnet is refused, so
+# asking the question about another console (NULL, say) fails the test.  cmds/cmd_wifi_flash.c
+# compiled unchanged against wifi_flash_fake.c, which counts the calls that matter;
+# from a console that is not telnet the same four do reach the teardown.
+st="$HOST_TEST_SHELL_TEST"
+gcc $CFLAGS -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
+    -I "$inc" -I "$HOST_TEST_CORE" -I "$st/../cmds" -I "$svc" -I "$svc/net" \
+    -I "$board/cmds" -I "$board/src" -I "$board/svc" \
+    "$here/test_wifi_flash_guard.c" "$here/wifi_flash_fake.c" \
+    "$board/cmds/cmd_wifi_flash.c" "$HOST_TEST_CORE/cli_parse.c" \
+    $LDFLAGS -o "$out/test_wifi_flash_guard"
+"$out/test_wifi_flash_guard"
+
 # issue #175 -- the model I/O check this board's host gate (verify_tflite) compiles from
 # svc/nn/tflm/nn_tflm_model_check.h, the function the backend runs before it plans a
 # model: generated files wrong in exactly one way must be refused as the board would

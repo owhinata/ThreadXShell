@@ -546,6 +546,17 @@ gcc $CFLAGS -DSHELL_HAS_NET_TTY=1 -DBSP_ENABLE_KV=1 -DTX_TIMER_TICKS_PER_SECOND=
 # the repaint comes before the mark is given back on every end; the length is
 # strict; `info` keeps the board's bring-up lines; the six tuning subcommands
 # follow `info` and `test`, with no name twice.  With the LCD built and not.
+# issue #252 -- the sweep of `psram wtune` (src/psram_wtune.c), compiled
+# unchanged over a fake device (the marker lands or not per write dummy, a
+# read-back that times out, a reset that fails at a chosen dummy): refused
+# offsets and not-up call no hardware step; the lowest passing dummy is left
+# applied, the original one when none passed; a reset that fails ends DEAD at
+# once with the original dummy re-entered, never OK.
+gcc $CFLAGS -I "$board/src" \
+    "$here/test_psram_wtune.c" "$board/src/psram_wtune.c" \
+    $LDFLAGS -o "$out/test_psram_wtune"
+"$out/test_psram_wtune"
+
 for lcd in 1 0; do
     gcc $CFLAGS -D_GNU_SOURCE -DCLI_USE_COLOR=0 -DEXT_RAM_TEST_HOOKS \
         -DBSP_ENABLE_LCD=$lcd -DBSP_ENABLE_IWDG=1 \

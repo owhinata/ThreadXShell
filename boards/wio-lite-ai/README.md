@@ -296,6 +296,18 @@ block across resets (`show` / `stop` read or clear its record); a value comes
 back by typing it again or by `reboot`.  `psram info`'s `mr0` is the value
 written, not one read back from the device.
 
+All six enter through one function (`psram_guard()` in `cmds/cmd_psram.c`):
+take the reconfigurer mark, then write the whole D-cache back
+(`psram_clean_dcache()`, `SCB_CleanDCache()`) before anything is changed
+(issue #252).  The top 2 MB (`.psram_ai`: the model, nn's arena, membench's
+cached buffer) is write-back cacheable, and a line left dirty there would
+otherwise be evicted later at the new latency, phase or clock and land in the
+device wrong.  Under the mark no user holds the window, so nothing dirties a
+line again before the change; no interrupt handler writes `.psram_ai`.  The
+whole cache rather than the 2 MB by address: 1,024 set/way operations against
+65,536 lines, and no range to keep right.  `psram test` does not clean: it
+changes no timing, so a line written back during it lands correctly.
+
 `psram wtune [addr]` (default `0x90000200`) sweeps the write latency 0..15,
 each with an 8-byte marker written through the window and read back
 indirectly; use it with a read path that is trusted (the shipped setting, or
@@ -311,7 +323,17 @@ one `psram test` passed).  Since issue #252:
   until `reboot` (``psram wtune: device stopped answering; OCTOSPI1 held until
   `reboot` `` or ``... nothing round-tripped; ...``), so nothing reads the window
   and stalls the bus.  This is the one end that keeps the mark (`src/psram.h`).
-- Internal flash free: 8,856 B before issue #252, 8,672 B after (-184 B).
+  While it is kept, `psram info` says so on one line (``held    : OCTOSPI1,
+  since a failed wtune; `reboot` ``).
+- When the mark is given back (a write path shown), everyone else reads and
+  writes the PSRAM again at the write latency the sweep left applied.
+- The sweep itself, and everything that decides its result (the refusal, a
+  reset that fails -> `DEAD`, the latency left applied), is
+  `src/psram_wtune.c`, with the hardware steps passed in by `src/psram.c`, so
+  `test/test_psram_wtune.c` reaches every end on the host.
+- Internal flash free: 8,856 B before issue #252, 8,672 B after the first
+  commit, 8,488 B after the review fixes (the cache clean, the `info` line,
+  the sweep's own file).
 
 ## Console
 
@@ -2295,6 +2317,7 @@ Using `nor` since issue #250:
 | Internal flash free, issue #250 step 4 (no `nor test` here, every `nor` line shorter) | 5,768 B -> **10,200 B** (+4,432 B; more than before #250) |
 | Internal flash free, issue #251 (the shared `psram info` / `test`, the table, the repaint) | 10,208 B -> **8,856 B** (-1,352 B) |
 | Internal flash free, issue #252 (`psram wtune`'s range, frame drop, repaint and kept mark) | 8,856 B -> **8,672 B** (-184 B) |
+| Internal flash free, issue #252 review fixes (the D-cache clean in the tuning entry, the `psram info` line, the sweep's own file) | 8,672 B -> **8,488 B** (-184 B) |
 | Shell stack, `nor write` (static frames from `.su`, the shared command as grove-vision-ai-v2 compiles it) | the shared `nor write` keeps its 256 B of data on the stack (`cmd_nor_write` 344 B); **the high-water on the board is not measured yet** |
 
 PSRAM (8 MB at `0x90000000`; the low 6 MB is non-cacheable and holds the frame
@@ -2314,9 +2337,9 @@ that stays loaded between nn commands holds no place in the guard.
 |---|---|---|---|---|---|---|
 | `psram info` | nothing (prints values kept since bring-up) | -- | runs | runs | not looked at | since #251 the shared lines (the part, the window, the two ranges with whether each is cacheable and tested, the state) come first, then this board's bring-up lines |
 | `psram test [bytes]` | the mark, across all three passes, then given back after the repaint | from `0x90000000`, never past the 6 MB non-cacheable pool, so never `.psram_ai` (the shared command stops at the first cacheable range).  **Since #251 the length is strict**: a non-zero multiple of 4 up to 6 MB, anything else (0, 1..3, 6 MB + 4, 8 MB) an error before the mark is asked for; until then 0 meant 6 MB, more was cut to 6 MB with a warning, an odd length was rounded down and 1..3 tested nothing and said PASS | runs | runs | not looked at | refused while the PSRAM is not up; drops the camera's last capture under the mark and before the first write; Ctrl+C after each 64 KB written or read; **since #251 both LCD buffers are repainted black (CPU) before the mark is given back** (with the LCD built), so `lcd on` never shows the patterns |
-| `psram set <rd> <wr>`, `psram mr0 <hex>`, `psram phase <sel> [units]`, `psram clk <presc>` | the mark, for the one change | -- (no address; each value has a bound) | runs | runs | not looked at | change the live bus timing or the device's MR0; `mr0` is refused while the PSRAM is not up |
-| `psram mmapscan start [phase] \| show \| stop` | `start`: the mark, then the board resets once per tested setting; `show` / `stop`: nothing | -- | runs | runs | not looked at | `start` is refused in a build without the IWDG and while the PSRAM is not up |
-| `psram wtune [addr]` | the mark, for the sweep; **kept until `reboot` when no write path was shown** (the device stopped answering and the reset did not bring it back, or no marker round-tripped; issue #252) | since #252 anything but a multiple of 4 with all 8 bytes in the 6 MB non-cacheable pool (`0x90000000-0x905FFFF8`), before the mark; `psram_wtune()` refuses the same itself.  Until then the whole 8 MB, `.psram_ai` included | runs | runs | not looked at | refused while the PSRAM is not up; since #252 drops the captured frame under the mark before the first marker, and with a write path shown repaints both LCD buffers black before the mark is given back; applies the lowest write latency that passed.  since #252 `psram mr0` no longer points to `psram probe`, nor the `psram info` init line to `psram snap` (neither exists) |
+| `psram set <rd> <wr>`, `psram mr0 <hex>`, `psram phase <sel> [units]`, `psram clk <presc>` | the mark, for the one change; since #252 the whole D-cache is written back right after the mark is taken, before the change | -- (no address; each value has a bound) | runs | runs | not looked at | change the live bus timing or the device's MR0; `mr0` is refused while the PSRAM is not up |
+| `psram mmapscan start [phase] \| show \| stop` | `start`: the mark (and since #252 the D-cache written back), then the board resets once per tested setting; `show` / `stop`: nothing | -- | runs | runs | not looked at | `start` is refused in a build without the IWDG and while the PSRAM is not up |
+| `psram wtune [addr]` | the mark, for the sweep, with the D-cache written back first; **kept until `reboot` when no write path was shown** (the device stopped answering and the reset did not bring it back, or no marker round-tripped; issue #252), and then `psram info` says so | since #252 anything but a multiple of 4 with all 8 bytes in the 6 MB non-cacheable pool (`0x90000000-0x905FFFF8`), before the mark; `psram_wtune()` refuses the same itself.  Until then the whole 8 MB, `.psram_ai` included | runs | runs | not looked at | refused while the PSRAM is not up; since #252 drops the captured frame under the mark before the first marker, and with a write path shown repaints both LCD buffers black before the mark is given back; applies the lowest write latency that passed.  since #252 `psram mr0` no longer points to `psram probe`, nor the `psram info` init line to `psram snap` (neither exists) |
 
 The guards of `psram info` / `test` before and after the shared command
 (issue #251).  Not one is lost; the strict length and the repaint are new.

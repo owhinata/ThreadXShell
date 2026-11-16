@@ -59,10 +59,19 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Take the OCTOSPI1 concurrency guard for a hardware subcommand; on contention
- * (a backgrounded `psram`/`membench` command still holds it) print and bail so
- * two commands never drive OCTOSPI1 at once.  Pair every success with
- * psram_release().  Returns 0 when acquired, -1 when busy. */
+/* Set when `psram wtune` ended keeping the reconfigurer mark (no write path
+ * shown, issue #252): `psram info` says so until `reboot`.  CPU-only, so in
+ * DTCM (zeroed at boot by SystemInit()). */
+static volatile uint8_t psram_wtune_kept_mark __attribute__((section(".dtcm_bss")));
+
+/* [!] THE ONE ENTRY OF EVERY TUNING SUBCOMMAND (set, mr0, phase, clk,
+ * mmapscan start, wtune): take the OCTOSPI1 reconfigurer mark, then write the
+ * D-cache back while the timing is still the one its dirty lines were made
+ * under (psram_clean_dcache(), issue #252) -- under the mark, so no user can
+ * dirty a line again before the change.  On contention (a backgrounded
+ * `psram`/`membench` command still holds it) print and bail.  Pair every
+ * success with psram_release() (wtune's one exception is psram.h's).
+ * Returns 0 when acquired, -1 when busy. */
 static int psram_guard(struct cli_instance *sh)
 {
 	if (!psram_acquire()) {
@@ -71,6 +80,7 @@ static int psram_guard(struct cli_instance *sh)
 		          "run `lcd off`)\r\n");
 		return -1;
 	}
+	psram_clean_dcache();
 	return 0;
 }
 
@@ -111,6 +121,10 @@ static int psram_info_lines(ext_ram_write_fn write, void *ctx)
 	if (!psram_ready() &&
 	    psram_line(write, ctx, "  init    : failed at %s\r\n",
 	               psram_stage_name(psram_init_stage())) != 0)
+		return -1;
+	if (psram_wtune_kept_mark &&
+	    psram_line(write, ctx, "  held    : OCTOSPI1, since a failed wtune; "
+	               "`reboot`\r\n") != 0)
 		return -1;
 	if (psram_line(write, ctx, "  clock   : %lu Hz (device)\r\n",
 	               (unsigned long)psram_clock_hz()) != 0 ||
@@ -369,6 +383,7 @@ int cmd_psram_wtune(struct cli_instance *sh, int argc, char **argv)
 		cli_print(sh, "  wr dummy %2lu: %s\r\n", (unsigned long)d,
 		          (mask & (1u << d)) ? "PASS" : "fail");
 	if (end == PSRAM_WTUNE_END_KEEP) {
+		psram_wtune_kept_mark = 1u;
 		cli_error(sh, "psram wtune: %s; OCTOSPI1 held until `reboot`\r\n",
 		          rc == PSRAM_WTUNE_DEAD ? "device stopped answering"
 		                                 : "nothing round-tripped");

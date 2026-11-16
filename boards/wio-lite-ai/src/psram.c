@@ -36,6 +36,7 @@
 #include "stm32h7xx_hal.h"
 #include "psram.h"
 #include "psram_guard.h"    /* the guard word's transitions (issue #142) */
+#include "psram_wtune.h"    /* the wtune sweep, hardware passed in (issue #252) */
 
 #define LOG_TAG "psram"
 #include "log.h"
@@ -863,65 +864,52 @@ void psram_set_mr0(uint32_t val)
  * a mis-latencied write can leave the device unresponsive for the next read,
  * and a DQS-gated MMAP read then stalls the AXI bus forever (no timeout in
  * mmap mode) -> CPU lock -> IWDG reset.  Board #2 hit exactly that at d=0. */
-int psram_wtune(uint32_t off, uint32_t reps, uint32_t *out_mask)
+/* The sweep's hardware steps (src/psram_wtune.h): the sweep itself, and
+ * everything that decides its result, is psram_wtune.c (issue #252). */
+static void wt_mmap_enter(uint32_t wr_dcyc)
+{
+	psram_mmap_enter(psram_rd_dcyc, wr_dcyc);
+}
+
+static void wt_write_marker(uint32_t off, uint32_t m0, uint32_t m1)
 {
 	volatile uint32_t *p =
 	    (volatile uint32_t *)(uintptr_t)(PSRAM_BASE_ADDR + off);
-	static uint32_t wt_nonce;
-	uint32_t d, r, i, mask = 0u, orig = psram_wr_dcyc, first = 0xFFFFFFFFu;
 
-	*out_mask = 0u;
-	/* [!] Never past the non-cacheable pool (issue #252), whatever the caller. */
-	if (!psram_up || !psram_wtune_off_ok(off))
-		return PSRAM_WTUNE_REFUSED;
+	p[0] = m0;                      /* the path under test: mmap write */
+	p[1] = m1;
+	__DSB();                        /* drain store buffer -> bus */
+	psram_pause();                  /* leave mmap before reading back */
+}
 
+static int wt_read_back(uint32_t off, uint8_t back[8])
+{
+	return ospi1_mem_read_ind(off, back, 8u);
+}
+
+static const struct psram_wtune_hw wt_hw = {
+	.mmap_enter = wt_mmap_enter, .write_marker = wt_write_marker,
+	.read_back = wt_read_back, .recover = psram_recover,
+};
+
+int psram_wtune(uint32_t off, uint32_t reps, uint32_t *out_mask)
+{
 	/* Per-run nonce folded into the markers: the sweep reuses the same
 	 * address every run, so without it a silently-failing write could read
 	 * back a previous run's identical marker and fake a PASS. */
+	static uint32_t wt_nonce;
+
 	wt_nonce += 0x004D0000u;
+	return psram_wtune_sweep(&wt_hw, psram_up, psram_wr_dcyc, wt_nonce, off,
+	                         reps, out_mask);
+}
 
-	for (d = 0u; d <= 15u; d++) {
-		uint32_t ok = 1u;
-		for (r = 0u; r < reps && ok; r++) {
-			uint32_t m0 = (0x5AC30000u | (d << 8) | r) ^ wt_nonce;
-			uint32_t m1 = ~m0;
-			uint8_t back[8];
-			uint32_t g0 = 0u, g1 = 0u;
-
-			psram_mmap_enter(psram_rd_dcyc, d);
-			p[0] = m0;                      /* the path under test: mmap write */
-			p[1] = m1;
-			__DSB();                        /* drain store buffer -> bus */
-			psram_pause();                  /* leave mmap before reading back */
-			if (!ospi1_mem_read_ind(off, back, 8u)) {
-				ok = 0u;                    /* timed out; abort already done */
-				continue;
-			}
-			for (i = 0u; i < 4u; i++) {
-				g0 |= (uint32_t)back[i] << (8u * i);
-				g1 |= (uint32_t)back[4u + i] << (8u * i);
-			}
-			if (g0 != m0 || g1 != m1)
-				ok = 0u;
-		}
-		/* Recover a device wedged by this dummy's writes before it poisons
-		 * the rest of the sweep; bail with the partial mask if it stays
-		 * dead so the caller sees the failure instead of 16 bogus fails. */
-		if (!psram_recover()) {
-			psram_mmap_enter(psram_rd_dcyc, orig);
-			*out_mask = mask;
-			return PSRAM_WTUNE_DEAD;
-		}
-		if (ok) {
-			mask |= 1u << d;
-			if (first == 0xFFFFFFFFu)
-				first = d;
-		}
-	}
-	psram_mmap_enter(psram_rd_dcyc,
-	                 (first != 0xFFFFFFFFu) ? first : orig);
-	*out_mask = mask;
-	return PSRAM_WTUNE_OK;
+/* [!] Issue #252: called by every tuning subcommand right after it took the
+ * reconfigurer mark (cmds/cmd_psram.c, psram_guard()).  No user holds the
+ * window then, so nothing dirties a line again before the timing changes. */
+void psram_clean_dcache(void)
+{
+	SCB_CleanDCache();
 }
 
 /* ------------------------------------------------------------------ *

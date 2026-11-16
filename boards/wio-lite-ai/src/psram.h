@@ -238,6 +238,20 @@ int psram_mmapscan_get(struct psram_scan_state *out);
  * not bring it back: the original dummy is re-entered, *mask is what passed
  * before).
  */
+/*
+ * Write every dirty D-cache line back, with the bus timing still the one the
+ * lines were made under (issue #252).  The top 2 MB of the window
+ * (`.psram_ai`: the model, nn's arena, membench's cached buffer) is
+ * write-back cacheable, so a line left dirty there would otherwise be evicted
+ * later -- while a tuning subcommand has the bus at a different latency,
+ * phase or clock -- and land in the device wrong.  Every tuning subcommand
+ * calls it once, right after it took the reconfigurer mark and before it
+ * changes anything (the one entry in cmds/cmd_psram.c).  The whole cache, by
+ * set and way: 32 KB is 1,024 operations, against 65,536 lines for the 2 MB by
+ * address, and it needs no range to be kept right.
+ */
+void psram_clean_dcache(void);
+
 #define PSRAM_WTUNE_OK       0
 #define PSRAM_WTUNE_REFUSED  1
 #define PSRAM_WTUNE_DEAD     2

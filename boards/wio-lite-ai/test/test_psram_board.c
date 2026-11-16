@@ -49,7 +49,7 @@ static volatile uint32_t *mem;   /* mapped at PSRAM_BASE_ADDR */
 
 static char seq[128];
 static int mark, refuse_mark, frame_dropped, painted, ready = 1;
-static int acquires, releases, sets, repaints;
+static int acquires, releases, sets, repaints, cleaned, cleans, unclean_sets;
 static long stores, loads, bad_access;
 static long flip_load = -1, flip_seen;
 static uint32_t flip_addr;
@@ -70,7 +70,24 @@ void psram_release(void)
 {
 	releases++;
 	mark = 0;
+	cleaned = 0;
 	say("mark- ");
+}
+/* [!] #252: the D-cache written back under the mark, before any change */
+void psram_clean_dcache(void)
+{
+	cleans++;
+	if (!mark)
+		bad_access++;
+	cleaned = 1;
+	say("clean ");
+}
+/* A tuning change made without the mark, or before the clean. */
+static void tuned(void)
+{
+	sets++;
+	if (!mark || !cleaned)
+		unclean_sets++;
 }
 void camera_frame_invalidate(void)
 {
@@ -93,20 +110,20 @@ uint32_t psram_init_stage(void) { return PSRAM_STAGE_MR0; }
 uint32_t psram_get_dqse(void) { return 1u; }
 uint32_t psram_get_refresh(void) { return 2u; }
 uint32_t psram_clock_hz(void) { return 133000000u; }
-void psram_set_prescaler(uint32_t p) { (void)p; sets++; }
+void psram_set_prescaler(uint32_t p) { (void)p; tuned(); }
 void psram_read_id(uint8_t id[2]) { id[0] = 0x8Du; id[1] = 0x93u; }
 void psram_get_latency(uint32_t *rd, uint32_t *wr) { *rd = 8u; *wr = 4u; }
-void psram_set_latency(uint32_t rd, uint32_t wr) { (void)rd; (void)wr; sets++; }
+void psram_set_latency(uint32_t rd, uint32_t wr) { (void)rd; (void)wr; tuned(); }
 uint32_t psram_get_instruction_dtr(void) { return 0u; }
 void psram_get_phase(uint32_t *sel, uint32_t *unit) { *sel = 3u; *unit = 8u; }
-void psram_set_phase(uint32_t sel, uint32_t unit) { (void)sel; (void)unit; sets++; }
+void psram_set_phase(uint32_t sel, uint32_t unit) { (void)sel; (void)unit; tuned(); }
 uint32_t psram_get_read_flags(void) { return 0u; }
 uint32_t psram_get_mr0(void) { return 0x24u; }
-void psram_set_mr0(uint32_t v) { (void)v; sets++; }
+void psram_set_mr0(uint32_t v) { (void)v; tuned(); }
 void psram_mmapscan_stop(void) {}
 int psram_mmapscan_get(struct psram_scan_state *out) { (void)out; return 0; }
 int psram_mmapscan_start(uint32_t phase, uint32_t ulo, uint32_t ustep, uint32_t n)
-{ (void)phase; (void)ulo; (void)ustep; (void)n; return 0; }
+{ (void)phase; (void)ulo; (void)ustep; (void)n; tuned(); return 0; }
 /* `psram wtune` (issue #252): what the sweep returns, and in what order the
  * command reached it. */
 static int wt_rc, wt_calls, wt_frame_first, wt_mark_held;
@@ -116,7 +133,7 @@ int psram_wtune(uint32_t off, uint32_t reps, uint32_t *mask)
 	(void)reps;
 	wt_calls++;
 	wt_off = off;
-	wt_frame_first = frame_dropped;    /* [!] the frame dropped before a marker */
+	wt_frame_first = frame_dropped && cleaned; /* [!] cleaned, frame dropped first */
 	wt_mark_held = mark;
 	*mask = (wt_rc == PSRAM_WTUNE_REFUSED) ? 0u : wt_mask;
 	say("wtune ");
@@ -224,7 +241,8 @@ static const struct cli_cmd *psram_sub(const char *name)
 static void reset(void)
 {
 	seq[0] = '\0';
-	mark = refuse_mark = frame_dropped = painted = 0;
+	mark = refuse_mark = frame_dropped = painted = cleaned = 0;
+	cleans = unclean_sets = 0;
 	ready = 1;
 	acquires = releases = sets = 0;
 	stores = loads = bad_access = 0;
@@ -354,8 +372,8 @@ int main(void)
 
 	/* ---- a whole test ---- */
 	reset();
-	check(run("test") == 0 && strcmp(seq, all_steps) == 0,
-	      "mark, frame, (repaint), mark given back", "test");
+	check(run("test") == 0 && strcmp(seq, all_steps) == 0 && cleans == 0,
+	      "mark, frame, (repaint), mark given back; no cache clean", "test");
 	check(stores == 3L * (long)(PSRAM_NC_BYTES / 4u) && loads == stores,
 	      "6 MB three times", "test");
 	check(has("psram: DESTRUCTIVE test over 6144 KB from 0x90000000\r\n") &&
@@ -393,6 +411,22 @@ int main(void)
 	check(run("clk 1") == 1 && sets == 0 && has("OCTOSPI1 busy"),
 	      "clk refused: nothing set", "clk 1");
 
+
+
+	/* ---- #252: every tuning change is made under the mark, after the clean ---- */
+	{
+		static const char *const lines[] = { "set 8 4", "mr0 0x24", "phase 3 8",
+		                                     "clk 1", "mmapscan start 3" };
+
+		for (unsigned i = 0; i < sizeof lines / sizeof lines[0]; i++) {
+			reset();
+			run(lines[i]);
+			check(cleans == 1 && sets == 1 && unclean_sets == 0,
+			      "the D-cache cleaned under the mark, before the change", lines[i]);
+		}
+	}
+	reset();
+	check(run("info") == 0 && !has("held    :"), "info: no kept mark, no line", "info");
 
 	/* ---- issue #252: `psram wtune` ---- */
 	{
@@ -438,8 +472,8 @@ int main(void)
 	check(run("wtune 0x905FFFF8") == 0 && wt_off == 0x5FFFF8u && wt_frame_first &&
 	      wt_mark_held && !mark && releases == 1 &&
 	      repaints == (BSP_ENABLE_LCD ? 1 : 0) &&
-	      strcmp(seq, BSP_ENABLE_LCD ? "mark+ frame wtune paint mark- "
-	                                 : "mark+ frame wtune mark- ") == 0 &&
+	      strcmp(seq, BSP_ENABLE_LCD ? "mark+ clean frame wtune paint mark- "
+	                                 : "mark+ clean frame wtune mark- ") == 0 &&
 	      has("  wr dummy  4: PASS\r\n") &&
 	      has("psram wtune: lowest passing dummy applied; run `psram test 4096`\r\n"),
 	      "wtune passed: frame dropped first, repainted, then the mark given back",
@@ -460,6 +494,11 @@ int main(void)
 	text[0] = '\0';
 	check(run("set 8 4") == 1 && sets == 0 && has("OCTOSPI1 busy"),
 	      "after a kept mark every reconfigurer is refused", "set 8 4");
+	text_len = 0;
+	text[0] = '\0';
+	check(run("info") == 0 &&
+	      has("  held    : OCTOSPI1, since a failed wtune; `reboot`\r\n"),
+	      "info says the mark is kept", "info");
 	mark = 0;
 	reset();
 	wt_rc = PSRAM_WTUNE_REFUSED;

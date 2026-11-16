@@ -995,6 +995,7 @@ add_executable(shell
     "${BOARD_DIR}/src/malloc_lock.c"
     "${BOARD_DIR}/src/mpu.c"
     "${BOARD_DIR}/src/psram.c"
+    "${BOARD_DIR}/src/psram_wtune.c"   # psram wtune's sweep, hardware passed in (#252)
     "${BOARD_DIR}/src/psram_guard.c"   # the OCTOSPI1 guard word (#142)
     "${BOARD_DIR}/src/rtl8720.c"
     "${BOARD_DIR}/src/rtl8720_flash.c"

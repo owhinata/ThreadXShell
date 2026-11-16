@@ -82,6 +82,24 @@ variable to `ON` or `OFF`;
 `shared-storage/capabilities.txt`, and a variable a mark names that is unset or
 not exactly `ON`/`OFF` fails.
 
+Every other file under `shell/cmds/` is `required`; among them, since issue
+#250, `cmd_nor.c` (the shared `nor`; a build without the device -- wio-lite-ai
+with `BSP_ENABLE_KV` off -- compiles it and registers nothing, as `cmd_blob.c`)
+and `nor_console.c` (where an erase or a write of the NOR may run).
+
+`nor_console.c` asks "is this the telnet console" only on a board that has
+one, and that answer is not the board's to write: the top-level
+`CMakeLists.txt` derives `SHELL_HAS_NET_TTY` (1 or 0) from `BOARD_HAS_NETX`
+-- the property `net_tty.c` is optional on -- right after the board's
+`board.cmake`, and sets it on that one source (`set_property(SOURCE ...
+COMPILE_DEFINITIONS)`).  A `BOARD_HAS_NETX` that is not `ON` or `OFF` stops
+the configure; without the definition the file does not compile (its
+`#error`, checked by `shell/test/run_host_tests.sh`); 1 on a board that does
+not build `net_tty.c` does not link.  A board that could say "no telnet"
+itself would lose the refusal on its telnet console with every check still
+passing, which is the hole `xfer_console_board_facts`' telnet field has
+(CLAUDE.md, #231).
+
 - A `required` file, or an `optional` one whose property is `ON`, must be
   compiled as an object the `shell` link takes directly: one of the inputs
   before `|` in that link's `build.ninja` statement, read with

@@ -3210,25 +3210,39 @@ the serial port open and a reset already pressed.
 ### `nor` -- reading the flash, and who owns the window (issue #86)
 
 ```
-nor info    the lifecycle, the JEDEC id, the wrapped IRQ, MPU/SCU read-back
-nor scan    walk all 16 MB and report every extent that is not erased
-nor cycle   take the window down and bring it back; no data touched
-nor erase   erase the flash covering <addr> <len>, inside `blob` only
-nor write   program <addr> <len> [byte], inside `blob` only, 64 KB max
+nor info                the lifecycle, the JEDEC id, the wrapped IRQ, MPU/SCU read-back
+nor scan                walk all 16 MB and report every extent that is not erased
+nor cycle               take the window down and bring it back; no data touched  (danger)
+nor erase <addr> <len>  erase whole 4 KB sectors, inside `blob` only             (danger)
+nor write <addr> <hex>  program 1..256 B given in hex, inside `blob` only        (danger)
 ```
+
+Since issue #250 `info`, `erase` and `write` are the shared `nor` of all three
+boards (`shell/cmds/cmd_nor.c`, the contract in `svc/nor/nor_svc.h`), with
+this board's table in `cmds/cmd_nor_board.c`; `scan` and `cycle` are this
+board's own subcommands there.  The shared `read` and `test` answer that this
+board has neither: ``nor: no `nor read` on this board -- the flash is mapped
+at 0x3A000000; `devmem dump` reads it`` and ``nor: no `nor test` on this
+board -- every `nor write` reads back and compares what it wrote``.  `cycle`,
+`erase` and `write` are built only with `CLI_ENABLE_DANGEROUS_CMDS` (fixed at
+1 on this board, so nothing changes in the image).
 
 The last three are issue #88 Part E and are thin on purpose: all the judgement
 is in `port/nor/nor_write.c` and `port/sdk_seam/nor_seam.c` (below).  There is
 no raw-opcode subcommand and no way to name an address outside the writable
 interval.
 
-[!] **`nor write`'s cap moved from one program page to 64 KB in issue #92**, and
-it now programs out of the blob staging buffer rather than a 256-byte pattern of
-its own.  Not because a console needs to write 64 KB of one byte: #49 Step 2 has
-to know what one program TRANSACTION costs at each candidate chunk size before
-the transfer's chunk can be chosen, and a measurement taken through a different
-buffer would be a measurement of a different path.  Both `write` and `erase`
-print an `elapsed` line for the same reason -- the whole transaction, not the
+[!] **`nor write` took `<addr> <len> [byte]` and programmed up to 64 KB out
+of the blob staging buffer from issue #92 to issue #250.**  It was there to
+measure what one program TRANSACTION costs at each candidate chunk size
+before `blob write`'s chunk could be chosen, through the buffer the transfer
+uses; that measurement is done ([What a write costs](#what-a-write-costs-and-where-the-chunk-size-comes-from)
+and `blob write` programs 64 KB chunks through the same path).  Since issue
+#250 `nor write <addr> <hex>` takes 1..256 bytes, as on the other two boards,
+from the command's own stack: it no longer touches the staging buffer, which
+also ends the case where it filled that buffer before it held the reservation
+while a background `blob verify` was computing a CRC in it.  Both `write` and
+`erase` still print an `elapsed` line -- the whole transaction, not the
 vendor call, because the window down, the JEDEC canary, the read-back and the
 re-probe are what a transfer pays per chunk.
 
@@ -3830,17 +3844,20 @@ rule is about SSPI and WDMA3, not this path.
 #### What the console can and cannot do
 
 ```
-nor cycle                      the transaction with no operation
-nor erase <addr> <len>         whole 4 KB sectors; prints the footprint first
-nor write <addr> <len> [byte]  up to 64 KB of a pattern or one byte value
+nor cycle                the transaction with no operation
+nor erase <addr> <len>   whole 4 KB sectors (both 4 KB aligned); prints the range first
+nor write <addr> <hex>   1..256 B given in hex, starting on a 4-byte word
 ```
 
-`nor erase` prints the **footprint** -- what is lost, not what was asked for --
-*before* it runs, both because an erase destroys whole units and because if the
+`nor erase` prints the range it erases *before* it runs, because if the
 vendor ever wedges, the last line on the console is what was in flight.
+Since issue #250 the address and the length must both be whole 4 KB sectors
+(`nor: erase takes whole 4 KB sectors ...`), so what is named is what is lost;
+until then the range was rounded outward and the footprint printed.
 
-`nor write` was capped at one program page when it was written; since issue
-#92 the cap is 64 KB, the blob staging buffer (see [`nor`](#nor----reading-the-flash-and-who-owns-the-window-issue-86)).
+`nor write` was capped at one program page when it was written, at 64 KB (the
+blob staging buffer) from issue #92 to issue #250, and at 256 B again since
+(see [`nor`](#nor----reading-the-flash-and-who-owns-the-window-issue-86)).
 Bulk data still does not come through a console: issue #49's blob writer calls
 `nor_write_program()` directly.
 
@@ -3949,19 +3966,23 @@ leaves `done == 0`, the old header intact and the slot still valid -- so
 "the erase did not succeed, therefore the slot is empty" is **not** a valid
 inference. Only a cancel supports it.
 
-### What guards each `nor` subcommand today (issue #248)
+### What guards each `nor` subcommand today (issues #248, #250)
 
 `nor` goes past the asset store (`blob`) to the part itself.  The table says,
 per subcommand, what keeps it from destroying somebody else's data **as the
-code stands at `3ee40b2`**.  It was read from the source (`cmds/cmd_nor.c`,
-`port/nor/nor_write.c`, `port/nor/nor_span.c`, `port/sdk_seam/nor_seam.c`), not
-tried on the board for this table; the behaviour it summarises is described,
-with what was seen on the board, in the sections above and in [Why a write is
-refused while the camera streams](#why-a-write-is-refused-while-the-camera-streams-issue-203).
-f746g-disco's `qspi` / `sdram` and wio-lite-ai's `nor` / `psram` have the same
-columns in those boards' READMEs.  Issue #213 changes these commands and
-updates the table; a guard that is in it now has to be in it afterwards.  This
-board has no external RAM, so there is no second table.
+code stands after issue #250**, which made `nor info` / `erase` / `write` the
+shared command of all three boards.  It was read from the source
+(`shell/cmds/cmd_nor.c`, `cmds/cmd_nor_board.c`, `port/nor/nor_write.c`,
+`port/nor/nor_span.c`, `port/sdk_seam/nor_seam.c`), not tried on the board
+for this table; the behaviour it summarises is described, with what was seen
+on the board, in the sections above and in [Why a write is refused while the
+camera streams](#why-a-write-is-refused-while-the-camera-streams-issue-203).
+The refusals are walked by `test/test_nor_board.c` (the shared command with
+this board's real table).  f746g-disco's `nor` / `sdram` and wio-lite-ai's
+`nor` / `psram` have the same columns in those boards' READMEs.  Issue #213
+changes these commands and updates the table; a guard that is in it now has
+to be in it afterwards (the before / after table below says where each one
+went).  This board has no external RAM, so there is no second table.
 
 What the columns mean, the same on all three boards:
 
@@ -3970,25 +3991,58 @@ What the columns mean, the same on all three boards:
   `blob write` and `blob erase` take; it is refused, not waited for, while a
   reader holds a lease (an open model, a `blob` read, a `devmem` access of
   the window, a `nor scan`), another writer holds it, the camera streams, or
-  the port is faulted.
+  the port is faulted.  It is this board's hold in the shared `nor`'s table
+  (`nor_board_hold()`): the shared command takes no hold and gives none back,
+  and the one operation it runs inside is one call of `nor_write_erase()` /
+  `nor_write_program()` -- one transaction.
 - **Addresses it refuses**: before anything is sent.  The writable interval
   is the blob partition, `0x200000-0xFFDFFF`, read from the seam's own record
-  (`nor_seam_limits`, the interval `nor info` prints), and checked again by the
+  (`nor_seam_limits`, the interval `nor info` prints), asked by the board's
+  range before the reservation and checked again by the writer and by the
   seam on every vendor call (`check_nor_seam.py` confirms from the linker map
   that only `nor_seam.c` reaches the vendor's erase and program).
 - **From telnet / in a background job**: this board has no telnet console.
-  The background question is asked by `nor_cmd_foreground()`.
+  The background question is the shared `nor_console_refuse()`
+  (`shell/cmds/nor_console.c`, since issue #250; it knows there is no telnet
+  console from the build, `BOARD_HAS_NETX` OFF), asked by the shared erase
+  and write and by this board's `cycle`.
 - **Dangerous-commands setting**: whether the subcommand is built only with
   `CLI_ENABLE_DANGEROUS_CMDS`.  On this board the setting is fixed at 1
-  (`board.cmake`), and `cmds/cmd_nor.c` does not look at it.
+  (`board.cmake`); since issue #250 `cycle`, `erase` and `write` are built
+  only with it (before, nothing here looked at it).
 
 | Subcommand | Held while it runs | Addresses it refuses | From telnet | In a background job | Dangerous-commands setting | Other refusals and checks |
 |---|---|---|---|---|---|---|
 | `nor info` | nothing, except when the window has never been brought up: then a reader lease for the bring-up, given back at once | -- | no telnet console | runs | not looked at | the bring-up writes the QE bit of the status register ([`nor`](#nor----reading-the-flash-and-who-owns-the-window-issue-86)) |
 | `nor scan` | a reader lease for the whole scan, so every writer is refused meanwhile | -- (reads every byte of the 16 MB through the window) | no telnet console | runs | not looked at | refused while a writer holds the reservation or the port is faulted; Ctrl+C every 64 sectors |
-| `nor cycle` | the reservation, then one transaction | -- (touches no data) | no telnet console | **refused** (#203) | not looked at | the JEDEC id read again with the window down, the window re-probed after; costs two status-register writes |
-| `nor erase <addr> <len>` | the reservation, then one transaction | everything outside the writable interval: the firmware and bootloader area and the bootloader's slot header.  Inside it the range is rounded outward to whole 4 KB sectors.  **The blob slots, headers included, are not refused** | no telnet console | **refused** (#203) | not looked at | prints the sectors it will destroy first; does not look at what it erases; reads the range back as `0xFF`, and a mismatch is terminal (`FAULTED`, refused until reset); Ctrl+C between sectors, the result in `dmesg` |
-| `nor write <addr> <len> [byte]` | the reservation, then one transaction | outside the writable interval; an address not on a 4-byte boundary; `len` outside 1..64 KB (the staging buffer) | no telnet console | **refused** (#203) | not looked at | refused when the target is not erased, before the window goes down; reads the bytes back and compares, and a mismatch is terminal (`FAULTED`) |
+| `nor cycle` | the reservation, then one transaction | -- (touches no data) | no telnet console | **refused** (#203) | built only with it (since #250) | the JEDEC id read again with the window down, the window re-probed after; costs two status-register writes |
+| `nor erase <addr> <len>` | the reservation, then one transaction | everything outside the writable interval: the firmware and bootloader area and the bootloader's slot header; **an address or a length that is not a whole number of 4 KB sectors, or a length of 0** (since #250; before, the range was rounded outward).  **The blob slots, headers included, are not refused** | no telnet console | **refused** (#203) | built only with it (since #250) | prints the range it erases first; does not look at what it erases; reads the range back as `0xFF`, and a mismatch is terminal (`FAULTED`, refused until reset); Ctrl+C between sectors, the result in `dmesg` |
+| `nor write <addr> <hex>` | the reservation, then one transaction | outside the writable interval; an address not on a 4-byte word (the length may be odd); more than 256 B (since #250; it was `<addr> <len> [byte]` up to 64 KB through the staging buffer) | no telnet console | **refused** (#203) | built only with it (since #250) | refused when the target is not erased, before the window goes down; reads the bytes back and compares, and a mismatch is terminal (`FAULTED`); a line in `dmesg` |
+| `nor read`, `nor test` | -- | -- | -- | -- | `test` built only with it | **not on this board**: they answer that, with the way to do it here, and call nothing |
+
+The guards before and after the shared command (issue #250).  Not one is
+lost; the 4 KB alignment of an erase and the dangerous-commands setting are
+new.
+
+| Guard | Until #250 (`cmds/cmd_nor.c`) | Since #250 |
+|---|---|---|
+| the reservation for one transaction, given back at one exit | `nor_cmd_writer_enter()` + one exit per subcommand | `nor_board_hold()` in `cmds/cmd_nor_board.c` (the one exit), for erase, write and `cycle` |
+| one transaction per command, the order inside it, the read-back, FAULTED terminal, no program over data that is not erased | `port/nor/nor_write.c` | the same, unchanged |
+| the writable interval | `nor_write.c` and the seam | the same, and first the board's `nor_board_range()` |
+| a write starts on a 32-bit word | `nor_write.c` / `nor_span.c` | the same, and first `nor_board_range()` |
+| only `nor_seam.c` reaches the vendor's erase and program | `check_nor_seam.py` | the same (it saw the shared `cmd_nor.c` calling the vendor directly and failed) |
+| background jobs refused (#203) | `nor_cmd_foreground()` | the shared `nor_console_refuse()` |
+| the busy refusal names the one holder, in `blob`'s words too | `nor_cmd_say_busy()` | the same function, now from `nor_busy_why()` (two or more readers: "readers hold the window (`nor info` lists them)", the count no longer in the line) |
+| the camera refusal | `say_camera()` | the same sentence, `NOR_CAMERA_WHY` |
+| the output vocabulary | `check_output_vocabulary.py` | the same (it fails on a detector word in the shared `cmd_nor.c`) |
+| **new**: erase on whole 4 KB sectors, nothing rounded | -- | the shared `nor_arg_sectors()` |
+| **new**: `cycle` / `erase` / `write` under the dangerous-commands setting | -- | the shared command and `svc/nor_svc_config.h` |
+| **new**: `nor_svc_board` in the plugin forbidden table | -- | `GROVE_PLUGIN_FORBIDDEN` in `board.cmake` |
+
+| Measured (issue #250, the version string held fixed) | |
+|---|---|
+| ITCM free (`check_placement_budget.py`) | 19,136 B -> 19,104 B (step 1, the shared console question) -> **15,808 B** (step 2, the shared `nor`; roughly 2 KB of it, with their words, is the shared `read` and `test`, compiled and linked although this board has neither) |
+| Shell stack, `nor write` (static frames from `.su`) | the 256 B of data are on the stack now: about 528 B down to `nor_write_program()` (`cmd_nor_write` 376 B) against 88 B before; **the high-water on the board is not measured yet** |
 
 ### What is actually on this board's flash
 
@@ -4502,8 +4556,9 @@ cannot be brought back and was never ours.
 > `camera stream stop`.  The refusal leaves the port as it was (not faulted,
 > no reservation held); `nor info` and the reads (`blob list`, `blob verify`)
 > are not affected.  The same commands also refuse to run as a background job
-> (`cannot run in the background -- drop the trailing '&'`), which the camera
-> check depends on.  Why, and what was measured: "Why a write is refused while
+> (`nor: erasing or writing the flash runs only in the foreground; this is a
+> background job` for `nor`, `cannot run in the background -- drop the
+> trailing '&'` for `blob`), which the camera check depends on.  Why, and what was measured: "Why a write is refused while
 > the camera streams" below.
 
 ```
@@ -4605,7 +4660,9 @@ which is a separate issue.
 The vendor's page program (`hx_lib_qspi_eeprom_write`: the 256 B page goes
 to the SPI master by DMA, and the call spins on the DMA completion flag)
 does not survive a streaming camera.  Measured on the board with firmware
-5acf240, 64 KB `nor write` into erased `blob` flash:
+5acf240, 64 KB `nor write` into erased `blob` flash (the 64 KB form of `nor
+write` is gone since issue #250; `blob write` programs the same 64 KB
+transactions):
 
 | state before the write | result |
 |---|---|
@@ -4656,9 +4713,12 @@ How the refusal is decided (`port/nor/nor_flash.c`, `nor_write_camera_live()`):
   walked by `test/test_nor_state.c`).  The camera can only turn a "go" into
   this refusal; a faulted port or another holder still answers first.
 - **every writing command runs in the foreground only**: `nor write`,
-  `nor erase`, `nor cycle` and `blob erase` answer `nor: cannot run in the
-  background -- drop the trailing '&'` (`blob:` for the last), as `blob write`
-  already did.  This is what the check rests on: a camera is started only from
+  `nor erase` and `nor cycle` answer `nor: erasing or writing the flash runs
+  only in the foreground; this is a background job` (since issue #250 the
+  shared `shell/cmds/nor_console.c`, the words of all three boards; `nor:
+  cannot run in the background -- drop the trailing '&'` before), and `blob
+  erase` answers `blob: cannot run in the background -- drop the trailing
+  '&'`, as `blob write` already did.  This is what the check rests on: a camera is started only from
   a console thread, and a program or a cycle does not yield between its claim
   and its commit (the vendor spins) -- which keeps the camera out only while
   the writer is the foreground shell thread, because background jobs run below

@@ -522,7 +522,7 @@ is no built-in model) and after `nn model unload`.
   name the store could never have stored before it takes anything (`'<name>' is
   not a blob name (...)`), then holds the store's busy flag from the name
   lookup to the end of the payload read, so no `blob write` / `blob erase` /
-  `qspi erase` / `qspi test` can change the slot between the two (a held flag:
+  `nor erase` / `nor test` can change the slot between the two (a held flag:
   BUSY, `blob busy (...)`, before the swap, so the open model stays).  Under
   it: no VALID slot or two VALID slots under the name are ARG (`'<name>': ...
   (`blob list` shows what is where)`), headers that cannot be read are HW; a
@@ -988,7 +988,7 @@ What is shared and what is this board's:
 |---|---|
 | `0x000000 .. 0x100000` | the key-value store, `kv` (FlashDB, issue #214; the same place as wio-lite-ai's): see [The configuration store](#the-configuration-store-kv-issue-214).  No slot; until #214 reserved, and `qspi erase` / `qspi test` reached it |
 | `0x100000 .. 0x800000` | the blob store: 13 slots, below |
-| `0x800000 .. 0x1000000` | unallocated, no slot; the 4 KB at `0x800000` is where `qspi test` is run (issue #214) |
+| `0x800000 .. 0x1000000` | unallocated, no slot; the 4 KB at `0x800000` is where `nor test 0x800000` is run (issue #214; `qspi test` until #250) |
 
 | Slots | Base | Size | Payload |
 |---|---|---|---|
@@ -1028,20 +1028,20 @@ What is this board's:
 - **[!] The store's reads answer busy while its busy flag is held**, unlike
   wio-lite-ai's: `blob list`, `blob info`, `blob read`, `blob verify` and
   `blob free` answer `blob: another QSPI operation is running (...)` while a
-  `blob write` / `blob erase`, a `qspi erase` / `qspi test`, an `nn model
+  `blob write` / `blob erase`, a `nor erase` / `nor test`, an `nn model
   load <name>` (lookup to end of read) or, since issue #214, any `kv`
   command (reads included, [below](#the-configuration-store-kv-issue-214))
   runs on another console or in the background, rather than describe flash
   that is being changed.  They only
-  look at the flag, so two readers do not refuse each other.  Which `qspi`
-  subcommands take the flag (`qspi: busy -- ...` when they cannot) is in
-  [What guards `qspi` and `sdram` today](#what-guards-qspi-and-sdram-today-issue-248).  Every
-  refusal names the same holders -- `blob`'s, `qspi`'s and `nn model load`'s
+  look at the flag, so two readers do not refuse each other.  Which `nor`
+  subcommands take the flag (`nor: busy -- ...` when they cannot) is in
+  [What guards `nor` and `sdram` today](#what-guards-nor-and-sdram-today-issues-248-250).  Every
+  refusal names the same holders -- `blob`'s, `nor`'s and `nn model load`'s
   BUSY -- from one string, `BLOB_BUSY_HOLDERS` in `src/blob.h` (which names
   "a `kv` command" too since #214).
 - [!] **A read looks at the flag once, when it starts.**  A `blob verify`
   that is already running is not stopped when another console then starts a
-  `qspi erase` or `qspi test`: it goes on reading flash that is being erased
+  `nor erase` or `nor test`: it goes on reading flash that is being erased
   or programmed and may report a false CRC mismatch.  A `blob list` looks
   again at every row, so it stops part way with the busy line instead (or
   shows a row read while the flag was still free).  Run either again once the
@@ -1161,20 +1161,32 @@ mode only.  Two things it does that the HAL does not:
   instruction is the usual behaviour of this family; it was not checked
   against the N25Q128A datasheet here.)
 
-`qspi info` shows all of it (the shape; values elided):
+`nor info` shows all of it (`qspi info` until issue #250; the shape, values
+elided):
 
 ```
-before    : CR ... (abort 0) SR ... (busy 0 flevel 0 tcf . ftf . tef .)
-            CCR ... (fmode 0 dmode .) DLR ... AR ...
-            handle state 0x.. error 0x., t ... ms
-size      : ...                 (geometry, clock, read mode as before)
-status    : 0x00
-after     : (the same three lines, after its own status read)
-failures  : 0
+NOR: N25Q128A on QUADSPI
+  state   : ready (indirect)
+  jedec   : 20 BA 18
+  size    : 16 MB (offsets 0 .. 0xFFFFFF)
+  erase   : 4096 B unit
+  page    : 256 B
+  sector  : 64 KiB (erase 0xD8, not used by `nor erase`); subsector 4 KiB (erase 0x20)
+  sclk    : ... MHz, indirect mode
+  read    : ...                 (the read mode)
+  status  : 0x00
+  before : CR ... (abort 0) SR ... (busy 0 flevel 0 tcf . ftf . tef .)
+             CCR ... (fmode 0 dmode .) DLR ... AR ...
+             handle state 0x.. error 0x., t ... ms
+  after  : (the same three lines, after its own id and status reads)
+  failures: 0
 ```
 
-`before` is the controller as it was when the command was typed, before
-`qspi info` sends anything; `after` follows its own status-register read.
+The first six lines are the shared `nor info`'s, the same on all three
+boards; the rest are this board's.  `before` is the controller as it was
+when the command was typed: it is sampled before `nor info` sends anything,
+although since issue #250 it is printed after the shared lines; `after`
+follows its own id and status-register reads.
 Healthy is `abort 0`, `busy 0` and `fmode 0` in both.  `failures` counts the
 driver's failures since boot; when it is not 0, `first fail` and `last fail`
 follow, each with the step that failed (`<op>-<phase>`; phase `rxend` is a
@@ -1313,9 +1325,9 @@ yes` mean what they mean there.  What is this board's:
   for half a minute or more (below) -- `blob list` / `info` / `read` /
   `verify` / `free` answer `blob: another QSPI operation is running (...)`,
   `blob write` / `blob erase` and `nn model load <name>` answer busy, and
-  `qspi erase` / `qspi test` answer `qspi: busy -- ...`.  The other way, while
+  `nor erase` / `nor test` answer `nor: busy -- ...`.  The other way, while
   a `blob write` (its whole receive), a `blob erase`, an `nn model load
-  <name>` or a `qspi erase` / `qspi test` holds the flag, every `kv` command,
+  <name>` or a `nor erase` / `nor test` holds the flag, every `kv` command,
   `kv get` and `kv list` included, waits 5 s and answers `store busy`.  A
   `kv list` prints its rows with the flag held, so a telnet client that stops
   reading keeps the blob commands busy for as long as that output waits.  A
@@ -1337,12 +1349,14 @@ yes` mean what they mean there.  What is this board's:
   offline (`device lock failed inside FlashDB -- store latched offline`).
   A FlashDB or FAL print that comes from a thread without the hold goes to
   `dmesg` as it is, prefixed `(unheld) `.
-- **`qspi erase` and `qspi test` refuse the store's partition**:
-  ``qspi: 0x<addr> is in the kv store (0x000000-0x0fffff) -- `kv format yes`
-  erases it``.  `kv format yes` is the way to erase it.
-- **`qspi test` refuses a subsector that is not blank before it erases
-  anything** (``qspi: 4 KB at 0x<addr> is not blank -- not testing over data;
-  `qspi erase` it first if it is scratch``), and after the pattern test it
+- **`nor erase` and `nor test` refuse a range that touches the store's
+  partition** (`qspi erase` / `qspi test` until issue #250, which asked only
+  the address): ``nor: 0x<from> .. 0x<to> is in the kv store (0x000000 ..
+  0x0FFFFF) -- `kv format yes` erases it``.  `kv format yes` is the way to
+  erase it.
+- **`nor test` refuses a subsector that is not blank before it erases
+  anything** (``nor: 4 KB at 0x<addr> is not blank -- not testing over data;
+  `nor erase 0x<addr> 4096` first if it is scratch``), and after the pattern test it
   checks the partial-page programs the store relies on: 14 programs at fixed
   offsets into the subsector's first two pages (single status bytes one after
   another, a header, a record, one across the page boundary), both pages read
@@ -1359,8 +1373,8 @@ yes` mean what they mean there.  What is this board's:
   the addresses given and the other bytes of the page are not affected, and
   names no limit on partial programs of one page and no internal ECC; an
   erase is good for at least 100,000 cycles per sector.  `qspi test`'s
-  partial-page check passed on this board.  **Still to check: the marking on
-  the fitted part.**  `qspi probe`'s JEDEC ID (`20 BA 18`) is the same for the
+  partial-page check (`nor test`'s since issue #250) passed on this board.
+  **Still to check: the marking on the fitted part.**  `nor probe`'s JEDEC ID (`20 BA 18`) is the same for the
   N25Q128A and the MT25QL128, so the ID cannot say which; if it is an
   MT25QL128 the same points are to be read in the MT25Q datasheet.
 - **`kv format yes` takes about half a minute to a minute here.**  It erases
@@ -1815,7 +1829,7 @@ TUs. Each audit replays its producer's compile command. See the
 blob      camera    console   coremark  crash     devmem
 dmesg     echo      eth       free      gui       help
 jobs      kill      kv        lcd       membench  net
-nn        qspi      reboot    sd        sdram     sleep
+nn        nor       reboot    sd        sdram     sleep
 thread    touch     uptime    usleep    version   watch
 wdt
 ```
@@ -1825,7 +1839,7 @@ wdt
 
 Subsystems behind them: LTDC + GUIX (`gui`, `lcd`), OV5640 over DCMI
 (`camera`), the QSPI NOR as the asset store and the configuration store
-(`blob`, `qspi`, `kv` since issue #214; a LevelX + FileX volume with an `fs`
+(`blob`, `nor` (`qspi` until issue #250) and `kv` since issue #214; a LevelX + FileX volume with an `fs`
 command until issue #194), microSD (`sd`), FT5336 touch
 (`touch`), the Ethernet MAC and PHY (`eth`) with NetX Duo on top (`net`), the
 NN backends (`nn`), and YMODEM
@@ -1857,41 +1871,77 @@ deadline that drops output lives in the shared output path.  What counts as a
 console, and what the two columns mean, is in the root
 [README](../../README.md#a-board-can-run-more-than-one-console).
 
-### What guards `qspi` and `sdram` today (issue #248)
+### What guards `nor` and `sdram` today (issues #248, #250)
 
-`qspi` and `sdram` go past the stores (`blob`, `kv`) and past the owners of
-the SDRAM, to the devices themselves.  The two tables say, per subcommand, what
-keeps it from destroying somebody else's data **as the code stands at
-`3ee40b2`** -- including what does not.  They were read from the source
-(`cmds/cmd_qspi.c`, `cmds/cmd_sdram.c` and what they call), not tried on the
-board; the cells marked *(source only)* are the ones nobody has seen happen.
-wio-lite-ai's `nor` / `psram` and grove-vision-ai-v2's `nor` have the same
-columns in those boards' READMEs.  Issue #213 changes these commands and
-updates the tables; a guard that is in a table now has to be in it afterwards.
+`nor` (until issue #250 this board's `qspi`) and `sdram` go past the stores
+(`blob`, `kv`) and past the owners of the SDRAM, to the devices themselves.
+The two tables say, per subcommand, what keeps it from destroying somebody
+else's data -- including what does not -- **the `sdram` table as the code
+stands at `3ee40b2`, the `nor` table as it stands after issue #250**.  They
+were read from the source (`shell/cmds/cmd_nor.c`, `cmds/cmd_nor_board.c`,
+`cmds/cmd_sdram.c` and what they call), not tried on the board; the cells
+marked *(source only)* are the ones nobody has seen happen.  The `nor`
+refusals are walked by `test/test_nor_board.c` (the shared command with this
+board's real table).  wio-lite-ai's `nor` / `psram` and grove-vision-ai-v2's
+`nor` have the same columns in those boards' READMEs.  Issue #213 changes
+these commands and updates the tables; a guard that is in a table now has to
+be in it afterwards (the before / after table below says where each one went).
 
 What the columns mean, the same on all three boards:
 
 - **Held while it runs**: what the command takes, and for how long.  Every
-  `qspi` subcommand also holds the QSPI driver's mutex for each driver call
+  `nor` subcommand also holds the QSPI driver's mutex for each driver call
   (`port/qspi/qspi_flash.c`, waits without a limit), which serialises the
   wire and protects no data; it is not repeated in the rows.
 - **Addresses it refuses**: before anything is sent.
 - **From telnet / in a background job**: whether the command runs from the
-  `net>` console, and as `cmd &`.  Nothing in these two commands asks either
-  question (`net_tty_guard()` is not called, `sh->fg` is not read).
+  `net>` console, and as `cmd &`.  `sdram` asks neither question.  Since
+  issue #250 `nor erase` / `test` ask both, through the shared
+  `shell/cmds/nor_console.c` (the telnet question through the shared
+  `net_tty_is_console()`, a background job by `sh->fg`); until then `qspi`
+  asked neither.
 - **Dangerous-commands setting**: whether the subcommand is built only with
   `CLI_ENABLE_DANGEROUS_CMDS` (a CMake option on this board, ON by default,
   `board.cmake`).
 
-QSPI NOR (16 MB; the map is in [The QSPI asset store](#the-qspi-asset-store-blob-issue-194)):
+QSPI NOR (16 MB; the map is in [The QSPI asset store](#the-qspi-asset-store-blob-issue-194)).
+The command is the shared `shell/cmds/cmd_nor.c` (issue #250; the contract is
+`svc/nor/nor_svc.h`, see `svc/README.md`), and what protects the device is
+this board's table, `cmds/cmd_nor_board.c`.  An erase or a test asks, in this
+order and before it touches the device: its arguments (shared: the address on
+the device, the address and the length whole 4 KB subsectors, the range not
+past the end); the range (the board's: one that touches the `kv` partition
+by one byte is refused); the console (shared: telnet, a job launched from it
+and a job of the VCP console are refused, `nor: erasing or writing the flash
+runs only in the foreground of the VCP console; this is ...`); then the hold
+(the board's: the driver up, then the store's busy flag for the whole
+operation, given back at one place once taken).  The shared command takes no
+hold and gives none back.  There is no `nor write` on this board: it answers
+``nor: no `nor write` on this board`` and calls nothing.
 
 | Subcommand | Held while it runs | Addresses it refuses | From telnet | In a background job | Dangerous-commands setting | Other refusals and checks |
 |---|---|---|---|---|---|---|
-| `qspi probe` | nothing else | -- (reads the JEDEC id) | runs | runs | always built | -- |
-| `qspi info` | nothing else | -- (reads the status register and the controller registers) | runs | runs | always built | -- |
-| `qspi read <addr> [len]` | **not the store's busy flag**: it reads alongside a `blob write`, a `kv` command or a `qspi erase` / `test` and shows what they leave | outside the 16 MB (driver); `len` over 256.  The `kv` partition and the blob slots are read like any other address | runs | runs | always built | -- |
-| `qspi erase <addr>` | the store's busy flag for the whole command, refused (not waited for) while a `blob write` / `blob erase`, a `qspi erase` / `test`, an `nn model load <name>` or a `kv` command holds it | outside the 16 MB; not on a 4 KB boundary (no rounding); the `kv` partition `0x000000-0x0FFFFF` (#214).  **The blob slots `0x100000-0x7FFFFF`, headers included, are not refused** | **runs** | **runs** | built only with the setting | one 4 KB subsector per command; does not look at what it erases; no read-back |
-| `qspi test <addr>` | the store's busy flag for the whole test, as `qspi erase` | as `qspi erase` | **runs** | **runs** | built only with the setting | refuses a subsector that is not blank before it erases anything; every program is read back and compared (the pattern, then the 14 partial-page writes); the subsector is left blank.  Ctrl+C between pages leaves it partly programmed, and the next `qspi test` there refuses it until it is erased |
+| `nor probe` | nothing else | -- (reads the JEDEC id) | runs | runs | always built | -- |
+| `nor info` | nothing else | -- (the controller registers first, then the id, the status register, the registers again and the failure record) | runs | runs | always built | -- |
+| `nor read <addr> [len]` | **not the store's busy flag**: it reads alongside a `blob write`, a `kv` command or a `nor erase` / `test` and shows what they leave | outside the 16 MB; `len` outside 1..1024 (256 until #250); **a range past the end of the device** (since #250).  The `kv` partition and the blob slots are read like any other address | runs | runs | always built | -- |
+| `nor erase <addr> <len>` | the store's busy flag for the whole command, refused (not waited for) while a `blob write` / `blob erase`, a `nor erase` / `test`, an `nn model load <name>` or a `kv` command holds it | outside the 16 MB; an address or a length that is not a whole number of 4 KB subsectors, or a length of 0 (no rounding); a range past the end; **a range that touches the `kv` partition `0x000000-0x0FFFFF`** (#214; until #250 only the address was asked, one subsector being all an erase could name).  **The blob slots `0x100000-0x7FFFFF`, headers included, are not refused** | **refused** (since #250) | **refused** (since #250) | built only with the setting | refused while the driver is down; **only 4 KB subsector erases, in order, never the 64 KB sector erase**; since #250 any number of subsectors, with Ctrl+C after each; prints the range first; does not look at what it erases; no read-back; a line in `dmesg` |
+| `nor test <addr>` | the store's busy flag for the whole test, as `nor erase` | as `nor erase`, for its one 4 KB subsector | **refused** (since #250) | **refused** (since #250) | built only with the setting | refuses a subsector that is not blank before it erases anything; every program is read back and compared (the pattern, then the 14 partial-page writes); since #250 also one byte re-programmed twice (observed, not judged); the subsector is left blank.  Ctrl+C before every page leaves it partly programmed, and the next `nor test` there refuses it until it is erased; a line in `dmesg` |
+
+The guards before and after the shared command (issue #250).  Not one is
+lost; the console question and the range of a multi-subsector erase are new.
+
+| Guard | Until #250 (`cmds/cmd_qspi.c`) | Since #250 |
+|---|---|---|
+| busy flag for the whole erase / test, given back at one exit | `qspi_busy_gate()` + one exit per command | `nor_board_hold()` in `cmds/cmd_nor_board.c` (the one exit) |
+| the driver not initialised | the driver's own `ERR_STATE` | `nor_board_hold()` refuses first; the driver still answers too |
+| the `kv` partition | `parse_subsector()` (the address) | `nor_board_range()` (the whole range) |
+| on the device, on a 4 KB boundary | `parse_subsector()` | the shared `nor_arg_addr()` / `nor_arg_sectors()` / `nor_arg_fits()` |
+| 4 KB subsector erases only | one `qspi_flash_erase_subsector()` per command | `nor_op_erase()`: subsector erases only, one per 4 KB of the range |
+| the test refuses a subsector that is not blank, compares every program, leaves it blank, Ctrl+C between pages | `qspi_test_run()` | the shared `nor_test_body()` |
+| the dangerous-commands setting | `#if CLI_ENABLE_DANGEROUS_CMDS` | the same, in the shared command |
+| `qspi_flash_*` in the plugin forbidden table | `F746_PLUGIN_FORBIDDEN` | the same, plus `nor_svc_board` |
+| **new**: telnet, its jobs, a job of the VCP console | -- (ran) | the shared `nor_console_refuse()` |
+| **new**: `read` past the end refused | -- | the shared `nor_arg_fits()` |
 
 SDRAM (8 MB; the banks are in [The SDRAM's internal banks are assigned by use](#-the-sdrams-internal-banks-are-assigned-by-use-and-the-linker-enforces-it)):
 

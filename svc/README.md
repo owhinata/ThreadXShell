@@ -20,9 +20,10 @@ The files are grouped by the feature they serve (issue #153):
 | `svc/blob/` | The asset store's board-independent parts (issue #192): the header format and a transfer's decisions (`blob_state`), the slot table's rules and lookups (`blob_map`), the `blob write` coordinator (`blob_write`), and since issue #194 the one set of store results (`blob_err.h`) and the store contract of the shared `blob` command (`blob_svc.h`); see [The asset store's shared parts](#the-asset-stores-shared-parts-issue-192). No file here is named `blob.h` (every board has a `src/blob.h` of its own). |
 | `svc/net/` | The contract of the shared `net` command, `net_svc.h` (issue #219; f746g-disco and wio-lite-ai, grove-vision-ai-v2 has no network). A header only: the command is `shell/cmds/cmd_net.c`, the one implementation under it is `shell/cmds/net_core.c` (issue #220) and the one telnet console is `shell/cmds/net_tty.c` (issue #221) -- both need NetX and ThreadX, so they cannot live here -- and each board's adapter is the board's; see [The `net` command and the telnet console are one implementation](#the-net-command-and-the-telnet-console-are-one-implementation-issue-212). |
 | `svc/kv/` | The persistent configuration store (issue #214; f746g-disco and wio-lite-ai, grove-vision-ai-v2 has none): the one implementation over FlashDB (`kv.c`, `kv.h`), its record format and key checks (`kv_record`), what the board gives it (`kv_board.h`) and FlashDB's one build configuration (`fdb_cfg.h`). The `kv` command and the boot-time steps are `shell/cmds/cmd_kv.c` and `shell/cmds/kv_cfg.c`; see [The key-value store](#the-key-value-store-and-the-kv-command-are-one-implementation-issue-214). |
+| `svc/nor/` | The contract of the shared `nor` command, `nor_svc.h` (issue #250; all three boards): the results, the range answer, the `nor info` sample, the operations a board's hold hands over and the one table a board defines, `nor_svc_board`. A header only: the command is `shell/cmds/cmd_nor.c` and the console question `shell/cmds/nor_console.c`; each board's table and its protection are the board's `cmds/cmd_nor_board.c`; see [The `nor` command is shared](#the-nor-command-is-shared-issue-250). |
 | `svc/fs/` | The contract of a board's microSD card driver, `sd_card_svc.h` (issue #232; f746g-disco, and wio-lite-ai until issue #234 removed its microSD; grove-vision-ai-v2 has no slot): the block size, the result codes, the probed card's identity and the table of six calls the board defines under a fixed name. A header only: the `sd` command is `shell/cmds/cmd_sd.c`, and the FileX mount glue and media driver under it are `shell/cmds/sd_fs_glue.c` and `shell/cmds/fx_sd_driver.c` (one implementation since issue #233, in `shell/cmds/` because FileX's header includes `tx_api.h`); see [The `sd` command is shared](#the-sd-command-is-shared-issue-232). |
 
-`svc/` itself and `nn/`, `plugin/`, `camera/` and `blob/` are on the firmware's
+`svc/` itself and `nn/`, `plugin/`, `camera/`, `blob/` and `nor/` are on the firmware's
 include path on every board, `net/` and `kv/` on f746g-disco's and
 wio-lite-ai's (grove-vision-ai-v2 has neither feature), and `fs/` on
 f746g-disco's (wio-lite-ai's too until issue #234), so a source names a
@@ -1786,6 +1787,68 @@ dispatcher, the secret-key table included) and `test_kv_cfg` (the boot steps,
 once with each default: the port handed over exactly once on every path and
 every reported line word for word).  f746g-disco's own side is
 `boards/f746g-disco/test/test_kv_qspi.c` (that board's README).
+
+## The `nor` command is shared (issue #250)
+
+Until issue #250 each board had its own command for its external NOR, with
+three grammars: f746g-disco's `qspi` (`cmds/cmd_qspi.c`), wio-lite-ai's and
+grove-vision-ai-v2's `nor` (`cmds/cmd_nor.c`).  Now there is one `nor`,
+`shell/cmds/cmd_nor.c`, with the contract `svc/nor/nor_svc.h`; f746g-disco's
+`qspi` is gone (no alias).
+
+| Piece | Where | What it has |
+|---|---|---|
+| the contract | `svc/nor/nor_svc.h` | the results (`enum nor_svc_status`, `struct nor_svc_result`: done, read back, the first bad byte, the JEDEC id read again), the range answer, the `nor info` sample, the operations of a hold, and the one table a board defines, `nor_svc_board`.  Freestanding: no HAL, no board header, no `tx_api.h` |
+| the command | `shell/cmds/cmd_nor.c` (`required`) | the grammar, the argument checks, the console question, the acceptance test, every line `nor` prints and the dmesg line of each erase, write and test |
+| the console question | `shell/cmds/nor_console.c` (`required`) | the telnet console, a job launched from it and a job of the local console are refused; whether the board has a telnet console is `SHELL_HAS_NET_TTY`, derived from `BOARD_HAS_NETX` by the top-level `CMakeLists.txt` (`cmake/README.md`), never written by a board |
+| the result lines for a board's own subcommand | `shell/cmds/nor_cmd_core.h` | `nor_cmd_report()` / `nor_cmd_not_held()`, which grove-vision-ai-v2's `nor cycle` uses |
+| the table | each board's `cmds/cmd_nor_board.c` | the facts and the four calls below |
+| the properties | each board's `svc/nor_svc_config.h` | whether the device is built (`NOR_SVC_HAS_DEVICE`: wio-lite-ai from `BSP_ENABLE_KV`, as `blob`), the `help` line, the board's own subcommands (f746g-disco `probe`; grove-vision-ai-v2 `scan` and `cycle`, `cycle` under the dangerous-commands setting) |
+
+[!] **The protection stays with the board, and the shared command takes no
+hold and gives none back.**  The table's `hold()` takes the board's hold,
+calls the shared procedure once with the operations that may be used only
+inside it, and gives the hold back at its one exit; when it cannot take the
+hold it calls nothing and says why (busy, with the holder in the board's
+words, or the device down).  The operations and their context are valid for
+that call only, and the shared command owns no storage to keep them in
+(`cmake/check_no_mutable_storage.py`).  So there is no exit of the shared
+command on which a hold could be forgotten, and no erase or program of a
+board is reachable except inside its hold.  The table's name, `nor_svc_board`,
+is in the plugin forbidden table of all three boards.
+
+| The table's field | f746g-disco | wio-lite-ai | grove-vision-ai-v2 |
+|---|---|---|---|
+| part, size, erase unit (checked: 4 KB), page | N25Q128A on QUADSPI, 16 MB, 4 KB, 256 B | W25Q128JV on OCTOSPI2, 16 MB, 4 KB, 256 B | the QSPI NOR, 16 MB, 4 KB (`NOR_ERASE_GRAN`, the measured geometry), 256 B |
+| the erase stops between 4 KB units (Ctrl+C) | yes: subsector erases only, one per 4 KB, never the 64 KB sector erase | no: one driver call | yes: inside the one transaction, with the window down |
+| subcommands it does not have (and the line said) | `write` | -- | `read` (``the flash is mapped at 0x3A000000; `devmem dump` reads it``), `test` (``every `nor write` reads back and compares what it wrote``) |
+| `info()`: sample once, then the shared lines, then the board's | the controller registers before anything is sent, then the id, the status, the registers again and the failure record | the id, the registers, the clock | the report (a reader lease only to bring the window up), the leases, the seam's writable interval, the probe, the IRQ, SCU and MPU |
+| `read()` (no hold) | the driver | the driver (refused while the device is down) | -- |
+| `range()` (pure; the board's operations ask again) | a range touching the `kv` partition | a range touching the `kv` partition | outside the seam's writable interval; a write not starting on a 32-bit word |
+| `hold()` | the driver up, then the store's busy flag | the NOR up, then the store's busy flag | the bring-up lease, then the writer reservation; the one operation inside is one call of `nor_write_erase()` / `nor_write_program()`, one transaction |
+
+The order of an erase, write or test is the shared command's: the arguments
+(the address on the device; an erase's address and length whole 4 KB units,
+nothing rounded; the range not past the end; a write of 1..256 bytes; `read`
+1..1024 bytes and refused past the end) -> the board's range -> the console
+-> the board's hold.  A refusal before the hold reads and writes nothing.
+The acceptance test is f746g-disco's (issues #194, #214) with wio-lite-ai's
+same-byte overwrite observed (issue #249): blank before (refused otherwise,
+before anything is erased), erase and blank, a counting pattern page by page
+read back and compared, erase and blank, the 14 partial-page writes the kv
+store makes with both pages compared after each, the overwrite (not judged),
+erase and blank, PASS; Ctrl+C before every page.  The erase's progress
+function only prints and asks for Ctrl+C: on grove-vision-ai-v2 it runs with
+the memory-mapped window down (`port/nor/nor_write.h`).
+
+The tests: `shell/test/test_nor_cmd.c` (the shared command over a fake
+table, in four shapes: full with and without the telnet console, subcommands
+absent, the dangerous commands off) and each board's
+`test/test_nor_guard.c` (wio-lite-ai) / `test/test_nor_board.c`, the shared
+command with the board's real table.  Every one counts an erase, a program or
+a test read made while the hold is not held, and requires 0 in every run
+(issue #249's lesson: a balanced take and give-back says nothing about what
+ran between them).
 
 ## The `sd` command is shared (issue #232)
 

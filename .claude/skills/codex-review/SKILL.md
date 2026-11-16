@@ -1,6 +1,6 @@
 ---
 name: codex-review
-description: Codex による plan（実装計画）レビュー。ExitPlanMode ゲートの marker を更新する唯一の経路。ThreadX Shell（マルチボード: STM32F746G-DISCO / Wio Lite AI / Grove Vision AI V2）の shell コア構造 / transport 抽象 / ThreadX 統合 / ボードポート / メモリ配置に関わる計画に使う。実装後の diff レビューは codex plugin の /codex:review・/codex:adversarial-review を使う（この skill ではない）。
+description: Codex による plan（実装計画）レビュー。ThreadX Shell（マルチボード: STM32F746G-DISCO / Wio Lite AI / Grove Vision AI V2）の shell コア構造 / transport 抽象 / ThreadX 統合 / ボードポート / メモリ配置に関わる計画に使う。実装後の diff レビューは codex plugin の /codex:review・/codex:adversarial-review を使う（この skill ではない）。
 argument-hint: <plan | 設計説明>
 ---
 
@@ -13,7 +13,7 @@ Codex 呼び出しは **codex plugin（`codex@openai-codex`）のランタイム
 
 | レビュー対象 | 使うもの |
 |---|---|
-| **実装計画（plan mode / 会話中の設計）** | **この skill**（ExitPlanMode の marker を更新する） |
+| **実装計画（Issue の plan / 会話中の設計）** | **この skill** |
 | 実装後の差分（working tree / branch） | `/codex:review`（focus text は渡せない） |
 | 差分を観点付きで叩く / 設計判断そのものを疑う | `/codex:adversarial-review [--base <ref>] <focus>` |
 | 不具合の原因追跡 | `codex-debug` skill、または `/codex:rescue` |
@@ -69,19 +69,11 @@ permission ルールに当たらず毎回プロンプトが出る。）
 （F746 = RM0385 / H725 = RM0468）やリポジトリの実物で裏を取れる指摘かどうかを確認してから
 報告する。
 
-### 4. marker の更新（ここがゲート）
+### 4. 実装に進む条件
 
-3 面すべて問題なしなら「実装着手 OK」とし、marker を更新する:
-
-```bash
-touch ~/.claude/.threadx-shell-plan-codex-reviewed
-```
-
-- 問題ありなら**marker は更新しない**。BLOCKING / CONCERN を解消して再 review し、
-  LGTM に至ってから touch する。
-- この marker は `ExitPlanMode` の PreToolUse gate（`.claude/settings.json`）が確認する。
-  marker が無い / 古い（2h 超）と ExitPlanMode は block される。
-- trivial plan で skip する場合も、**user 承認を得てから** touch する。
+3 面すべて問題なしで、ユーザーに聞く点の答えが出たら「実装着手 OK」。問題ありなら BLOCKING /
+CONCERN を解消して再 review する。plan・各巡の指摘・裏取り・採否・ユーザーの決定は、その Issue の
+コメントに置く（CLAUDE.md「Plan + Codex review ワークフロー」）。plan mode と marker は使わない。
 
 ## 3 面レビュー観点
 

@@ -127,14 +127,14 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
 進め方の判断・ユーザーとのやり取り・報告の裏取りに使い、実装の詳細や Codex の出力で埋めない。
 
 - **メイン**: Issue と範囲を決める / subagent を起動し報告を**実物で裏取り**する / 選択肢と CONCERN の
-  採否をユーザーに聞く / plan mode と `ExitPlanMode` / ビルド・テスト・差分の再確認 / 実機確認の依頼 /
+  採否をユーザーに聞く / 決定を Issue に記録する / ビルド・テスト・差分の再確認 / 実機確認の依頼 /
   commit・merge・push / Issue コメントとクローズ。**subagent**: 下調べ / plan 素案 / `codex-review`
   skill による plan レビュー / 実装 / 実装後の Codex レビュー（**実装者とは別の fresh subagent**）。
 - [!] **subagent は `model: opus` で起動する**（継承させない）。読むだけの下調べは `sonnet` 可、迷ったら opus。
 - subagent への指示に毎回書くこと: CLAUDE.md と該当するメモリ / README を最初に読む（規則は書き写さずパスを渡す） / add・commit・push をしない /
-  **marker に触らない（touch はメインだけ）** / **実機に焼かない** / `lib/`・SDK・boot を編集しない /
+  **実機に焼かない** / `lib/`・SDK・boot を編集しない /
   plan と実物が食い違ったら止まって報告する / 「plan から外れた点・自分で決めた点」を必ず書く / **報告は普通の言い方で書く**（コードの識別子・英単語の直訳・漢字 1 字の略語（段・像・列・窓・相）・比喩（穴・枠の側）を持ち込まない。**メインがユーザーに書く文も同じで、subagent の報告を写すときに置き換える**）。
-- **Codex を回す subagent は同時に 1 つまで**。subagent が実装している間はメインが plan mode に入らない。
+- **Codex を回す subagent は同時に 1 つまで**。plan mode は使わない（plan は Issue のコメントで固める）。
   実装は plan のコミット単位で 1 ステップずつ止めさせ、メインが確認してコミットしてから次へ。
 
 ### Plan + Codex review ワークフロー
@@ -146,7 +146,7 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
 触れる一切の変更**（原則やらない）。
 
 1. **Plan 確定前**: **`codex-review` skill** で 3 面（設計 / MCU 実機能（対象ボードの RM 照合）/
-   HW リソース競合）review。BLOCKING / CONCERN を全解消してから `ExitPlanMode`。
+   HW リソース競合）review。BLOCKING / CONCERN を全解消し、ユーザーの決定を Issue に記録してから実装に進む。
 2. **実装後**（commit 前）: branch の diff を review → BLOCKING 解消 → 実機 verify 依頼 → commit。
 3. **記録は Issue のコメント**（「plan v1」→ 各巡の指摘・裏取り・採否を同じ Issue に、全文は `<details>`、確定は編集。`.md` は作らない）。
 
@@ -155,17 +155,13 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
 ゲート・安全機構そのものを足す/変えるとき** — 汎用レビュアーは「この検査は騙せるか」を見ない。
 **focus は 1〜2 問に絞り**、「この検査を通過したまま X できるか」の形で疑う面を名指しする。
 
-入口: **plan = `codex-review` skill**（marker を更新する唯一の経路）/ 実装後の差分 = 上の 2 つ / 原因追跡 =
+入口: **plan = `codex-review` skill** / 実装後の差分 = 上の 2 つ / 原因追跡 =
 `codex-debug` skill または `/codex:rescue`。Codex 呼び出しは codex plugin のランタイムに一本化（MCP server は
 使わない）。毎回 120s を超えるので `run_in_background: true` で起動して待つ（`/codex:status`）。
 **Codex の指摘は鵜呑みにしない** — ローカルの実物・対象ボードの RM で裏を取ってから報告する。
 
 **プロジェクト不変条件は `AGENTS.md` に置く**（`/codex:review` の内蔵レビュアーは focus text を
 受け取れないので、Codex に伝える経路はそこしかない）。**不変条件を変えたら両方を直す。**
-
-**ゲートの強制**: `ExitPlanMode` の PreToolUse hook が `~/.claude/.threadx-shell-plan-codex-reviewed`
-marker を確認し、無い/古い（2h 超）と block する。trivial plan で skip する場合も **user 承認を
-得てから** touch する。
 
 ## Git ワークフロー
 

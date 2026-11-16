@@ -271,6 +271,15 @@ bool ltdc_dma2d_unconfirmed(void);
  */
 int ltdc_set_scanout(bool on);
 
+/**
+ * Paint both frame buffers black with the CPU (issue #251): the last thing
+ * `psram test` does with the OCTOSPI1 reconfigurer mark still held, so the
+ * scan-out is off (psram_acquire() refused otherwise) and no `lcd on` can show
+ * the test's patterns before they are gone.  Takes the frame lock.  Nothing
+ * when the display never came up.  Thread context only.
+ */
+void ltdc_fb_repaint_black(void);
+
 /** Drive LCD_BL (PF5): the backlight, on/off.  LCD_RST (PG5) is released by
  *  ltdc_init() and not touched again during normal operation -- resetting the
  *  panel puts the ST7789 back to sleep, and its serial pins have become LTDC

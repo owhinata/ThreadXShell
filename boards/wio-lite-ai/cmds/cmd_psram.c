@@ -4,32 +4,58 @@
  */
 /**
  * @file    cmd_psram.c
- * @brief   `psram` shell command (owhinata/wio-lite-ai#3): OCTOSPI1 APS6408 PSRAM
- * status + test.
+ * @brief   This board's table for the shared `psram` (shell/cmds/cmd_ext_ram.c,
+ *          issue #251), and its six tuning subcommands (owhinata/wio-lite-ai#3
+ *          until then: the whole command).
  *
- *   psram info          show bring-up state, device clock, ID, mmap window
- *   psram test [bytes]  write/read/verify patterns over the mmap window (default,
- *                       and maximum, the 6 MB non-cacheable pool -- see below);
- *                       reports the first mismatch address
+ *   psram info          the part, the window, its ranges, the state, then the
+ *                       bring-up lines (clock, id, latency, dlyb, mr0, ...)
+ *   psram test [bytes]  write/read-back test (default and at most the 6 MB
+ *                       non-cacheable pool)
+ *   psram set | mr0 | phase | mmapscan | wtune | clk   tuning (svc/ext_ram_config.h;
+ *                       their words are issue #252's)
  *
- * This is the primary functional check for the OCTOSPI1 octal wiring + latency:
- * a wrong data-line AF, latency code, or delay-block setting shows up as a
- * mismatch (or, if the mmap latency is badly off, an AXI/bus fault that the
- * fault handler records to dmesg).  Registered only in the `shell` executable
- * (like cmd_membench.c); PSRAM is scratch RAM so no dangerous-command gate.
+ * The test is the primary functional check for the OCTOSPI1 octal wiring and
+ * latency: a wrong data-line AF, latency code or delay-block setting shows up as
+ * a mismatch (or, if the mmap latency is badly off, an AXI/bus fault that the
+ * fault handler records to dmesg).  PSRAM is scratch RAM, so no dangerous-command
+ * gate.
  *
- * `psram test` deliberately stops at the top of the non-cacheable pool (6 MB) rather
- * than covering the device: owhinata/wio-lite-ai#9 made the last 2 MB Normal
- * write-back, and a memory test through a write-back cache proves nothing, because
- * the read-back can be served from the cache while the device is not answering at
- * all.
+ * THE RANGES, as src/mpu.c maps the window: the low 6 MB Normal non-cacheable
+ * (the LCD's two buffers and the camera's frame), the top 2 MB write-back
+ * cacheable (owhinata/wio-lite-ai#9: nn's arena and model slots, membench's
+ * cached buffer).  [!] A test never reaches the cacheable 2 MB (the shared
+ * command stops at the first cacheable range): a store and its load can be
+ * answered by the cache and never reach the APS6408 -- the reading
+ * owhinata/wio-lite-ai#3 and #16 tuned the timing against has to stay a device
+ * test.
+ *
+ * THE STEPS, in this order (given back in the reverse one):
+ *   1. the OCTOSPI1 reconfigurer mark, psram_acquire(): refused while anyone
+ *      uses the memory, while the LTDC scans out of it, while a DMA2D transfer
+ *      was never confirmed stopped, or while a camera stream runs.  Held for
+ *      the whole test, so the LCD, the camera, nn, membench's PSRAM rows,
+ *      devmem's PSRAM and `wifi flash` are refused meanwhile;
+ *   2. the camera's single-capture frame is dropped (issue #150), under the
+ *      mark and before the first write: a frame captured before would
+ *      otherwise stay valid over the test's patterns;
+ *   3. (with the LCD built) the give repaints both LCD buffers black, with the
+ *      CPU, while the mark is still held -- so no `lcd on` can show the
+ *      patterns -- and only then is the mark given back.
  *
  * Clean-room design; no third-party code reused.
  */
 #include "cli.h"
+#include "ext_ram_cmd_board.h"
+#include "fmt.h"         /* fmt_vsnformat: the board's `info` lines */
 #include "psram.h"
 #include "camera.h"      /* camera_frame_invalidate(): the test clobbers cam_frame */
+#if BSP_ENABLE_LCD
+#include "ltdc_display.h" /* ltdc_fb_repaint_black(): after a test */
+#endif
 
+#include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -59,43 +85,56 @@ static const char *psram_stage_name(uint32_t s)
 	}
 }
 
-static int cmd_psram_info(struct cli_instance *sh, int argc, char **argv)
+/* One of the board's `info` lines, formatted on the stack and written whole. */
+static int psram_line(ext_ram_write_fn write, void *ctx, const char *fmt, ...)
+{
+	char line[96];
+	va_list ap;
+	int n;
+
+	va_start(ap, fmt);
+	n = fmt_vsnformat(line, sizeof line, fmt, ap);
+	va_end(ap);
+	return (write(ctx, line, (size_t)n) < 0) ? -1 : 0;
+}
+
+/* `psram info`, after the shared lines: the bring-up values, sampled first. */
+static int psram_info_lines(ext_ram_write_fn write, void *ctx)
 {
 	uint8_t id[2];
 	uint32_t rd, wr, sel, unit;
 
-	(void)argc; (void)argv;
 	psram_read_id(id);
 	psram_get_latency(&rd, &wr);
 	psram_get_phase(&sel, &unit);
 
-	cli_print(sh, "PSRAM (OCTOSPI1 / APS6408):\r\n");
-	cli_print(sh, "  state   : %s\r\n", psram_ready() ? "ready (mmap)" : "NOT ready");
-	if (!psram_ready())
-		cli_print(sh, "  init    : failed at %s (see `psram snap`)\r\n",
-		          psram_stage_name(psram_init_stage()));
-	cli_print(sh, "  window  : 0x%08lX .. 0x%08lX (%lu MB)\r\n",
-	          (unsigned long)PSRAM_BASE_ADDR,
-	          (unsigned long)(PSRAM_BASE_ADDR + PSRAM_SIZE_BYTES),
-	          (unsigned long)(PSRAM_SIZE_BYTES >> 20));
-	cli_print(sh, "  clock   : %lu Hz (device)\r\n", (unsigned long)psram_clock_hz());
-	cli_print(sh, "  id      : MR1=0x%02X MR2=0x%02X\r\n", id[0], id[1]);
-	cli_print(sh, "  latency : read %lu / write %lu dummy cycles\r\n",
-	          (unsigned long)rd, (unsigned long)wr);
-	cli_print(sh, "  dlyb    : phase %lu / units %lu\r\n",
-	          (unsigned long)sel, (unsigned long)unit);
-	cli_print(sh, "  mr0     : 0x%02lX   read-flags 0x%lX (b0=SSHIFT b1=DHQC)\r\n",
-	          (unsigned long)psram_get_mr0(), (unsigned long)psram_get_read_flags());
-	cli_print(sh, "  ifmt    : %s instruction\r\n",
-	          psram_get_instruction_dtr() ? "16-bit DTR doubled" : "8-bit SDR official");
-	cli_print(sh, "  probe   : dqse %lu / refresh %lu (DCR4)\r\n",
-	          (unsigned long)psram_get_dqse(),
-	          (unsigned long)psram_get_refresh());
+	if (!psram_ready() &&
+	    psram_line(write, ctx, "  init    : failed at %s (see `psram snap`)\r\n",
+	               psram_stage_name(psram_init_stage())) != 0)
+		return -1;
+	if (psram_line(write, ctx, "  clock   : %lu Hz (device)\r\n",
+	               (unsigned long)psram_clock_hz()) != 0 ||
+	    psram_line(write, ctx, "  id      : MR1=0x%02X MR2=0x%02X\r\n", id[0],
+	               id[1]) != 0 ||
+	    psram_line(write, ctx, "  latency : read %lu / write %lu dummy cycles\r\n",
+	               (unsigned long)rd, (unsigned long)wr) != 0 ||
+	    psram_line(write, ctx, "  dlyb    : phase %lu / units %lu\r\n",
+	               (unsigned long)sel, (unsigned long)unit) != 0 ||
+	    psram_line(write, ctx, "  mr0     : 0x%02lX   read-flags 0x%lX "
+	               "(b0=SSHIFT b1=DHQC)\r\n", (unsigned long)psram_get_mr0(),
+	               (unsigned long)psram_get_read_flags()) != 0 ||
+	    psram_line(write, ctx, "  ifmt    : %s instruction\r\n",
+	               psram_get_instruction_dtr() ? "16-bit DTR doubled"
+	                                           : "8-bit SDR official") != 0 ||
+	    psram_line(write, ctx, "  probe   : dqse %lu / refresh %lu (DCR4)\r\n",
+	               (unsigned long)psram_get_dqse(),
+	               (unsigned long)psram_get_refresh()) != 0)
+		return -1;
 	return 0;
 }
 
 /* psram clk <presc>: device clock = 266MHz/(presc+1).  2=88.7M, 7=33.3M. */
-static int cmd_psram_clk(struct cli_instance *sh, int argc, char **argv)
+int cmd_psram_clk(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t p;
 
@@ -120,7 +159,7 @@ static int cmd_psram_clk(struct cli_instance *sh, int argc, char **argv)
 
 /* psram phase <sel> [units]: override the DLYB read-sampling phase to sweep for
  * the value that aligns the read data eye (no reflash). */
-static int cmd_psram_phase(struct cli_instance *sh, int argc, char **argv)
+int cmd_psram_phase(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t sel, unit, cur_sel, cur_unit;
 
@@ -144,7 +183,7 @@ static int cmd_psram_phase(struct cli_instance *sh, int argc, char **argv)
    (owhinata/wio-lite-ai#16 diagnostic).
  * 0x09 = power-up default (Variable LC5); 0x24 = Fixed Latency LC8 (ST U585
  * reference -- pair with `psram set 8 <wr>`).  Verify with `psram probe 0`. */
-static int cmd_psram_mr0(struct cli_instance *sh, int argc, char **argv)
+int cmd_psram_mr0(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t v;
 
@@ -169,7 +208,7 @@ static int cmd_psram_mr0(struct cli_instance *sh, int argc, char **argv)
 
 /* psram set <read_dcyc> <write_dcyc>: re-enter mmap with new latencies to sweep
  * for values that pass `psram test` without a reflash. */
-static int cmd_psram_set(struct cli_instance *sh, int argc, char **argv)
+int cmd_psram_set(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t rd, wr;
 
@@ -188,106 +227,12 @@ static int cmd_psram_set(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* Write `pat` to every word in [base,base+len), then read back and compare.
- * `addr_pattern` != 0 stores each word's own address instead of `pat`.  Returns
- * 0 on match, 1 on the first mismatch (already reported).  Cancelable. */
-static int test_pass(struct cli_instance *sh, uint32_t base, uint32_t words,
-                     uint32_t pat, int addr_pattern, const char *label)
-{
-	volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)base;
-	uint32_t i;
-
-	for (i = 0u; i < words; i++) {
-		p[i] = addr_pattern ? (base + i * 4u) : pat;
-		if ((i & 0x3FFFu) == 0u && cli_cancel_requested(sh)) {
-			cli_print(sh, "\r\n%s: canceled (write @0x%08lX)\r\n",
-			          label, (unsigned long)(base + i * 4u));
-			return 1;
-		}
-	}
-	for (i = 0u; i < words; i++) {
-		uint32_t want = addr_pattern ? (base + i * 4u) : pat;
-		uint32_t got  = p[i];
-		if (got != want) {
-			cli_error(sh, "%s: MISMATCH @0x%08lX  wrote 0x%08lX  read 0x%08lX\r\n",
-			          label, (unsigned long)(base + i * 4u),
-			          (unsigned long)want, (unsigned long)got);
-			return 1;
-		}
-		if ((i & 0x3FFFu) == 0u && cli_cancel_requested(sh)) {
-			cli_print(sh, "\r\n%s: canceled (verify @0x%08lX)\r\n",
-			          label, (unsigned long)(base + i * 4u));
-			return 1;
-		}
-	}
-	cli_print(sh, "  %-12s OK\r\n", label);
-	return 0;
-}
-
-static int cmd_psram_test(struct cli_instance *sh, int argc, char **argv)
-{
-	uint32_t len = PSRAM_NC_BYTES;
-	uint32_t words;
-	int clamped = 0;
-
-	if (!psram_ready()) {
-		cli_error(sh, "psram: not ready (bring-up failed; see `psram info`)\r\n");
-		return 1;
-	}
-	if (argc >= 2 && cli_parse_u32(argv[1], &len) != 0) {
-		cli_error(sh, "psram: bad length '%s'\r\n", argv[1]);
-		return 1;
-	}
-	/*
-	 * Bounded by the non-cacheable pool, not by the device.  Since
-	 * owhinata/wio-lite-ai#9 phase 2a the top 2 MB is Normal write-back (app/mpu.c
-	 * region 3), and a memory test cannot run through a write-back cache and mean
-	 * anything: the store below can be answered by the cache and never reach the
-	 * APS6408, so a device that has stopped answering would still be reported PASS.
-	 * That is the reading issues owhinata/wio-lite-ai#3 and #16 tuned the timing
-	 * against, so it has to stay a device test.
-	 */
-	if (len == 0u || len > PSRAM_NC_BYTES) {
-		clamped = (len > PSRAM_NC_BYTES);
-		len = PSRAM_NC_BYTES;
-	}
-	if (clamped)
-		cli_warn(sh, "psram: clamped to %lu KB -- above 0x%08lX the window is "
-		             "cacheable, where a write/read-back can be answered by the "
-		             "cache instead of the device\r\n",
-		         (unsigned long)(PSRAM_NC_BYTES / 1024u),
-		         (unsigned long)PSRAM_AI_BASE_ADDR);
-	len &= ~0x3u;                       /* whole 32-bit words */
-	words = len / 4u;
-
-	cli_print(sh, "psram test: 0x%08lX, %lu bytes\r\n",
-	          (unsigned long)PSRAM_BASE_ADDR, (unsigned long)len);
-
-	if (psram_guard(sh))               /* held across all three mmap passes */
-		return 1;
-	/* [!] The pool holds the camera's single-capture frame (issue #150).  The
-	   guard keeps capture, save and send away for the whole test, but a frame
-	   captured BEFORE it would stay valid over the test's patterns, so drop it
-	   here, under the guard and before the first write. */
-	camera_frame_invalidate();
-	if (test_pass(sh, PSRAM_BASE_ADDR, words, 0x00000000u, 1, "addr-in-addr") ||
-	    test_pass(sh, PSRAM_BASE_ADDR, words, 0x55555555u, 0, "0x55555555") ||
-	    test_pass(sh, PSRAM_BASE_ADDR, words, 0xAAAAAAAAu, 0, "0xAAAAAAAA")) {
-		psram_release();
-		return 1;
-	}
-	psram_release();
-
-	cli_print(sh, "psram test: PASS (%lu bytes verified)\r\n", (unsigned long)len);
-	return 0;
-}
-
 /* psram mmapscan <start [phase]|show|stop>: reset-persistent DLYB sweep
  * validated against real memory-mapped access (owhinata/wio-lite-ai#16).  `start`
  * captures the current clock/latency/MR0 and sweeps DLYB units 0..124 (step 4) on
  * `phase` (default 3), auto-rebooting per unit -- the console drops during the sweep
  * and returns when it completes; then `show` prints which units passed mmap. */
-static int cmd_psram_mmapscan(struct cli_instance *sh, int argc, char **argv)
+int cmd_psram_mmapscan(struct cli_instance *sh, int argc, char **argv)
 {
 	struct psram_scan_state st;
 	uint32_t phase = 3u, ulo, ustep, ncand, idx, ci;
@@ -375,7 +320,7 @@ static int cmd_psram_mmapscan(struct cli_instance *sh, int argc, char **argv)
 
 /* psram wtune [addr]: sweep the mmap write dummy 0..15 with write+readback
  * markers (needs a trusted read path -- run `psram eye` first). */
-static int cmd_psram_wtune(struct cli_instance *sh, int argc, char **argv)
+int cmd_psram_wtune(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t addr = PSRAM_BASE_ADDR + 0x200u;
 	uint32_t mask, d;
@@ -404,24 +349,64 @@ static int cmd_psram_wtune(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-CLI_SUBCMD_SET_CREATE(psram_subcmds,
-	CLI_CMD_ARG(info, NULL, "show PSRAM state/clock/id/latency", cmd_psram_info, 1, 0),
-	CLI_CMD_ARG_USAGE(test, NULL, "write/verify patterns [bytes]",
-	                  "[bytes]", cmd_psram_test, 1, 1),
-	CLI_CMD_ARG_USAGE(set,  NULL, "set mmap latency <rd> <wr> cycles",
-	                  "<rd> <wr>", cmd_psram_set, 3, 0),
-	CLI_CMD_ARG_USAGE(mr0,  NULL, "write device MR0 latency reg <hex>",
-	                  "<hex>", cmd_psram_mr0, 2, 0),
-	CLI_CMD_ARG_USAGE(phase, NULL, "set dlyb read phase <sel> [units]",
-	                  "<sel> [units]", cmd_psram_phase, 2, 1),
-	CLI_CMD_ARG_USAGE(mmapscan, NULL,
-	                  "reset-persistent mmap DLYB sweep <start|show|stop>",
-	                  "start [phase] | show | stop", cmd_psram_mmapscan, 2, 1),
-	CLI_CMD_ARG_USAGE(wtune, NULL, "sweep mmap write dummy 0..15 [addr]",
-	                  "[addr]", cmd_psram_wtune, 1, 1),
-	CLI_CMD_ARG_USAGE(clk,  NULL, "set device clock prescaler <0..255>",
-	                  "<0..255>", cmd_psram_clk, 2, 0),
-	CLI_SUBCMD_SET_END);
+/* ---- the table (shell/cmds/ext_ram_cmd_board.h) --------------------------- */
 
-CLI_CMD_REGISTER(psram, psram_subcmds,
-                 "OCTOSPI1 APS6408 PSRAM info/test", NULL, 1, 0);
+static int take_octospi(struct ext_ram_claim *c)
+{
+	if (psram_acquire())
+		return 0;
+	c->why = "OCTOSPI1 busy (another psram/membench command or `nn stream` "
+	         "holds it, or the LCD is scanning out of it -- run `lcd off`)";
+	return -1;
+}
+
+static const char *give_octospi(void)
+{
+	psram_release();
+	return NULL;
+}
+
+/* [!] Under the mark and before the first write (issue #150). */
+static int take_frame(struct ext_ram_claim *c)
+{
+	(void)c;
+	camera_frame_invalidate();
+	return 0;
+}
+
+#if BSP_ENABLE_LCD
+/* [!] Before the mark is given back: the step after the mark's in the table. */
+static const char *give_repaint(void)
+{
+	ltdc_fb_repaint_black();
+	return NULL;
+}
+#endif
+
+static const struct ext_ram_step psram_steps[] = {
+	{ take_octospi, give_octospi },
+	{ take_frame,   NULL         },
+#if BSP_ENABLE_LCD
+	{ NULL,         give_repaint },
+#endif
+};
+
+static const struct ext_ram_range psram_ranges[] = {
+	{ 0u,             PSRAM_NC_BYTES, 0u, "LCD, camera" },
+	{ PSRAM_NC_BYTES, PSRAM_AI_BYTES, 1u, "nn, membench" },
+};
+
+_Static_assert(PSRAM_NC_BYTES + PSRAM_AI_BYTES == PSRAM_SIZE_BYTES,
+               "the two ranges are the whole window");
+
+const struct ext_ram_board ext_ram_board = {
+	.part     = "APS6408 on OCTOSPI1",
+	.base     = PSRAM_BASE_ADDR,
+	.size     = PSRAM_SIZE_BYTES,
+	.ranges   = psram_ranges,
+	.n_ranges = sizeof psram_ranges / sizeof psram_ranges[0],
+	.steps    = psram_steps,
+	.n_steps  = sizeof psram_steps / sizeof psram_steps[0],
+	.ready    = psram_ready,
+	.info     = psram_info_lines,
+};

@@ -367,6 +367,15 @@ static void fb_clear_all(void)
 			ltdc_fb[b][i] = LTDC_RGB565_BLACK;
 }
 
+void ltdc_fb_repaint_black(void)
+{
+	if (!ltdc_up)               /* never came up: nothing shows them, no lock */
+		return;
+	ltdc_lock_frame();          /* a draw of the back buffer is not mid-way */
+	fb_clear_all();
+	ltdc_unlock_frame();
+}
+
 int ltdc_set_scanout(bool on)
 {
 	if (!ltdc_up)               /* lock/objects may not exist yet */

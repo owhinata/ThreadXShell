@@ -536,6 +536,28 @@ gcc $CFLAGS -DSHELL_HAS_NET_TTY=1 -DBSP_ENABLE_KV=1 -DTX_TIMER_TICKS_PER_SECOND=
     $LDFLAGS -o "$out/test_nor_guard"
 "$out/test_nor_guard"
 
+# issue #251 -- the shared `psram` on this board: shell/cmds/cmd_ext_ram.c with
+# this board's REAL table and tuning subcommands (cmds/cmd_psram.c) and headers
+# (src/psram.h, port/camera/camera.h, port/ltdc/ltdc_display.h,
+# svc/ext_ram_config.h), over 8 MB mapped at 0x90000000 and counted stand-ins
+# for the OCTOSPI1 reconfigurer mark, the camera frame and the LCD repaint.
+# Every word the test stores or loads (EXT_RAM_TEST_HOOKS) is in the low 6 MB,
+# under the mark, after the captured frame was dropped and before the repaint;
+# the repaint comes before the mark is given back on every end; the length is
+# strict; `info` keeps the board's bring-up lines; the six tuning subcommands
+# follow `info` and `test`, with no name twice.  With the LCD built and not.
+for lcd in 1 0; do
+    gcc $CFLAGS -D_GNU_SOURCE -DCLI_USE_COLOR=0 -DEXT_RAM_TEST_HOOKS \
+        -DBSP_ENABLE_LCD=$lcd -DBSP_ENABLE_IWDG=1 \
+        -I "$st/shim" -I "$HOST_TEST_INC" -I "$HOST_TEST_CORE" -I "$st/../cmds" \
+        -I "$board/svc" -I "$HOST_TEST_SVC" -I "$board/src" -I "$board/port/camera" \
+        -I "$board/port/ltdc" \
+        "$here/test_psram_board.c" "$st/../cmds/cmd_ext_ram.c" "$board/cmds/cmd_psram.c" \
+        "$HOST_TEST_CORE/cli_parse.c" "$HOST_TEST_SVC/fmt.c" \
+        $LDFLAGS -o "$out/test_psram_board_lcd$lcd"
+    "$out/test_psram_board_lcd$lcd"
+done
+
 # issue #238 -- what the stored wifi.* keys say to do (src/kv_wifi.c), driven
 # the way src/kv_boot.c drives it: every combination of the five keys found or
 # not, for the boot and for a console command, with the store open and closed.

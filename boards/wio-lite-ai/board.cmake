@@ -459,9 +459,6 @@ set(APP_TINYUSB_SOURCES
 # has NetX Duo (the host stack, src/nx_net.c), so the shared storage audit wants
 # that file shipped.
 set(BOARD_HAS_NETX ON)
-# The property shell/cmds/cmd_ext_ram.c is optional on (issue #251): OFF until
-# the board's `psram` moves onto it (cmds/cmd_psram.c is still its own).
-set(BOARD_HAS_EXT_RAM OFF)
 set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/core/cli_core.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_complete.c"
@@ -485,7 +482,6 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_watch.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_jobs.c"
     "${BOARD_DIR}/cmds/cmd_devmem.c"
-    "${BOARD_DIR}/cmds/cmd_psram.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_dmesg.c"
     "${BOARD_DIR}/cmds/cmd_crash.c"
     "${BOARD_DIR}/cmds/cmd_wdt.c"
@@ -637,6 +633,18 @@ option(BSP_ENABLE_WFI "Enable ThreadX idle WFI power saving" ON)
 # the bring-up moves into the bootloader and BSP_PSRAM_INIT_IN_APP is turned OFF.
 option(BSP_ENABLE_PSRAM "Enable OCTOSPI1 APS6408 PSRAM (MPU window + psram command)" ON)
 option(BSP_PSRAM_INIT_IN_APP "Bring up OCTOSPI1 PSRAM app-side (app-first validation)" ON)
+# The property shell/cmds/cmd_ext_ram.c is optional on (issue #251): the one
+# `psram` (info / test) is shipped with the PSRAM, with this board's table and
+# tuning subcommands (cmds/cmd_psram.c); without it there is no `psram`.  This
+# append must stay BELOW the option(), as the LCD block's does.
+if(BSP_ENABLE_PSRAM)
+    set(BOARD_HAS_EXT_RAM ON)
+    list(APPEND SHELL_SOURCES
+        "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_ext_ram.c"
+        "${BOARD_DIR}/cmds/cmd_psram.c")
+else()
+    set(BOARD_HAS_EXT_RAM OFF)
+endif()
 # Which NN backend this build links.  Declared here with the other build
 # options; the rest of the NN wiring stays further down with the other source
 # lists.

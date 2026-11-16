@@ -65,6 +65,11 @@ struct sd_fs_state {
 	int      mounted;
 	int      busy;         /* umount/format/raw owns the media              */
 	int      active_ops;   /* FS commands currently inside a body           */
+	/* Set last by sd_fs_glue_init(), only when both mutexes above were
+	 * created; 0 (the .bss boot state, a board that never called it, or a
+	 * failed create) makes every entry point that returns a status refuse
+	 * with FS_ERR_UNINIT before it takes a lock (issue #242). */
+	int      locks_ready;
 	/* ---- the FileX media driver (fx_sd_driver.c) ---- */
 	/* Partition window for the current mount (recomputed at INIT for
 	 * hot-plug): physical LBA = part_lba + logical, valid for
@@ -107,14 +112,23 @@ static inline int sd_card_ops_complete(void)
 
 /* ---- the mount glue (shell/cmds/sd_fs_glue.c) ------------------------------ */
 
-/** Create the glue's two mutexes and run fx_system_initialize() (the slot's
- *  media is the only FileX media on every board that has one).  Call once
- *  from tx_application_define(). */
-void sd_fs_glue_init(void);
+/**
+ * Create the glue's two mutexes and run fx_system_initialize() (the slot's
+ * media is the only FileX media on every board that has one).  Call once
+ * from tx_application_define().  The locks_ready mark is set last, only when
+ * both mutexes were created (issue #242); until then -- never called, or a
+ * create failed -- sd_op_begin(), sd_exclusive_begin(), sd_raw_begin(),
+ * sd_media_acquire(), sd_media_mount_exclusive() and sd_media_unmount()
+ * return FS_ERR_UNINIT without taking a lock or touching FileX or the card.
+ * The end / lock calls that return nothing are only reached after one of
+ * those succeeded.  @return 0, or -1 (the mark stays clear).
+ */
+int sd_fs_glue_init(void);
 
 /** Return the mounted media in *out, mounting (fx_media_open) on first use.
  *  Returns FX_SUCCESS, FS_ERR_BUSY, FS_ERR_NO_CARD, FS_ERR_UNWIRED (a field of
- *  the card table is empty: nothing touched), or the failing fx status. */
+ *  the card table is empty: nothing touched), FS_ERR_UNINIT (the glue's locks
+ *  are missing: nothing touched), or the failing fx status. */
 UINT sd_media_acquire(FX_MEDIA **out);
 
 /**
@@ -130,7 +144,8 @@ UINT sd_media_acquire(FX_MEDIA **out);
  */
 UINT sd_media_mount_exclusive(FX_MEDIA **out);
 
-/** Flush + unmount (fx_media_close).  No-op when not mounted. */
+/** Flush + unmount (fx_media_close).  No-op when not mounted;
+ *  FS_ERR_UNINIT when the glue's locks are missing. */
 UINT sd_media_unmount(void);
 
 /** Nonzero while the SD media is mounted. */
@@ -145,7 +160,8 @@ int sd_is_busy(void);
  * (refused while any op or another exclusive runs); the card-disruptive
  * `sd info`/`sd read` (which may re-probe, i.e. de-initialise the card) take
  * the raw slot, which is the exclusive slot plus a refusal while the media is
- * mounted.  begin calls return FX_SUCCESS or FS_ERR_BUSY and never block;
+ * mounted.  begin calls return FX_SUCCESS, FS_ERR_BUSY or FS_ERR_UNINIT (the
+ * glue's locks are missing, issue #242) and never block;
  * pair every successful begin with its end on all exit paths.
  */
 UINT sd_op_begin(void);

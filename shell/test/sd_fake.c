@@ -64,7 +64,10 @@ int sd_fake_touched_anything(void)
 	return calls[0] != '\0' || sd_fake.lock_gets != 0 || sd_fake.dir_gets != 0;
 }
 
-void sd_fake_reset(void)
+/* Weak: test_fx_sd_driver links this file without the mount glue. */
+#pragma weak sd_fs_glue_init
+
+void sd_fake_reset_cold(void)
 {
 	memset(&sd_fs_board_state, 0, sizeof sd_fs_board_state);
 	memset(&sd_fake, 0, sizeof sd_fake);
@@ -77,6 +80,27 @@ void sd_fake_reset(void)
 	sd_fake.write_rc = SD_OK;
 	sd_fake.block_count = 62333952u;       /* a 32 GB card */
 	sd_fake.fat32 = FX_TRUE;
+}
+
+void sd_fake_reset_record(void)
+{
+	calls[0] = '\0';
+	logbuf[0] = '\0';
+	sd_fake.lock_gets = sd_fake.lock_puts = 0;
+	sd_fake.dir_gets = sd_fake.dir_puts = 0;
+	sd_fake.lock_nested = 0;
+}
+
+void sd_fake_reset(void)
+{
+	sd_fake_reset_cold();
+	if (sd_fs_glue_init != NULL)
+		(void)sd_fs_glue_init();
+	calls[0] = '\0';
+	logbuf[0] = '\0';
+	sd_fake.mutexes_created = 0;
+	sd_fake.mutex_creates = 0;
+	sd_fake.fx_inits = 0;
 }
 
 uint8_t *sd_fake_block(uint32_t lba)
@@ -265,6 +289,12 @@ UINT tx_mutex_create(TX_MUTEX *mutex_ptr, CHAR *name_ptr, UINT inherit)
 {
 	(void)mutex_ptr;
 	(void)inherit;
+	sd_fake.mutex_creates++;
+	if (sd_fake.mutex_fail_n != 0 &&
+	    sd_fake.mutex_creates == sd_fake.mutex_fail_n) {
+		rec("mutex_create_failed:%s", name_ptr);
+		return 0x1Cu;               /* TX_MUTEX_ERROR */
+	}
 	rec("mutex_create:%s", name_ptr);
 	sd_fake.mutexes_created++;
 	return TX_SUCCESS;

@@ -32,6 +32,10 @@
  *   - `sd info` / `sd read`: refused while the slot is refused, touching no
  *     card; every exit gives the slot back once; `read` with an unreadable LBA
  *     takes no slot.
+ *   - the slot refused as "not initialised" (issue #242): `info`, `read`
+ *     and `format` print the answer they got, not the busy sentence, and
+ *     touch nothing else; in REAL, over the real glue whose locks are
+ *     missing.
  *   - with a field of the table empty, `info`, `read` and `format` refuse
  *     before any slot, unmount or card call; the filesystem subcommands do not
  *     check the table in cmd_sd.c and reach the body (since issue #233 the
@@ -253,6 +257,7 @@ const char *fs_strerror(UINT status)
 	case FX_SUCCESS:     return "success";
 	case FS_ERR_BUSY:    return "busy (format in progress)";
 	case FS_ERR_NO_CARD: return "no card";
+	case FS_ERR_UNINIT:  return "TESTFX uninit";
 	default:             return "TESTFX error";
 	}
 }
@@ -484,6 +489,16 @@ static void t_format_refusals(void)
 	       count("excl_begin") == 1 && count("excl_end") == 0 &&
 	       at("unmount") < 0 && at("probe") < 0 && at("format") < 0 &&
 	       at("fmode") < 0 && t_held == 0);
+
+	reset();
+	t_excl_rc = FS_ERR_UNINIT;
+	run("sd format yes\r");
+	expect("the exclusive slot refused as not initialised: says that, not "
+	       "busy, nothing else touched (issue #242)",
+	       has("sd: TESTFX uninit\r\n") && !has("busy") &&
+	       count("excl_begin") == 1 && count("excl_end") == 0 &&
+	       at("unmount") < 0 && at("probe") < 0 && at("format") < 0 &&
+	       at("fmode") < 0 && t_held == 0);
 }
 
 static void t_format_success(void)
@@ -593,6 +608,15 @@ static void t_info_cmd(void)
 	       at("probe") < 0 && at("info") < 0 && t_held == 0);
 
 	reset();
+	t_raw_rc = FS_ERR_UNINIT;
+	run("sd info\r");
+	expect("not initialised: says that, not `sd umount`, no card call "
+	       "(issue #242)",
+	       has("sd: TESTFX uninit\r\n") && !has("sd umount") &&
+	       count("raw_begin") == 1 && at("raw_end") < 0 && at("status") < 0 &&
+	       at("probe") < 0 && at("info") < 0 && t_held == 0);
+
+	reset();
 	run("sd info\r");
 	expect("a ready card: status, the info, then the slot given back once",
 	       at("raw_begin") == 0 && at("raw_begin") < at("status[H]") &&
@@ -636,6 +660,15 @@ static void t_read_cmd(void)
 	run("sd read 0\r");
 	expect("mounted or busy: refused, no card call, nothing given back",
 	       has("filesystem mounted or busy; run `sd umount` first") &&
+	       at("read_blk") < 0 && at("status") < 0 && at("raw_end") < 0 &&
+	       t_held == 0);
+
+	reset();
+	t_raw_rc = FS_ERR_UNINIT;
+	run("sd read 0\r");
+	expect("not initialised: says that, not `sd umount`, nothing read "
+	       "(issue #242)",
+	       has("sd: TESTFX uninit\r\n") && !has("sd umount") &&
 	       at("read_blk") < 0 && at("status") < 0 && at("raw_end") < 0 &&
 	       t_held == 0);
 
@@ -748,6 +781,25 @@ static void t_format_real(void)
 	       sd_fake_at("media_close[LB]") < sd_fake_at("media_format[-B]") &&
 	       has("formatted and mounted (FAT32)\r\n") &&
 	       sd_fake_count("slot_released") == 1);
+
+	/* The glue's locks missing (issue #242): the real glue refuses the
+	 * slot, and the command says why without touching the card. */
+	reset();
+	sd_fake_reset_cold();
+	run("sd format yes\r");
+	expect("format, the glue never initialised: says so, nothing touched",
+	       has("sd: TESTFX uninit\r\n") && !has("busy") &&
+	       !has("formatting") && !sd_fake_touched_anything() &&
+	       sd_fs_board_state.format_mode == 0);
+	reset();
+	sd_fake_reset_cold();
+	sd_fake.mutex_fail_n = 2;
+	(void)sd_fs_glue_init();
+	sd_fake_reset_record();
+	run("sd info\r");
+	expect("info, the second create failed: says so, nothing touched",
+	       has("sd: TESTFX uninit\r\n") && !has("sd umount") &&
+	       !has("type      :") && !sd_fake_touched_anything());
 }
 #endif
 

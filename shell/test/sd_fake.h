@@ -23,6 +23,9 @@
  * another console's umount closing it would: an answer read after the release
  * is seen.
  *
+ * tx_mutex_create() fails the Nth call from the reset when mutex_fail_n is
+ * N, and creates nothing then (issue #242).
+ *
  * Shapes of the card table: SD_FAKE_SHAPE_NOPROBE / NOSTATUS / NOINFO /
  * NOREAD / NOWRITE / NORELEASE leave that field NULL; none, every field set.
  */
@@ -58,6 +61,9 @@ struct sd_fake {
 	int      double_open;   /* an open while already open (a glue bug)      */
 	/* ---- ThreadX ---- */
 	int      mutexes_created;
+	int      mutex_creates;  /* every tx_mutex_create() call, failed or not */
+	int      mutex_fail_n;   /* fail the Nth create from here (1-based), 0
+	                            none (issue #242)                           */
 	int      lock_held;     /* the mount lock                               */
 	int      lock_nested;   /* a get while held (never expected)            */
 	int      lock_gets, lock_puts, dir_gets, dir_puts;
@@ -66,9 +72,18 @@ struct sd_fake {
 
 extern struct sd_fake sd_fake;
 
-/* Zero the board's state, the record and the log; a present, probed-able
- * 32 GB card with nothing on it. */
+/* A board that booted: sd_fake_reset_cold(), then sd_fs_glue_init() when
+ * the glue is linked (it sets the mark that both locks exist, issue #242),
+ * then the record, the log and the init's counts cleared again -- so a test
+ * starts from "booted, nothing done since". */
 void sd_fake_reset(void);
+/* Zero the board's state, the record and the log; a present, probed-able
+ * 32 GB card with nothing on it.  The glue's init is NOT run: the state of a
+ * board that never called sd_fs_glue_init() (issue #242). */
+void sd_fake_reset_cold(void);
+/* Forget the record, the log and the lock counts; the state and the card
+ * are kept. */
+void sd_fake_reset_record(void);
 
 /* Put a FAT boot sector (a superfloppy VBR covering @p total) at @p lba. */
 void sd_fake_put_vbr(uint32_t lba, uint32_t total);

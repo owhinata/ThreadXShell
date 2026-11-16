@@ -29,6 +29,11 @@
  * and does the cache maintenance, so where the board puts the state is not
  * this file's concern.
  *
+ * The two locks exist only after sd_fs_glue_init() created both: every entry
+ * point that returns a status checks the mark first and refuses with
+ * FS_ERR_UNINIT; the ones that return nothing (the ends and the listing lock)
+ * are reached only after one of those succeeded (issue #242).
+ *
  * Lock order: the mount lock -> FileX's media mutex (inside fx_media_*) -> the
  * card driver's own lock (inside each sd_card_board_ops call).  Nothing here
  * takes them the other way round.
@@ -42,13 +47,35 @@
 #define LOG_TAG "sdfs"
 #include "log.h"
 
-void sd_fs_glue_init(void)
+/*
+ * Both creates are checked and the mark is set last, only when both succeeded
+ * (issue #242): until then every entry point that returns a status refuses
+ * with FS_ERR_UNINIT before it takes a lock -- a tx_mutex_get() on a mutex
+ * that was never created fails, and every caller here drops that answer, so
+ * without the mark the glue would run unlocked.
+ */
+int sd_fs_glue_init(void)
 {
-	tx_mutex_create(&sd_fs_board_state.mount_lock, "sd_mount", TX_INHERIT);
-	tx_mutex_create(&sd_fs_board_state.dir_mutex, "sd_dir", TX_INHERIT);
+	UINT mount_rc, dir_rc;
+
+	sd_fs_board_state.locks_ready = 0;
+	mount_rc = tx_mutex_create(&sd_fs_board_state.mount_lock, "sd_mount",
+	                           TX_INHERIT);
+	dir_rc = tx_mutex_create(&sd_fs_board_state.dir_mutex, "sd_dir",
+	                         TX_INHERIT);
 	/* The only FileX media on a board with a slot, so this glue owns the
 	 * one-time system init (FileX's date/time and internal structures). */
 	fx_system_initialize();
+	if (mount_rc != TX_SUCCESS || dir_rc != TX_SUCCESS)
+		return -1;
+	sd_fs_board_state.locks_ready = 1;      /* last: both locks exist */
+	return 0;
+}
+
+/* Nonzero when sd_fs_glue_init() created both locks (issue #242). */
+static int sd_locks_ready(void)
+{
+	return sd_fs_board_state.locks_ready != 0;
 }
 
 FX_MEDIA *sd_glue_media(void)
@@ -80,6 +107,8 @@ UINT sd_op_begin(void)
 {
 	UINT status = FX_SUCCESS;
 
+	if (!sd_locks_ready())
+		return FS_ERR_UNINIT;
 	tx_mutex_get(&sd_fs_board_state.mount_lock, TX_WAIT_FOREVER);
 	if (sd_fs_board_state.busy)
 		status = FS_ERR_BUSY;
@@ -102,6 +131,8 @@ static UINT sd_owner_begin(int require_unmounted)
 {
 	UINT status = FX_SUCCESS;
 
+	if (!sd_locks_ready())
+		return FS_ERR_UNINIT;
 	tx_mutex_get(&sd_fs_board_state.mount_lock, TX_WAIT_FOREVER);
 	if (sd_fs_board_state.busy || sd_fs_board_state.active_ops > 0 ||
 	    (require_unmounted && sd_fs_board_state.mounted))
@@ -188,6 +219,8 @@ UINT sd_media_acquire(FX_MEDIA **out)
 	 * or the card is touched (sd_card_ops_complete()). */
 	if (!sd_card_ops_complete())
 		return FS_ERR_UNWIRED;
+	if (!sd_locks_ready())
+		return FS_ERR_UNINIT;
 
 	tx_mutex_get(&sd_fs_board_state.mount_lock, TX_WAIT_FOREVER);
 
@@ -235,6 +268,8 @@ UINT sd_media_mount_exclusive(FX_MEDIA **out)
 	/* The same refusal as sd_media_acquire()'s, made first. */
 	if (!sd_card_ops_complete())
 		return FS_ERR_UNWIRED;
+	if (!sd_locks_ready())
+		return FS_ERR_UNINIT;
 
 	tx_mutex_get(&sd_fs_board_state.mount_lock, TX_WAIT_FOREVER);
 	status = mount_locked();
@@ -249,6 +284,8 @@ UINT sd_media_unmount(void)
 {
 	UINT status = FX_SUCCESS;
 
+	if (!sd_locks_ready())
+		return FS_ERR_UNINIT;
 	tx_mutex_get(&sd_fs_board_state.mount_lock, TX_WAIT_FOREVER);
 
 	if (sd_fs_board_state.mounted) {

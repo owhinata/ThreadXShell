@@ -16,7 +16,11 @@
  *
  * Pinned (nothing typed at a console shows these):
  *   - init creates the two mutexes and runs fx_system_initialize() once,
- *     touching no card;
+ *     touching no card, and sets the mark that both exist;
+ *   - with the mark clear (init never called, or either create failed:
+ *     issue #242) every entry point that returns a status refuses with
+ *     FS_ERR_UNINIT before a lock, FileX or the card, and every `sd`
+ *     subcommand that reaches the glue says so in one line, no mount hint;
  *   - the first use mounts once; a mounted media is not opened again;
  *   - a card that stops answering is evicted -- aborted, never closed (no
  *     flush to a card that may be gone), released, then mounted afresh -- but
@@ -151,15 +155,87 @@ __attribute__((unused)) static int lock_balanced(void)
 #if !SHAPE_EMPTY_FIELD
 static void t_init(void)
 {
+	int rc;
+
 	printf("init\n");
 	reset();
-	sd_fs_glue_init();
+	sd_fake_reset_cold();                /* a board that has not called it yet */
+	expect("before init: the mark is clear", sd_fs_board_state.locks_ready == 0);
+	rc = sd_fs_glue_init();
 	expect("two mutexes and one fx_system_initialize, no card",
 	       sd_fake.mutexes_created == 2 && sd_fake.fx_inits == 1 &&
 	       sd_fake_at("mutex_create:sd_mount") >= 0 &&
 	       sd_fake_at("mutex_create:sd_dir") >= 0 &&
 	       sd_fake_at("probe") < 0 && sd_fake_at("status") < 0 &&
 	       sd_fake_at("media_open") < 0);
+	expect("  ...success, and the mark set (issue #242)",
+	       rc == 0 && sd_fs_board_state.locks_ready != 0);
+}
+
+/*
+ * The glue's locks missing (issue #242): never initialised, or one of the two
+ * creates failed.  Every entry point that returns a status refuses with
+ * FS_ERR_UNINIT before a lock, FileX or the card, and the commands say so.
+ */
+static void uninit_case(int fail_n)
+{
+	static const char *const fs_lines[] = {
+		"sd ls\r", "sd cat /a\r", "sd write /a x\r", "sd rm /a\r",
+		"sd mkdir /d\r", "sd df\r", "sd umount\r",
+		"sd info\r", "sd read 0\r", "sd format yes\r",
+	};
+	const char *say = "sd: filesystem not initialised (mount locks missing)\r\n";
+	const char *name = fail_n == 0 ? "never initialised" :
+	                   fail_n == 1 ? "the first create failed" :
+	                                 "the second create failed";
+	FX_MEDIA *m = NULL;
+	char what[128];
+	unsigned i;
+	int rc;
+
+	reset();
+	sd_fake_reset_cold();
+	if (fail_n != 0) {
+		sd_fake.mutex_fail_n = fail_n;
+		rc = sd_fs_glue_init();
+		snprintf(what, sizeof what, "%s: init says so, the mark stays clear",
+		         name);
+		expect(what, rc != 0 && sd_fs_board_state.locks_ready == 0 &&
+		             sd_fake.mutex_creates == 2 &&
+		             sd_fake.mutexes_created == 1);
+		sd_fake_reset_record();
+	}
+	snprintf(what, sizeof what, "%s: every entry point refuses, nothing "
+	         "touched at all", name);
+	expect(what,
+	       sd_op_begin() == FS_ERR_UNINIT &&
+	       sd_exclusive_begin() == FS_ERR_UNINIT &&
+	       sd_raw_begin() == FS_ERR_UNINIT &&
+	       sd_media_acquire(&m) == FS_ERR_UNINIT && m == NULL &&
+	       sd_media_mount_exclusive(&m) == FS_ERR_UNINIT && m == NULL &&
+	       sd_media_unmount() == FS_ERR_UNINIT &&
+	       !sd_fake_touched_anything() && sd_fake.lock_puts == 0 &&
+	       sd_fake.dir_puts == 0 && sd_fs_board_state.active_ops == 0 &&
+	       !sd_is_busy() && !sd_is_mounted());
+	for (i = 0; i < sizeof fs_lines / sizeof fs_lines[0]; i++) {
+		sd_fake_reset_record();
+		run(fs_lines[i]);
+		snprintf(what, sizeof what, "%s: `%.*s` says so in one line, no hint, "
+		         "nothing touched", name, (int)strlen(fs_lines[i]) - 1,
+		         fs_lines[i]);
+		expect(what, has(say) && out_count("sd: ") == 1 &&
+		             !has("no FAT filesystem?") && !has("run `sd umount`") &&
+		             !has("busy") && !sd_fake_touched_anything() &&
+		             sd_fake.lock_puts == 0 && !sd_is_busy());
+	}
+}
+
+static void t_uninit(void)
+{
+	printf("the glue's locks missing (issue #242)\n");
+	uninit_case(0);
+	uninit_case(1);
+	uninit_case(2);
 }
 
 static void t_first_use(void)
@@ -454,6 +530,7 @@ int main(void)
 #if !SHAPE_EMPTY_FIELD
 	printf("test_sd_fs_glue (FULL)\n");
 	t_init();
+	t_uninit();
 	t_first_use();
 	t_evict();
 	t_owner();

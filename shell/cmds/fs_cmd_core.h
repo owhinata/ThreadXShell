@@ -43,6 +43,11 @@ struct cli_instance;
 #define FS_ERR_UNWIRED 0xF2u   /* a field of the card driver table is empty:
                                   refused before the media or the card was
                                   touched (issue #233)                         */
+#define FS_ERR_UNINIT  0xF3u   /* the mount glue's two locks were not both
+                                  created (sd_fs_glue_init() not called, or a
+                                  tx_mutex_create() failed): refused before
+                                  a lock, FileX or the card was touched
+                                  (issue #242)                                 */
 
 /**
  * Media abstraction for the shared command bodies.  One instance per command file
@@ -65,8 +70,8 @@ struct fs_device {
 const char *fs_strerror(UINT status);
 
 /** Mount-on-demand: returns the media or NULL after printing the failure, and
- *  the device's mount_hint unless the failure is FS_ERR_BUSY, FS_ERR_NO_CARD
- *  or FS_ERR_UNWIRED (not about the filesystem on the card).  Exposed for
+ *  the device's mount_hint unless the failure is FS_ERR_BUSY, FS_ERR_NO_CARD,
+ *  FS_ERR_UNWIRED or FS_ERR_UNINIT (not about the filesystem on the card).  Exposed for
  *  the commands that write through a medium (`camera save`).  `sd format`
  *  does not use it: it remounts while it still holds the exclusive slot,
  *  which this entry point would refuse. */

@@ -81,11 +81,19 @@ static int sd_refuse_if_unwired(struct cli_instance *sh)
 
 /*
  * Take the raw slot for a card-disruptive op.  Refused while the filesystem is
- * mounted or busy, so a re-probe can never run under a live FX_MEDIA.
+ * mounted or busy, so a re-probe can never run under a live FX_MEDIA.  The
+ * glue's locks missing is a different refusal, said as such: `sd umount`
+ * would not help (issue #242).
  */
 static int sd_raw_gate(struct cli_instance *sh)
 {
-	if (sd_raw_begin() != FX_SUCCESS) {
+	UINT status = sd_raw_begin();
+
+	if (status == FS_ERR_UNINIT) {
+		cli_error(sh, "sd: %s\r\n", fs_strerror(status));
+		return -1;
+	}
+	if (status != FX_SUCCESS) {
 		cli_error(sh, "sd: filesystem mounted or busy; run `sd umount` first\r\n");
 		return -1;
 	}
@@ -274,9 +282,12 @@ static int cmd_sd_format(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 
-	/* Exclusive ownership for the whole format (refused while any op runs). */
-	if (sd_exclusive_begin() != FX_SUCCESS) {
-		cli_error(sh, "sd: %s\r\n", fs_strerror(FS_ERR_BUSY));
+	/* Exclusive ownership for the whole format (refused while any op runs,
+	 * or when the glue's locks are missing -- the answer says which, issue
+	 * #242). */
+	status = sd_exclusive_begin();
+	if (status != FX_SUCCESS) {
+		cli_error(sh, "sd: %s\r\n", fs_strerror(status));
 		return 1;
 	}
 

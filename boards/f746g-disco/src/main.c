@@ -216,8 +216,12 @@ void tx_application_define(void *first_unused_memory)
 	/* SD filesystem glue (owhinata/stm32f746g-disco#34; the shared
 	 * shell/cmds/sd_fs_glue.c since issue #233): SD mount mutexes and
 	 * fx_system_initialize() -- the media mounts lazily on the first `sd` FS
-	 * command.  The board's only FileX media since issue #194. */
-	sd_fs_glue_init();
+	 * command.  The board's only FileX media since issue #194.  On failure (a
+	 * mutex not created) every `sd` filesystem command, `sd info` / `sd
+	 * read` / `sd format` and `camera save` to the card refuse with
+	 * "filesystem not initialised" (issue #242); nothing else stops. */
+	if (sd_fs_glue_init() != 0)
+		printf("sd: filesystem glue init failed (sd filesystem disabled)\r\n");
 
 	/* FMC SDRAM bring-up (owhinata/stm32f746g-disco#40): GPIO/FMC controller + the
     JEDEC power-up

@@ -13,6 +13,8 @@
  * and with a field of it empty (SD_FAKE_SHAPE_NOWRITE), where the save says
  * so in one line without the mount hint, creates no file, touches neither
  * FileX nor the card, gives the operation slot back and closes the frame.
+ * With the full table, also the mount glue's locks missing (issue #242):
+ * the save says so in one line and touches nothing.
  */
 #include <stdio.h>
 #include <string.h>
@@ -125,6 +127,17 @@ int main(void)
 	expect("an empty slot: no card, one line, no file",
 	       has("sd: mount failed: no card (0xf1)\r\n") &&
 	       !has("no FAT filesystem?") && camera_stub.created_file == 0);
+	/* The glue's locks missing (issue #242): the operation slot refuses,
+	   and the save says why in one line. */
+	reset();
+	sd_fake_reset_cold();
+	run("camera save sd /a.raw\r");
+	expect("the glue never initialised: says so, one line, no hint, no file, "
+	       "nothing touched, the frame closed",
+	       has("camera: sd: filesystem not initialised (mount locks "
+	           "missing)\r\n") && out_lines() == 2 &&
+	       !has("no FAT filesystem?") && camera_stub.created_file == 0 &&
+	       !sd_fake_touched_anything() && camera_stub.opened == 0);
 #endif
 	if (failures) {
 		printf("test_camera_save_sd: %d FAILED\n", failures);

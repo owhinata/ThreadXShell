@@ -1823,6 +1823,18 @@ What the command and the contract fix:
   that compiles the glue without defining `sd_fs_board_state` does not link,
   and neither does one that defines it twice; the two shared files own no
   mutable storage themselves (the per-board audit).
+- **The glue refuses to run without its locks** (issue #242).
+  `sd_fs_glue_init()` checks both `tx_mutex_create()` calls and sets a mark
+  in the state last, only when both succeeded; it returns -1 otherwise, and
+  f746g-disco prints one line at boot.  With the mark clear (a board that
+  never called it leaves the state's zero) every glue entry point that
+  returns a status -- the operation, exclusive and raw slots, both mount
+  entry points and the unmount -- answers `FS_ERR_UNINIT` before it takes a
+  lock or touches FileX or the card, and the filesystem subcommands,
+  `sd info` / `sd read` / `sd format` and `camera save` print
+  `filesystem not initialised (mount locks missing)` in one line, without
+  the mount hint.  Until then a missing mutex made every `tx_mutex_get()`
+  fail, every caller dropped that answer, and the glue ran unlocked.
 - **`sd format yes` keeps the exclusive slot from start to end**: unmount,
   probe, format (with the driver's format mode on, and off again as soon as
   the format returns), mount again through `sd_media_mount_exclusive()`, then the FAT32
@@ -1862,8 +1874,9 @@ through the real exclusive entry point.  Since issue #233 also:
 over them, over a recording card table and stand-ins of FileX and ThreadX
 (mount once, eviction without flushing and only when no operation is
 running, busy and no-card answers, a no-card answer not carried over to a
-later failure, an empty field refused by every entry point; built once per
-table shape); `test_fx_sd_driver`, the FileX driver request by request
+later failure, an empty field refused by every entry point, and since issue
+#242 the glue never initialised or either mutex create failed refused by
+every entry point and every subcommand; built once per table shape); `test_fx_sd_driver`, the FileX driver request by request
 (superfloppy, MBR partition 0, a missing signature, a non-FAT type, an
 overflowing partition, out-of-range and overflowing accesses, format mode,
 the probe result overwritten at every INIT); and `test_camera_save_sd`,

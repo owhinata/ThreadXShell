@@ -174,8 +174,8 @@ static uint32_t      psram_reg_dqse = 1u;               /* DQS-gate the reg-read
 /* Failure-stage bookkeeping (owhinata/wio-lite-ai#3 debug): every instrumented
    transaction
  * records into psram_last_diag; psram_hw_init copies the first failing one
- * into psram_fail_diag so `psram info`/`psram snap` can show WHERE the cold
- * bring-up died (Global Reset TCF vs first MR-pair read FTF) and what the
+ * into psram_fail_diag, a record of WHERE the cold bring-up died (no command
+ * prints it; `psram info` names the stage) (Global Reset TCF vs first MR-pair read FTF) and what the
  * controller state was at that instant. */
 static uint32_t          psram_stage = PSRAM_STAGE_OK;
 static struct psram_diag psram_last_diag;
@@ -775,7 +775,7 @@ uint32_t psram_clock_hz(void) { return PSRAM_KERNEL_HZ / (psram_presc + 1u); }
  * slower clock relaxes every timing margin; if the corruption survives at
  * 33MHz it is protocol, not analog).  DCR2 is written with the OCTOSPI
  * disabled.  Touches only OCTOSPI1 -- the shared 266MHz kernel is untouched.
- * Usable in NOT-ready state for `psram probe` sweeps. */
+ * Usable in NOT-ready state. */
 void psram_set_prescaler(uint32_t presc)
 {
 	if (presc > 255u)
@@ -863,15 +863,17 @@ void psram_set_mr0(uint32_t val)
  * a mis-latencied write can leave the device unresponsive for the next read,
  * and a DQS-gated MMAP read then stalls the AXI bus forever (no timeout in
  * mmap mode) -> CPU lock -> IWDG reset.  Board #2 hit exactly that at d=0. */
-uint32_t psram_wtune(uint32_t off, uint32_t reps)
+int psram_wtune(uint32_t off, uint32_t reps, uint32_t *out_mask)
 {
 	volatile uint32_t *p =
 	    (volatile uint32_t *)(uintptr_t)(PSRAM_BASE_ADDR + off);
 	static uint32_t wt_nonce;
 	uint32_t d, r, i, mask = 0u, orig = psram_wr_dcyc, first = 0xFFFFFFFFu;
 
-	if (!psram_up || off > PSRAM_SIZE_BYTES - 8u)
-		return 0u;
+	*out_mask = 0u;
+	/* [!] Never past the non-cacheable pool (issue #252), whatever the caller. */
+	if (!psram_up || !psram_wtune_off_ok(off))
+		return PSRAM_WTUNE_REFUSED;
 
 	/* Per-run nonce folded into the markers: the sweep reuses the same
 	 * address every run, so without it a silently-failing write could read
@@ -907,7 +909,8 @@ uint32_t psram_wtune(uint32_t off, uint32_t reps)
 		 * dead so the caller sees the failure instead of 16 bogus fails. */
 		if (!psram_recover()) {
 			psram_mmap_enter(psram_rd_dcyc, orig);
-			return mask;
+			*out_mask = mask;
+			return PSRAM_WTUNE_DEAD;
 		}
 		if (ok) {
 			mask |= 1u << d;
@@ -917,7 +920,8 @@ uint32_t psram_wtune(uint32_t off, uint32_t reps)
 	}
 	psram_mmap_enter(psram_rd_dcyc,
 	                 (first != 0xFFFFFFFFu) ? first : orig);
-	return mask;
+	*out_mask = mask;
+	return PSRAM_WTUNE_OK;
 }
 
 /* ------------------------------------------------------------------ *

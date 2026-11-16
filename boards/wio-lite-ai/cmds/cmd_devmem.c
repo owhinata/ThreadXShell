@@ -134,7 +134,7 @@ static int devmem_check(struct cli_instance *sh, uint32_t addr, uint32_t span,
 		 * 0x90000000 is an unbounded DQS-gated OCTOSPI1 transaction that stalls
 		 * the AXI bus until the IWDG resets -- devmem must not attempt it. */
 		if (r->psram && !psram_ready()) {
-			cli_error(sh, "devmem: PSRAM not ready; use `psram info`/`psram probe`\r\n");
+			cli_error(sh, "devmem: PSRAM not ready; see `psram info`\r\n");
 			return -1;
 		}
 #endif

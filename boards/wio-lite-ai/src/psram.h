@@ -44,8 +44,8 @@
 #define PSRAM_STAGE_MR0   2u            /* MA0 2-byte register-pair read */
 #define PSRAM_STAGE_MR2   3u            /* MA2 2-byte register-pair read */
 
-/* Observability record of one indirect transaction (init failure snapshot and
- * `psram probe`).  SR is sampled at three points: before arming the transfer,
+/* Observability record of one indirect transaction (the init failure snapshot,
+ * kept by psram.c; no command prints it).  SR is sampled at three points: before arming the transfer,
  * when the first data poll ended (FTF set or timed out; 0 for the data-less
  * Global Reset), and when the completion poll ended (TCF set or timed out).
  * SR bit0=TEF bit1=TCF bit2=FTF bit3=SMF bit4=TOF bit5=BUSY [13:8]=FLEVEL.
@@ -87,6 +87,11 @@ int psram_ready(void);
  * psram_acquire_shared() -- the guard is one word of users plus a reconfigurer
  * mark (src/psram_guard.h, issue #142), and a release of the wrong kind is
  * refused and leaves the other held.  Thread context only.
+ *
+ * [!] ONE END KEEPS THE MARK (issue #252): when `psram wtune` leaves no write
+ * path shown -- the device stopped answering and the reset did not bring it
+ * back, or no marker round-tripped -- it does not give the reconfigurer mark
+ * back, so nothing reads the window (and stalls the bus) until `reboot`.
  *
  * The two differ in what they refuse, because the callers differ in what they
  * do to the bus:
@@ -169,7 +174,8 @@ uint32_t psram_get_read_flags(void);
 /* APS6408 read-latency register MR0 (device-side latency code): getter for
  * `psram info`, and a diagnostic writer (`psram mr0`) to try e.g. Fixed Latency
  * LC8 (0x24) -- deterministic read timing to widen the eye at high clock
- * (owhinata/wio-lite-ai#16).  Verify with `psram probe 0` (MA0 D0 = MR0). */
+ * (owhinata/wio-lite-ai#16).  The getter returns the value last written, not
+ * one read back from the device. */
 uint32_t psram_get_mr0(void);
 void psram_set_mr0(uint32_t val);
 
@@ -214,9 +220,51 @@ int psram_mmapscan_get(struct psram_scan_state *out);
 #define PSRAM_SCAN_STEP  4u
 #define PSRAM_SCAN_COLS  32u
 
-/* Write-latency tuner: sweep mmap write dummy 0..15 with marker write+readback
- * (x`reps` each); returns a pass bitmask (bit d = dummy d round-tripped) and
- * leaves the lowest passing dummy applied (`psram wtune`). */
-uint32_t psram_wtune(uint32_t off, uint32_t reps);
+/*
+ * Write-latency tuner (`psram wtune`, issue #252): sweep the mmap write dummy
+ * 0..15, each with an 8-byte marker written through the memory-mapped window
+ * at window offset @p off and read back indirectly (x @p reps).
+ *
+ * [!] Only inside the non-cacheable pool: a marker written into the cacheable
+ * `.psram_ai` can stay in the D-cache (so the indirect read-back means nothing)
+ * and be written back later over a loaded model.  So @p off must be a multiple
+ * of 4 with the whole 8 bytes below PSRAM_NC_BYTES (psram_wtune_off_ok()); the
+ * caller checks it first, and this function refuses again.
+ *
+ * @return PSRAM_WTUNE_OK with *mask the pass bits (bit d = dummy d
+ * round-tripped; the lowest is left applied, or the original if none);
+ * PSRAM_WTUNE_REFUSED (not ready, or @p off outside the pool: nothing done,
+ * *mask 0); PSRAM_WTUNE_DEAD (the device stopped answering and the reset did
+ * not bring it back: the original dummy is re-entered, *mask is what passed
+ * before).
+ */
+#define PSRAM_WTUNE_OK       0
+#define PSRAM_WTUNE_REFUSED  1
+#define PSRAM_WTUNE_DEAD     2
+int psram_wtune(uint32_t off, uint32_t reps, uint32_t *mask);
+
+/** A window offset `psram wtune` may write its 8 bytes at: a multiple of 4,
+ *  all 8 bytes in the non-cacheable pool (pure). */
+static inline int psram_wtune_off_ok(uint32_t off)
+{
+	return (off & 3u) == 0u && off <= PSRAM_NC_BYTES - 8u;
+}
+
+/** What `psram wtune` does after the sweep (pure, issue #252): with the write
+ *  path shown (PSRAM_WTUNE_OK and at least one dummy round-tripped) repaint
+ *  the LCD buffers and give the mark back; refused before anything was
+ *  written, give it back; otherwise (the device dead, or nothing round-tripped)
+ *  [!] keep the mark until `reboot` and repaint nothing. */
+#define PSRAM_WTUNE_END_REPAINT_GIVE 0
+#define PSRAM_WTUNE_END_GIVE         1
+#define PSRAM_WTUNE_END_KEEP         2
+static inline int psram_wtune_end(int rc, uint32_t mask)
+{
+	if (rc == PSRAM_WTUNE_REFUSED)
+		return PSRAM_WTUNE_END_GIVE;
+	if (rc == PSRAM_WTUNE_OK && mask != 0u)
+		return PSRAM_WTUNE_END_REPAINT_GIVE;
+	return PSRAM_WTUNE_END_KEEP;
+}
 
 #endif /* APP_PSRAM_H */

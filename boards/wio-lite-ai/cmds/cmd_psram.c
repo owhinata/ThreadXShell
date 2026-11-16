@@ -109,7 +109,7 @@ static int psram_info_lines(ext_ram_write_fn write, void *ctx)
 	psram_get_phase(&sel, &unit);
 
 	if (!psram_ready() &&
-	    psram_line(write, ctx, "  init    : failed at %s (see `psram snap`)\r\n",
+	    psram_line(write, ctx, "  init    : failed at %s\r\n",
 	               psram_stage_name(psram_init_stage())) != 0)
 		return -1;
 	if (psram_line(write, ctx, "  clock   : %lu Hz (device)\r\n",
@@ -182,7 +182,8 @@ int cmd_psram_phase(struct cli_instance *sh, int argc, char **argv)
 /* psram mr0 <hex>: write the APS6408 MR0 read-latency register
    (owhinata/wio-lite-ai#16 diagnostic).
  * 0x09 = power-up default (Variable LC5); 0x24 = Fixed Latency LC8 (ST U585
- * reference -- pair with `psram set 8 <wr>`).  Verify with `psram probe 0`. */
+ * reference -- pair with `psram set 8 <wr>`).  `psram info` shows the value
+ * written, not one read back from the device. */
 int cmd_psram_mr0(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t v;
@@ -200,9 +201,8 @@ int cmd_psram_mr0(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	psram_set_mr0(v);
 	psram_release();
-	cli_print(sh, "psram: MR0<=0x%02lX; set matching read dummy (`psram set`), "
-	          "verify `psram probe 0`, then `psram test 4096`\r\n",
-	          (unsigned long)v);
+	cli_print(sh, "psram: MR0<=0x%02lX (not read back); set the read dummy "
+	          "(`psram set`), then `psram test 4096`\r\n", (unsigned long)v);
 	return 0;
 }
 
@@ -318,34 +318,64 @@ int cmd_psram_mmapscan(struct cli_instance *sh, int argc, char **argv)
 	return 1;
 }
 
-/* psram wtune [addr]: sweep the mmap write dummy 0..15 with write+readback
- * markers (needs a trusted read path -- run `psram eye` first). */
+/*
+ * psram wtune [addr]: sweep the mmap write dummy 0..15 with an 8-byte marker
+ * written at addr and read back indirectly (issue #252).  Use it with a read
+ * path that is trusted: the shipped setting, or one `psram test` passed.
+ *
+ * [!] The order: the address (a multiple of 4, all 8 bytes in the 6 MB
+ * non-cacheable pool; refused before anything else), the mark, the captured
+ * frame dropped (the marker may land in it), the sweep.  Then
+ * psram_wtune_end(): with a write path shown, repaint the LCD buffers (the
+ * marker may land in them) and give the mark back; otherwise keep the mark
+ * until `reboot` (psram.h).
+ */
 int cmd_psram_wtune(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t addr = PSRAM_BASE_ADDR + 0x200u;
 	uint32_t mask, d;
+	int rc, end;
 
 	if (argc >= 2 && cli_parse_u32(argv[1], &addr) != 0) {
 		cli_error(sh, "psram: bad address '%s'\r\n", argv[1]);
 		return 1;
 	}
-	if (!psram_ready() || addr < PSRAM_BASE_ADDR ||
-	    addr > PSRAM_BASE_ADDR + PSRAM_SIZE_BYTES - 8u) {
-		cli_error(sh, "psram: not ready / bad addr\r\n");
+	if (!psram_ready()) {
+		cli_error(sh, "psram: not ready\r\n");
+		return 1;
+	}
+	if (addr < PSRAM_BASE_ADDR || !psram_wtune_off_ok(addr - PSRAM_BASE_ADDR)) {
+		cli_error(sh, "psram: wtune address: a multiple of 4 in "
+		              "0x90000000..0x905FFFF8\r\n");
 		return 1;
 	}
 	if (psram_guard(sh))
 		return 1;
-	mask = psram_wtune(addr - PSRAM_BASE_ADDR, 4u);
-	psram_release();
+	camera_frame_invalidate();
+	rc = psram_wtune(addr - PSRAM_BASE_ADDR, 4u, &mask);
+	end = psram_wtune_end(rc, mask);
+	if (end == PSRAM_WTUNE_END_REPAINT_GIVE) {
+#if BSP_ENABLE_LCD
+		ltdc_fb_repaint_black();
+#endif
+	}
+	if (end != PSRAM_WTUNE_END_KEEP)
+		psram_release();
+	if (rc == PSRAM_WTUNE_REFUSED) {
+		cli_error(sh, "psram: wtune refused\r\n");
+		return 1;
+	}
 	for (d = 0u; d <= 15u; d++)
 		cli_print(sh, "  wr dummy %2lu: %s\r\n", (unsigned long)d,
 		          (mask & (1u << d)) ? "PASS" : "fail");
-	if (mask != 0u)
-		cli_print(sh, "psram wtune: lowest passing dummy applied; "
-		          "run `psram test 4096`\r\n");
-	else
-		cli_print(sh, "psram wtune: nothing round-tripped\r\n");
+	if (end == PSRAM_WTUNE_END_KEEP) {
+		cli_error(sh, "psram wtune: %s; OCTOSPI1 held until `reboot`\r\n",
+		          rc == PSRAM_WTUNE_DEAD ? "device stopped answering"
+		                                 : "nothing round-tripped");
+		return 1;
+	}
+	cli_print(sh, "psram wtune: lowest passing dummy applied; "
+	          "run `psram test 4096`\r\n");
 	return 0;
 }
 

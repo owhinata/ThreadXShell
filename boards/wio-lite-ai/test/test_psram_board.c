@@ -49,7 +49,7 @@ static volatile uint32_t *mem;   /* mapped at PSRAM_BASE_ADDR */
 
 static char seq[128];
 static int mark, refuse_mark, frame_dropped, painted, ready = 1;
-static int acquires, releases, sets;
+static int acquires, releases, sets, repaints;
 static long stores, loads, bad_access;
 static long flip_load = -1, flip_seen;
 static uint32_t flip_addr;
@@ -85,6 +85,7 @@ void ltdc_fb_repaint_black(void)
 	if (!mark)
 		bad_access++;          /* [!] repainted after the mark went back */
 	painted = 1;
+	repaints++;
 	say("paint ");
 }
 #endif
@@ -106,7 +107,21 @@ void psram_mmapscan_stop(void) {}
 int psram_mmapscan_get(struct psram_scan_state *out) { (void)out; return 0; }
 int psram_mmapscan_start(uint32_t phase, uint32_t ulo, uint32_t ustep, uint32_t n)
 { (void)phase; (void)ulo; (void)ustep; (void)n; return 0; }
-uint32_t psram_wtune(uint32_t off, uint32_t reps) { (void)off; (void)reps; sets++; return 0u; }
+/* `psram wtune` (issue #252): what the sweep returns, and in what order the
+ * command reached it. */
+static int wt_rc, wt_calls, wt_frame_first, wt_mark_held;
+static uint32_t wt_mask, wt_off;
+int psram_wtune(uint32_t off, uint32_t reps, uint32_t *mask)
+{
+	(void)reps;
+	wt_calls++;
+	wt_off = off;
+	wt_frame_first = frame_dropped;    /* [!] the frame dropped before a marker */
+	wt_mark_held = mark;
+	*mask = (wt_rc == PSRAM_WTUNE_REFUSED) ? 0u : wt_mask;
+	say("wtune ");
+	return wt_rc;
+}
 
 static void check_access(volatile uint32_t *p)
 {
@@ -217,6 +232,10 @@ static void reset(void)
 	flip_seen = 0;
 	flip_addr = 0u;
 	cancel_at = cancel_asks = 0;
+	wt_rc = PSRAM_WTUNE_OK;
+	wt_calls = wt_frame_first = wt_mark_held = repaints = 0;
+	wt_mask = 0x10u;
+	wt_off = 0u;
 	text_len = 0;
 	text[0] = '\0';
 	for (uint32_t i = 0; i < PSRAM_SIZE_BYTES / 4u; i++)
@@ -237,7 +256,7 @@ static int run(const char *line)
 {
 	static char buf[64];
 	char *argv[4];
-	int argc = 0, rc;
+	int argc = 0, rc, held_before;
 	const struct cli_cmd *s;
 
 	snprintf(buf, sizeof buf, "%s", line);
@@ -246,11 +265,15 @@ static int run(const char *line)
 	s = psram_sub(argv[0]);
 	if (s == NULL)
 		return -100;
+	held_before = mark;
 	rc = s->handler(&usb, argc, argv);
 	check(bad_access == 0, "every access in the low 6 MB, under the mark, after the "
 	      "frame was dropped and before the repaint", line);
-	check(!mark && acquires - releases == (refuse_mark ? acquires : 0),
-	      "the mark given back once for every take", line);
+	/* (wtune keeps the mark on purpose; a command run behind a kept mark is
+	 * refused and leaves it) */
+	if (strncmp(line, "wtune", 5) != 0 && !held_before)
+		check(!mark && acquires - releases == (refuse_mark ? acquires : 0),
+		      "the mark given back once for every take", line);
 	check(top_untouched(), "the cacheable 2 MB untouched", line);
 	return rc;
 }
@@ -308,7 +331,7 @@ int main(void)
 	reset();
 	ready = 0;
 	check(run("info") == 0 && has("state:   DOWN\r\n") &&
-	      has("  init    : failed at MA0 pair read (see `psram snap`)\r\n"),
+	      has("  init    : failed at MA0 pair read\r\n"),
 	      "info, not ready: the init line", "info");
 
 	/* ---- the length ---- */
@@ -369,6 +392,80 @@ int main(void)
 	refuse_mark = 1;
 	check(run("clk 1") == 1 && sets == 0 && has("OCTOSPI1 busy"),
 	      "clk refused: nothing set", "clk 1");
+
+
+	/* ---- issue #252: `psram wtune` ---- */
+	{
+		static const struct { uint32_t off; int ok; } offs[] = {
+			{ 0u, 1 }, { 0x200u, 1 }, { 0x5FFFF8u, 1 }, { 0x5FFFFCu, 0 },
+			{ 0x600000u, 0 }, { 0x7FFFF8u, 0 }, { 0x202u, 0 }, { 0x201u, 0 },
+			{ 0xFFFFFFFCu, 0 }, { 0xFFFFFFF8u, 0 },
+		};
+
+		for (unsigned i = 0; i < sizeof offs / sizeof offs[0]; i++)
+			check(psram_wtune_off_ok(offs[i].off) == offs[i].ok,
+			      "the wtune offset: aligned, all 8 bytes in the 6 MB", "pure");
+		check(psram_wtune_end(PSRAM_WTUNE_OK, 1u) == PSRAM_WTUNE_END_REPAINT_GIVE &&
+		      psram_wtune_end(PSRAM_WTUNE_OK, 0u) == PSRAM_WTUNE_END_KEEP &&
+		      psram_wtune_end(PSRAM_WTUNE_DEAD, 0u) == PSRAM_WTUNE_END_KEEP &&
+		      psram_wtune_end(PSRAM_WTUNE_DEAD, 3u) == PSRAM_WTUNE_END_KEEP &&
+		      psram_wtune_end(PSRAM_WTUNE_REFUSED, 0u) == PSRAM_WTUNE_END_GIVE &&
+		      psram_wtune_end(99, 1u) == PSRAM_WTUNE_END_KEEP,
+		      "the end after the sweep", "pure");
+	}
+	{
+		static const char *const bad[] = { "wtune 0x90600000", "wtune 0x905FFFFC",
+		                                   "wtune 0x90000202", "wtune 0x8FFFFFF0",
+		                                   "wtune 0x907FFFF8", "wtune 0" };
+
+		for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+			reset();
+			check(run(bad[i]) == 1 && acquires == 0 && wt_calls == 0 &&
+			      !frame_dropped && has("psram: wtune address: a multiple of 4 in "
+			                            "0x90000000..0x905FFFF8\r\n"),
+			      "wtune: a bad address refused before the mark", bad[i]);
+		}
+		reset();
+		ready = 0;
+		check(run("wtune") == 1 && acquires == 0 && wt_calls == 0 &&
+		      has("psram: not ready\r\n"), "wtune: not ready", "wtune");
+		reset();
+		refuse_mark = 1;
+		check(run("wtune") == 1 && wt_calls == 0 && !frame_dropped &&
+		      has("OCTOSPI1 busy"), "wtune: the mark refused, nothing else", "wtune");
+	}
+	reset();
+	check(run("wtune 0x905FFFF8") == 0 && wt_off == 0x5FFFF8u && wt_frame_first &&
+	      wt_mark_held && !mark && releases == 1 &&
+	      repaints == (BSP_ENABLE_LCD ? 1 : 0) &&
+	      strcmp(seq, BSP_ENABLE_LCD ? "mark+ frame wtune paint mark- "
+	                                 : "mark+ frame wtune mark- ") == 0 &&
+	      has("  wr dummy  4: PASS\r\n") &&
+	      has("psram wtune: lowest passing dummy applied; run `psram test 4096`\r\n"),
+	      "wtune passed: frame dropped first, repainted, then the mark given back",
+	      "wtune");
+	reset();
+	wt_rc = PSRAM_WTUNE_DEAD;
+	wt_mask = 0x3u;
+	check(run("wtune") == 1 && mark && releases == 0 && repaints == 0 &&
+	      has("psram wtune: device stopped answering; OCTOSPI1 held until `reboot`\r\n"),
+	      "wtune, device dead: no repaint, the mark kept", "wtune");
+	mark = 0;
+	reset();
+	wt_mask = 0u;
+	check(run("wtune") == 1 && mark && releases == 0 && repaints == 0 &&
+	      has("psram wtune: nothing round-tripped; OCTOSPI1 held until `reboot`\r\n"),
+	      "wtune, nothing round-tripped: no repaint, the mark kept", "wtune");
+	text_len = 0;
+	text[0] = '\0';
+	check(run("set 8 4") == 1 && sets == 0 && has("OCTOSPI1 busy"),
+	      "after a kept mark every reconfigurer is refused", "set 8 4");
+	mark = 0;
+	reset();
+	wt_rc = PSRAM_WTUNE_REFUSED;
+	check(run("wtune") == 1 && !mark && releases == 1 && repaints == 0 &&
+	      has("psram: wtune refused\r\n"), "wtune refused below: the mark given back",
+	      "wtune");
 
 	printf("test_psram_board (LCD %d): %s\n", BSP_ENABLE_LCD, failures ? "FAILED" : "OK");
 	return failures ? 1 : 0;

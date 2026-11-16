@@ -459,6 +459,9 @@ set(APP_TINYUSB_SOURCES
 # has NetX Duo (the host stack, src/nx_net.c), so the shared storage audit wants
 # that file shipped.
 set(BOARD_HAS_NETX ON)
+# The property shell/cmds/cmd_ext_ram.c is optional on (issue #251): OFF until
+# the board's `psram` moves onto it (cmds/cmd_psram.c is still its own).
+set(BOARD_HAS_EXT_RAM OFF)
 set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/core/cli_core.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_complete.c"

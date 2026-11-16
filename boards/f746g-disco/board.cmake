@@ -322,6 +322,9 @@ set(BOARD_HAS_SD ON)
 # The property shell/cmds/cmd_net.c is optional on (issue #219): this board
 # always has NetX Duo, so the shared storage audit wants that file shipped.
 set(BOARD_HAS_NETX ON)
+# The property shell/cmds/cmd_ext_ram.c is optional on (issue #251): OFF until
+# the board's `sdram` moves onto it (cmds/cmd_sdram.c is still its own).
+set(BOARD_HAS_EXT_RAM OFF)
 # The property shell/cmds/cmd_kv.c is optional on (issue #214): this board
 # always has the key-value store (FlashDB on the QSPI NOR's first megabyte), so
 # the shared storage audit wants that file shipped.

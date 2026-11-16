@@ -371,6 +371,8 @@ set(BOARD_HAS_KV OFF)     # no key-value store: shell/cmds/cmd_kv.c is compiled 
 set(BOARD_HAS_KV_NETX OFF) # neither: shell/cmds/kv_cfg.c is compiled by nothing (#214)
 set(BOARD_HAS_SD OFF)     # no microSD slot: shell/cmds/cmd_sd.c, sd_fs_glue.c and
                           # fx_sd_driver.c are compiled by nothing (#232, #233)
+set(BOARD_HAS_EXT_RAM OFF) # no external RAM in the address map: shell/cmds/cmd_ext_ram.c
+                           # is compiled by nothing (#251)
 set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/core/cli_core.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_complete.c"

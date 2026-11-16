@@ -1584,6 +1584,37 @@ gcc $CFLAGS -DNOR_TEST_SHAPE_ABSENT -I "$here/nor_cfg" -I "$svc/nor" \
     -c "$here/test_nor_absent_neg.c" -o "$out/nor_absent_neg.o"
 echo "  ok   a subcommand declared absent and still defined, or absent without its line, does not compile"
 
+# issue #251 -- the one shared external RAM command (shell/cmds/cmd_ext_ram.c),
+# over a fake board table (a 1 MB window with a cacheable range and one after
+# it, four steps that can refuse or warn, a skip) and reached through the root
+# command table.  Every word stored or loaded goes through the test's pair
+# (EXT_RAM_TEST_HOOKS) and must be inside the testable part, outside the skip
+# and made with every step held (#249); a length refusal or a bad table calls
+# nothing of the board; a refused take gives back exactly the steps before it,
+# in reverse; every end gives every step back once; a bad word is found in each
+# pass and Ctrl+C at every ask stops the test.  A board subcommand with a
+# shared name must make the test fail (-DEXT_RAM_TEST_DUP).  The boards' own
+# tables are tested in their host_tests.sh.
+gcc $CFLAGS -DCLI_USE_COLOR=0 -DEXT_RAM_TEST_HOOKS \
+    -I "$here/ext_ram_cfg" -I "$here/shim" -I "$here/../cmds" -I "$inc" -I "$core" \
+    "$here/test_ext_ram_cmd.c" "$here/../cmds/cmd_ext_ram.c" "$core/cli_parse.c" \
+    $LDFLAGS -o "$out/test_ext_ram_cmd"
+"$out/test_ext_ram_cmd"
+gcc $CFLAGS -DCLI_USE_COLOR=0 -DEXT_RAM_TEST_HOOKS -DEXT_RAM_TEST_DUP \
+    -I "$here/ext_ram_cfg" -I "$here/shim" -I "$here/../cmds" -I "$inc" -I "$core" \
+    "$here/test_ext_ram_cmd.c" "$here/../cmds/cmd_ext_ram.c" "$core/cli_parse.c" \
+    $LDFLAGS -o "$out/test_ext_ram_cmd_dup"
+if "$out/test_ext_ram_cmd_dup" > "$out/test_ext_ram_cmd_dup.log" 2>&1; then
+    echo "test_ext_ram_cmd: a board \`info\` next to the shared one PASSED" >&2
+    exit 1
+fi
+if ! LC_ALL=C grep -q "a board subcommand has a shared name" "$out/test_ext_ram_cmd_dup.log"; then
+    echo "test_ext_ram_cmd: the duplicate failed, but not on the name check:" >&2
+    cat "$out/test_ext_ram_cmd_dup.log" >&2
+    exit 1
+fi
+echo "  ok   a board subcommand named like a shared one is refused"
+
 # issue #99 -- the shared stream lifecycle (svc/nn/nn_stream_life.c).
 #
 # A `--frames` waiter and a second console racing over one stream: the waiter

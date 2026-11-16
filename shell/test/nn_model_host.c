@@ -17,6 +17,8 @@ int      nn_host_depth;
 int      nn_host_enters;
 int      nn_host_cycles_start_rc = -1;   /* like a part without CYCCNT */
 uint32_t nn_host_cycles_step = 0u;
+jmp_buf *nn_host_wait_jmp;
+int      nn_host_waits;
 
 static uint32_t nn_host_cyccnt;
 
@@ -40,7 +42,16 @@ void nn_model_board_exit(uint32_t saved)
 
 void nn_model_board_wait_tick(void)
 {
+	if (nn_host_wait_jmp != NULL) {
+		nn_host_waits++;
+		longjmp(*nn_host_wait_jmp, 1);
+	}
 	assert(!"the open latch was contended in a single-threaded test");
+}
+
+int nn_host_opening(void)
+{
+	return nn_model_board_state.opening;
 }
 
 int nn_model_board_cycles_start(void)

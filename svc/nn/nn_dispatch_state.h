@@ -63,11 +63,6 @@ struct nn_dispatch_state {
 	/* The single-session guard (nn_session_try_acquire()). */
 	volatile int session_busy;
 
-	/* An external claim on the backend's memory: f746g-disco's `sdram test`
-	 * holding .sdram.ai (nn_scratch_claim(), issue #152).  A board with no such
-	 * user never calls the claim and this stays 0. */
-	volatile int scratch_claimed;
-
 	/* Timing availability: the cycle counter was seen advancing at init.  0
 	 * makes nn_last_cycles() report 0 instead of a frozen counter's delta. */
 	uint8_t cycles_ok;

@@ -733,14 +733,16 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$svc/bl
     $LDFLAGS -o "$out/test_nn_desc"
 "$out/test_nn_desc"
 
-# issues #131 P16, #152, #161 -- the model singleton of wio-lite-ai and
+# issues #131 P16, #161, #253 -- the model singleton of wio-lite-ai and
 # f746g-disco (svc/nn/nn.c, one implementation since #161) over a stub backend
 # and shell/test/nn_model_host.c (the board's state object and hooks,
 # modelled).  Only the first open reaches the backend; a reload's answer is
 # whether a MODEL is left; a refused load whose restore also failed stays open
 # and empty and the next load goes through; every refusal code comes back
-# unchanged; each critical section hands back the mask it found; the external
-# memory claim (`sdram test`) refuses and is refused as nn.h says.  Built four
+# unchanged; each critical section hands back the mask it found; while the
+# first open builds, its latch is taken and a second open waits rather than
+# reaching the backend (issue #253: the check that used to show this was the
+# removed memory claim's).  Built four
 # times: a model in the image, its adoption failing, empty from boot, and a
 # backend that cannot swap (NN_ERR_NOSUP for all three optional entries).
 for nn_model_variant in "" -DTEST_FIRST_BUILD_FAILS -DTEST_EMPTY_FROM_BOOT -DTEST_NO_SWAP; do

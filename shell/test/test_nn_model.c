@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the model singleton of wio-lite-ai and f746g-disco
- * (svc/nn/nn.c), issues #131 P16, #152 and #161.
+ * (svc/nn/nn.c), issues #131 P16, #161 and #253.
  *
  * The real nn.c is compiled against nn_model_host.c (the board's state object
  * and hooks, modelled) and a stub backend that keeps the contract nn_backend.h
@@ -28,10 +28,9 @@
  *   - each critical section restores the mask value it found: a caller that
  *     already had interrupts masked still has them masked afterwards;
  *   - `arena` is the backend's reservation and `used` goes to 0 with no model;
- *   - the external memory claim f746g-disco's `sdram test` takes (issue #152):
- *     refused while the session is held, while the first open is building and
- *     while a model is loaded; while it is held the session cannot be taken,
- *     the first open builds nothing, and the load region and reload refuse.
+ *   - while the first open is building, its latch is taken and a second open
+ *     waits on it instead of reaching the backend (issue #253: until then the
+ *     only check of this was the removed memory claim's, refused mid-build).
  *
  * Built four times.  The default is a backend with a model in the image (the
  * null stub, f746g-disco's stedgeai).  With TEST_FIRST_BUILD_FAILS the stub's
@@ -44,6 +43,7 @@
  */
 #include <assert.h>
 #include <limits.h>
+#include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -100,7 +100,7 @@ static void check_dims_rule(void)
 			NN_MODEL_ERR_VERSION, NN_MODEL_ERR_OPS, NN_MODEL_ERR_ARENA,
 			NN_MODEL_ERR_TENSOR, NN_MODEL_ERR_SHAPE, NN_MODEL_ERR_EMPTY,
 			NN_MODEL_ERR_FORMAT, NN_MODEL_ERR_SLOT, NN_MODEL_ERR_ALIGN,
-			NN_ERR_ARG, NN_ERR_NOSUP, NN_ERR_STATE, NN_ERR_SCRATCH_HELD,
+			NN_ERR_ARG, NN_ERR_NOSUP, NN_ERR_STATE,
 		};
 
 		for (unsigned i = 0; i < sizeof others / sizeof others[0]; i++) {
@@ -121,7 +121,8 @@ static struct {
 	int restore_fails;  /* ...and the restore fails too: stays empty    */
 	int region_rc;      /* load_region() answers this                   */
 	int release_rc;     /* release() answers this                       */
-	int claim_in_open;  /* nn_scratch_claim() answer seen during a build */
+	int latch_in_open;  /* the first-open latch, read during the build  */
+	int second_open;    /* 1: an open tried mid-build waited, -1: got in */
 	int null_handle;    /* answer a reload with NULL (contract breach)  */
 	struct nn_tensor in;
 } stub;
@@ -131,13 +132,39 @@ static char stub_buf[64];
 static int st_init(void) { return 0; }
 static int stub_builds;     /* how many times the built-in model was built */
 
+/*
+ * [!] WHILE THE FIRST OPEN BUILDS, NOBODY ELSE GETS IN (issue #131 P16).
+ * Called from inside the backend's open, as another console's open would come
+ * in: the latch must be taken, and a second open must wait on it -- the host
+ * stand-in's one-tick wait jumps back here -- without reaching the backend.
+ * Before issue #253 the only check of this was the memory claim's refusal
+ * mid-build; the claim is gone, the latch is not.
+ */
+static void probe_mid_build(void)
+{
+	jmp_buf jb;
+	struct nn_model *x = NULL;
+	int calls = stub.open_calls;
+
+	stub.latch_in_open = nn_host_opening();
+	nn_host_waits = 0;
+	nn_host_wait_jmp = &jb;
+	if (setjmp(jb) == 0) {
+		(void)nn_model_open(&x);
+		stub.second_open = -1;          /* it did not wait: it got in */
+	} else {
+		stub.second_open = (nn_host_waits == 1 && nn_host_depth == 0 &&
+		                    stub.open_calls == calls) ? 1 : 0;
+	}
+	nn_host_wait_jmp = NULL;
+}
+
 static int st_open(void **impl)
 {
 	stub.open_calls++;
 	if (!stub.adopted) {
-		/* Mid-build the open latch is taken: a claim must be refused. */
-		stub.claim_in_open = nn_scratch_claim();
 		stub.adopted = 1;       /* the one adoption, whatever its outcome */
+		probe_mid_build();
 #ifdef TEST_EMPTY_FROM_BOOT
 		stub.has = 0;           /* nothing in the image: builds nothing */
 #else
@@ -255,10 +282,6 @@ static void check_nesting(void)
 		nn_session_release();
 	}
 	assert(nn_host_mask == 1u && nn_host_depth == 0);
-	(void)nn_scratch_claim();
-	assert(nn_host_mask == 1u && nn_host_depth == 0);
-	nn_scratch_release();
-	assert(nn_host_mask == 1u && nn_host_depth == 0);
 	assert(nn_host_enters > enters);   /* the sections did run */
 	nn_host_mask = 0u;
 	cs_clean();
@@ -275,6 +298,8 @@ int main(void)
 	 * the backend's code, unchanged. */
 	assert(nn_model_open(&m) == -3);
 	assert(stub.open_calls == 1 && stub_builds == 1);
+	assert(stub.latch_in_open == 1 && stub.second_open == 1);
+	assert(nn_host_opening() == 0);   /* the failure gave the latch back */
 	cs_clean();
 	/* No singleton yet: a reload is an early refusal, by this layer. */
 	assert(nn_model_reload(stub_buf, 8u, "x", &after) == NN_ERR_STATE);
@@ -318,20 +343,13 @@ int main(void)
 
 	assert(nn_model_has_builtin() == 0);
 
-	/* [!] `sdram test` HOLDING THE MEMORY DOES NOT REFUSE THIS FIRST OPEN
-	 * (issue #159 Step 4c): it builds nothing there, so a fresh-boot `nn
-	 * info` during the test answers (none), not busy.  The claim still keeps
-	 * the session out, and the load region and a reload still refuse. */
-	assert(nn_scratch_claim() == 0);
+	/* The first open builds nothing, under the same latch as one that
+	 * does: a second open mid-way waits. */
 	assert(nn_model_open(&m) == 0 && m != NULL);
 	assert(stub.open_calls == 1 && stub_builds == 0);
-	assert(stub.claim_in_open == -1);              /* the latch was taken */
+	assert(stub.latch_in_open == 1 && stub.second_open == 1);
+	assert(nn_host_opening() == 0);
 	assert(!nn_model_present(m));
-	assert(nn_session_try_acquire() == NN_ERR_SCRATCH_HELD);
-	after = -1;
-	assert(nn_model_reload(stub_buf, 8u, "x", &after) == NN_ERR_SCRATCH_HELD);
-	assert(after == 0);
-	nn_scratch_release();
 	cs_clean();
 	assert(!nn_model_present(m) && !nn_model_loaded());
 	assert(strcmp(nn_model_name(m), "(none)") == 0);
@@ -383,6 +401,8 @@ int main(void)
 	assert(nn_model_load_region(NULL, &cap) == NN_ERR_ARG);
 	assert(nn_model_open(NULL) == NN_ERR_ARG);
 	assert(nn_model_open(&m) == 0 && nn_model_present(m));
+	assert(stub.latch_in_open == 1 && stub.second_open == 1);
+	assert(nn_host_opening() == 0);
 	assert(nn_model_reload(stub_buf, 8u, "x", &after) == NN_ERR_NOSUP);
 	assert(after == 1);                       /* nothing was touched */
 	assert(nn_model_reload(NULL, 0u, NULL, &after) == NN_ERR_NOSUP);
@@ -391,11 +411,12 @@ int main(void)
 	assert(nn_run(NULL) == NN_ERR_STATE);
 	cs_clean();
 
-	/* The four codes this layer returns are distinct, and each has its own
-	 * sentence. */
+	/* The three codes this layer returns are distinct, and each has its own
+	 * sentence.  -50 is no longer one of them (issue #253). */
 	assert(strcmp(nn_model_strerror(NN_ERR_ARG), nn_model_strerror(NN_ERR_NOSUP)) != 0);
 	assert(strcmp(nn_model_strerror(NN_ERR_STATE), nn_model_strerror(NN_ERR_NOSUP)) != 0);
-	assert(strcmp(nn_model_strerror(NN_ERR_SCRATCH_HELD), "unknown error") != 0);
+	assert(strcmp(nn_model_strerror(NN_ERR_ARG), nn_model_strerror(NN_ERR_STATE)) != 0);
+	assert(strcmp(nn_model_strerror(-50), "unknown error") == 0);
 	assert(strcmp(nn_model_strerror(-12345), "unknown error") == 0);
 	/* The in-place backend's refusals (issue #169) are worded by that backend,
 	 * which hands every other code here: this layer has no sentence of its own for
@@ -429,7 +450,7 @@ static void check_codes_pass_through(struct nn_model *m)
 		NN_MODEL_ERR_FORMAT, NN_MODEL_ERR_SLOT, NN_MODEL_ERR_ALIGN,
 		NN_MODEL_ERR_WINDOW, NN_MODEL_ERR_IDENT, NN_MODEL_ERR_PAYLOAD,
 		NN_MODEL_ERR_DIMS,
-		-14, -15, -49, -51, -89, -93, -128, INT_MIN,
+		-14, -15, -49, -50, -51, -89, -93, -128, INT_MIN,
 	};
 	void *buf;
 	uint32_t cap;
@@ -471,32 +492,22 @@ int main(void)
 	assert(after == 0 && stub.open_calls == 0);
 	assert(nn_model_load_region(NULL, &cap) == NN_ERR_ARG);
 
-	/* [!] The memory claim on a fresh boot (issue #152): nothing loaded,
-	 * nothing using nn, so it is granted -- and while it is held the session
-	 * cannot be taken and the FIRST open builds nothing. */
-	assert(nn_scratch_claim() == 0);
-	assert(nn_scratch_claim() == -1);                 /* one holder      */
-	assert(nn_session_try_acquire() == NN_ERR_SCRATCH_HELD);
-	assert(nn_model_open(&m) == NN_ERR_SCRATCH_HELD);
-	assert(stub.open_calls == 0 && stub_builds == 0);  /* nothing built   */
-	assert(nn_model_load_region(&buf, &cap) == NN_ERR_SCRATCH_HELD);
-	assert(!nn_model_loaded());
-	nn_scratch_release();
-	cs_clean();
-
-	/* Refused while the session is held, granted again once it is not; a
-	 * second acquire is busy (-1), not the claim's code. */
+	/* The session: taken once, a second acquire is busy (-1), and granted
+	 * again once it is given back. */
 	assert(nn_session_try_acquire() == 0);
 	assert(nn_session_try_acquire() == -1);
-	assert(nn_scratch_claim() == -1);
 	nn_session_release();
+	assert(nn_session_try_acquire() == 0);
+	nn_session_release();
+	assert(stub.open_calls == 0 && !nn_model_loaded());
 	cs_clean();
 
 	/* The first open adopts the built-in model; the second reaches nothing.
-	 * The claim tried mid-build was refused (the open latch was taken). */
+	 * Mid-build the latch was taken and a second open waited on it. */
 	m = NULL;
 	assert(nn_model_open(&m) == 0 && m != NULL);
-	assert(stub.claim_in_open == -1);
+	assert(stub.latch_in_open == 1 && stub.second_open == 1);
+	assert(nn_host_opening() == 0);
 	assert(nn_model_open(&m2) == 0 && m2 == m);
 	assert(stub.open_calls == 1 && stub_builds == 1);
 	assert(nn_model_present(m));
@@ -527,25 +538,6 @@ int main(void)
 	assert(nn_input_count(m) == 0 && nn_activations_bytes(m) == 0u);
 	assert(nn_arena_reserved() == 524288u);       /* a fact of the build */
 	assert(nn_run(m) != 0);
-
-	/* The claim: refused over a model, granted on the empty singleton.  An
-	 * open now returns the singleton as it is and builds nothing; a reload
-	 * refuses and leaves it empty. */
-	assert(nn_model_reload(stub_buf, 8u, "x", &after) == 0 &&
-	       nn_model_present(m));
-	assert(nn_scratch_claim() == -2);
-	assert(nn_model_release() == 0 && !nn_model_present(m));
-	assert(nn_scratch_claim() == 0);
-	assert(nn_session_try_acquire() == NN_ERR_SCRATCH_HELD);
-	assert(nn_model_open(&m2) == 0 && m2 == m && stub.open_calls == 1);
-	after = -1;
-	assert(nn_model_reload(stub_buf, 8u, "x", &after) == NN_ERR_SCRATCH_HELD);
-	assert(after == 0 && !nn_model_present(m));
-	assert(nn_model_load_region(&buf, &cap) == NN_ERR_SCRATCH_HELD);
-	nn_scratch_release();
-	assert(nn_session_try_acquire() == 0);
-	nn_session_release();
-	cs_clean();
 
 	/* [!] A refused load FROM EMPTY: the handle is open, but no model is
 	 * left -- "nothing is loaded", not "the previous model is still active". */

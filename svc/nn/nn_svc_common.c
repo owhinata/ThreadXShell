@@ -54,14 +54,6 @@ void nn_svc_common_info(struct nn_svc_info *out, uint32_t (*life_seq)(void))
 	 * nothing ran in between. */
 	seq0 = life_seq();
 	rc = nn_model_open(&m);
-	if (rc == NN_ERR_SCRATCH_HELD) {
-		/* Another command holds the backend's memory and nothing was opened
-		 * (f746g-disco's `sdram test`, issue #152): a transient answer, not
-		 * "nothing is loaded".  A board whose backend memory nobody else
-		 * claims never gets this. */
-		nn_svc_common_busy(out);
-		return;
-	}
 	if (rc != 0 || m == NULL) {
 		/* The backend could not open: "nothing loaded", which is true and
 		 * not BUSY.  The copy is of the state the counter showed on both

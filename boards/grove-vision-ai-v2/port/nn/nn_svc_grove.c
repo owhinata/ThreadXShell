@@ -289,10 +289,8 @@ static void nn_core_gate_take(int oneshot)
 	nn_owner = (uint8_t)(oneshot ? NN_OWNER_OP : NN_OWNER_STREAM);
 	/* The session with the gate, as in nn_claim_as().  The core calls this only
 	 * after nn_core_gate_held() said free, in this same critical section, and
-	 * only the gate sites touch the session, so it cannot be held here.  Its
-	 * one other refusal, NN_ERR_SCRATCH_HELD, needs nn_scratch_claim(), which
-	 * nothing on this board calls (f746g-disco's `sdram test` is its only
-	 * user).  Both are why the result is not consulted. */
+	 * only the gate sites touch the session, so it cannot be held here --
+	 * why the result is not consulted. */
 	(void)nn_session_try_acquire();
 }
 

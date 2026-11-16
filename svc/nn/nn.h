@@ -74,15 +74,8 @@ enum nn_dtype {
 #define NN_ERR_ARG    (-90)   /**< a required argument was NULL or out of range     */
 #define NN_ERR_NOSUP  (-91)   /**< the compiled-in backend does not implement this  */
 #define NN_ERR_STATE  (-92)   /**< no model is open; call nn_model_open() first     */
-
-/**
- * f746g-disco: returned by nn_session_try_acquire(), the first nn_model_open()
- * after boot, nn_model_load_region() and nn_model_reload() while
- * nn_scratch_claim() is held.  Retryable: nothing was built or changed, and the
- * same call succeeds once `sdram test` has finished.  Distinct from the
- * backends' small negatives.
- */
-#define NN_ERR_SCRATCH_HELD  (-50)
+/* -50 meant "the backend's memory is held by an external claim" (f746g-disco's
+ * `sdram test`) until issue #253 removed the claim; it is not reused. */
 
 /*
  * Why a backend refused a model (nn_model_reload).  These live here rather than
@@ -374,8 +367,7 @@ int nn_model_staging_is_open(void);
  *
  * @p data == NULL is refused (NN_ERR_ARG) and changes nothing; an unload is
  * nn_model_release().  Before the singleton exists the answer is NN_ERR_STATE;
- * while nn_scratch_claim() is held, NN_ERR_SCRATCH_HELD; on a backend that
- * cannot swap, NN_ERR_NOSUP.
+ * on a backend that cannot swap, NN_ERR_NOSUP.
  *
  * [!] WHERE @p data MAY POINT (issue #108, f746g-disco since issue #159; per
  * backend since issue #169).  Wherever the compiled-in backend declares it can
@@ -430,9 +422,8 @@ int nn_model_release(void);
 /**
  * One short sentence for a code returned by nn_model_load_region() or
  * nn_model_reload(), never NULL.  Handles the NN_MODEL_ERR_* family and this
- * layer's own NN_ERR_* codes (NN_ERR_SCRATCH_HELD included); anything else is
- * "unknown error".  wio-lite-ai's adapter prints it; f746g-disco's words its
- * refusals itself.
+ * layer's own NN_ERR_* codes; anything else is "unknown error".  wio-lite-ai's
+ * adapter prints it; f746g-disco's words its refusals itself.
  */
 const char *nn_model_strerror(int rc);
 
@@ -443,33 +434,10 @@ const char *nn_model_strerror(int rc);
  * `nn run`, or a live `nn stream`.  try_acquire() claims the session (returns
  * 0) or reports it busy (<0); release() frees it.  Interrupt-guarded and
  * thread-agnostic -- the acquiring and releasing threads may differ (stream
- * start in one console, stop in another).  No init required.  Busy is -1;
- * NN_ERR_SCRATCH_HELD while nn_scratch_claim() is held.
+ * start in one console, stop in another).  No init required.  Busy is -1.
  */
 int  nn_session_try_acquire(void);
 void nn_session_release(void);
-
-/**
- * f746g-disco: the memory owner's side of `sdram test` (issue #152).
- * .sdram.ai (the arena, the model slots) belongs to this layer, so the test
- * asks HERE before it writes over it -- the same shape as
- * camera_scratch_claim().
- *
- * nn_scratch_claim() succeeds (0) only when no model is loaded and nothing is
- * using nn: it refuses with -1 while the session is held, the first open is in
- * flight or another claim is held, and with -2 while a model is loaded.  It
- * NEVER unloads -- the operator does that with `nn model unload`.  The check
- * and the set are one PRIMASK critical section.
- *
- * While it is held nothing can put anything into .sdram.ai: the session cannot
- * be taken (so `nn model load` / `unload`, `nn bench`, `nn run` and `nn stream`
- * are all refused), the first open builds nothing, and the load region and
- * reload refuse -- each with NN_ERR_SCRATCH_HELD.  An open that already
- * happened returns the (empty) singleton as before; it builds nothing.
- * nn_scratch_release() ends it.  Interrupt-guarded and thread-agnostic.
- */
-int  nn_scratch_claim(void);
-void nn_scratch_release(void);
 
 #ifdef __cplusplus
 }

@@ -44,9 +44,7 @@ extern "C" {
  * life, and that is when `nn info` is worth asking); the copy then stands only
  * if the shared load order's counter says no load or unload was between its
  * two reads, nor ran whole in between (nn_core_model_copy_stands()), and is
- * BUSY otherwise.  A backend whose memory another command holds
- * (NN_ERR_SCRATCH_HELD: f746g-disco's `sdram test`) is BUSY too, never "no
- * model".
+ * BUSY otherwise.
  *
  * @param life_seq  the board's read of the shared load order's transition
  *                  counter, in its critical section.  A hook, not the order's
@@ -59,12 +57,11 @@ void nn_svc_common_info(struct nn_svc_info *out, uint32_t (*life_seq)(void));
 /*
  * [!] AND THE COPY CARRIES WHICH STATE IT IS OF (issue #199): the counter's
  * value, read before the session is given back when it was taken, else the
- * value both reads agreed on.  A BUSY copy -- the backend's memory held, or the
- * counter moved -- carries none.  A copy from an open that failed ("nothing
- * loaded", not BUSY) carries the counter when the reads before the open and
- * after the failure agree and are even, and none otherwise: a failed open
- * gives its initialisation back, so another console may open and load in
- * between.
+ * value both reads agreed on.  A BUSY copy -- the counter moved -- carries
+ * none.  A copy from an open that failed ("nothing loaded", not BUSY) carries
+ * the counter when the reads before the open and after the failure agree and
+ * are even, and none otherwise: a failed open gives its initialisation back,
+ * so another console may open and load in between.
  */
 
 /**

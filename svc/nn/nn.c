@@ -12,8 +12,7 @@
  * the cross-backend concerns the backends must not each reimplement:
  *   - a singleton public `struct nn_model` wrapping the backend's opaque handle,
  *     opened race-free even though several consoles can ask for it at once,
- *   - the single-session guard, and the external claim on the backend's memory
- *     (f746g-disco's `sdram test`, issue #152),
+ *   - the single-session guard,
  *   - cycle-counter timing around nn_run() for nn_last_cycles().
  *
  * [!] THIS FILE OWNS NO STORAGE.  Every byte of state is the board's
@@ -81,19 +80,6 @@ int nn_model_open(struct nn_model **out)
 			nn_model_board_exit(saved);
 			*out = &NN_ST->model;
 			return 0;
-		}
-		/* [!] The first open of a backend with a model in the image
-		 * (has_builtin: null, stedgeai) builds it into the backend's memory:
-		 * refused, before anything is built, while an external claim holds
-		 * that memory (issue #152).  Decided in the same critical section
-		 * that takes the latch, so a claim and a build can never both be in.
-		 * [!] ONLY THAT BACKEND (issue #159 Step 4c).  tflm's and
-		 * stedgeai_reloc's first open builds nothing -- it only publishes the
-		 * empty handle -- so refusing it would turn a fresh-boot `nn info`
-		 * during `sdram test` into "busy" for a memory nothing touches. */
-		if (NN_ST->scratch_claimed && nn_backend_vt_selected.has_builtin) {
-			nn_model_board_exit(saved);
-			return NN_ERR_SCRATCH_HELD;
 		}
 		if (!NN_ST->opening) { NN_ST->opening = 1; owner = 1; }
 		nn_model_board_exit(saved);
@@ -225,8 +211,6 @@ int nn_model_load_region(void **buf, uint32_t *cap)
 {
 	if (!buf || !cap)
 		return NN_ERR_ARG;
-	if (NN_ST->scratch_claimed)
-		return NN_ERR_SCRATCH_HELD;   /* the region is the claimed memory */
 	if (!nn_backend_vt_selected.load_region)
 		return NN_ERR_NOSUP;
 	return nn_backend_vt_selected.load_region(buf, cap);
@@ -259,8 +243,6 @@ int nn_model_reload(const void *data, uint32_t len, const char *name,
 	 * path is what runs backend init and settles the race between consoles. */
 	if (!NN_ST->model.open)
 		return NN_ERR_STATE;
-	if (NN_ST->scratch_claimed)
-		return NN_ERR_SCRATCH_HELD;   /* an external claim holds the memory */
 	if (!nn_backend_vt_selected.reload)
 		return NN_ERR_NOSUP;
 	if (data == NULL)
@@ -329,8 +311,6 @@ const char *nn_model_strerror(int rc)
 	case NN_ERR_ARG:           return NN_SVC_DETAIL_LIT("bad argument");
 	case NN_ERR_NOSUP:         return NN_SVC_DETAIL_LIT("this backend cannot load a model at run time");
 	case NN_ERR_STATE:         return NN_SVC_DETAIL_LIT("no model session is open");
-	case NN_ERR_SCRATCH_HELD:  return NN_SVC_DETAIL_LIT("the model memory is held by a memory test; "
-	                                                    "try again when it finishes");
 	default:                   return NN_SVC_DETAIL_LIT("unknown error");
 	}
 }
@@ -345,9 +325,7 @@ int nn_session_try_acquire(void)
 	uint32_t saved = nn_model_board_enter();
 	int rc;
 
-	if (NN_ST->scratch_claimed)
-		rc = NN_ERR_SCRATCH_HELD;     /* an external claim holds the memory */
-	else if (!NN_ST->session_busy) {
+	if (!NN_ST->session_busy) {
 		NN_ST->session_busy = 1;
 		rc = 0;
 	} else
@@ -361,37 +339,5 @@ void nn_session_release(void)
 	uint32_t saved = nn_model_board_enter();
 
 	NN_ST->session_busy = 0;
-	nn_model_board_exit(saved);
-}
-
-/* ---- external claim on the backend's memory (issue #152) ------------------- */
-
-int nn_scratch_claim(void)
-{
-	uint32_t saved = nn_model_board_enter();
-	int rc;
-
-	/* [!] ONE CRITICAL SECTION for every question and the set.  The session
-	 * flag, the open latch and the claim are all written under it, and a model
-	 * can appear only under the session (load) or under the latch (the first
-	 * open) -- so with both free here, nn_model_loaded() cannot change before
-	 * the claim is set, and once it is set neither can be taken. */
-	if (NN_ST->scratch_claimed || NN_ST->session_busy || NN_ST->opening)
-		rc = -1;                      /* an nn command, a stream or a test */
-	else if (nn_model_loaded())
-		rc = -2;                      /* a model lives in the memory        */
-	else {
-		NN_ST->scratch_claimed = 1;
-		rc = 0;
-	}
-	nn_model_board_exit(saved);
-	return rc;
-}
-
-void nn_scratch_release(void)
-{
-	uint32_t saved = nn_model_board_enter();
-
-	NN_ST->scratch_claimed = 0;
 	nn_model_board_exit(saved);
 }

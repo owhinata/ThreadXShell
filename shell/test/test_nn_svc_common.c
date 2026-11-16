@@ -16,9 +16,8 @@
  * by a load on another console, an entry reached unleased.
  *
  * `nn info`: the copy stands when the session was free, or when the counter
- * shows no load between its two reads; it is BUSY otherwise, and BUSY when the
- * backend's memory is held by another command (NN_ERR_SCRATCH_HELD).  The
- * inference API is stubbed here.
+ * shows no load between its two reads; it is BUSY otherwise.  The inference
+ * API is stubbed here.
  *
  * And which state the copy belongs to (issue #199): a copy taken under the
  * session carries the counter read BEFORE the session went back, so a load
@@ -397,13 +396,19 @@ static void test_info_stands(void)
 	info_case("(b) held, 5 then 7: busy, no value", 0, -1, 1, 5u, 7u, 1);
 
 	/* (c) A BUSY copy never stands -- not even at the counter value its
-	 * cleared field happens to read. */
+	 * cleared field happens to read, nor at the value both its reads saw. */
+	seqs[0] = 5u;
+	seqs[1] = 5u;
+	seq_reads = 0;
 	live = 0;
-	open_rc = NN_ERR_SCRATCH_HELD;
+	open_rc = 0;
+	session_rc = -1;
 	memset(&out, 0x5A, sizeof out);
 	nn_svc_common_info(&out, life_seq);
-	CHECK(out.seq_known == 0u && !stands_at(&out, out.seq) &&
-	      !stands_at(&out, 0u), "(c) scratch held: no value, never stands");
+	CHECK(out.avail_identity == NN_AVAIL_BUSY && out.seq_known == 0u &&
+	      !stands_at(&out, out.seq) && !stands_at(&out, 0u) &&
+	      !stands_at(&out, 5u),
+	      "(c) a load in flight: no value, never stands");
 	seqs[0] = 4u;
 	seqs[1] = 6u;
 	seq_reads = 0;
@@ -482,8 +487,6 @@ static void test_info(void)
 	info_case("session held (a stream), counter still", 0, -1, 1, 4u, 4u, 0);
 	info_case("session held, a load in flight", 0, -1, 1, 5u, 5u, 1);
 	info_case("session held, a load ran between", 0, -1, 1, 4u, 6u, 1);
-	info_case("scratch held (f746g-disco's sdram test)",
-	          NN_ERR_SCRATCH_HELD, 0, 1, 4u, 4u, 1);
 	/* (the first read is before the open since issue #199; the copy carries
 	 * no value -- checked in test_info_stands()) */
 

@@ -322,9 +322,10 @@ set(BOARD_HAS_SD ON)
 # The property shell/cmds/cmd_net.c is optional on (issue #219): this board
 # always has NetX Duo, so the shared storage audit wants that file shipped.
 set(BOARD_HAS_NETX ON)
-# The property shell/cmds/cmd_ext_ram.c is optional on (issue #251): OFF until
-# the board's `sdram` moves onto it (cmds/cmd_sdram.c is still its own).
-set(BOARD_HAS_EXT_RAM OFF)
+# The property shell/cmds/cmd_ext_ram.c is optional on (issue #251): this board
+# always has the FMC SDRAM, so the shared storage audit wants that file shipped
+# (the one `sdram`; cmds/cmd_sdram.c is this board's table).
+set(BOARD_HAS_EXT_RAM ON)
 # The property shell/cmds/cmd_kv.c is optional on (issue #214): this board
 # always has the key-value store (FlashDB on the QSPI NOR's first megabyte), so
 # the shared storage audit wants that file shipped.
@@ -608,7 +609,8 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_gui.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/xfer_console.c"  # YMODEM over the console (#231)
     "${BOARD_DIR}/cmds/cmd_xfer_board.c"          # ...and this board's owner
-    "${BOARD_DIR}/cmds/cmd_sdram.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_ext_ram.c"  # the one shared `sdram` (#251)
+    "${BOARD_DIR}/cmds/cmd_sdram.c"               # ...this board's table
     "${BOARD_DIR}/cmds/cmd_eth.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_net.c"    # the one shared command (#219)
     "${CMAKE_SOURCE_DIR}/shell/cmds/net_core.c"   # ...its one NetX implementation (#220)

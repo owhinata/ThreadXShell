@@ -164,12 +164,12 @@ static unsigned long ext_ram_addr(uint32_t off)
 #define EXT_RAM_KB(n)      (unsigned long)(((n) & 1023u) ? (n) : (n) >> 10)
 #define EXT_RAM_KB_UNIT(n) (((n) & 1023u) ? "B" : "KB")
 
-/* One range: where, whether cacheable, whether a test touches it, what is
- * in it.  `info` lists them all; a test names the ones it leaves alone. */
-static void ext_ram_range_line(struct cli_instance *sh, const char *head,
+/* One range of `info`: where, whether cacheable, whether a test touches it,
+ * what is in it.  (A test does not repeat the ranges it leaves alone.) */
+static void ext_ram_range_line(struct cli_instance *sh,
                                const struct ext_ram_range *r, uint32_t testable)
 {
-	cli_print(sh, "%s0x%08lx..0x%08lx %s, %s: %s\r\n", head,
+	cli_print(sh, "range:   0x%08lx..0x%08lx %s, %s: %s\r\n",
 	          ext_ram_addr(r->off), ext_ram_addr(r->off + r->len - 1u),
 	          r->cached ? "cacheable" : "non-cacheable",
 	          r->off < testable ? "tested" : "not tested", r->what);
@@ -177,7 +177,7 @@ static void ext_ram_range_line(struct cli_instance *sh, const char *head,
 
 static int ext_ram_bad_table(struct cli_instance *sh)
 {
-	cli_error(sh, EXT_RAM_PFX "the board's range table is bad\r\n");
+	cli_error(sh, EXT_RAM_PFX "bad range table\r\n");
 	return 1;
 }
 
@@ -208,7 +208,7 @@ static int cmd_ext_ram_info(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "window:  0x%08lx..0x%08lx\r\n", ext_ram_addr(0u),
 	          ext_ram_addr(b->size - 1u));
 	for (k = 0u; k < b->n_ranges; k++)
-		ext_ram_range_line(sh, "range:   ", &b->ranges[k], testable);
+		ext_ram_range_line(sh, &b->ranges[k], testable);
 	cli_print(sh, "state:   %s\r\n", b->ready() ? "up" : "DOWN");
 	if (b->info != NULL && b->info(ext_ram_info_write, sh) < 0)
 		return 1;
@@ -274,12 +274,11 @@ static void ext_ram_give(struct cli_instance *sh, unsigned taken)
 }
 
 static int ext_ram_run(struct cli_instance *sh, uint32_t len,
-                       uint32_t testable, const struct ext_ram_claim *c)
+                       const struct ext_ram_claim *c)
 {
 	static const uint32_t patterns[3] = { 0u, 0x55555555u, 0xAAAAAAAAu };
 	static const char *const names[3] = { "address", "0x55555555",
 	                                      "0xAAAAAAAA" };
-	const struct ext_ram_board *b = &ext_ram_board;
 	struct ext_ram_span sp[2];
 	uint32_t tested = 0u, bad = 0u, got = 0u;
 	unsigned p, k;
@@ -287,8 +286,7 @@ static int ext_ram_run(struct cli_instance *sh, uint32_t len,
 
 	n = ext_ram_spans(len, c->skip_off, c->skip_len, sp);
 	if (n <= 0) {
-		cli_error(sh, EXT_RAM_PFX "%s\r\n", n < 0 ? "the board's skip is "
-		          "not on whole words" : "nothing left to test");
+		cli_error(sh, EXT_RAM_PFX "%s\r\n", n < 0 ? "bad skip" : "nothing to test");
 		return 1;
 	}
 	for (k = 0u; k < (unsigned)n; k++)
@@ -304,9 +302,6 @@ static int ext_ram_run(struct cli_instance *sh, uint32_t len,
 		          ext_ram_addr(c->skip_off), ext_ram_addr(end - 1u),
 		          c->skip_why != NULL ? c->skip_why : "the board asked");
 	}
-	for (k = 0u; k < b->n_ranges; k++)
-		if (b->ranges[k].off >= testable)
-			ext_ram_range_line(sh, EXT_RAM_PFX, &b->ranges[k], testable);
 
 	for (p = 0u; p < 3u; p++) {
 		rc = ext_ram_pass(sh, sp, n, patterns[p], &bad, &got);
@@ -366,7 +361,7 @@ static int cmd_ext_ram_test(struct cli_instance *sh, int argc, char **argv)
 			return 1;
 		}
 	}
-	ret = ext_ram_run(sh, len, testable, &c);
+	ret = ext_ram_run(sh, len, &c);
 	ext_ram_give(sh, taken);
 	return ret;
 }

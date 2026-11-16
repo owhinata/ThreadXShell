@@ -481,7 +481,7 @@ int main(void)
 	check(has("xram: DESTRUCTIVE test over 512 KB from 0x") &&
 	      has("pass 1/3 (address): 512 KB OK\r\n") &&
 	      has("pass 3/3 (0xAAAAAAAA): 512 KB OK\r\n") &&
-	      has("cacheable, not tested: nn\r\n") &&
+	      !has("not tested") &&
 	      has("xram: 512 KB tested, no errors\r\n") && !has("skipped"),
 	      "the lines of a pass", "test");
 	reset();
@@ -518,13 +518,13 @@ int main(void)
 		skip_off = 0u;
 		skip_len = 0x80000u;
 		check(run("test") == 1 && all_given() && stores == 0 &&
-		      has("xram: nothing left to test"), "all skipped: refused, given back",
+		      has("xram: nothing to test\r\n"), "all skipped: refused, given back",
 		      "test");
 		reset();
 		skip_off = 0x40002u;
 		skip_len = 0x40000u;
 		check(run("test") == 1 && all_given() && stores == 0 &&
-		      has("not on whole words"), "a bad skip: refused, given back", "test");
+		      has("xram: bad skip\r\n"), "a bad skip: refused, given back", "test");
 	}
 
 	/* ---- a give that warns ---- */

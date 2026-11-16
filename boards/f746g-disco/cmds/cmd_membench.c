@@ -21,7 +21,8 @@
  * enables and READS it -- see dwt_enable() for why it must never be reset (#4).
  * Clock is read from HAL_RCC_GetHCLKFreq() (not a hardcoded 216 MHz).
  *
- * Reentrancy (#4): one run at a time, enforced by a PRIMASK test-and-set below.
+ * Reentrancy (#4): one run at a time, and not while `sdram test` runs (#251):
+ * the SDRAM owner word (sdram_owner.h), taken under a brief PRIMASK.
  * The bench buffers and the calibration state are file-static, so a second
  * concurrent run (VCP + telnet, or `membench &` twice) would corrupt both.
  *
@@ -54,6 +55,7 @@
  */
 #include "cli.h"
 #include "sdram.h"            /* sdram_is_up() */
+#include "sdram_owner.h"      /* one run at a time, and not during `sdram test` */
 
 #include "stm32f7xx_hal.h"   /* DWT/CoreDebug/SCB, HAL_RCC_GetHCLKFreq, HAL_GetTick, __DSB/__ISB */
 
@@ -143,27 +145,13 @@ static int dwt_enable(void)
 }
 
 /*
- * Single-run guard (issue #4).  membench owns .dtcm_bench / the SDRAM bench buffer
- * and calibrates against the shared DWT, none of which survive two runs at once
- * (VCP + telnet, or `membench &` twice).  A plain flag test-set under a brief
- * PRIMASK critical section: interrupt-safe, needs no one-time init, and acquire /
- * release may run on different threads.  Same shape as the CoreMark guard and as
- * nn_session_try_acquire() in svc/nn/nn.c.
+ * Single-run guard (issue #4), and since issue #251 also against `sdram test`.
+ * membench owns .dtcm_bench / the SDRAM bench buffer and calibrates against the
+ * shared DWT, none of which survive two runs at once (VCP + telnet, or
+ * `membench &` twice); and the SDRAM bench buffer is in bank0, which `sdram test`
+ * overwrites.  So a run takes the SDRAM owner word (sdram_owner.h, kept by
+ * cmds/cmd_sdram.c) for every region it measures, and refuses while it is held.
  */
-static volatile uint8_t membench_busy;
-
-static int membench_try_acquire(void)
-{
-	uint32_t pm = __get_PRIMASK();
-	int ok;
-
-	__disable_irq();
-	ok = !membench_busy;
-	if (ok)
-		membench_busy = 1u;
-	__set_PRIMASK(pm);
-	return ok;
-}
 
 /* ---- timed harness ---------------------------------------------------------- */
 
@@ -398,6 +386,7 @@ static int cmd_membench(struct cli_instance *sh, int argc, char **argv)
 	int do_dtcm = 1, do_sram = 1, do_sdram = 1, do_flash = 1;
 	uint32_t hclk, i;
 	int sdram_ok;
+	enum sdram_owner held;
 	int rc = 0;                  /* every exit past the guard goes through `done` */
 	void     *sram_raw = NULL;   /* malloc base (freed on every exit via `done`) */
 	uint32_t *sram_bench_buf = NULL;   /* 32-byte-aligned working pointer         */
@@ -418,8 +407,11 @@ static int cmd_membench(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	/* Taken AFTER argument parsing so a bad region name never has to release it. */
-	if (!membench_try_acquire()) {
-		cli_error(sh, "membench: already running\r\n");
+	held = sdram_owner_take(SDRAM_OWNER_MEMBENCH);
+	if (held != SDRAM_OWNER_NONE) {
+		cli_error(sh, held == SDRAM_OWNER_TEST
+		              ? "membench: `sdram test` is running\r\n"
+		              : "membench: already running\r\n");
 		return 1;
 	}
 
@@ -507,7 +499,7 @@ static int cmd_membench(struct cli_instance *sh, int argc, char **argv)
 
 done:
 	free(sram_raw);   /* NULL when SRAM was not benched (free(NULL) is a no-op) */
-	membench_busy = 0u;   /* single cleanup point: guard cleared on every exit */
+	sdram_owner_give();   /* single cleanup point: given back on every exit */
 	return rc;
 }
 

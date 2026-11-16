@@ -452,3 +452,31 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 -DSHELL_HAS_NET_TTY=1 -DCLI_ENABLE_DANGEROUS_CMDS=
     "$st/../cmds/nor_console.c" "$HOST_TEST_CORE/cli_parse.c" "$HOST_TEST_SVC/fmt.c" \
     $LDFLAGS -o "$out/test_nor_board_f746"
 "$out/test_nor_board_f746"
+
+# issue #251 -- the shared `sdram` on this board: shell/cmds/cmd_ext_ram.c with
+# this board's REAL table (cmds/cmd_sdram.c) and headers (port/sdram/sdram.h,
+# port/camera/camera.h, port/ltdc/ltdc_display.h, port/netxduo/nx_glue.h,
+# svc/ext_ram_config.h), over 8 MB mapped at 0xC0000000 and counted stand-ins
+# for the camera claim, the display hold and the network.  Every word the test
+# stores or loads (EXT_RAM_TEST_HOOKS) is in banks 0..2, never in the cacheable
+# bank3, never in bank2 while the network is up, and made with the camera, the
+# SDRAM owner word and the display all held; the length stops at 6 MB; a
+# refusal at each step gives back exactly what was taken, in reverse;
+# `membench` and the test refuse each other through the one word.  Built a
+# second time with `.sdram.eth` placed outside bank2 (--defsym; -mcmodel=large
+# because the symbols are at 0xC0xxxxxx), which must be refused with where it
+# is.  sdram_shim/ stands in for the PRIMASK calls.
+for eth in "inside 0xC0400000" "outside 0xC0300000"; do
+    set -- $eth
+    def=""
+    [ "$1" = outside ] && def="-DSDRAM_TEST_ETH_OUTSIDE"
+    gcc $CFLAGS -mcmodel=large -D_GNU_SOURCE -DCLI_USE_COLOR=0 -DEXT_RAM_TEST_HOOKS $def \
+        -I "$here/sdram_shim" -I "$st/shim" -I "$HOST_TEST_INC" -I "$HOST_TEST_CORE" \
+        -I "$st/../cmds" -I "$board/cmds" -I "$board/svc" -I "$board/port/sdram" \
+        -I "$board/port/camera" -I "$board/port/ltdc" -I "$board/port/netxduo" \
+        "$here/test_sdram_board.c" "$st/../cmds/cmd_ext_ram.c" "$board/cmds/cmd_sdram.c" \
+        "$HOST_TEST_CORE/cli_parse.c" \
+        $LDFLAGS -Wl,--defsym,_ssdram_eth=$2 -Wl,--defsym,_esdram_eth=0xC0500000 \
+        -o "$out/test_sdram_board_$1"
+    "$out/test_sdram_board_$1"
+done

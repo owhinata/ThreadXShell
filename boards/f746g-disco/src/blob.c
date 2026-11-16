@@ -97,7 +97,7 @@ static volatile int blob_busy;
 /*
  * [!] THE PUBLIC READS REFUSE WHILE THE FLAG IS HELD, without taking it (issue
  * #194).  On this board the flag is held by a `blob write` / `blob erase` and
- * by `qspi erase` / `qspi test` -- the raw commands erase and program wherever
+ * by `nor erase` / `nor test` -- the raw commands erase and program wherever
  * they are pointed, so a listing taken while one runs would describe flash that
  * is half-way through changing.  Not taken, because two consoles listing at
  * once must not refuse each other.  What runs UNDER the flag (the write's own
@@ -352,7 +352,7 @@ int blob_erase_span(uint32_t addr, uint32_t len, blob_erase_tick_fn tick,
 		*cancelled = 0;
 	/* Inside the interval and whole units, checked by subtraction so a length
 	 * near 2^32 is refused rather than wrapped into looking contained.  The
-	 * reserved first megabyte and the unallocated top are `qspi erase`'s, not
+	 * reserved first megabyte and the unallocated top are `nor erase`'s, not
 	 * this one's. */
 	if (len == 0u || addr < BLOB_REGION_BASE || addr >= BLOB_REGION_END ||
 	    len > BLOB_REGION_END - addr ||

@@ -651,7 +651,7 @@ enum nor_write nor_write_claim(uint32_t token)
 	 * is preempted by the foreground, woken by the RX interrupt, and a
 	 * `camera stream start` typed there starts mid-program.  So every command
 	 * that writes refuses to run in the background (`nor write/erase/cycle`
-	 * in cmds/cmd_nor.c, `blob erase` in cmds/cmd_blob_board.c, `blob write`
+	 * through shell/cmds/nor_console.c, `blob erase` in cmds/cmd_blob_board.c, `blob write`
 	 * in the shared command).  An erase can still yield in the foreground:
 	 * its progress tick prints, and a print may wait on the UART -- the
 	 * README says what that leaves. */

@@ -55,7 +55,7 @@ set(LDSCRIPT_APP "${BOARD_DIR}/ldscript/HX6538_CM55M_S.ld")
 # --- Flash partition map (issues #44, #45, #85, #94) -------------------------
 # Declared HERE, above everything that uses it, because two consumers need it:
 # the flashing targets at the bottom of this file, and the firmware itself --
-# cmd_nor.c is compiled with the partition edges so that `nor scan`'s labels and
+# cmds/cmd_nor_board.c is compiled with the partition edges so that `nor scan`'s labels and
 # the layout the host checks cannot drift apart (issue #86).  Leaving them below
 # meant the compile definitions expanded to nothing, which the C compiler caught
 # only because an empty initialiser is a syntax error.
@@ -406,7 +406,8 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_camera_board.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
-    "${BOARD_DIR}/cmds/cmd_nor.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nor.c"    # the one shared `nor` (#250)
+    "${BOARD_DIR}/cmds/cmd_nor_board.c"           # ...this board's table, `scan`, `cycle`
     "${CMAKE_SOURCE_DIR}/shell/cmds/nor_console.c"  # ...where it may write (#250)
     # The shared `blob` command (#194) and this board's console pieces of it
     # (who may erase, who holds the NOR, why the port is faulted).
@@ -902,6 +903,7 @@ target_include_directories(shell_objs PRIVATE
     "${CMAKE_SOURCE_DIR}/svc/plugin"
     "${CMAKE_SOURCE_DIR}/svc/camera"
     "${CMAKE_SOURCE_DIR}/svc/blob"
+    "${CMAKE_SOURCE_DIR}/svc/nor"      # nor_svc.h, the shared `nor`'s contract (#250)
     "${BOARD_DIR}/svc"          # log.h / timebase.h: the board's services,
                                 # which the shared cmd_dmesg.c / cmd_sleep.c
                                 # consume
@@ -2018,6 +2020,9 @@ set(GROVE_PLUGIN_FORBIDDEN
     blob_svc_erase_header
     blob_svc_erase_span
     blob_svc_program
+    # The shared `nor`'s table (issue #250): its hold hands out the
+    # erase and program of port/nor/nor_write.c.
+    nor_svc_board
     hx_lib_pm_enter_lp
     hx_lib_pm_enter_ulp
     EPII_NVIC_SetVector

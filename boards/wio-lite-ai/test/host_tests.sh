@@ -514,21 +514,25 @@ gcc $CFLAGS -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
     $LDFLAGS -o "$out/test_wifi_flash_guard"
 "$out/test_wifi_flash_guard"
 
-# issue #249 -- what guards `nor erase` / `nor write` / `nor test`.  cmds/cmd_nor.c
+# issues #249, #250 -- what guards `nor erase` / `nor write` / `nor test`.  The
+# shared shell/cmds/cmd_nor.c and this board's table (cmds/cmd_nor_board.c)
 # compiled unchanged against a 16 MB array for the NOR (every call counted, any one
-# made to fail or to do nothing), a counted busy flag and the telnet question:
-# the refusals before the flag (the kv partition's range, telnet and its jobs, a
-# job of the USB console, the NOR down) touch neither the NOR nor the flag; a
+# made to fail or to do nothing, and every call made while the flag is not held
+# counted apart), a counted busy flag and the telnet question: the refusals
+# before the flag (the arguments, the kv partition's range, telnet and its jobs,
+# a job of the USB console, the NOR down) touch neither the NOR nor the flag; a
 # held flag is one failed take; `nor test` refuses a sector that is not blank
-# without erasing it, and every failure after the flag gives it back once and
-# never says PASS.  fal_cfg.h is the real one (the kv partition's place).  The
-# telnet and background question is the shared shell/cmds/nor_console.c (issue
-# #250), compiled in this board's shape: it has the telnet console.
-gcc $CFLAGS -DSHELL_HAS_NET_TTY=1 -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
+# without erasing it, and every failure and every Ctrl+C after the flag gives it
+# back once and never says PASS.  fal_cfg.h is the real one (the kv partition's
+# place); the telnet and background question is the shared
+# shell/cmds/nor_console.c in this board's shape (it has the telnet console).
+gcc $CFLAGS -DSHELL_HAS_NET_TTY=1 -DBSP_ENABLE_KV=1 -DTX_TIMER_TICKS_PER_SECOND=1000 \
+    -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
     -I "$inc" -I "$HOST_TEST_CORE" -I "$st/../cmds" -I "$svc" -I "$svc/net" \
-    -I "$svc/blob" -I "$board/src" -I "$board/port/nor" -I "$board/port/flashdb" \
-    "$here/test_nor_guard.c" "$board/cmds/cmd_nor.c" "$st/../cmds/nor_console.c" \
-    "$HOST_TEST_CORE/cli_parse.c" \
+    -I "$svc/nor" -I "$svc/blob" -I "$board/src" -I "$board/svc" -I "$board/port/nor" \
+    -I "$board/port/flashdb" \
+    "$here/test_nor_guard.c" "$st/../cmds/cmd_nor.c" "$board/cmds/cmd_nor_board.c" \
+    "$st/../cmds/nor_console.c" "$HOST_TEST_CORE/cli_parse.c" "$svc/fmt.c" \
     $LDFLAGS -o "$out/test_nor_guard"
 "$out/test_nor_guard"
 

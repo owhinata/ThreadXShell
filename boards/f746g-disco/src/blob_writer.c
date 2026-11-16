@@ -69,7 +69,7 @@ int blob_svc_ready(void)
 }
 
 /* The reservation is the busy flag: it serialises a write or an erase against
- * each other, against another console's, against `qspi erase` / `qspi test`
+ * each other, against another console's, against `nor erase` / `nor test`
  * and against the nn reader.  The token is a constant -- there is only one
  * flag. */
 int blob_svc_reserve(uint32_t *token)

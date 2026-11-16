@@ -17,7 +17,7 @@
  *   - an erase cancelled part way leaves no header and erased only what it
  *     reported;
  *   - the busy flag is taken once and given back once, every time, and while
- *     it is held the public reads answer BUSY (`qspi test` holds it too) and
+ *     it is held the public reads answer BUSY (`nor test` holds it too) and
  *     the reservation is refused;
  *   - the writer never programs or reads back outside the store's interval.
  *
@@ -362,7 +362,7 @@ static void t_busy(void)
 	uint32_t token = 0u, computed;
 	uint8_t b[4];
 
-	/* `qspi test` holds the flag: every public read and the reservation are
+	/* `nor test` holds the flag: every public read and the reservation are
 	 * refused BUSY; the reserved stat still reads. */
 	memset(nor, 0xFF, sizeof nor);
 	CHECK(blob_busy_acquire() == BLOB_OK, "the flag was not free");

@@ -8,11 +8,11 @@
  *          every board (issue #250, moved from wio-lite-ai's cmds/cmd_nor.c,
  *          issue #249).
  *
- * The commands that erase or write the external NOR (wio-lite-ai's and
- * grove-vision-ai-v2's `nor erase` / `nor write` / `nor test` / `nor cycle`,
- * f746g-disco's `qspi erase` / `qspi test`) run in the foreground of the local
- * console only: not on the telnet console, not in a background job launched
- * from it, and not in a background job (`... &`) of the local console.  Each
+ * The commands that erase or write the external NOR (the shared `nor erase` /
+ * `nor write` / `nor test`, shell/cmds/cmd_nor.c, and grove-vision-ai-v2's own
+ * `nor cycle`) run in the foreground of the local console only: not on the
+ * telnet console, not in a background job launched from it, and not in a
+ * background job (`... &`) of the local console.  Each
  * asks nor_console_refuse() once its arguments and its range are known and
  * before it takes the board's hold on the device.
  *
@@ -38,16 +38,14 @@ struct cli_instance;
 
 /**
  * Refuse an erase or a write that does not run in the foreground of the local
- * console.  On refusal it prints one line that says only the fact -- "<who>:
+ * console.  On refusal it prints one line that says only the fact -- "nor:
  * erasing or writing the flash runs only in the foreground of the <local>
  * console; this is <where>" (without a telnet console: "...only in the
  * foreground; this is a background job") -- and returns non-zero; otherwise it
  * returns 0 and prints nothing.  It reads the instance and, with a telnet
  * console, asks net_tty_is_console(); it touches no device and takes no lock.
- *
- * @param who  the command's name, the line's head ("nor", "qspi")
  */
-int nor_console_refuse(struct cli_instance *sh, const char *who);
+int nor_console_refuse(struct cli_instance *sh);
 
 #ifdef __cplusplus
 }

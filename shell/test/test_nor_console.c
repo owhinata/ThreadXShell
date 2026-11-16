@@ -93,7 +93,7 @@ static int run(struct cli_instance *sh)
 #if SHELL_HAS_NET_TTY
 	asked = 0;
 #endif
-	return nor_console_refuse(sh, "nor");
+	return nor_console_refuse(sh);
 }
 
 static int has(const char *s) { return strstr(text, s) != NULL; }

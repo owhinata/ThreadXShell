@@ -33,7 +33,7 @@ int blob_board_say(struct cli_instance *sh, int rc)
 {
 	switch (rc) {
 	case BLOB_ERR_STATE:
-		cli_error(sh, "blob: QSPI driver down (`qspi info` says why)\r\n");
+		cli_error(sh, "blob: QSPI driver down (`nor info` says why)\r\n");
 		return 1;
 	case BLOB_ERR_BUSY:
 		/* The busy flag is held by exactly these (src/blob.h). */

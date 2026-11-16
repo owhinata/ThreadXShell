@@ -1536,6 +1536,29 @@ if ! LC_ALL=C grep -q "SHELL_HAS_NET_TTY is defined from BOARD_HAS_NETX" \
 fi
 echo "  ok   nor_console.c without SHELL_HAS_NET_TTY refused at compile time"
 
+# issue #250 -- the one shared `nor` (shell/cmds/cmd_nor.c) with nor_console.c,
+# over a fake board table (a 1 MB array, every call counted, any operation made
+# to fail or to do nothing, the hold busy or the device down) and reached
+# through the root command table.  Per shape: every argument refusal calls
+# nothing of the board; the range and the console refusals take no hold; no
+# erase, program or test read is made without the hold in any run (#249); an
+# erase is one operation of exactly the range; the test refuses a sector that
+# is not blank before it erases, and every failure and every Ctrl+C ends
+# without PASS; a subcommand the board lacks calls nothing; with the dangerous
+# commands off there is no erase / write / test.  The boards' own tables are
+# tested with this file in their host_tests.sh.
+for shape in "FULL 1 1" "FULL 1 0" "ABSENT 1 1" "FULL 0 1"; do
+    set -- $shape
+    gcc $CFLAGS -DCLI_USE_COLOR=0 -DNOR_TEST_SHAPE_$1 -DCLI_ENABLE_DANGEROUS_CMDS=$2 \
+        -DSHELL_HAS_NET_TTY=$3 -DTX_TIMER_TICKS_PER_SECOND=1000 \
+        -I "$here/nor_cfg" -I "$here/shim" -I "$here/nx_shim" -I "$here/../cmds" \
+        -I "$inc" -I "$core" -I "$backend" -I "$svc" -I "$svc/net" -I "$svc/nor" \
+        "$here/test_nor_cmd.c" "$here/../cmds/cmd_nor.c" "$here/../cmds/nor_console.c" \
+        "$core/cli_parse.c" \
+        $LDFLAGS -o "$out/test_nor_cmd_$1$2$3"
+    "$out/test_nor_cmd_$1$2$3"
+done
+
 # issue #99 -- the shared stream lifecycle (svc/nn/nn_stream_life.c).
 #
 # A `--frames` waiter and a second console racing over one stream: the waiter

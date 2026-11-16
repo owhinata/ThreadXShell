@@ -97,8 +97,8 @@ extern "C" {
  * slot's header occupies.  This board's facts, handed to blob_map_check() at
  * every entry point; svc/blob declares no boundary of its own.
  *
- * [!] THE END IS ALSO WHERE `nor test` DEFAULTS TO (cmds/cmd_nor.c asserts it),
- * so a bare `nor test` lands above every slot.
+ * Until issue #250 the end was also where a bare `nor test` defaulted to; the
+ * shared `nor test` takes its address and has no default.
  */
 #define BLOB_REGION_BASE   0x00100000u
 #define BLOB_REGION_END    0x00800000u
@@ -189,7 +189,7 @@ int blob_find(const char *name, unsigned *slot, struct blob_info *out,
 /**
  * Who can hold the busy flag, in the words every refusal names them with:
  * shell/cmds/cmd_blob.c through cmds/cmd_blob_board.c (`blob write` / `blob
- * erase`), cmds/cmd_nor.c (`nor erase` / `nor write` / `nor test`, issue #249)
+ * erase`), cmds/cmd_nor_board.c (`nor erase` / `nor write` / `nor test`, #249)
  * and port/nn/nn_svc_wio.c (`nn model load <name>`).  The kv store does not
  * take it on this board: `nor` refuses the kv partition's range instead.  One
  * string, so a new holder is added to every refusal at once (as f746g-disco's).

@@ -493,7 +493,9 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_net.c"    # the one shared command (#219)
     "${CMAKE_SOURCE_DIR}/shell/cmds/net_core.c"   # ...its one NetX implementation (#220)
     "${CMAKE_SOURCE_DIR}/shell/cmds/net_tty.c"    # ...and the one telnet console (#221)
-    "${CMAKE_SOURCE_DIR}/shell/cmds/nor_console.c"  # where a NOR erase may run (#250)
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nor.c"    # the one shared `nor` (#250); with
+                                                  # BSP_ENABLE_KV off it registers nothing
+    "${CMAKE_SOURCE_DIR}/shell/cmds/nor_console.c"  # ...where it may erase (#250)
     "${BOARD_DIR}/cmds/cmd_wifi_link.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/xfer_console.c"  # YMODEM over the console (#231)
     "${BOARD_DIR}/cmds/cmd_xfer_board.c"          # ...and this board's owner
@@ -755,7 +757,7 @@ if(BSP_ENABLE_KV)
         # stamps every asset with it, and the plugin loader checks a container's
         # digest with it); here with FlashDB because that is what it calls.
         "${BOARD_DIR}/port/nn/crc32_fdb.c"
-        "${BOARD_DIR}/cmds/cmd_nor.c"
+        "${BOARD_DIR}/cmds/cmd_nor_board.c"   # the shared `nor`'s table (#250)
         "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_kv.c"   # the one shared `kv` (#214)
         "${BOARD_DIR}/cmds/cmd_blob_board.c"  # the shared `blob`'s console pieces
         "${FDB_DIR}/src/fdb.c"
@@ -1042,6 +1044,7 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/svc/camera"
     "${CMAKE_SOURCE_DIR}/svc/blob"
     "${CMAKE_SOURCE_DIR}/svc/net"
+    "${CMAKE_SOURCE_DIR}/svc/nor"      # nor_svc.h, the shared `nor`'s contract (#250)
     "${BOARD_DIR}/svc"                           # log.h / timebase.h: the board's
                                                  # services, which the shared
                                                  # cmd_dmesg.c / cmd_sleep.c consume
@@ -1448,6 +1451,9 @@ set(WIO_PLUGIN_FORBIDDEN
     HAL_FLASHEx_OBProgram
     nor_write
     nor_erase
+    # The shared `nor`'s table (issue #250): its hold hands out the erase and
+    # program above.
+    nor_svc_board
     blob_erase_header
     blob_erase_span
     # The shared `blob` command's writers over them (src/blob_writer.c,

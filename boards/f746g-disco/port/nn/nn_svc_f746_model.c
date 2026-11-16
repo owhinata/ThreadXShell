@@ -195,7 +195,7 @@ struct nn_f746_job {
  * PAYLOAD READ (issue #194, wio-lite-ai's since #191), so the slot the name
  * resolved to and the length and CRC checked before the open model went down
  * belong to the same generation of the slot as the bytes read after.  A `blob
- * write` / `blob erase` and `qspi erase` / `qspi test` are refused meanwhile.
+ * write` / `blob erase` and `nor erase` / `nor test` are refused meanwhile.
  * fetch() gives it back as soon as the QSPI is done with; every other exit -- a
  * refusal in prepare(), a lease the order could not take, any failure in
  * between -- gives it back in claim_give().  Written and read only by the
@@ -419,7 +419,7 @@ static int nn_life_prepare(struct nn_core_model_job *j)
 			return NN_SVC_ERR_ARG;
 		}
 		if (rc != BLOB_OK) {
-			nn_detail_set("cannot read the blob headers (%d, see `qspi "
+			nn_detail_set("cannot read the blob headers (%d, see `nor "
 			              "info` and `blob list`)", rc);
 			nn_life_blob_give();
 			return NN_SVC_ERR_HW;

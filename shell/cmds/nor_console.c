@@ -10,7 +10,9 @@
  *
  * The question was wio-lite-ai's (cmds/cmd_nor.c, issue #249) and had no board
  * fact in it; grove-vision-ai-v2 asked only its background half (issue #203)
- * and f746g-disco neither.  It is asked here once for all three.
+ * and f746g-disco neither.  It is asked here once for all three: by the shared
+ * `nor` (shell/cmds/cmd_nor.c) for erase, write and test, and by
+ * grove-vision-ai-v2's own `nor cycle`.
  *
  * The order is the telnet console first (a job launched from it answers for
  * its launcher, net_tty_is_console()), then any other background job
@@ -39,7 +41,7 @@
 #include "net_tty.h"         /* net_tty_is_console, the local console's name */
 #endif
 
-int nor_console_refuse(struct cli_instance *sh, const char *who)
+int nor_console_refuse(struct cli_instance *sh)
 {
 #if SHELL_HAS_NET_TTY
 	const char *here;
@@ -51,15 +53,15 @@ int nor_console_refuse(struct cli_instance *sh, const char *who)
 		here = "a background job";
 	else
 		return 0;
-	cli_error(sh, "%s: erasing or writing the flash runs only in the foreground "
+	cli_error(sh, "nor: erasing or writing the flash runs only in the foreground "
 	              "of the %s console; this is %s\r\n",
-	          who, net_tty_board_facts.other_console, here);
+	          net_tty_board_facts.other_console, here);
 	return -1;
 #else
 	if (sh->fg == NULL)
 		return 0;
-	cli_error(sh, "%s: erasing or writing the flash runs only in the foreground; "
-	              "this is a background job\r\n", who);
+	cli_error(sh, "nor: erasing or writing the flash runs only in the foreground; "
+	              "this is a background job\r\n");
 	return -1;
 #endif
 }

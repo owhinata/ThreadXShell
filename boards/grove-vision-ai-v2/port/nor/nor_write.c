@@ -264,7 +264,7 @@ static void program_run(struct nor_span span, const uint8_t *src,
  * is a statement about WHERE bytes landed exactly when the expected values
  * differ by position.  Issue #92's byte reversal was seen through a varying
  * pattern and was invisible for the whole of issue #88 through a constant
- * 0xA5, and `nor write` still accepts a constant when one is asked for.  Same
+ * 0xA5, and `nor write` writes whatever bytes it is given, a constant too.  Same
  * check, and what it proves depends on what was written.
  */
 static int verify(enum txn_op op, struct nor_span span, const uint8_t *src,

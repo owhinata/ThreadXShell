@@ -2,10 +2,11 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Issue #249 -- what guards `nor erase` / `nor write` / `nor test`.
+ * Issues #249, #250 -- what guards `nor erase` / `nor write` / `nor test`.
  *
- * cmds/cmd_nor.c is compiled unchanged and reached through the `nor` entry of the
- * root command table.  This file stands in for what it calls: the NOR driver (a
+ * The shared shell/cmds/cmd_nor.c and this board's table (cmds/cmd_nor_board.c)
+ * are compiled unchanged and reached through the `nor` entry of the root command
+ * table.  This file stands in for what they call: the NOR driver (a
  * 16 MB array that erases to 0xFF and programs by clearing bits, every call
  * counted and any one of them made to fail or to do nothing), the blob store's
  * busy flag (counted, and holdable by "somebody else"), the telnet question and
@@ -27,7 +28,9 @@
  *     read failing, the last erase doing nothing, each partial program doing
  *     nothing) ends without PASS and with the flag given back once;
  *   - the edge of the kv partition: 0xFFFFF refused, 0x100000 accepted, 8 KB at
- *     0xFF000 refused, a length near 2^32 refused.
+ *     0xFF000 refused, a length near 2^32 refused;
+ *   - Ctrl+C at every point the test asks for it ends without PASS and with the
+ *     flag given back once.
  */
 #include "cli.h"
 #include "cli_instance.h"
@@ -36,6 +39,8 @@
 #include "blob.h"
 #include "blob_err.h"
 #include "fal_cfg.h"
+#include "log.h"
+#include "tx_api.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -156,6 +161,27 @@ int cli_error(struct cli_instance *sh, const char *f, ...)
 int cli_hexdump_base(struct cli_instance *sh, const void *d, size_t n,
                      unsigned long long b)
 { (void)sh; (void)d; (void)b; return (int)n; }
+int cli_write(struct cli_instance *sh, const void *d, size_t n)
+{
+	(void)sh;
+	if (n < sizeof text - text_len) {
+		memcpy(text + text_len, d, n);
+		text_len += n;
+		text[text_len] = '\0';
+	}
+	return (int)n;
+}
+
+/* Ctrl+C: the cancel_at-th question is answered yes (0: never). */
+static int cancel_at, cancel_asks;
+bool cli_cancel_requested(struct cli_instance *sh)
+{
+	(void)sh;
+	return cancel_at != 0 && ++cancel_asks == cancel_at;
+}
+void log_write(unsigned level, const char *tag, const char *fmt, ...)
+{ (void)level; (void)tag; (void)fmt; }
+ULONG tx_time_get(void) { return 0; }
 
 /* ---- the harness ---------------------------------------------------------- */
 
@@ -193,6 +219,7 @@ static void reset(void)
 	fail_op = noop_op = -1;
 	takes = take_fails = gives = 0;
 	flag_held = flag_other = 0;
+	cancel_at = cancel_asks = 0;
 	ready = 1;
 	text_len = 0;
 	text[0] = '\0';
@@ -258,9 +285,9 @@ static void refused_early(struct cli_instance *sh, const char *line, const char 
 int main(void)
 {
 	static const char *const ops[] = {
-		"erase 0x800000", "write 0x800000 00", "test 0x800000",
+		"erase 0x800000 4096", "write 0x800000 00", "test 0x800000",
 	};
-	int base[OP_N], rc, k, o;
+	int base[OP_N], rc, k, o, asks;
 	size_t i;
 
 	dev = malloc(NOR_SIZE_BYTES);
@@ -269,24 +296,37 @@ int main(void)
 	memset(dev, 0xFF, NOR_SIZE_BYTES);
 
 	/* -- the kv partition, asked of the range actually erased or written -- */
-	refused_early(&usb, "erase 0", "in the kv store", "kv: erase 0");
-	refused_early(&usb, "erase 0xFFFFF", "in the kv store", "kv: last byte");
+	refused_early(&usb, "erase 0 4096", "in the kv store", "kv: erase 0");
+	refused_early(&usb, "erase 0xFF000 4096", "in the kv store", "kv: last sector");
 	refused_early(&usb, "erase 0xFF000 0x2000", "in the kv store", "kv: 8 KB across the end");
 	refused_early(&usb, "write 0x10 00", "in the kv store", "kv: write");
 	refused_early(&usb, "write 0xFFFFF 0000", "in the kv store", "kv: write across the end");
 	refused_early(&usb, "test 0", "in the kv store", "kv: test");
-	refused_early(&usb, "test 0xFFFFF", "in the kv store", "kv: test, last sector");
-	refused_early(&usb, "erase 0x100000 0xFFFFFFFF", "past the end", "length near 2^32");
-	refused_early(&usb, "erase 0 0xFFFFF001", "past the end", "length near 2^32 at 0");
+	refused_early(&usb, "test 0xFF000", "in the kv store", "kv: test, last sector");
+	refused_early(&usb, "erase 0x100000 0xFFFFF000", "past the end", "length near 2^32");
+	refused_early(&usb, "erase 0 0xFFFFF000", "past the end", "length near 2^32 at 0");
 	check(has("past the end") && !has("kv store"), "range first, then kv",
-	      "erase 0 0xFFFFF001");
+	      "erase 0 0xFFFFF000");
+	/* -- nothing is rounded: an erase or test names whole 4 KB sectors -- */
+	refused_early(&usb, "erase 0x100001 4096", "whole 4 KB sectors", "unaligned address");
+	refused_early(&usb, "erase 0x100000 4095", "whole 4 KB sectors", "unaligned length");
+	refused_early(&usb, "erase 0x100000 0", "whole 4 KB sectors", "length 0");
+	refused_early(&usb, "test 0x800010", "whole 4 KB sectors", "unaligned test");
+	refused_early(&usb, "erase 0x1000000 4096", "bad address", "address off the device");
+	refused_early(&usb, "write 0xFFFFFF 0000", "past the end", "write past the end");
+	refused_early(&usb, "write 0x100000 0", "bad hex", "odd hex");
 
 	reset();
-	rc = run(&usb, "erase 0x100000");
+	rc = run(&usb, "erase 0x100000 4096");
 	check(rc == 0 && calls[OP_ERASE] == 1 && last_erase_addr == 0x100000u &&
 	      last_erase_len == NOR_SECTOR_SIZE, "0x100000 is erased", "erase 0x100000");
 	check(takes == 1 && gives == 1 && !flag_held, "flag taken and given back once",
 	      "erase 0x100000");
+	check(!has("Ctrl+C"), "one driver call: no Ctrl+C offered", "erase 0x100000");
+	reset();
+	rc = run(&usb, "erase 0x100000 0x10000");
+	check(rc == 0 && calls[OP_ERASE] == 1 && last_erase_len == 0x10000u,
+	      "a 64 KB erase is one call of exactly the range", "erase 0x100000 0x10000");
 	reset();
 	rc = run(&usb, "write 0x100000 A55A");
 	check(rc == 0 && calls[OP_WRITE] == 1 && dev[0x100000] == 0xA5u,
@@ -295,7 +335,7 @@ int main(void)
 	      "write 0x100000 A55A");
 	blank(0x100000, NOR_SECTOR_SIZE);
 	for (o = OP_ERASE; o <= OP_WRITE; o++) {
-		const char *line = (o == OP_ERASE) ? "erase 0x100000" : "write 0x100000 A55A";
+		const char *line = (o == OP_ERASE) ? "erase 0x100000 4096" : "write 0x100000 A55A";
 
 		reset();
 		fail_op = o;
@@ -311,6 +351,17 @@ int main(void)
 	rc = run(&telnet, "read 0x100000 16");
 	check(rc == 0 && takes == 0 && calls[OP_READ] == 1 && unheld[OP_READ] == 1,
 	      "read: from telnet, no flag", "read 0x100000 16");
+	reset();
+	rc = run(&usb, "read 0xFFFFFF 2");
+	check(rc == 1 && calls[OP_READ] == 0 && has("past the end"),
+	      "read past the end refused, not cut", "read 0xFFFFFF 2");
+	reset();
+	rc = run(&usb, "read 0 1025");
+	check(rc == 1 && calls[OP_READ] == 0 && has("1 .. 1024"), "read: 1025 B refused",
+	      "read 0 1025");
+	reset();
+	rc = run(&usb, "read 0 1024");
+	check(rc == 0 && calls[OP_READ] == 4, "read: 1024 B in 4 pieces", "read 0 1024");
 
 	/* -- the console, the device, the flag: for each of the three -- */
 	for (i = 0; i < sizeof ops / sizeof ops[0]; i++) {
@@ -339,8 +390,8 @@ int main(void)
 	reset();
 	blank(0x800000, NOR_SECTOR_SIZE);
 	dev[0x800000 + 4000] = 0x12;
-	rc = run(&usb, "test");
-	check(rc == 1 && has("is not blank") && has("`nor erase 0x800000`"),
+	rc = run(&usb, "test 0x800000");
+	check(rc == 1 && has("is not blank") && has("`nor erase 0x800000 4096`"),
 	      "not blank: refused with the way out", "test");
 	check(calls[OP_ERASE] == 0 && calls[OP_WRITE] == 0, "not blank: nothing erased "
 	      "or programmed", "test");
@@ -351,9 +402,10 @@ int main(void)
 	/* -- nor test that passes -- */
 	reset();
 	blank(0x800000, NOR_SECTOR_SIZE);
-	rc = run(&usb, "test");
+	rc = run(&usb, "test 0x800000");
 	check(rc == 0 && has("nor: PASS"), "test passes", "test");
-	check(calls[OP_ERASE] == 2, "test erases twice (the last leaves it blank)", "test");
+	check(calls[OP_ERASE] == 3, "test erases three times (the last leaves it blank)",
+	      "test");
 	check(is_blank(0x800000, NOR_SECTOR_SIZE), "test leaves the sector blank", "test");
 	check(takes == 1 && gives == 1 && !flag_held, "test: flag back once", "test");
 	memcpy(base, calls, sizeof base);
@@ -367,7 +419,7 @@ int main(void)
 			blank(0x800000, NOR_SECTOR_SIZE);
 			fail_op = o;
 			fail_at = k;
-			rc = run(&usb, "test");
+			rc = run(&usb, "test 0x800000");
 			snprintf(what, sizeof what, "%s %d of %d fails",
 			         o == OP_ERASE ? "erase" : o == OP_WRITE ? "write" : "read",
 			         k, base[o]);
@@ -381,20 +433,42 @@ int main(void)
 	blank(0x800000, NOR_SECTOR_SIZE);
 	noop_op = OP_ERASE;
 	noop_at = base[OP_ERASE];
-	rc = run(&usb, "test");
-	check(rc == 1 && !has("PASS") && has("not blank after the final erase"),
+	rc = run(&usb, "test 0x800000");
+	check(rc == 1 && !has("PASS") && has("final erase"),
 	      "a last erase that does nothing is caught", "test");
 	check(takes == 1 && gives == 1 && !flag_held, "flag back once", "dead erase");
-	check(has("`nor erase 0x800000` before the next"), "says how to clean up", "test");
-	for (k = 1; k <= 3; k++) {
+	check(has("`nor erase 0x800000 4096` before the next"), "says how to clean up",
+	      "test");
+	/* Each pattern page and each partial write that does nothing is caught
+	 * (the two overwrite programs are observed, not judged). */
+	for (k = 1; k <= base[OP_WRITE] - 2; k++) {
 		reset();
 		blank(0x800000, NOR_SECTOR_SIZE);
 		noop_op = OP_WRITE;
 		noop_at = k;
-		rc = run(&usb, "test");
-		check(rc == 1 && !has("PASS") && has("disturbs the page"),
-		      "a partial program that does nothing is caught", "test");
+		rc = run(&usb, "test 0x800000");
+		check(rc == 1 && !has("PASS") && has("FAIL"),
+		      "a program that does nothing is caught", "test");
 		check(takes == 1 && gives == 1 && !flag_held, "flag back once", "dead program");
+	}
+	/* -- Ctrl+C at every point the test asks -- */
+	reset();
+	blank(0x800000, NOR_SECTOR_SIZE);
+	cancel_at = 1000000;
+	rc = run(&usb, "test 0x800000");
+	asks = cancel_asks;
+	/* four blank checks of 16 pages, three erases, 16 pages programmed and
+	 * 16 read, 14 partial writes, 2 overwrites (shell/cmds/cmd_nor.c) */
+	check(rc == 0 && asks == 4 * 16 + 3 + 16 + 16 + 14 + 2,
+	      "the test asks for Ctrl+C before every page", "test");
+	for (k = 1; k <= asks; k++) {
+		reset();
+		blank(0x800000, NOR_SECTOR_SIZE);
+		cancel_at = k;
+		rc = run(&usb, "test 0x800000");
+		check(rc == 1 && !has("PASS") && has("cancelled"), "Ctrl+C stops the test",
+		      "test");
+		check(takes == 1 && gives == 1 && !flag_held, "flag back once", "cancel");
 	}
 
 	free(dev);

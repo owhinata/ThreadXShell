@@ -727,7 +727,7 @@ int qspi_flash_erase_chip(void)
 	return erase_common(CMD_ERASE_CHIP, 0, 0, TIMEOUT_CHIP_MS);
 }
 
-/* ---- read-only views for `qspi info` (issue #194) ------------------------ */
+/* ---- read-only views for `nor info` (issues #194, #250) ----------------- */
 
 void qspi_flash_regs_now(struct qspi_flash_regs *r, uint32_t *state,
                          uint32_t *error)

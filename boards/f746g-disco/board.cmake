@@ -149,6 +149,7 @@ target_include_directories(bsp_iface INTERFACE
     "${CMAKE_SOURCE_DIR}/svc/camera"   # frame.h
     "${CMAKE_SOURCE_DIR}/svc/blob"
     "${CMAKE_SOURCE_DIR}/svc/net"
+    "${CMAKE_SOURCE_DIR}/svc/nor"   # nor_svc.h, the shared `nor`'s contract (#250)
     "${CMAKE_SOURCE_DIR}/svc/fs"   # sd_card_svc.h: the card driver's contract (#232)
     "${BOARD_DIR}/svc"          # this board's services: log.h / timebase.h
     "${GEN_DIR}"
@@ -588,7 +589,8 @@ add_executable(shell
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_watch.c"
     "${BOARD_DIR}/cmds/cmd_wdt.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_jobs.c"
-    "${BOARD_DIR}/cmds/cmd_qspi.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nor.c"    # the one shared `nor` (#250, was `qspi`)
+    "${BOARD_DIR}/cmds/cmd_nor_board.c"           # ...this board's table and `nor probe`
     "${CMAKE_SOURCE_DIR}/shell/cmds/nor_console.c"  # ...where it may erase (#250)
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_sd.c"     # the one shared `sd` (#232)
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_camera.c"  # the one shared command (#143)
@@ -688,7 +690,7 @@ target_include_directories(shell PRIVATE
     "${TX_DIR}/utility/execution_profile_kit"   # EPK header (`thread` cpu%)
     "${BOARD_DIR}/port/threadx"
     "${BOARD_DIR}/port/qspi"
-    "${BOARD_DIR}/src"             # blob.h, the store's interface (cmd_qspi.c)
+    "${BOARD_DIR}/src"             # blob.h, the store's interface (cmd_nor_board.c)
     # The key-value store (issue #214).  fdb_cfg.h (svc/kv, shared) and
     # fal_cfg.h (port/flashdb, this board's) must be found BEFORE FlashDB's own
     # inc/, which ships fdb_cfg_template.h only -- FlashDB includes <fdb_cfg.h>
@@ -730,6 +732,7 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/svc/camera"
     "${CMAKE_SOURCE_DIR}/svc/blob"
     "${CMAKE_SOURCE_DIR}/svc/net"
+    "${CMAKE_SOURCE_DIR}/svc/nor"   # nor_svc.h, the shared `nor`'s contract (#250)
     "${CMAKE_SOURCE_DIR}/svc/fs"   # sd_card_svc.h (#232)
     "${BOARD_DIR}/svc")            # this board's svc: log.h / timebase.h
 target_compile_definitions(shell PRIVATE TX_INCLUDE_USER_DEFINE_FILE
@@ -932,6 +935,9 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         qspi_flash_erase_sector
         qspi_flash_erase_subsector
         qspi_flash_erase_chip
+        # The shared `nor`'s table (issue #250): its hold hands out the
+        # erase and program above.
+        nor_svc_board
         blob_erase_header
         blob_erase_span
         blob_svc_erase_header

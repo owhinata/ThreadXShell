@@ -40,8 +40,7 @@
  * exactly the 7 MB of [0x100000, 0x800000), with no gap.  Everything above
  * 0x800000 belongs to no slot, and the interval says so rather than the table:
  * src/blob.h ends it there, so a slot that reached past it would be refused by
- * blob_map_check() at every entry point.  The `nor test` default address sits
- * at that end for the same reason (cmds/cmd_nor.c asserts it).
+ * blob_map_check() at every entry point.
  *
  * The bases are spelled out rather than computed: a loop that generated them
  * would be a second statement of the same layout, and the one thing worth

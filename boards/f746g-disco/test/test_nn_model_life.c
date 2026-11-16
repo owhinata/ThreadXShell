@@ -283,7 +283,7 @@ int main(void)
 	nn_blob_stub.find_rc = BLOB_OK;
 	assert(res.status == NN_SVC_ERR_HW && state == NN_MODEL_PREVIOUS);
 	assert(strstr(res.detail, "cannot read the blob headers (-2") != NULL);
-	nn_blob_stub.held_elsewhere = 1;     /* a `blob write`, a `qspi test` */
+	nn_blob_stub.held_elsewhere = 1;     /* a `blob write`, a `nor test` */
 	load("a");
 	nn_blob_stub.held_elsewhere = 0;
 	assert(res.status == NN_SVC_ERR_BUSY && state == (enum nn_model_state)99);

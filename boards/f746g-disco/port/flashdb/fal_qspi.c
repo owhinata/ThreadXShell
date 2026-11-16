@@ -24,7 +24,7 @@
  *
  *   order        kv's mutex (waited for, bounded) -> the busy flag (tried until
  *                the same deadline).  Nothing that holds the flag -- blob,
- *                `qspi erase` / `qspi test`, `nn model load` -- takes kv's
+ *                `nor erase` / `nor test`, `nn model load` -- takes kv's
  *                mutex, so the two never wait on each other in a circle.
  *   the record   the flag records no holder, so once kv has it, kv writes which
  *                thread took it to kv_flag_owner; FAL's write and erase compare

@@ -204,7 +204,7 @@ gcc $CFLAGS -I "$here/blob_shim" \
 # write coordinator, end to end on the array: a completed write reads VALID and
 # verifies, a disagreeing read-back leaves INCOMPLETE, a cancelled erase leaves
 # no header, the busy flag is taken and given back once and refuses the public
-# reads while held (`qspi test` holds it too), and the writer stays inside the
+# reads while held (`nor test` holds it too), and the writer stays inside the
 # store's interval.  blob_shim/log.h stands in for svc/log.h.
 gcc $CFLAGS -I "$here/blob_shim" \
     -I "$board/src" -I "$board/port/qspi" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/blob" \
@@ -429,3 +429,26 @@ else
     python3 "$board/cmake/fixtures/run_verify_tflite_size_tests.py" \
         --build-dir "$io_build"
 fi
+
+# issue #250 -- the shared `nor` on this board (until then `qspi`): the shared
+# shell/cmds/cmd_nor.c and nor_console.c with this board's REAL table
+# (cmds/cmd_nor_board.c), svc/nor_svc_config.h and port/flashdb/fal_cfg.h, over
+# a 16 MB array for the QSPI driver and a counted busy flag.  An erase is 4 KB
+# subsector erases of exactly the range and never the 64 KB or chip erase; the
+# kv partition, telnet and its jobs and a job of the VCP console are refused
+# before the flag; no driver erase, program or read of the test is made while
+# the flag is not held; the flag is given back once for every take; `nor info`
+# samples the registers before it sends anything.  nor_shim/ stands in for the
+# HAL (HAL_GetTick) and svc/log.h.
+st="$HOST_TEST_SHELL_TEST"
+gcc $CFLAGS -DCLI_USE_COLOR=0 -DSHELL_HAS_NET_TTY=1 -DCLI_ENABLE_DANGEROUS_CMDS=1 \
+    -DTX_TIMER_TICKS_PER_SECOND=1000 \
+    -I "$here/nor_shim" -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
+    -I "$HOST_TEST_INC" -I "$HOST_TEST_CORE" -I "$st/../cmds" \
+    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/net" -I "$HOST_TEST_SVC/nor" \
+    -I "$HOST_TEST_SVC/blob" -I "$board/src" -I "$board/svc" -I "$board/port/qspi" \
+    -I "$board/port/flashdb" \
+    "$here/test_nor_board.c" "$st/../cmds/cmd_nor.c" "$board/cmds/cmd_nor_board.c" \
+    "$st/../cmds/nor_console.c" "$HOST_TEST_CORE/cli_parse.c" "$HOST_TEST_SVC/fmt.c" \
+    $LDFLAGS -o "$out/test_nor_board_f746"
+"$out/test_nor_board_f746"

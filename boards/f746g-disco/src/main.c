@@ -195,9 +195,9 @@ void tx_application_define(void *first_unused_memory)
 	/* QSPI NOR bring-up (owhinata/stm32f746g-disco#29): peripheral + operation mutex
     only -- no
 	 * flash transaction, so it is safe before the scheduler starts.  On failure
-	 * the `qspi` command reports "driver not initialized"; nothing else stops. */
+	 * the `nor` command reports "driver not initialized"; nothing else stops. */
 	if (qspi_flash_init() != 0)
-		printf("qspi: init failed (qspi command disabled)\r\n");
+		printf("qspi: init failed (nor command disabled)\r\n");
 
 	/* SDMMC1 SD-card bring-up (owhinata/stm32f746g-disco#33): GPIO/DMA/NVIC +
     operation mutex and

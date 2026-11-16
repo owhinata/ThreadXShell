@@ -852,3 +852,26 @@ else
         -o "$out/test_nn_model_name_ethosu"
     "$out/test_nn_model_name_ethosu"
 fi
+
+# issue #250 -- the shared `nor` on this board: shell/cmds/cmd_nor.c and
+# nor_console.c with this board's REAL table and own subcommands
+# (cmds/cmd_nor_board.c, svc/nor_svc_config.h), over stand-ins of the port's
+# leases, reservation and report and of port/nor/nor_write.c's three
+# transactions.  One `nor erase` / `nor write` / `nor cycle` is ONE call of its
+# transaction, inside the reservation, and none is ever made without it (#249);
+# the seam's interval and a write's starting word are refused before the
+# reservation, as is a background job (`cycle` too, through the registration);
+# a refused reservation names its one holder in the words `blob` uses; every
+# transaction outcome is said in the shared lines; there is no `nor read` and
+# no `nor test`.  The partition edges are only the labels of `nor scan`.
+st="$HOST_TEST_SHELL_TEST"
+gcc $CFLAGS -DCLI_USE_COLOR=0 -DSHELL_HAS_NET_TTY=0 -DCLI_ENABLE_DANGEROUS_CMDS=1 \
+    -DTX_TIMER_TICKS_PER_SECOND=1000 -DNOR_ERASE_GRAN=0x1000 \
+    -DNOR_PART_FW_END=0x200000 -DNOR_PART_BLOB_END=0xFFE000 \
+    -I "$st/shim" -I "$HOST_TEST_BACKEND" -I "$HOST_TEST_INC" -I "$HOST_TEST_CORE" \
+    -I "$st/../cmds" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nor" \
+    -I "$board/cmds" -I "$board/svc" -I "$board/port/nor" -I "$board/port/sdk_seam" \
+    "$here/test_nor_board.c" "$st/../cmds/cmd_nor.c" "$board/cmds/cmd_nor_board.c" \
+    "$st/../cmds/nor_console.c" "$HOST_TEST_CORE/cli_parse.c" "$HOST_TEST_SVC/fmt.c" \
+    $LDFLAGS -o "$out/test_nor_board_grove"
+"$out/test_nor_board_grove"

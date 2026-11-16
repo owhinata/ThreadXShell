@@ -73,7 +73,9 @@ filesystem and a card slot are two things), and `cmd_net.c`, `net_core.c` and `n
 f746g-disco and wio-lite-ai ON; grove-vision-ai-v2 has no network and declares
 OFF, so the files must be compiled by nothing there), `cmd_kv.c`, on
 `BOARD_HAS_KV` (issue #214: f746g-disco ON, wio-lite-ai from `BSP_ENABLE_KV`,
-grove-vision-ai-v2 OFF), and `kv_cfg.c`, on `BOARD_HAS_KV_NETX`, which each
+grove-vision-ai-v2 OFF), `cmd_ext_ram.c`, on `BOARD_HAS_EXT_RAM` (issue #251:
+f746g-disco ON, wio-lite-ai from `BSP_ENABLE_PSRAM`, grove-vision-ai-v2 OFF),
+and `kv_cfg.c`, on `BOARD_HAS_KV_NETX`, which each
 board sets ON exactly when its `BOARD_HAS_KV` and `BOARD_HAS_NETX` both are and
 registers the file under the same condition (issue #214; grove-vision-ai-v2
 OFF). Every board's `board.cmake` must set each such

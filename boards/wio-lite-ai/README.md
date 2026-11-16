@@ -249,6 +249,45 @@ and `cmd_sd.c`, `sd_fs_glue.c` and `fx_sd_driver.c` `BOARD_HAS_SD` (issues
 (until then they followed `BSP_ENABLE_SD`), so those files are compiled by
 nothing here.
 
+### `psram`: the shared RAM test (issue #251)
+
+`psram info` and `psram test` are the shared `shell/cmds/cmd_ext_ram.c` (also
+f746g-disco's `sdram`) over this board's table, `cmds/cmd_psram.c`, which also
+keeps the six tuning subcommands (`set`, `mr0`, `phase`, `mmapscan`, `wtune`,
+`clk`), appended after `info` and `test` by `svc/ext_ram_config.h`.  The
+command exists only with `BSP_ENABLE_PSRAM` (`BOARD_HAS_EXT_RAM` follows it in
+`board.cmake`); a build without the PSRAM has no `psram` at all.  `psram info`
+prints the shared lines and then the bring-up lines as before:
+
+```
+device:  APS6408 on OCTOSPI1
+window:  0x90000000..0x907fffff
+range:   0x90000000..0x905fffff non-cacheable, tested: LCD, camera
+range:   0x90600000..0x907fffff cacheable, not tested: nn, membench
+state:   up
+  clock   : ... Hz (device)
+  id / latency / dlyb / mr0 / ifmt / probe lines, unchanged
+```
+
+The "cacheable" mark is the table's word for what `src/mpu.c` sets (region 3
+over `.psram_ai`); nothing reads the MPU back (the user's decision on #251).
+
+- **`psram test [bytes]`** tests from `0x90000000`: the 6 MB non-cacheable
+  pool without an argument, otherwise `bytes`, a non-zero multiple of 4 up to
+  6 MB; anything else is `psram: bad length (4-byte multiple, 4..6291456)`
+  before the mark is asked for.  Three passes, one line each (`pass 1/3
+  (address): 6144 KB OK`); a bad word stops it with `pass N/3 (...): FAIL at
+  0x..: got 0x.., want 0x..`; Ctrl+C is asked after each 64 KB; it ends with
+  `psram: 6144 KB tested, no errors`.
+- **Order** (`cmds/cmd_psram.c`): the OCTOSPI1 reconfigurer mark; the captured
+  frame dropped; the passes; then, with the LCD built, both LCD buffers
+  painted black with the CPU (`ltdc_fb_repaint_black()`, under the frame lock;
+  nothing if the display never came up); and only then the mark given back.
+  The order is in the shipped (LTO) image: the table in `.rodata` and the one
+  give loop that walks it backwards.
+- Internal flash free: 10,208 B before issue #251, 8,856 B after (-1,352 B:
+  the shared range lines and pass loop, the board's table and the repaint).
+
 ## Console
 
 The console is USB CDC on USB1_OTG_HS, driven at full speed through the
@@ -485,7 +524,7 @@ camera scan | reg <addr> <reg> [value] [-16]   (this board's own)
   (issue #150): the frame lives in the PSRAM they overwrite, so under their
   OCTOSPI1 reconfigurer mark -- which already keeps capture and send out
   for the whole run -- they call `camera_frame_invalidate()` before the first
-  write (the staging does it in `rtl8720_img.c`'s YMODEM begin), and `send`
+  write (`psram test` as the second step of its table, issue #251) (the staging does it in `rtl8720_img.c`'s YMODEM begin), and `send`
   then answers no frame until the next capture.
 - **Lines read `label    : value`** (the label padded to 8 and ` : `), the same
   form on all three boards.
@@ -839,7 +878,7 @@ once in [svc/README.md](../../svc/README.md#the-blob-command-is-shared-issue-194
   Every busy refusal names them from one string, `BLOB_BUSY_HOLDERS` in
   `src/blob.h` (as f746g-disco's).  The `kv` store does not take it here
   (f746g-disco's does); `nor` refuses the `kv` partition's range instead
-  ([What guards `nor`](#what-guards-nor-and-psram-today-issues-248-250)).
+  ([What guards `nor`](#what-guards-nor-and-psram-today-issues-248-250-251)).
 - **The store's reads do not look at the busy flag** (f746g-disco's answer
   busy while it is held): `blob list` during another console's `blob write`
   shows the slot as the erase and the program leave it.
@@ -2114,18 +2153,20 @@ applies to both.  The boot-time
 KV shell (`src/kv_boot.c`) is an instance too, but it is never started as a
 console -- its output goes to `dmesg` -- so it is not listed.
 
-### What guards `nor` and `psram` today (issues #248, #250)
+### What guards `nor` and `psram` today (issues #248, #250, #251)
 
 `nor` and `psram` go past the stores (`kv`, `blob`) and past the owners of the
 PSRAM, to the devices themselves.  The two tables say, per subcommand, what
 keeps it from destroying somebody else's data -- including what does not --
-**the `psram` table as the code stands at `3ee40b2`, the `nor` table as it
-stands after issue #250** (issue #249 added the `nor` guards, issue #250 made
-`nor` the one command of all three boards; `psram` is unchanged).  They were
-read from the source (`shell/cmds/cmd_nor.c`, `cmds/cmd_nor_board.c`,
+**the `nor` table as it stands after issue #250, the `psram` table after
+issue #251** (issue #249 added the `nor` guards, issue #250 made `nor` the one
+command of all three boards, issue #251 made `psram info` / `test` the shared
+RAM test that f746g-disco's `sdram` also is).  They were read from the source
+(`shell/cmds/cmd_nor.c`, `cmds/cmd_nor_board.c`, `shell/cmds/cmd_ext_ram.c`,
 `cmds/cmd_psram.c` and what they call); the `psram` table was not tried on the
 board, and the cells marked *(source only)* are the ones nobody has seen
-happen.  The `nor` refusals are walked by `test/test_nor_guard.c` (the shared
+happen.  The `nor` refusals are walked by `test/test_nor_guard.c` and the
+`psram info` / `test` ones by `test/test_psram_board.c` (each the shared
 command with this board's real table).  f746g-disco's and
 grove-vision-ai-v2's `nor` and f746g-disco's `sdram` have the same columns in
 those boards' READMEs.  Issue #213 changes these commands and updates the
@@ -2227,6 +2268,7 @@ Using `nor` since issue #250:
 | Internal flash free, issue #250 step 1 (the shared console question) | 9,272 B -> 9,256 B (-16 B) |
 | Internal flash free, issue #250 step 2 (the shared `nor`) | 9,256 B -> 5,768 B (-3,488 B: mostly the longer shared test -- the pattern pages and the 14 partial writes -- the shared `info` and result lines, and the per-outcome words) |
 | Internal flash free, issue #250 step 4 (no `nor test` here, every `nor` line shorter) | 5,768 B -> **10,200 B** (+4,432 B; more than before #250) |
+| Internal flash free, issue #251 (the shared `psram info` / `test`, the table, the repaint) | 10,208 B -> **8,856 B** (-1,352 B) |
 | Shell stack, `nor write` (static frames from `.su`, the shared command as grove-vision-ai-v2 compiles it) | the shared `nor write` keeps its 256 B of data on the stack (`cmd_nor_write` 344 B); **the high-water on the board is not measured yet** |
 
 PSRAM (8 MB at `0x90000000`; the low 6 MB is non-cacheable and holds the frame
@@ -2244,11 +2286,23 @@ that stays loaded between nn commands holds no place in the guard.
 
 | Subcommand | Held while it runs | Addresses it refuses | From telnet | In a background job | Dangerous-commands setting | Other refusals and checks |
 |---|---|---|---|---|---|---|
-| `psram info` | nothing (prints values kept since bring-up) | -- | runs | runs | not looked at | -- |
-| `psram test [bytes]` | the mark, across all three passes | from `0x90000000`, never past the 6 MB non-cacheable pool, so never `.psram_ai`.  **The length is not refused**: 0 means 6 MB, more than 6 MB is cut to 6 MB with a warning, a length that is not a multiple of 4 is rounded down silently, and 1..3 tests 0 bytes and prints PASS *(source only)* | runs | runs | not looked at | refused while the PSRAM is not up; drops the camera's last capture before the first write; Ctrl+C every 64 KB; **the frame buffers are not repainted afterwards** |
+| `psram info` | nothing (prints values kept since bring-up) | -- | runs | runs | not looked at | since #251 the shared lines (the part, the window, the two ranges with whether each is cacheable and tested, the state) come first, then this board's bring-up lines |
+| `psram test [bytes]` | the mark, across all three passes, then given back after the repaint | from `0x90000000`, never past the 6 MB non-cacheable pool, so never `.psram_ai` (the shared command stops at the first cacheable range).  **Since #251 the length is strict**: a non-zero multiple of 4 up to 6 MB, anything else (0, 1..3, 6 MB + 4, 8 MB) an error before the mark is asked for; until then 0 meant 6 MB, more was cut to 6 MB with a warning, an odd length was rounded down and 1..3 tested nothing and said PASS | runs | runs | not looked at | refused while the PSRAM is not up; drops the camera's last capture under the mark and before the first write; Ctrl+C after each 64 KB written or read; **since #251 both LCD buffers are repainted black (CPU) before the mark is given back** (with the LCD built), so `lcd on` never shows the patterns |
 | `psram set <rd> <wr>`, `psram mr0 <hex>`, `psram phase <sel> [units]`, `psram clk <presc>` | the mark, for the one change | -- (no address; each value has a bound) | runs | runs | not looked at | change the live bus timing or the device's MR0; `mr0` is refused while the PSRAM is not up |
 | `psram mmapscan start [phase] \| show \| stop` | `start`: the mark, then the board resets once per tested setting; `show` / `stop`: nothing | -- | runs | runs | not looked at | `start` is refused in a build without the IWDG and while the PSRAM is not up |
 | `psram wtune [addr]` | the mark, for the sweep | outside `0x90000000-0x907FFFF8`.  **That is the whole 8 MB, `.psram_ai` included**: it writes 8 bytes of markers there, over a loaded model as well *(source only)* | runs | runs | not looked at | refused while the PSRAM is not up; applies the lowest write latency that passed.  Its help, and `psram info` / `mr0`'s, point to `psram snap` / `probe` / `eye`, which do not exist |
+
+The guards of `psram info` / `test` before and after the shared command
+(issue #251).  Not one is lost; the strict length and the repaint are new.
+
+| Guard | Until #251 (`cmds/cmd_psram.c`, the whole command) | Since #251 |
+|---|---|---|
+| the reconfigurer mark across all three passes | `psram_guard()` around the passes | the same `psram_acquire()`, step 1 of `cmds/cmd_psram.c`'s table, given back in the shared command's one give loop |
+| the captured frame dropped under the mark, before the first write | `camera_frame_invalidate()` after the guard | the same, step 2 |
+| never past the 6 MB non-cacheable pool | `PSRAM_NC_BYTES` in the command | the table's ranges: the shared command stops at the first cacheable range |
+| refused while the PSRAM is not up | `psram_ready()` | the same, the table's `ready` |
+| **new**: the length is strict | -- (clamped, rounded) | the shared command |
+| **new**: the LCD buffers repainted black before the mark goes back | -- | step 3, `ltdc_fb_repaint_black()` (`port/ltdc`), only with the LCD built |
 
 ### `net`: the command shared with f746g-disco (issue #219)
 

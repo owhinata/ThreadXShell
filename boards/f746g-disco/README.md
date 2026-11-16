@@ -244,6 +244,46 @@ The linker script asserts each boundary (`.sdram.cam` must start exactly at
 bank1 and be exactly 2 MB, `.sdram.eth` must fit inside bank2, and so on), so a
 placement mistake is a link error rather than a rendering artifact.
 
+### `sdram`: the shared RAM test (issue #251)
+
+`sdram` is the shared `shell/cmds/cmd_ext_ram.c` (also wio-lite-ai's `psram`)
+over this board's table, `cmds/cmd_sdram.c`.  `sdram info` prints:
+
+```
+device:  MT48LC4M32B2 (128 Mbit, 16-bit bus -> 8 MB usable)
+window:  0xc0000000..0xc07fffff
+range:   0xc0000000..0xc03fffff non-cacheable, tested: banks 0-1: LCD, camera, membench
+range:   0xc0400000..0xc05fffff non-cacheable, tested: bank2: ETH, MJPEG; skipped while the network is up
+range:   0xc0600000..0xc07fffff cacheable, not tested: bank3: nn
+state:   up
+config:  SDCLK 108 MHz (HCLK/2), CAS 3, refresh 0x0603
+```
+
+The "cacheable" mark is the table's word for what `src/bsp.c` sets ([MPU
+regions](#mpu-regions)); nothing reads the MPU back, so a change to one has to
+be made in the other by hand (the user's decision on #251; there is no test
+that would catch the two drifting apart).
+
+- **`sdram test [bytes]`** tests from `0xC0000000`: all of banks 0-2 (6 MB)
+  without an argument, otherwise `bytes`, a non-zero multiple of 4 up to 6 MB.
+  Anything else (0, 3, `0x800000`) is `sdram: bad length (4-byte multiple,
+  4..6291456)` before anything is taken.  Three passes (each word's own
+  address, `0x55555555`, `0xAAAAAAAA`), each writing everything and then
+  reading it back, one line per pass: `pass 1/3 (address): 6144 KB OK`.  A bad
+  word stops it with `pass N/3 (...): FAIL at 0x..: got 0x.., want 0x..`.
+  Ctrl+C is asked after each 64 KB.  It ends with `sdram: 6144 KB tested, no
+  errors` (4096 KB while the network is up).
+- **`membench` and `sdram test` refuse each other** through one word kept by
+  `cmds/cmd_sdram.c` (`cmds/sdram_owner.h`): ``sdram: `membench` is running`` /
+  ``membench: `sdram test` is running``.  `membench` takes it for every region,
+  not only the SDRAM rows (the test keeps the FMC busy, which moves the other
+  rows too), and it still refuses a second `membench` (`membench: already
+  running`).
+- **Known limit: `devmem` can write anywhere in the SDRAM**, during a test or a
+  `membench` too; it looks at neither.
+- f746g-disco internal flash: `.text` 665,756 B before issue #251, 666,412 B
+  after (+656 B).
+
 ## Time
 
 **The timebase is TIM2 at 108 MHz**, not the core clock.  APB1 runs at /4 with
@@ -1868,17 +1908,18 @@ deadline that drops output lives in the shared output path.  What counts as a
 console, and what the two columns mean, is in the root
 [README](../../README.md#a-board-can-run-more-than-one-console).
 
-### What guards `nor` and `sdram` today (issues #248, #250)
+### What guards `nor` and `sdram` today (issues #248, #250, #251)
 
 `nor` (until issue #250 this board's `qspi`) and `sdram` go past the stores
 (`blob`, `kv`) and past the owners of the SDRAM, to the devices themselves.
 The two tables say, per subcommand, what keeps it from destroying somebody
-else's data -- including what does not -- **the `sdram` table as the code
-stands at `3ee40b2`, the `nor` table as it stands after issue #250**.  They
-were read from the source (`shell/cmds/cmd_nor.c`, `cmds/cmd_nor_board.c`,
-`cmds/cmd_sdram.c` and what they call), not tried on the board; the cells
-marked *(source only)* are the ones nobody has seen happen.  The `nor`
-refusals are walked by `test/test_nor_board.c` (the shared command with this
+else's data -- including what does not -- **the `nor` table as it stands
+after issue #250, the `sdram` table after issue #251**.  They were read from
+the source (`shell/cmds/cmd_nor.c`, `cmds/cmd_nor_board.c`,
+`shell/cmds/cmd_ext_ram.c`, `cmds/cmd_sdram.c` and what they call), not tried
+on the board; the cells marked *(source only)* are the ones nobody has seen
+happen.  The `nor` refusals are walked by `test/test_nor_board.c` and the
+`sdram` ones by `test/test_sdram_board.c` (each the shared command with this
 board's real table).  wio-lite-ai's `nor` / `psram` and grove-vision-ai-v2's
 `nor` have the same columns in those boards' READMEs.  Issue #213 changes
 these commands and updates the tables; a guard that is in a table now has to
@@ -1892,7 +1933,8 @@ What the columns mean, the same on all three boards:
   wire and protects no data; it is not repeated in the rows.
 - **Addresses it refuses**: before anything is sent.
 - **From telnet / in a background job**: whether the command runs from the
-  `net>` console, and as `cmd &`.  `sdram` asks neither question.  Since
+  `net>` console, and as `cmd &`.  `sdram` asks neither question (nor did it
+  before issue #251).  Since
   issue #250 `nor erase` / `test` ask both, through the shared
   `shell/cmds/nor_console.c` (the telnet question through the shared
   `net_tty_is_console()`, a background job by `sh->fg`); until then `qspi`
@@ -1942,12 +1984,32 @@ lost; the console question and the range of a multi-subsector erase are new.
 | **new**: telnet, its jobs, a job of the VCP console | -- (ran) | the shared `nor_console_refuse()` |
 | **new**: `read` past the end refused | -- | the shared `nor_arg_fits()` |
 
-SDRAM (8 MB; the banks are in [The SDRAM's internal banks are assigned by use](#-the-sdrams-internal-banks-are-assigned-by-use-and-the-linker-enforces-it)):
+SDRAM (8 MB; the banks are in [The SDRAM's internal banks are assigned by use](#-the-sdrams-internal-banks-are-assigned-by-use-and-the-linker-enforces-it)).
+Since issue #251 the command is the shared `shell/cmds/cmd_ext_ram.c` (the
+contract is `shell/cmds/ext_ram_cmd_board.h`, see `svc/README.md`), and what
+protects the SDRAM is this board's table, `cmds/cmd_sdram.c`: its ranges and
+the steps a test takes, in this order and given back in the reverse one on
+every way the test ends.  A step that refuses gives back the ones before it
+and nothing is written.
 
 | Subcommand | Held while it runs | Addresses it refuses | From telnet | In a background job | Dangerous-commands setting | Other refusals and checks |
 |---|---|---|---|---|---|---|
-| `sdram info` | nothing | -- (prints the window and whether the FMC came up) | runs | runs | not under the setting | prints `MPU: Normal, non-cacheable` for the whole window, which has been wrong for bank 3 since #173 (MPU region 1 is write-back, [MPU regions](#mpu-regions)) |
-| `sdram test [bytes]` | for the whole run, three claims taken in this order: the camera's frame buffer and stream ring (`camera_scratch_claim()`: refused while a stream runs or is held, or another `sdram test` holds it); nn's `.sdram.ai` (`nn_scratch_claim()`: refused while an nn command or stream holds the session, or **while a model is loaded**); the display (`ltdc_scanout_hold()`: refused while GUIX owns it; scan-out stops, and `lcd on`, `gui start`, the `lcd` draws and flips are refused) | from `0xC0000000`; `bytes` must be a multiple of 4 in 4..8 MB, otherwise an error.  Bank 2 (`0xC0400000-0xC05FFFFF`, the Ethernet descriptors and pool) is skipped while the network is up, and the test is refused if `.sdram.eth` is not inside bank 2 | runs | runs | not under the setting | **not refused: a running `membench`**, whose 64 KB buffer is in bank 0 (`.sdram.fixed`); neither command looks at the other *(source only)*.  **Bank 3 (`0xC0600000-0xC07FFFFF`) is tested although it is cacheable since #173**; how much of the read-back the D-cache answers is not measured.  Ctrl+C between 64 KB chunks.  Afterwards both frame buffers are repainted black and scan-out is restored; the captured frame stays invalid until the next capture |
+| `sdram info` | nothing | -- (the part, the window, the three ranges with whether each is cacheable and tested, the state, the controller line) | runs | runs | not under the setting | since #251 the ranges say what the MPU does: banks 0-1 and bank 2 non-cacheable, bank 3 cacheable (until then one line said `MPU: Normal, non-cacheable` for the whole window, wrong for bank 3 since #173) |
+| `sdram test [bytes]` | for the whole run, four steps in this order: the camera's frame buffer and stream ring (`camera_scratch_claim()`: refused while a stream runs or is held, or another `sdram test` holds it); **the SDRAM owner word** (`cmds/sdram_owner.h`: refused while `membench` runs); the network (bank 2 skipped while it is up); the display (`ltdc_scanout_hold()`: refused while GUIX owns it; scan-out stops, and `lcd on`, `gui start`, the `lcd` draws and flips are refused) | from `0xC0000000`; `bytes` must be a multiple of 4 in 4..6 MB (banks 0-2), otherwise an error -- 8 MB until #251.  **Bank 3 (`0xC0600000-0xC07FFFFF`, cacheable, nn's) is never tested**: the shared command stops at the first cacheable range.  Bank 2 (`0xC0400000-0xC05FFFFF`, Ethernet descriptors, pool and the MJPEG buffer) is skipped while the network is up, and the test is refused if `.sdram.eth` is not inside bank 2 (with where it is) | runs | runs | not under the setting | **refused while `membench` runs, and `membench` is refused while it runs** (since #251; until then neither looked at the other).  **No longer takes nn's claim** (since #251, the user's decision): nothing of nn is in banks 0-2 on any backend (`nm`, tflm / null / stedgeai_reloc rebuilt, stedgeai from an older build), so there is nothing of nn left to protect; a loaded model no longer refuses the test.  Ctrl+C after each 64 KB written or read.  Afterwards both frame buffers are repainted black and scan-out is restored; the captured frame stays invalid until the next capture.  **Not stopped: `devmem`** writes anywhere in the SDRAM and looks at neither the test nor `membench` *(source only)* |
+
+The guards before and after the shared command (issue #251).  One is taken
+out on purpose (nn's claim, which has nothing left to guard); two are new.
+
+| Guard | Until #251 (`cmds/cmd_sdram.c`, the whole command) | Since #251 |
+|---|---|---|
+| the camera's frame and ring, for the whole run | `camera_scratch_claim()` | the same, step 1 of `cmds/cmd_sdram.c` |
+| nn's `.sdram.ai` (bank 3) | `nn_scratch_claim()`, refused while a model is loaded or nn is busy | **taken out**: bank 3 is cacheable and the shared command never tests it, so the test writes nothing of nn's.  nn's claim mechanism stays in `svc/nn` for now (a later issue removes it) |
+| bank 2 while the network is up | skipped, `.sdram.eth` checked | the same, step 3 |
+| the display | `ltdc_scanout_hold()` / `unhold()` | the same, step 4 |
+| every taken claim given back once, in reverse | three `goto` exits | the shared command's one give loop |
+| the length | 4..8 MB, a multiple of 4 | 4..6 MB, a multiple of 4 (the shared command) |
+| **new**: bank 3 not tested (cacheable) | -- (tested through the D-cache) | the shared command stops at the first cacheable range of the table |
+| **new**: `membench` and `sdram test` refuse each other | -- | the SDRAM owner word, `cmds/sdram_owner.h` |
 
 ### The camera streams while somebody holds it (issue #142)
 
@@ -2130,8 +2192,8 @@ camera res | format | fps | set   (this board's own)
   camera running for the operator (issue #142's `manual` holder, which the
   GUIX camera screen also opens at boot), so `nn stream stop` alone never
   clears it (issue #175).
-- **`sdram test` also claims `.sdram.ai` from nn and skips live Ethernet state**
-  (issue #152).  The NN arena and model buffer live in
+- **`sdram test` skips live Ethernet state, and since issue #251 leaves nn
+  alone.**  Until issue #251 (from issue #152): the NN arena and model buffer live in
   `.sdram.ai` (bank 3), owned by `port/nn`, so the test takes
   `nn_scratch_claim()` right after the camera claim and keeps it for its whole
   run.  While it is held no nn session can be taken (`nn model load` /
@@ -2148,12 +2210,16 @@ camera res | format | fps | set   (this board's own)
   busy; wait for the nn command / stream to finish`), and while a model is
   loaded (``sdram: a model is loaded in .sdram.ai; run `nn model unload`
   first``) -- a model left loaded over test patterns would run on garbage, and
-  the test never unloads it for you.  Bank 2 (`.sdram.eth`) holds the ETH DMA
+  the test never unloads it for you.  **Since issue #251 none of that
+  happens**: the test stops at 6 MB and never writes bank 3, so it takes no nn
+  claim; during a test `nn model load` / `unload`, `nn bench` and `nn info`
+  run as usual, and `nn run` / `nn stream start` are refused by the camera
+  claim instead.  Bank 2 (`.sdram.eth`) holds the ETH DMA
   descriptors and the NetX pool; the IP instance never goes down once boot
   created it, so while the network is up the test skips the whole bank
-  (`sdram: bank2 (0xC0400000..0xC05FFFFF) skipped: the network is up (ETH DMA
-  descriptors live there)`) and the summary counts only what was tested (6144
-  KB for a full run).  The MJPEG server needs no guard of its own: it reads the
+  (since #251 `sdram: 0xc0400000..0xc05fffff skipped: the network is up (ETH
+  DMA)`) and the summary counts only what was tested (4096 KB for a full run
+  since #251, 6144 KB before).  The MJPEG server needs no guard of its own: it reads the
   camera stream, which the camera claim already refuses.
 - **`sdram test` holds the display** (issue #152, `ltdc_scanout_hold()` under
   the LTDC lock).  `ltdc_fb` sits in bank 0, so the test is refused while GUIX
@@ -2165,8 +2231,9 @@ camera res | format | fps | set   (this board's own)
   accepted and only means the display stays off afterwards; `lcd info` only
   reads.  At the end both buffers are repainted black, and scan-out and the
   backlight each return to what they were (recorded apart: under GUIX `lcd off`
-  drops only the backlight).  `nn run` / `nn stream start` during the test answer busy with
-  ``.sdram.ai is held by `sdram test`; try again when it finishes``.
+  drops only the backlight).  `nn run` / `nn stream start` during the test are
+  refused (since #251 by the camera claim; until then busy with
+  ``.sdram.ai is held by `sdram test`; try again when it finishes``).
 - **`camera off` with the operator's stream running** prints `camera: stopping
   stream before power off`, waits for THAT stream to end and then cuts the rail
   (`camera: power off`).  A holder other than the operator refuses it (`camera:

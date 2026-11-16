@@ -1869,6 +1869,60 @@ a test read made while the hold is not held, and requires 0 in every run
 (issue #249's lesson: a balanced take and give-back says nothing about what
 ran between them).
 
+## The external RAM test is shared: `sdram` and `psram` (issue #251)
+
+Until issue #251 f746g-disco's `sdram` (`cmds/cmd_sdram.c`) and wio-lite-ai's
+`psram info` / `test` (`cmds/cmd_psram.c`) were two commands with two lengths,
+two outputs and two ways to stop.  Now both are `shell/cmds/cmd_ext_ram.c`
+(`optional BOARD_HAS_EXT_RAM`), with the contract
+`shell/cmds/ext_ram_cmd_board.h`; the names stay (the board says its own).
+grove-vision-ai-v2 has no external RAM in its address map and compiles none
+of it.  The contract is in `shell/cmds/` and not here: nothing under `svc/`
+takes part, the test is a shell command.
+
+| Piece | Where | What it has |
+|---|---|---|
+| the contract | `shell/cmds/ext_ram_cmd_board.h` | the ranges, the claim a step fills in (a refusal and up to two addresses; a run to skip for this test and why), the steps, and the one table a board defines, `ext_ram_board`; the three pure functions the host tests call (the table check, the length, the spans around a skip).  Freestanding: no HAL, no `tx_api.h` |
+| the command | `shell/cmds/cmd_ext_ram.c` | the grammar, the strict length, which bytes a test touches, the three passes, Ctrl+C every 64 KB, every line printed.  No storage (the claim and the spans are on the stack) |
+| the table | each board's `cmds/cmd_sdram.c` / `cmds/cmd_psram.c` | the window, the ranges, the steps, `ready()`, the board's own `info` lines |
+| the properties | each board's `svc/ext_ram_config.h` | the name (`EXT_RAM_CMD`: `sdram` / `psram`), the `help` line, the board's own subcommands (wio-lite-ai's six tuning subcommands; f746g-disco none) |
+
+[!] **A test never reaches a cacheable range.**  The table splits the window
+into ranges, back to back from its start to its end, each marked cacheable or
+not; the bytes a test may touch end where the first cacheable range starts,
+whatever the board asks, because a write and its read-back through a
+write-back cache can be answered by the cache while the device is not
+answering at all.  The mark is the board's word for what its MPU setup does;
+nothing reads the MPU back (the user's decision on #251), so the two are kept
+in step by hand.
+
+[!] **The shared command walks the board's steps; the board never gives one
+back itself.**  Before the first write it takes the steps in order; after the
+last read it gives them back in the reverse order.  A step that refuses stops
+there: the steps taken before it are given back in reverse and nothing is
+written.  Every way a test ends -- passed, a bad word, Ctrl+C, a skip the board
+got wrong -- gives every taken step back exactly once, and the steps are held
+for the whole test.  A give can return a warning (f746g-disco's failed display
+restore), which is printed while the rest are still given back.  So the order
+"the board's protection first, the patterns after, the protection given back
+last" is the table's, in one place, and the shared command has one give loop.
+
+| The table | f746g-disco `sdram` | wio-lite-ai `psram` |
+|---|---|---|
+| window | 8 MB at `0xC0000000` | 8 MB at `0x90000000` |
+| ranges | banks 0-1 and bank 2 non-cacheable; bank 3 cacheable | the low 6 MB non-cacheable; the top 2 MB (`.psram_ai`) cacheable |
+| what a test may touch | 6 MB (banks 0-2) | 6 MB |
+| steps | the camera claim; the SDRAM owner word (`membench`); the network (bank 2 skipped while it is up); the display hold, whose give repaints and restores | the OCTOSPI1 reconfigurer mark; the captured frame dropped; with the LCD built, the repaint as the give before the mark's |
+
+The length is strict: no argument is everything a test may touch, otherwise a
+non-zero multiple of 4 up to it, and anything else is refused before a step is
+taken.  The tests: `shell/test/test_ext_ram_cmd.c` (a fake table with a
+cacheable range and one after it, four steps, a skip) and each board's
+`test/test_sdram_board.c` / `test/test_psram_board.c` (the real table over the
+real addresses, mapped on the host).  Every one counts a word stored or loaded
+while a step is not held, past the testable part or inside the skip, and
+requires 0 in every run (issue #249's lesson).
+
 ## The `sd` command is shared (issue #232)
 
 f746g-disco has a microSD slot with a FAT filesystem on FileX;

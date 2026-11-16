@@ -1558,6 +1558,31 @@ for shape in "FULL 1 1" "FULL 1 0" "ABSENT 1 1" "FULL 0 1"; do
         $LDFLAGS -o "$out/test_nor_cmd_$1$2$3"
     "$out/test_nor_cmd_$1$2$3"
 done
+# ...and what a board does not have is declared once (svc/nor_svc_config.h):
+# a board that says it has no read and still defines nor_svc_board_read(), one
+# that has the test but no read, and one that leaves out the line to say must
+# each fail to compile, on that check; the same file with nothing wrong
+# compiles.
+for neg in "NEG_READ_LEFT -DNOR_TEST_SHAPE_ABSENT:redeclared as different kind of symbol" \
+           "NEG_TEST_NO_READ:NOR_SVC_HAS_TEST needs NOR_SVC_HAS_READ" \
+           "NEG_NO_SAYS:must say NOR_SVC_NO_<SUB>_SAYS"; do
+    flags=${neg%%:*}
+    want=${neg#*:}
+    if LC_ALL=C gcc $CFLAGS -D$flags -I "$here/nor_cfg" -I "$svc/nor" \
+           -c "$here/test_nor_absent_neg.c" -o "$out/nor_absent_neg.o" \
+           > "$out/nor_absent_neg.log" 2>&1; then
+        echo "test_nor_absent_neg: -D$flags COMPILED -- the declaration check did not fire" >&2
+        exit 1
+    fi
+    if ! LC_ALL=C grep -qF "$want" "$out/nor_absent_neg.log"; then
+        echo "test_nor_absent_neg: -D$flags failed, but not on its check:" >&2
+        cat "$out/nor_absent_neg.log" >&2
+        exit 1
+    fi
+done
+gcc $CFLAGS -DNOR_TEST_SHAPE_ABSENT -I "$here/nor_cfg" -I "$svc/nor" \
+    -c "$here/test_nor_absent_neg.c" -o "$out/nor_absent_neg.o"
+echo "  ok   a subcommand declared absent and still defined, or absent without its line, does not compile"
 
 # issue #99 -- the shared stream lifecycle (svc/nn/nn_stream_life.c).
 #

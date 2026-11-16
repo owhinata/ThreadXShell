@@ -39,11 +39,11 @@ struct cli_instance;
 /**
  * Refuse an erase or a write that does not run in the foreground of the local
  * console.  On refusal it prints one line that says only the fact -- "nor:
- * erasing or writing the flash runs only in the foreground of the <local>
- * console; this is <where>" (without a telnet console: "...only in the
- * foreground; this is a background job") -- and returns non-zero; otherwise it
- * returns 0 and prints nothing.  It reads the instance and, with a telnet
- * console, asks net_tty_is_console(); it touches no device and takes no lock.
+ * erase/write only in the <local> foreground, not <telnet | a telnet job | a
+ * job>" (without a telnet console: "...only in the foreground, not a job") --
+ * and returns non-zero; otherwise it returns 0 and prints nothing.  It reads
+ * the instance and, with a telnet console, asks net_tty_is_console(); it
+ * touches no device and takes no lock.
  */
 int nor_console_refuse(struct cli_instance *sh);
 

@@ -18,7 +18,17 @@
 #define NOR_SVC_HAS_DEVICE 1
 
 /** The `nor` line of the top-level `help`. */
-#define NOR_SVC_HELP "inspect and write the external QSPI NOR"
+#define NOR_SVC_HELP "the external QSPI NOR"
+
+/** The shared subcommands this board has: no `nor read` (the flash is
+ *  memory-mapped, `devmem dump` reads it under a lease) and no `nor test`
+ *  (every `nor write` reads back what it wrote); their code is not in this
+ *  board's image (issue #250). */
+#define NOR_SVC_HAS_READ  0
+#define NOR_SVC_HAS_WRITE 1
+#define NOR_SVC_HAS_TEST  0
+#define NOR_SVC_NO_READ_SAYS "`devmem dump 0x3A000000` reads it"
+#define NOR_SVC_NO_TEST_SAYS "`nor write` verifies itself"
 
 /*
  * The board's own subcommands, appended to the shared `nor` table: a run of
@@ -38,14 +48,14 @@
 
 #if CLI_ENABLE_DANGEROUS_CMDS
 #define NOR_SVC_BOARD_CYCLE                                                    \
-	CLI_CMD_ARG_USAGE(cycle, NULL, "window down and back up; no data touched", \
+	CLI_CMD_ARG_USAGE(cycle, NULL, "window down and up, no data",             \
 	                  NULL, nor_board_cycle, 1, 0),
 #else
 #define NOR_SVC_BOARD_CYCLE
 #endif
 
 #define NOR_SVC_BOARD_SUBCMDS                                                  \
-	CLI_CMD_ARG_USAGE(scan, NULL, "walk the window, report non-erased extents", \
+	CLI_CMD_ARG_USAGE(scan, NULL, "report non-erased extents",                \
 	                  NULL, nor_board_scan, 1, 0),                         \
 	NOR_SVC_BOARD_CYCLE
 

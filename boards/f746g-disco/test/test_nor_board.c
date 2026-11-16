@@ -265,14 +265,14 @@ int main(void)
 	check(nor_table() != NULL && dups == 0 && nor_sub("probe") != NULL,
 	      "`nor probe` is in the table, no name twice", "nor");
 	reset();
-	check(run(&vcp, "probe") == 0 && n_id == 1 && has("Micron N25Q128A"), "probe",
+	check(run(&vcp, "probe") == 0 && n_id == 1 && has("JEDEC 20 BA 18 (N25Q128A/MT25QL128)"), "probe",
 	      "probe");
 
 	/* ---- info: the registers before anything is sent ---- */
 	reset();
 	check(run(&vcp, "info") == 0 && seq_regs_first != 0 && seq_regs_first < seq_id,
 	      "the registers are sampled before the read id", "info");
-	check(has("NOR: N25Q128A on QUADSPI") && has("  jedec   : 20 BA 18\r\n") &&
+	check(has("NOR: N25Q128A on QUADSPI, 16 MB, erase 4096 B, page 256 B\r\n") && has("  jedec   : 20 BA 18\r\n") &&
 	      has("before ") && has("failures: 0"), "the shared lines and the board's",
 	      "info");
 
@@ -285,24 +285,24 @@ int main(void)
 	      sub_addr[15] == 0x80F000u, "sixteen subsectors, in order", "erase 64 KB");
 	check(dev[0x7FFFFF] == 0x00 && dev[0x810000] == 0x00,
 	      "the bytes on either side are untouched", "erase 64 KB");
-	check(takes == 1 && gives == 1 && has("Ctrl+C stops it"), "the flag once; Ctrl+C",
+	check(takes == 1 && gives == 1 && has("erase 0x800000..0x80FFFF (Ctrl+C stops it; result in dmesg)"), "the flag once; Ctrl+C",
 	      "erase 64 KB");
 	reset();
 	cancel_at = 2;
 	rc = run(&vcp, "erase 0x800000 0x10000");
-	check(rc == 1 && n_sub == 2 && has("cancelled after 8192 B of 65536"),
+	check(rc == 1 && n_sub == 2 && has("nor: cancelled at 8192/65536 B"),
 	      "Ctrl+C after the second subsector stops there", "erase cancel");
 	reset();
 	fail_sub_at = 3;
 	rc = run(&vcp, "erase 0x800000 0x10000");
-	check(rc == 1 && n_sub == 3 && has("erase failed: flash reported program/erase error"),
+	check(rc == 1 && n_sub == 3 && has("nor: erase failed: flash reported an error"),
 	      "a failed subsector stops the erase", "erase fail");
 
 	/* ---- the kv partition, the console, the flag ---- */
-	refused_early(&vcp, "erase 0xFF000 0x2000", "is in the kv store (0x000000 .. 0x0FFFFF)");
+	refused_early(&vcp, "erase 0xFF000 0x2000", "0x0FF000..0x100FFF hits the kv store 0x000000..0x0FFFFF -- `kv format yes` erases it");
 	refused_early(&vcp, "erase 0 4096", "`kv format yes` erases it");
-	refused_early(&vcp, "test 0xFF000", "is in the kv store");
-	refused_early(&vcp, "erase 0x800800 4096", "whole 4 KB sectors");
+	refused_early(&vcp, "test 0xFF000", "hits the kv store");
+	refused_early(&vcp, "erase 0x800800 4096", "4 KB multiples");
 	refused_early(&vcp, "erase 0xFFF000 0x2000", "past the end");
 	refused_early(&vcp, "read 0xFFFFFF 2", "past the end");
 	{
@@ -310,14 +310,14 @@ int main(void)
 
 		for (unsigned i = 0; i < 2; i++) {
 			refused_early(&telnet, lines[i],
-			              "foreground of the VCP console; this is the telnet console");
+			              "nor: erase/write only in the VCP foreground, not telnet");
 			refused_early(&telnet_job, lines[i],
-			              "this is a background job of the telnet console");
-			refused_early(&vcp_job, lines[i], "this is a background job");
+			              "not a telnet job");
+			refused_early(&vcp_job, lines[i], "VCP foreground, not a job");
 			reset();
 			ready = 0;
 			check(run(&vcp, lines[i]) == 1 && takes == 0 && driver_calls() == 0 &&
-			      has("driver not initialized"), "down: no take", lines[i]);
+			      has("nor: driver down"), "down: no take", lines[i]);
 			reset();
 			flag_other = 1;
 			check(run(&vcp, lines[i]) == 1 && takes == 1 && take_fails == 1 &&
@@ -331,19 +331,19 @@ int main(void)
 	/* ---- no `nor write` ---- */
 	reset();
 	check(run(&vcp, "write 0x800000 00") == 1 && takes == 0 && driver_calls() == 0 &&
-	      has("no `nor write` on this board\r\n"), "no write, nothing called", "write");
+	      has("nor: no `write` on this board\r\n"), "no write, nothing called", "write");
 
 	/* ---- test ---- */
 	reset();
 	memset(dev + 0x800000, 0xFF, 0x1000);
 	dev[0x800010] = 0x00;
 	check(run(&vcp, "test 0x800000") == 1 && n_sub == 0 && n_write == 0 &&
-	      dev[0x800010] == 0x00 && has("is not blank"), "not blank: nothing erased",
+	      dev[0x800010] == 0x00 && has("not blank, not tested"), "not blank: nothing erased",
 	      "test");
 	reset();
 	memset(dev + 0x800000, 0xFF, 0x1000);
 	check(run(&vcp, "test 0x800000") == 0 && has("nor: PASS") && n_sub == 3 &&
-	      has("overwrite:"), "a pass, three subsector erases, the overwrite seen",
+	      has("overwrite FE->FE FC->FC: accepted"), "a pass, three subsector erases, the overwrite seen",
 	      "test");
 	for (int i = 0; i < 0x1000; i++)
 		if (dev[0x800000 + i] != 0xFF) {
@@ -355,7 +355,7 @@ int main(void)
 		memset(dev + 0x800000, 0xFF, 0x1000);
 		fail_sub_at = k;
 		check(run(&vcp, "test 0x800000") == 1 && !has("PASS") &&
-		      has("`nor erase 0x800000 4096` before the next"),
+		      has("may be dirty: `nor erase 0x800000 4096`"),
 		      "a failed erase: no PASS, the way out", "test");
 	}
 

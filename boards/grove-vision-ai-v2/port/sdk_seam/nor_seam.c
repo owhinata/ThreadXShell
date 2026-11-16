@@ -56,7 +56,7 @@ _Static_assert(NOR_WRITABLE_LO < NOR_WRITABLE_HI,
  * out of .rodata and the arithmetic the firmware performs cannot be different
  * numbers.  Within this translation unit the compiler folds them back to the
  * constants -- the emitted code is the same as before -- but the object is
- * still there for cmd_nor.c and the gate, because nothing here is allowed to
+ * still there for cmds/cmd_nor_board.c and the gate, because nothing here is allowed to
  * be built with LTO. */
 const struct nor_seam_limits nor_seam_limits = {
 	NOR_WRITABLE_LO, NOR_WRITABLE_HI, NOR_ERASE_UNIT,

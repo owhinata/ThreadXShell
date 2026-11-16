@@ -67,7 +67,7 @@ extern "C" {
  * linked image, so that a build which lost the definitions cannot enforce a
  * different interval than the one the layout was checked against.
  *
- * [!] NO FALLBACK DEFAULTS, for the reason cmd_nor.c states: a default is a
+ * [!] NO FALLBACK DEFAULTS, for the reason cmds/cmd_nor_board.c states: a default is a
  * second declaration of a layout only one file may declare, and the wrong one
  * refuses nothing visibly. */
 #if !defined(NOR_PART_FW_END) || !defined(NOR_PART_BLOB_END) || \

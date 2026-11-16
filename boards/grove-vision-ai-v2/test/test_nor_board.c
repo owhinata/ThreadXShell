@@ -283,11 +283,11 @@ int main(void)
 	/* ---- what this board does not have ---- */
 	reset();
 	check(run(&uart, "read 0x200000") == 1 && acquires == 0 && writes() == 0 &&
-	      has("no `nor read` on this board -- the flash is mapped at 0x3A000000; "
-	          "`devmem dump` reads it"), "no read", "read");
+	      has("nor: no `read` on this board; `devmem dump 0x3A000000` reads it\r\n"),
+	      "no read", "read");
 	reset();
 	check(run(&uart, "test 0x200000") == 1 && reserves == 0 && writes() == 0 &&
-	      has("no `nor test` on this board -- every `nor write` reads back"),
+	      has("nor: no `test` on this board; `nor write` verifies itself\r\n"),
 	      "no test", "test");
 
 	/* ---- one transaction per command ---- */
@@ -299,7 +299,7 @@ int main(void)
 	reset();
 	cancel_at = 1;
 	check(run(&uart, "erase 0x200000 0x2000") == 1 && n_erase == 1 &&
-	      has("cancelled after 4096 B of 8192"), "erase: a cancel is said as one",
+	      has("nor: cancelled at 4096/8192 B"), "erase: a cancel is said as one",
 	      "erase cancel");
 	reset();
 	check(run(&uart, "write 0x200004 A55A01") == 0 && n_program == 1 &&
@@ -307,22 +307,22 @@ int main(void)
 	      last_data[2] == 0x01u, "write: one transaction, an odd length", "write");
 	reset();
 	check(run(&uart, "cycle") == 0 && n_cycle == 1 && reserves == 1 &&
-	      has("costs two status-register writes") && has("no data touched"),
+	      has("cycle: 2 status-register writes, no data\r\n") && has("ok, no data touched"),
 	      "cycle: one transaction", "cycle");
 
 	/* ---- the seam's interval and the word a write starts on ---- */
-	refused_early(&uart, "erase 0x1FF000 0x2000", "is not inside what this board writes "
-	              "(0x200000 .. 0xFFDFFF)");
-	refused_early(&uart, "erase 0xFFD000 0x2000", "is not inside");
-	refused_early(&uart, "erase 0xFFE000 4096", "is not inside");
-	refused_early(&uart, "write 0x1FFFFF 00", "is not inside");
-	refused_early(&uart, "write 0x200002 00", "a write starts on a multiple of 4 B");
-	refused_early(&uart, "erase 0x200800 4096", "whole 4 KB sectors");
+	refused_early(&uart, "erase 0x1FF000 0x2000", "nor: 0x1FF000..0x200FFF is outside "
+	              "0x200000..0xFFDFFF\r\n");
+	refused_early(&uart, "erase 0xFFD000 0x2000", "is outside");
+	refused_early(&uart, "erase 0xFFE000 4096", "is outside");
+	refused_early(&uart, "write 0x1FFFFF 00", "is outside");
+	refused_early(&uart, "write 0x200002 00", "nor: a write starts on 4 B here, not 0x200002");
+	refused_early(&uart, "erase 0x200800 4096", "4 KB multiples");
 
 	/* ---- background jobs, through the real registration ---- */
-	refused_early(&uart_job, "erase 0x200000 4096", "this is a background job");
-	refused_early(&uart_job, "write 0x200000 00", "this is a background job");
-	refused_early(&uart_job, "cycle", "this is a background job");
+	refused_early(&uart_job, "erase 0x200000 4096", "nor: erase/write only in the foreground, not a job\r\n");
+	refused_early(&uart_job, "write 0x200000 00", "not a job");
+	refused_early(&uart_job, "cycle", "not a job");
 	check(!has("telnet"), "this board names no telnet console", "cycle");
 
 	/* ---- who holds it ---- */
@@ -338,7 +338,7 @@ int main(void)
 	live = (1u << NOR_LEASE_NPU) | (1u << NOR_LEASE_DEVMEM);
 	readers = 2u;
 	check(run(&uart, "write 0x200000 00") == 1 &&
-	      has("nor: busy -- readers hold the window (`nor info` lists them)"),
+	      has("nor: busy -- readers hold the window (nor info)"),
 	      "two readers, not counted", "busy two");
 	reset();
 	reserve_fails = 1;
@@ -360,7 +360,7 @@ int main(void)
 	reset();
 	acquire_fails = 1;
 	check(run(&uart, "erase 0x200000 4096") == 1 && reserves == 0 &&
-	      has("could not be brought up"), "bring-up refused: no reservation",
+	      has("nor: busy -- window not up (a writer holds it)"), "bring-up refused: no reservation",
 	      "bring-up");
 	reset();
 	live = 1u << NOR_LEASE_BLOB;
@@ -379,9 +379,9 @@ int main(void)
 	next_r.jedec_ok = 1u;
 	next_r.jedec[0] = 0xC8u;
 	check(run(&uart, "write 0x200000 A5") == 1 &&
-	      has("nor: FAULTED -- read-back mismatch") &&
-	      has("first at 0x200010: read 0x00, wanted 0xA5") &&
-	      has("jedec    : C8 00 00"), "faulted: the first bad byte", "faulted");
+	      has("nor: FAULTED -- read-back mismatch; refused until reset") &&
+	      has("first bad 0x200010: 0x00, want 0xA5") &&
+	      has("jedec C8 00 00 (re-read)"), "faulted: the first bad byte", "faulted");
 	reset();
 	next_st = NOR_WRITE_REFUSED;
 	next_r.fail = "the target is not erased";
@@ -393,19 +393,19 @@ int main(void)
 	      "camera at the claim", "camera");
 	reset();
 	next_st = NOR_WRITE_NO_TRANSPORT;
-	check(run(&uart, "erase 0x200000 4096") == 1 && has("did not answer; nothing was sent"),
+	check(run(&uart, "erase 0x200000 4096") == 1 && has("nor: no answer from the part; nothing sent"),
 	      "no transport", "transport");
 	reset();
 	next_st = NOR_WRITE_OK;
 	next_r.done = 1u;
 	next_r.verified = 1u;
 	check(run(&uart, "write 0x200000 A5") == 0 &&
-	      has("ok       : 1 B done, 1 B read back and compared"), "ok", "ok");
+	      has("ok, 1 B verified"), "ok", "ok");
 
 	/* ---- info ---- */
 	reset();
 	state = NOR_ST_OFF;
-	check(run(&uart, "info") == 0 && acquires == 1 && has("NOR: QSPI NOR") &&
+	check(run(&uart, "info") == 0 && acquires == 1 && has("NOR: QSPI NOR at 0x3A000000, 16 MB, erase 4096 B, page 256 B") &&
 	      has("  writable: 0x00200000..0x00ffe000, 4096 B unit") &&
 	      has("  jedec   : C8 00 00 (read before XIP)"),
 	      "info: brought up by a lease, the seam's record", "info");

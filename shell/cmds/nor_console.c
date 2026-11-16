@@ -47,21 +47,18 @@ int nor_console_refuse(struct cli_instance *sh)
 	const char *here;
 
 	if (net_tty_is_console(sh))
-		here = (sh->fg != NULL) ? "a background job of the telnet console"
-		                        : "the telnet console";
+		here = (sh->fg != NULL) ? "a telnet job" : "telnet";
 	else if (sh->fg != NULL)
-		here = "a background job";
+		here = "a job";
 	else
 		return 0;
-	cli_error(sh, "nor: erasing or writing the flash runs only in the foreground "
-	              "of the %s console; this is %s\r\n",
+	cli_error(sh, "nor: erase/write only in the %s foreground, not %s\r\n",
 	          net_tty_board_facts.other_console, here);
 	return -1;
 #else
 	if (sh->fg == NULL)
 		return 0;
-	cli_error(sh, "nor: erasing or writing the flash runs only in the foreground; "
-	              "this is a background job\r\n");
+	cli_error(sh, "nor: erase/write only in the foreground, not a job\r\n");
 	return -1;
 #endif
 }

@@ -57,11 +57,11 @@ _Static_assert(QSPI_FLASH_PAGE_SIZE == NOR_SVC_WRITE_MAX,
 static const char *qspi_strerror(int rc)
 {
 	switch (rc) {
-	case QSPI_FLASH_ERR_PARAM:   return "address/length out of range";
+	case QSPI_FLASH_ERR_PARAM:   return "out of range";
 	case QSPI_FLASH_ERR_HAL:     return "QUADSPI transfer failed";
-	case QSPI_FLASH_ERR_TIMEOUT: return "flash busy timeout";
-	case QSPI_FLASH_ERR_FLASH:   return "flash reported program/erase error";
-	case QSPI_FLASH_ERR_STATE:   return "driver not initialized";
+	case QSPI_FLASH_ERR_TIMEOUT: return "busy timeout";
+	case QSPI_FLASH_ERR_FLASH:   return "flash reported an error";
+	case QSPI_FLASH_ERR_STATE:   return "driver down";
 	default:                     return "unknown error";
 	}
 }
@@ -91,11 +91,9 @@ int nor_board_probe(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "nor: read id failed: %s\r\n", qspi_strerror(rc));
 		return 1;
 	}
-	cli_print(sh, "JEDEC ID: %02X %02X %02X", id[0], id[1], id[2]);
-	if (id[0] == 0x20 && id[1] == 0xBA && id[2] == 0x18)
-		cli_print(sh, "  (Micron N25Q128A/MT25QL128, 16 MiB)\r\n");
-	else
-		cli_print(sh, "  (unexpected -- check wiring/AF)\r\n");
+	cli_print(sh, "JEDEC %02X %02X %02X %s\r\n", id[0], id[1], id[2],
+	          (id[0] == 0x20 && id[1] == 0xBA && id[2] == 0x18)
+	                  ? "(N25Q128A/MT25QL128)" : "(unexpected: wiring/AF?)");
 	return 0;
 }
 
@@ -193,29 +191,23 @@ static int nor_board_info(nor_svc_common_fn common, nor_svc_write_fn write,
 	qspi_live_now(&after);
 	qspi_flash_record_get(&d);
 
-	in.state = ready ? "ready (indirect)" : "driver not initialized";
+	in.state = ready ? "ready" : "driver down";
 	in.state_note = "";
 	in.jedec_valid = (id_rc == 0);
-	in.jedec_note = (id_rc == 0) ? "" : "read id failed";
+	in.jedec_note = (id_rc == 0) ? "" : "read failed";
 	if (common(ctx, &in) != 0)
 		return -1;
 
-	if (qspi_line(write, ctx, "  sector  : %lu KiB (erase 0xD8, not used by "
-	              "`nor erase`); subsector %lu KiB (erase 0x20)\r\n",
-	              (unsigned long)(fi->sector_size / 1024u),
-	              (unsigned long)(fi->subsector_size / 1024u)) ||
-	    qspi_line(write, ctx, "  sclk    : %lu MHz, indirect mode\r\n",
-	              (unsigned long)(fi->sclk_hz / 1000000u)) ||
-	    qspi_line(write, ctx, "  read    : %s\r\n",
-	              qspi_flash_quad_enabled() ? "quad output 0x6B (1-1-4, dummy 10)"
-	                                        : "fast read 0x0B (1-1-1, dummy 8)"))
+	if (qspi_line(write, ctx, "  sclk    : %lu MHz, read %s\r\n",
+	              (unsigned long)(fi->sclk_hz / 1000000u),
+	              qspi_flash_quad_enabled() ? "0x6B 1-1-4" : "0x0B 1-1-1"))
 		return -1;
 	if (sr_rc != 0) {
-		if (qspi_line(write, ctx, "  status  : read failed: %s\r\n",
+		if (qspi_line(write, ctx, "  status  : %s\r\n",
 		              qspi_strerror(sr_rc)))
 			return -1;
 	} else if (qspi_line(write, ctx, "  status  : 0x%02x%s\r\n", sr,
-	                     (sr & 0x01u) ? " (write in progress)" : "")) {
+	                     (sr & 0x01u) ? " (WIP)" : "")) {
 		return -1;
 	}
 	if (qspi_live_lines(write, ctx, "before ", &before) ||
@@ -229,8 +221,8 @@ static int nor_board_info(nor_svc_common_fn common, nor_svc_write_fn write,
 	return 0;
 }
 
-static void nor_board_read(uint32_t addr, uint8_t *buf, uint32_t len,
-                           struct nor_svc_result *r)
+void nor_svc_board_read(uint32_t addr, uint8_t *buf, uint32_t len,
+                        struct nor_svc_result *r)
 {
 	qspi_answer(qspi_flash_read(addr, buf, len), len, r);
 }
@@ -287,18 +279,10 @@ static void nor_op_program(void *dev, uint32_t addr, const uint8_t *data,
 	qspi_answer(qspi_flash_write(addr, data, len), len, r);
 }
 
-static void nor_op_read(void *dev, uint32_t addr, uint8_t *buf, uint32_t len,
-                        struct nor_svc_result *r)
-{
-	(void)dev;
-	qspi_answer(qspi_flash_read(addr, buf, len), len, r);
-}
-
 static const struct nor_svc_ops nor_ops = {
 	.dev = NULL,
 	.erase = nor_op_erase,
 	.program = nor_op_program,
-	.read = nor_op_read,
 };
 
 /* The driver up, then the busy flag for the whole of @p body, given back here
@@ -308,12 +292,12 @@ static void nor_board_hold(nor_svc_body_fn body, void *ctx,
 {
 	if (!qspi_flash_ready()) {
 		r->status = NOR_SVC_DOWN;
-		r->why = "driver not initialized (see `nor info`)";
+		r->why = "driver down";
 		return;
 	}
 	if (blob_busy_acquire() != BLOB_OK) {
 		r->status = NOR_SVC_BUSY;
-		r->why = BLOB_BUSY_HOLDERS " is running; try again";
+		r->why = BLOB_BUSY_HOLDERS " is running";
 		return;
 	}
 	body(ctx, &nor_ops);
@@ -327,11 +311,7 @@ const struct nor_svc_board nor_svc_board = {
 	.erase_unit    = QSPI_FLASH_SUBSECTOR_SIZE,
 	.page          = QSPI_FLASH_PAGE_SIZE,
 	.erase_cancels = 1u,
-	.no_read       = NULL,
-	.no_write      = "",
-	.no_test       = NULL,
 	.info          = nor_board_info,
-	.read          = nor_board_read,
 	.range         = nor_board_range,
 	.hold          = nor_board_hold,
 };

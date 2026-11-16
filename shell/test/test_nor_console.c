@@ -114,19 +114,19 @@ int main(void)
 
 	check(run(&telnet) != 0 && asked == 1, "telnet console refused");
 	refused("telnet console");
-	check(has("foreground of the USB CDC console; this is the telnet console\r\n"),
+	check(has("nor: erase/write only in the USB CDC foreground, not telnet\r\n"),
 	      "telnet console: says where it may run and where this is");
 
 	check(run(&telnet_job) != 0 && asked == 1, "job of telnet refused");
 	refused("job of telnet");
-	check(has("; this is a background job of the telnet console\r\n"),
+	check(has(", not a telnet job\r\n"),
 	      "job of telnet: named as a job of the telnet console");
 
 	check(run(&usb_job) != 0 && asked == 1, "job of USB refused");
 	refused("job of USB");
-	check(has("foreground of the USB CDC console; this is a background job\r\n"),
+	check(has("only in the USB CDC foreground, not a job\r\n"),
 	      "job of USB: named as a background job");
-	check(!has("this is a background job of the telnet"), "job of USB: not telnet");
+	check(!has("telnet"), "job of USB: not telnet");
 
 	printf("test_nor_console (telnet): %s\n", failures ? "FAILED" : "OK");
 #else
@@ -135,10 +135,10 @@ int main(void)
 
 	check(run(&usb_job) != 0, "no telnet: a background job refused");
 	refused("no telnet: background job");
-	check(strcmp(text, "nor: erasing or writing the flash runs only in the "
-	                   "foreground; this is a background job\r\n") == 0,
+	check(strcmp(text, "nor: erase/write only in the foreground, not a job\r\n")
+	      == 0,
 	      "no telnet: the whole sentence");
-	check(!has("telnet") && !has("console"), "no telnet: names no console");
+	check(!has("telnet") && !has("USB"), "no telnet: names no console");
 
 	/* What a board without telnet calls the other instance is still only a
 	 * question of fg: an instance that is not a job goes ahead. */

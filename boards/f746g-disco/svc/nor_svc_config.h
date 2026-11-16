@@ -18,7 +18,14 @@
 #define NOR_SVC_HAS_DEVICE 1
 
 /** The `nor` line of the top-level `help`. */
-#define NOR_SVC_HELP "QSPI NOR flash (N25Q128A, 16 MiB)"
+#define NOR_SVC_HELP "QSPI NOR (N25Q128A)"
+
+/** The shared subcommands this board has: no `nor write` (nothing here needs
+ *  one); its code is not in this board's image (issue #250). */
+#define NOR_SVC_HAS_READ  1
+#define NOR_SVC_HAS_WRITE 0
+#define NOR_SVC_HAS_TEST  1
+#define NOR_SVC_NO_WRITE_SAYS ""
 
 /*
  * The board's own subcommands, appended to the shared `nor` table: a run of
@@ -34,7 +41,7 @@
 	int nor_board_probe(struct cli_instance *sh, int argc, char **argv);
 
 #define NOR_SVC_BOARD_SUBCMDS                                                  \
-	CLI_CMD_ARG(probe, NULL, "read the JEDEC id (expect 20 BA 18)",        \
+	CLI_CMD_ARG(probe, NULL, "JEDEC id (expect 20 BA 18)",                 \
 	            nor_board_probe, 1, 0),
 
 #endif /* NOR_SVC_CONFIG_H */

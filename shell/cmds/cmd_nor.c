@@ -15,6 +15,15 @@
  *   nor test <addr>          acceptance test on one blank 4 KB sector   (danger)
  *   ... and the board's own (NOR_SVC_BOARD_SUBCMDS, svc/nor_svc_config.h).
  *
+ * A subcommand the board does not have (NOR_SVC_HAS_READ / _WRITE / _TEST 0)
+ * answers "not on this board" with the board's line, and its code is not
+ * compiled: f746g-disco has no `write`, wio-lite-ai no `test` (issue #250, for
+ * its internal flash), grove-vision-ai-v2 no `read` and no `test`.
+ *
+ * The words are short on purpose (issue #250, wio-lite-ai's internal flash):
+ * what was refused and why, the addresses, PASS / FAIL / busy / cancelled and
+ * the next command to type stay; the rest is in the READMEs.
+ *
  * Until issue #250 each board had its own command: f746g-disco's `qspi`,
  * wio-lite-ai's and grove-vision-ai-v2's `nor`, with three grammars.
  *
@@ -45,8 +54,7 @@
 #include "cli.h"
 #include "nor_cmd_core.h"
 #include "nor_console.h"
-#include "nor_svc.h"
-#include "nor_svc_config.h"   /* the board says what it has */
+#include "nor_svc.h"          /* and the board's nor_svc_config.h */
 
 #include "tx_api.h"           /* tx_time_get: the elapsed lines */
 
@@ -84,11 +92,11 @@ static const char *nor_status_word(enum nor_svc_status s)
 	case NOR_SVC_BUSY:         return "busy";
 	case NOR_SVC_DOWN:         return "down";
 	case NOR_SVC_REFUSED:      return "refused";
-	case NOR_SVC_NO_TRANSPORT: return "no-transport";
+	case NOR_SVC_NO_TRANSPORT: return "no-answer";
 	case NOR_SVC_IO:           return "io";
-	case NOR_SVC_INCOMPLETE:   return "incomplete";
+	case NOR_SVC_INCOMPLETE:   return "stopped";
 	case NOR_SVC_CANCELLED:    return "cancelled";
-	case NOR_SVC_FAULTED:      return "faulted";
+	case NOR_SVC_FAULTED:      return "FAULTED";
 	default:                   return "?";
 	}
 }
@@ -98,21 +106,22 @@ static const char *nor_why(const struct nor_svc_result *r, const char *dflt)
 	return (r->why != NULL) ? r->why : dflt;
 }
 
+#if !NOR_SVC_HAS_READ || \
+    (CLI_ENABLE_DANGEROUS_CMDS && (!NOR_SVC_HAS_WRITE || !NOR_SVC_HAS_TEST))
 /* A subcommand this board does not have: say so, call nothing. */
-static int nor_absent(struct cli_instance *sh, const char *sub, const char *hint)
+static int nor_absent(struct cli_instance *sh, const char *sub, const char *says)
 {
-	if (hint == NULL)
-		return 0;
-	cli_error(sh, "nor: no `nor %s` on this board%s%s\r\n", sub,
-	          hint[0] != '\0' ? " -- " : "", hint);
+	cli_error(sh, "nor: no `%s` on this board%s%s\r\n", sub,
+	          says[0] != '\0' ? "; " : "", says);
 	return 1;
 }
+#endif
 
 /* A device offset, on the device. */
 static int nor_arg_addr(struct cli_instance *sh, const char *s, uint32_t *out)
 {
 	if (cli_parse_u32(s, out) != 0 || *out >= nor_svc_board.size) {
-		cli_error(sh, "nor: bad address (0 .. 0x%06lX)\r\n",
+		cli_error(sh, "nor: bad address (0..0x%06lX)\r\n",
 		          (unsigned long)(nor_svc_board.size - 1u));
 		return -1;
 	}
@@ -125,8 +134,8 @@ static int nor_arg_fits(struct cli_instance *sh, uint32_t addr, uint32_t len)
 {
 	if (len <= nor_svc_board.size - addr)
 		return 0;
-	cli_error(sh, "nor: 0x%06lX + %lu B runs past the end of the device "
-	              "(0x%06lX)\r\n", (unsigned long)addr, (unsigned long)len,
+	cli_error(sh, "nor: 0x%06lX+%lu is past the end (0x%06lX)\r\n",
+	          (unsigned long)addr, (unsigned long)len,
 	          (unsigned long)nor_svc_board.size);
 	return -1;
 }
@@ -148,7 +157,10 @@ static int nor_info_common(void *ctx, const struct nor_svc_info *in)
 {
 	struct cli_instance *sh = (struct cli_instance *)ctx;
 
-	cli_print(sh, "NOR: %s\r\n", nor_svc_board.part);
+	cli_print(sh, "NOR: %s, %lu MB, erase %lu B, page %lu B\r\n",
+	          nor_svc_board.part, (unsigned long)(nor_svc_board.size >> 20),
+	          (unsigned long)nor_svc_board.erase_unit,
+	          (unsigned long)nor_svc_board.page);
 	cli_print(sh, "  state   : %s%s%s\r\n", in->state,
 	          in->state_note[0] != '\0' ? " -- " : "", in->state_note);
 	if (in->jedec_valid)
@@ -158,12 +170,6 @@ static int nor_info_common(void *ctx, const struct nor_svc_info *in)
 		cli_print(sh, "  jedec   : --");
 	cli_print(sh, in->jedec_note[0] != '\0' ? " (%s)\r\n" : "%s\r\n",
 	          in->jedec_note);
-	cli_print(sh, "  size    : %lu MB (offsets 0 .. 0x%06lX)\r\n",
-	          (unsigned long)(nor_svc_board.size >> 20),
-	          (unsigned long)(nor_svc_board.size - 1u));
-	cli_print(sh, "  erase   : %lu B unit\r\n",
-	          (unsigned long)nor_svc_board.erase_unit);
-	cli_print(sh, "  page    : %lu B\r\n", (unsigned long)nor_svc_board.page);
 	return 0;
 }
 
@@ -177,7 +183,7 @@ static int cmd_nor_info(struct cli_instance *sh, int argc, char **argv)
 	memset(&r, 0, sizeof r);
 	rc = nor_svc_board.info(nor_info_common, nor_info_write, sh, &r);
 	if (rc > 0) {
-		cli_error(sh, "nor: %s\r\n", nor_why(&r, "nothing could be sampled"));
+		cli_error(sh, "nor: %s\r\n", nor_why(&r, "no sample"));
 		return 1;
 	}
 	return rc < 0 ? 1 : 0;
@@ -185,18 +191,17 @@ static int cmd_nor_info(struct cli_instance *sh, int argc, char **argv)
 
 /* ---- read ----------------------------------------------------------------- */
 
+#if NOR_SVC_HAS_READ
 static int cmd_nor_read(struct cli_instance *sh, int argc, char **argv)
 {
 	uint8_t buf[NOR_CHUNK];
 	uint32_t addr, len = NOR_READ_DEFAULT, done = 0u;
 
-	if (nor_absent(sh, "read", nor_svc_board.no_read) || nor_svc_board.read == NULL)
-		return 1;
 	if (nor_arg_addr(sh, argv[1], &addr))
 		return 1;
 	if (argc > 2 && (cli_parse_u32(argv[2], &len) != 0 || len == 0u ||
 	                 len > NOR_SVC_READ_MAX)) {
-		cli_error(sh, "nor: bad length (1 .. %lu)\r\n",
+		cli_error(sh, "nor: bad length (1..%lu)\r\n",
 		          (unsigned long)NOR_SVC_READ_MAX);
 		return 1;
 	}
@@ -210,7 +215,7 @@ static int cmd_nor_read(struct cli_instance *sh, int argc, char **argv)
 		if (chunk > sizeof buf)
 			chunk = sizeof buf;
 		memset(&r, 0, sizeof r);
-		nor_svc_board.read(addr + done, buf, chunk, &r);
+		nor_svc_board_read(addr + done, buf, chunk, &r);
 		if (r.status != NOR_SVC_OK) {
 			cli_error(sh, "nor: read failed at 0x%06lX: %s\r\n",
 			          (unsigned long)(addr + done), nor_why(&r, "error"));
@@ -221,6 +226,14 @@ static int cmd_nor_read(struct cli_instance *sh, int argc, char **argv)
 	}
 	return 0;
 }
+#else
+static int cmd_nor_read(struct cli_instance *sh, int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	return nor_absent(sh, "read", NOR_SVC_NO_READ_SAYS);
+}
+#endif
 
 /* ---- the report ----------------------------------------------------------- */
 
@@ -233,10 +246,10 @@ static void nor_log(const char *what, uint32_t addr, uint32_t len,
 
 	/* The numbers first and the prose last: a record is LOG_MSG_MAX bytes,
 	 * and a cut can then only cost the end of the reason. */
-	log_write(level, "nor", "%s %s 0x%lx+%lu: %lu/%lu%s%s", what,
+	log_write(level, "nor", "%s %s %lx+%lu %lu/%lu%s%s", what,
 	          nor_status_word(r->status), (unsigned long)addr,
 	          (unsigned long)len, (unsigned long)r->done,
-	          (unsigned long)r->verified, r->why ? " -- " : "",
+	          (unsigned long)r->verified, r->why ? " " : "",
 	          r->why ? r->why : "");
 }
 
@@ -247,7 +260,7 @@ int nor_cmd_not_held(struct cli_instance *sh, const char *what, uint32_t addr,
 	if (r->status == NOR_SVC_BUSY)
 		cli_error(sh, "nor: busy -- %s\r\n", nor_why(r, "try again"));
 	else
-		cli_error(sh, "nor: %s\r\n", nor_why(r, "device down (see `nor info`)"));
+		cli_error(sh, "nor: %s\r\n", nor_why(r, "device down"));
 	return 1;
 }
 
@@ -256,58 +269,48 @@ int nor_cmd_report(struct cli_instance *sh, const char *what, uint32_t addr,
 {
 	nor_log(what, addr, len, r);
 	if (r->jedec_valid)
-		cli_print(sh, "jedec    : %02X %02X %02X (read again with the window "
-		              "down)\r\n", r->jedec[0], r->jedec[1], r->jedec[2]);
+		cli_print(sh, "jedec %02X %02X %02X (re-read)\r\n", r->jedec[0],
+		          r->jedec[1], r->jedec[2]);
 
 	switch (r->status) {
 	case NOR_SVC_OK:
 		if (len == 0u)
-			cli_print(sh, "ok       : no data touched\r\n");
-		else if (r->verified != 0u)
-			cli_print(sh, "ok       : %lu B done, %lu B read back and "
-			              "compared\r\n", (unsigned long)r->done,
-			          (unsigned long)r->verified);
+			cli_print(sh, "ok, no data touched\r\n");
 		else
-			cli_print(sh, "ok       : %lu B done\r\n", (unsigned long)r->done);
+			cli_print(sh, "ok, %lu B%s\r\n", (unsigned long)r->done,
+			          r->verified != 0u ? " verified" : "");
 		return 0;
 	case NOR_SVC_BUSY:
+		cli_error(sh, "nor: busy -- %s\r\n", nor_why(r, "try again"));
+		return 1;
 	case NOR_SVC_DOWN:
-		cli_error(sh, r->status == NOR_SVC_BUSY ? "nor: busy -- %s\r\n"
-		                                         : "nor: %s\r\n",
-		          nor_why(r, "try again"));
+		cli_error(sh, "nor: %s\r\n", nor_why(r, "device down"));
 		return 1;
 	case NOR_SVC_REFUSED:
-		cli_error(sh, "nor: refused -- %s\r\n",
-		          nor_why(r, "outside what this board may write"));
+		cli_error(sh, "nor: refused -- %s\r\n", nor_why(r, "not writable"));
 		return 1;
 	case NOR_SVC_NO_TRANSPORT:
-		cli_error(sh, "nor: the part did not answer; nothing was sent\r\n");
+		cli_error(sh, "nor: no answer from the part; nothing sent\r\n");
 		return 1;
 	case NOR_SVC_IO:
 		cli_error(sh, "nor: %s failed: %s\r\n", what, nor_why(r, "I/O error"));
 		return 1;
 	case NOR_SVC_CANCELLED:
-		cli_error(sh, "nor: cancelled after %lu B of %lu (all of it "
-		              "erased)\r\n", (unsigned long)r->done,
-		          (unsigned long)len);
+		cli_error(sh, "nor: cancelled at %lu/%lu B (erased up to there)\r\n",
+		          (unsigned long)r->done, (unsigned long)len);
 		return 1;
 	case NOR_SVC_INCOMPLETE:
-		cli_error(sh, "nor: stopped after %lu B of %lu (%s); %lu B read back "
-		              "and compared, nothing is claimed about the rest\r\n",
+		cli_error(sh, "nor: stopped at %lu/%lu B (%s); %lu B verified\r\n",
 		          (unsigned long)r->done, (unsigned long)len,
-		          nor_why(r, "the device stopped"),
-		          (unsigned long)r->verified);
+		          nor_why(r, "device"), (unsigned long)r->verified);
 		return 1;
 	case NOR_SVC_FAULTED:
 	default:
-		cli_error(sh, "nor: FAULTED -- %s\r\n",
-		          nor_why(r, "what was read back is not what was written"));
+		cli_error(sh, "nor: FAULTED -- %s; refused until reset\r\n",
+		          nor_why(r, "read-back mismatch"));
 		if (r->bad_valid)
-			cli_print(sh, "         first at 0x%06lX: read 0x%02X, wanted "
-			              "0x%02X\r\n", (unsigned long)r->bad_off,
-			          r->bad_got, r->bad_want);
-		cli_print(sh, "         the device refuses everything until the "
-		              "board is reset\r\n");
+			cli_print(sh, "first bad 0x%06lX: 0x%02X, want 0x%02X\r\n",
+			          (unsigned long)r->bad_off, r->bad_got, r->bad_want);
 		return 1;
 	}
 }
@@ -329,22 +332,19 @@ static int nor_refuse_range(struct cli_instance *sh, enum nor_svc_op op,
 	case NOR_SVC_RANGE_OK:
 		return 0;
 	case NOR_SVC_RANGE_INSIDE:
-		cli_error(sh, "nor: 0x%06lX .. 0x%06lX is in the %s (0x%06lX .. "
-		              "0x%06lX)%s\r\n", (unsigned long)addr,
-		          (unsigned long)(addr + len - 1u), g.name,
+		cli_error(sh, "nor: 0x%06lX..0x%06lX hits the %s 0x%06lX..0x%06lX%s\r\n",
+		          (unsigned long)addr, (unsigned long)(addr + len - 1u), g.name,
 		          (unsigned long)g.lo, (unsigned long)(g.hi - 1u), g.hint);
 		return -1;
 	case NOR_SVC_RANGE_ALIGN:
-		cli_error(sh, "nor: a write starts on a multiple of %lu B here "
-		              "(0x%06lX does not)%s\r\n", (unsigned long)g.lo,
-		          (unsigned long)addr, g.hint);
+		cli_error(sh, "nor: a write starts on %lu B here, not 0x%06lX%s\r\n",
+		          (unsigned long)g.lo, (unsigned long)addr, g.hint);
 		return -1;
 	case NOR_SVC_RANGE_OUTSIDE:
 	default:
-		cli_error(sh, "nor: 0x%06lX .. 0x%06lX is not inside what this board "
-		              "writes (0x%06lX .. 0x%06lX)%s\r\n", (unsigned long)addr,
-		          (unsigned long)(addr + len - 1u), (unsigned long)g.lo,
-		          (unsigned long)(g.hi - 1u), g.hint);
+		cli_error(sh, "nor: 0x%06lX..0x%06lX is outside 0x%06lX..0x%06lX%s\r\n",
+		          (unsigned long)addr, (unsigned long)(addr + len - 1u),
+		          (unsigned long)g.lo, (unsigned long)(g.hi - 1u), g.hint);
 		return -1;
 	}
 }
@@ -357,15 +357,36 @@ static int nor_admit(struct cli_instance *sh, enum nor_svc_op op, uint32_t addr,
 }
 
 /* Is a request a whole number of 4 KB sectors? */
-static int nor_arg_sectors(struct cli_instance *sh, const char *sub,
-                           uint32_t addr, uint32_t len)
+static int nor_arg_sectors(struct cli_instance *sh, uint32_t addr, uint32_t len)
 {
 	if (addr % NOR_SVC_ERASE_UNIT == 0u && len % NOR_SVC_ERASE_UNIT == 0u &&
 	    len != 0u && nor_svc_board.erase_unit == NOR_SVC_ERASE_UNIT)
 		return 0;
-	cli_error(sh, "nor: %s takes whole 4 KB sectors -- the address and the "
-	              "length must be multiples of 0x1000\r\n", sub);
+	cli_error(sh, "nor: address and length must be 4 KB multiples\r\n");
 	return -1;
+}
+
+struct nor_op_ctx {
+	struct cli_instance *sh;
+	uint32_t addr, len;
+	const uint8_t *data;
+	struct nor_svc_result r;
+	uint32_t ms;
+};
+
+/* The hold, then the report and the time: the one shape of erase and write. */
+static int nor_run(struct nor_op_ctx *c, const char *what, nor_svc_body_fn body)
+{
+	struct nor_svc_result h;
+	int rc;
+
+	memset(&h, 0, sizeof h);
+	nor_svc_board.hold(body, c, &h);
+	if (h.status != NOR_SVC_OK)
+		return nor_cmd_not_held(c->sh, what, c->addr, c->len, &h);
+	rc = nor_cmd_report(c->sh, what, c->addr, c->len, &c->r);
+	cli_print(c->sh, "%lu ms\r\n", (unsigned long)c->ms);
+	return rc;
 }
 
 /* ---- erase ---------------------------------------------------------------- */
@@ -383,18 +404,10 @@ static int nor_erase_tick(void *ctx, uint32_t done, uint32_t total)
 	struct cli_instance *sh = (struct cli_instance *)ctx;
 
 	if (total > NOR_TICK_EVERY && (done % NOR_TICK_EVERY) == 0u)
-		cli_print(sh, "erasing  : %lu / %lu B\r\n", (unsigned long)done,
+		cli_print(sh, "%lu/%lu B\r\n", (unsigned long)done,
 		          (unsigned long)total);
 	return cli_cancel_requested(sh) ? 1 : 0;
 }
-
-struct nor_op_ctx {
-	struct cli_instance *sh;
-	uint32_t addr, len;
-	const uint8_t *data;
-	struct nor_svc_result r;
-	uint32_t ms;
-};
 
 static void nor_erase_body(void *ctx, const struct nor_svc_ops *ops)
 {
@@ -404,13 +417,10 @@ static void nor_erase_body(void *ctx, const struct nor_svc_ops *ops)
 
 	/* The span lost, BEFORE it is lost: after a Ctrl+C the console drops
 	 * the rest of this command's output, so it has to be said first. */
-	cli_print(c->sh, "erasing  : 0x%06lX .. 0x%06lX (%lu KB, %lu sector(s))\r\n",
-	          (unsigned long)c->addr, (unsigned long)(c->addr + c->len - 1u),
-	          (unsigned long)(c->len >> 10),
-	          (unsigned long)(c->len / NOR_SVC_ERASE_UNIT));
-	if (nor_svc_board.erase_cancels && c->len > NOR_SVC_ERASE_UNIT)
-		cli_print(c->sh, "         Ctrl+C stops it between sectors; the "
-		              "result is in `dmesg`\r\n");
+	cli_print(c->sh, "erase 0x%06lX..0x%06lX%s\r\n", (unsigned long)c->addr,
+	          (unsigned long)(c->addr + c->len - 1u),
+	          (nor_svc_board.erase_cancels && c->len > NOR_SVC_ERASE_UNIT)
+	                  ? " (Ctrl+C stops it; result in dmesg)" : "");
 	t0 = (uint32_t)tx_time_get();
 	ops->erase(ops->dev, c->addr, c->len, &p, &c->r);
 	c->ms = (uint32_t)tx_time_get() - t0;
@@ -419,8 +429,6 @@ static void nor_erase_body(void *ctx, const struct nor_svc_ops *ops)
 static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nor_op_ctx c;
-	struct nor_svc_result h;
-	int rc;
 
 	(void)argc;
 	memset(&c, 0, sizeof c);
@@ -431,22 +439,15 @@ static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "nor: bad length\r\n");
 		return 1;
 	}
-	if (nor_arg_sectors(sh, "erase", c.addr, c.len) ||
-	    nor_arg_fits(sh, c.addr, c.len) ||
+	if (nor_arg_sectors(sh, c.addr, c.len) || nor_arg_fits(sh, c.addr, c.len) ||
 	    nor_admit(sh, NOR_SVC_OP_ERASE, c.addr, c.len))
 		return 1;
-
-	memset(&h, 0, sizeof h);
-	nor_svc_board.hold(nor_erase_body, &c, &h);
-	if (h.status != NOR_SVC_OK)
-		return nor_cmd_not_held(sh, "erase", c.addr, c.len, &h);
-	rc = nor_cmd_report(sh, "erase", c.addr, c.len, &c.r);
-	cli_print(sh, "elapsed  : %lu ms\r\n", (unsigned long)c.ms);
-	return rc;
+	return nor_run(&c, "erase", nor_erase_body);
 }
 
 /* ---- write ---------------------------------------------------------------- */
 
+#if NOR_SVC_HAS_WRITE
 static int nor_hex_nibble(char ch)
 {
 	if (ch >= '0' && ch <= '9') return ch - '0';
@@ -479,8 +480,8 @@ static void nor_write_body(void *ctx, const struct nor_svc_ops *ops)
 	struct nor_op_ctx *c = (struct nor_op_ctx *)ctx;
 	uint32_t t0;
 
-	cli_print(c->sh, "program  : 0x%06lX + %lu B (bits only clear -- erase "
-	              "first)\r\n", (unsigned long)c->addr, (unsigned long)c->len);
+	cli_print(c->sh, "write 0x%06lX+%lu\r\n", (unsigned long)c->addr,
+	          (unsigned long)c->len);
 	t0 = (uint32_t)tx_time_get();
 	ops->program(ops->dev, c->addr, c->data, c->len, &c->r);
 	c->ms = (uint32_t)tx_time_get() - t0;
@@ -490,12 +491,9 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 {
 	uint8_t data[NOR_SVC_WRITE_MAX];
 	struct nor_op_ctx c;
-	struct nor_svc_result h;
-	int n, rc;
+	int n;
 
 	(void)argc;
-	if (nor_absent(sh, "write", nor_svc_board.no_write))
-		return 1;
 	memset(&c, 0, sizeof c);
 	c.sh = sh;
 	c.data = data;
@@ -503,26 +501,28 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	n = nor_hex_bytes(argv[2], data, sizeof data);
 	if (n < 0) {
-		cli_error(sh, "nor: bad hex data (an even number of hex digits, "
-		              "1 .. %lu B)\r\n", (unsigned long)sizeof data);
+		cli_error(sh, "nor: bad hex (even digits, 1..%lu B)\r\n",
+		          (unsigned long)sizeof data);
 		return 1;
 	}
 	c.len = (uint32_t)n;
 	if (nor_arg_fits(sh, c.addr, c.len) ||
 	    nor_admit(sh, NOR_SVC_OP_WRITE, c.addr, c.len))
 		return 1;
-
-	memset(&h, 0, sizeof h);
-	nor_svc_board.hold(nor_write_body, &c, &h);
-	if (h.status != NOR_SVC_OK)
-		return nor_cmd_not_held(sh, "write", c.addr, c.len, &h);
-	rc = nor_cmd_report(sh, "write", c.addr, c.len, &c.r);
-	cli_print(sh, "elapsed  : %lu ms\r\n", (unsigned long)c.ms);
-	return rc;
+	return nor_run(&c, "write", nor_write_body);
 }
+#else
+static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	return nor_absent(sh, "write", NOR_SVC_NO_WRITE_SAYS);
+}
+#endif
 
 /* ---- test ----------------------------------------------------------------- */
 
+#if NOR_SVC_HAS_TEST
 /*
  * The acceptance test, on one 4 KB sector that reads blank (issues #194, #214,
  * #249, #250): erase -> blank -> a counting pattern page by page, read back
@@ -543,7 +543,8 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
  *
  * Ctrl+C is asked before every page (decided for issue #250).  Cancelled or
  * failed once anything was erased, the sector may be left programmed, and the
- * next test refuses it until it is erased; the line says so.
+ * next test refuses it until it is erased; the line says so.  The reads are
+ * nor_svc_board_read(), inside the hold.
  */
 static const struct { uint16_t off, len; } nor_partial[] = {
 	{   0u,   1u }, {   1u,   1u }, {   2u,   1u }, {   3u,   1u },  /* statuses */
@@ -604,8 +605,19 @@ static int nor_t_op(struct nor_test_ctx *t, const struct nor_svc_result *r,
 		return 0;
 	t->end = NOR_T_FAIL;
 	t->step = step;
-	cli_error(t->sh, "nor: FAIL -- %s: %s %s\r\n", step,
+	cli_error(t->sh, "nor: FAIL %s: %s %s\r\n", step,
 	          nor_status_word(r->status), nor_why(r, ""));
+	return 1;
+}
+
+/* A byte that is not what it should be: FAIL, at its address. */
+static int nor_t_bad(struct nor_test_ctx *t, const char *step, uint32_t off,
+                     uint8_t want)
+{
+	t->end = NOR_T_FAIL;
+	t->step = step;
+	cli_error(t->sh, "nor: FAIL %s: 0x%06lX=0x%02X, want 0x%02X\r\n", step,
+	          (unsigned long)(t->addr + off), t->buf[off % NOR_CHUNK], want);
 	return 1;
 }
 
@@ -614,7 +626,7 @@ static int nor_t_read(struct nor_test_ctx *t, uint32_t off, const char *step)
 	struct nor_svc_result r;
 
 	memset(&r, 0, sizeof r);
-	t->ops->read(t->ops->dev, t->addr + off, t->buf, NOR_CHUNK, &r);
+	nor_svc_board_read(t->addr + off, t->buf, NOR_CHUNK, &r);
 	return nor_t_op(t, &r, step);
 }
 
@@ -639,15 +651,9 @@ static int nor_t_blank(struct nor_test_ctx *t, const char *step)
 		for (i = 0u; i < NOR_CHUNK; i++) {
 			if (t->buf[i] == 0xFFu)
 				continue;
-			if (t->erased) {
-				t->end = NOR_T_FAIL;
-				t->step = step;
-				cli_error(t->sh, "nor: FAIL -- %s: 0x%06lX = 0x%02X, "
-				              "expected 0xFF\r\n", step,
-				          (unsigned long)(t->addr + off + i), t->buf[i]);
-			} else {
-				t->end = NOR_T_NOT_BLANK;
-			}
+			if (t->erased)
+				return nor_t_bad(t, step, off + i, 0xFFu);
+			t->end = NOR_T_NOT_BLANK;
 			return 1;
 		}
 	}
@@ -668,36 +674,24 @@ static int nor_t_erase_blank(struct nor_test_ctx *t, const char *step)
 
 static int nor_t_pattern(struct nor_test_ctx *t)
 {
-	uint32_t off, i, t0;
+	uint32_t off, i;
 
 	for (off = 0u; off < NOR_SVC_ERASE_UNIT; off += NOR_CHUNK) {
 		if (nor_t_cancel(t))
 			return 1;
 		for (i = 0u; i < NOR_CHUNK; i++)
 			t->buf[i] = (uint8_t)(i ^ (off >> 8));
-		if (nor_t_program(t, off, t->buf, NOR_CHUNK, "pattern program"))
+		if (nor_t_program(t, off, t->buf, NOR_CHUNK, "pattern"))
 			return 1;
 	}
-	t0 = (uint32_t)tx_time_get();
 	for (off = 0u; off < NOR_SVC_ERASE_UNIT; off += NOR_CHUNK) {
-		if (nor_t_cancel(t) || nor_t_read(t, off, "pattern read"))
+		if (nor_t_cancel(t) || nor_t_read(t, off, "pattern"))
 			return 1;
-		for (i = 0u; i < NOR_CHUNK; i++) {
-			uint8_t want = (uint8_t)(i ^ (off >> 8));
-
-			if (t->buf[i] != want) {
-				t->end = NOR_T_FAIL;
-				t->step = "pattern compare";
-				cli_error(t->sh, "nor: FAIL -- 0x%06lX read 0x%02X, want "
-				              "0x%02X\r\n", (unsigned long)(t->addr + off + i),
-				          t->buf[i], want);
-				return 1;
-			}
-		}
+		for (i = 0u; i < NOR_CHUNK; i++)
+			if (t->buf[i] != (uint8_t)(i ^ (off >> 8)))
+				return nor_t_bad(t, "pattern", off + i,
+				                 (uint8_t)(i ^ (off >> 8)));
 	}
-	cli_print(t->sh, "pattern  : 4096 B programmed, read back and compared "
-	              "(%lu ms to read)\r\n",
-	          (unsigned long)((uint32_t)tx_time_get() - t0));
 	return 0;
 }
 
@@ -715,30 +709,17 @@ static int nor_t_partial(struct nor_test_ctx *t)
 		 * pages are read back into it (one 256 B area on the stack). */
 		for (i = 0u; i < len; i++)
 			t->buf[i] = nor_partial_byte(k, i);
-		if (nor_t_program(t, off, t->buf, len, "partial write"))
+		if (nor_t_program(t, off, t->buf, len, "partial"))
 			return 1;
 		for (at = 0u; at < NOR_PARTIAL_SPAN; at += NOR_CHUNK) {
-			if (nor_t_read(t, at, "partial read"))
+			if (nor_t_read(t, at, "partial"))
 				return 1;
-			for (i = 0u; i < NOR_CHUNK; i++) {
-				uint8_t want = nor_partial_want(k, at + i);
-
-				if (t->buf[i] != want) {
-					t->end = NOR_T_FAIL;
-					t->step = "partial compare";
-					cli_error(t->sh, "nor: FAIL -- after partial write %u "
-					              "(%lu B at +%lu): 0x%06lX read 0x%02X, want "
-					              "0x%02X\r\n", k, (unsigned long)len,
-					          (unsigned long)off,
-					          (unsigned long)(t->addr + at + i), t->buf[i],
-					          want);
-					return 1;
-				}
-			}
+			for (i = 0u; i < NOR_CHUNK; i++)
+				if (t->buf[i] != nor_partial_want(k, at + i))
+					return nor_t_bad(t, "partial", at + i,
+					                 nor_partial_want(k, at + i));
 		}
 	}
-	cli_print(t->sh, "partial  : %u writes into 2 pages, both pages compared "
-	              "after each\r\n", (unsigned)NOR_PARTIAL_N);
 	return 0;
 }
 
@@ -750,15 +731,14 @@ static int nor_t_overwrite(struct nor_test_ctx *t)
 
 	for (i = 0u; i < 2u; i++) {
 		if (nor_t_cancel(t) ||
-		    nor_t_program(t, NOR_OVERWRITE_AT, &seq[i], 1u, "overwrite program") ||
-		    nor_t_read(t, 0u, "overwrite read"))
+		    nor_t_program(t, NOR_OVERWRITE_AT, &seq[i], 1u, "overwrite") ||
+		    nor_t_read(t, 0u, "overwrite"))
 			return 1;
 		got[i] = t->buf[NOR_OVERWRITE_AT];
 	}
-	cli_print(t->sh, "overwrite: 0xFF -> write 0xFE -> read 0x%02X -> write 0xFC "
-	              "-> read 0x%02X%s (observed, not judged)\r\n", got[0], got[1],
-	          (got[0] == 0xFEu && got[1] == 0xFCu) ? "  accepted"
-	                                               : "  NOT accepted");
+	cli_print(t->sh, "overwrite FE->%02X FC->%02X: %s (not judged)\r\n", got[0],
+	          got[1], (got[0] == 0xFEu && got[1] == 0xFCu) ? "accepted"
+	                                                       : "NOT accepted");
 	return 0;
 }
 
@@ -767,20 +747,11 @@ static void nor_test_body(void *ctx, const struct nor_svc_ops *ops)
 	struct nor_test_ctx *t = (struct nor_test_ctx *)ctx;
 
 	t->ops = ops;
-	if (ops->read == NULL) {             /* the table and the ops disagree */
-		t->end = NOR_T_FAIL;
-		t->step = "no read";
-		return;
-	}
 	/* [!] Before anything is erased: a test is not a way to destroy data. */
-	if (nor_t_blank(t, "blank before"))
-		return;
-	cli_print(t->sh, "blank    : 4096 B read 0xFF before the test\r\n");
-	if (nor_t_erase_blank(t, "erase") || nor_t_pattern(t) ||
-	    nor_t_erase_blank(t, "erase") || nor_t_partial(t) ||
+	if (nor_t_blank(t, "blank") || nor_t_erase_blank(t, "erase") ||
+	    nor_t_pattern(t) || nor_t_erase_blank(t, "erase") || nor_t_partial(t) ||
 	    nor_t_overwrite(t) || nor_t_erase_blank(t, "final erase"))
 		return;
-	cli_print(t->sh, "final    : erased and read blank (left as found)\r\n");
 	t->end = NOR_T_PASS;
 }
 
@@ -790,18 +761,16 @@ static int cmd_nor_test(struct cli_instance *sh, int argc, char **argv)
 	struct nor_svc_result h;
 
 	(void)argc;
-	if (nor_absent(sh, "test", nor_svc_board.no_test))
-		return 1;
 	memset(&t, 0, sizeof t);
 	t.sh = sh;
 	if (nor_arg_addr(sh, argv[1], &t.addr))
 		return 1;
-	if (nor_arg_sectors(sh, "test", t.addr, NOR_SVC_ERASE_UNIT) ||
+	if (nor_arg_sectors(sh, t.addr, NOR_SVC_ERASE_UNIT) ||
 	    nor_admit(sh, NOR_SVC_OP_ERASE, t.addr, NOR_SVC_ERASE_UNIT))
 		return 1;
 
-	cli_print(sh, "nor test : 4 KB at 0x%06lX (must read blank; it is erased, "
-	              "written and left blank)\r\n", (unsigned long)t.addr);
+	cli_print(sh, "test 0x%06lX: erases and writes 4 KB\r\n",
+	          (unsigned long)t.addr);
 	memset(&h, 0, sizeof h);
 	nor_svc_board.hold(nor_test_body, &t, &h);
 	if (h.status != NOR_SVC_OK)
@@ -809,49 +778,53 @@ static int cmd_nor_test(struct cli_instance *sh, int argc, char **argv)
 
 	switch (t.end) {
 	case NOR_T_PASS:
-		log_write(LOG_LEVEL_INF, "nor", "test 0x%lx: pass", (unsigned long)t.addr);
-		cli_print(sh, "nor: PASS\r\n");
+		log_write(LOG_LEVEL_INF, "nor", "test %lx pass", (unsigned long)t.addr);
+		cli_print(sh, "nor: PASS (left blank)\r\n");
 		return 0;
 	case NOR_T_NOT_BLANK:
-		log_write(LOG_LEVEL_WRN, "nor", "test 0x%lx: not blank, nothing erased",
+		log_write(LOG_LEVEL_WRN, "nor", "test %lx not blank", (unsigned long)t.addr);
+		cli_error(sh, "nor: 0x%06lX not blank, not tested; `nor erase 0x%06lX "
+		              "4096` first\r\n", (unsigned long)t.addr,
 		          (unsigned long)t.addr);
-		cli_error(sh, "nor: 4 KB at 0x%06lX is not blank -- not testing over "
-		              "data; `nor erase 0x%06lX 4096` first if it is scratch\r\n",
-		          (unsigned long)t.addr, (unsigned long)t.addr);
 		return 1;
 	case NOR_T_CANCEL:
 	case NOR_T_FAIL:
 	default:
-		log_write(LOG_LEVEL_WRN, "nor", "test 0x%lx: %s at %s%s",
-		          (unsigned long)t.addr,
-		          t.end == NOR_T_CANCEL ? "cancelled" : "fail",
-		          t.step ? t.step : "-", t.erased ? ", may not be blank" : "");
-		if (t.end == NOR_T_CANCEL)
-			cli_error(sh, "nor: cancelled\r\n");
+		log_write(LOG_LEVEL_WRN, "nor", "test %lx %s %s%s", (unsigned long)t.addr,
+		          t.end == NOR_T_CANCEL ? "cancelled" : "FAIL",
+		          t.step ? t.step : "-", t.erased ? " dirty" : "");
 		if (t.erased)
-			cli_error(sh, "nor: the 4 KB at 0x%06lX may not be blank now -- "
-			              "`nor erase 0x%06lX 4096` before the next `nor test`\r\n",
+			cli_error(sh, "nor: %s; 0x%06lX may be dirty: `nor erase 0x%06lX "
+			              "4096`\r\n", t.end == NOR_T_CANCEL ? "cancelled" : "FAIL",
 			          (unsigned long)t.addr, (unsigned long)t.addr);
 		else
-			cli_error(sh, "nor: nothing was erased\r\n");
+			cli_error(sh, "nor: %s; nothing erased\r\n",
+			          t.end == NOR_T_CANCEL ? "cancelled" : "FAIL");
 		return 1;
 	}
 }
+#else
+static int cmd_nor_test(struct cli_instance *sh, int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	return nor_absent(sh, "test", NOR_SVC_NO_TEST_SAYS);
+}
+#endif /* NOR_SVC_HAS_TEST */
 
 #endif /* CLI_ENABLE_DANGEROUS_CMDS */
 
 CLI_SUBCMD_SET_CREATE(nor_subcmds,
-	CLI_CMD_ARG(info, NULL, "the part, its state and geometry, the board's lines",
-	            cmd_nor_info, 1, 0),
-	CLI_CMD_ARG_USAGE(read, NULL, "hexdump 1 .. 1024 B (default 64)",
-	                  "<addr> [len]", cmd_nor_read, 2, 1),
+	CLI_CMD_ARG(info, NULL, "part, state, id", cmd_nor_info, 1, 0),
+	CLI_CMD_ARG_USAGE(read, NULL, "hexdump 1..1024 B", "<addr> [len]",
+	                  cmd_nor_read, 2, 1),
 #if CLI_ENABLE_DANGEROUS_CMDS
-	CLI_CMD_ARG_USAGE(erase, NULL, "erase whole 4 KB sectors (both 4 KB aligned)",
-	                  "<addr> <len>", cmd_nor_erase, 3, 0),
-	CLI_CMD_ARG_USAGE(write, NULL, "program 1 .. 256 B given in hex (erase first)",
-	                  "<addr> <hex>", cmd_nor_write, 3, 0),
-	CLI_CMD_ARG_USAGE(test, NULL, "acceptance test on one blank 4 KB sector",
-	                  "<addr>", cmd_nor_test, 2, 0),
+	CLI_CMD_ARG_USAGE(erase, NULL, "erase 4 KB sectors", "<addr> <len>",
+	                  cmd_nor_erase, 3, 0),
+	CLI_CMD_ARG_USAGE(write, NULL, "program 1..256 B of hex", "<addr> <hex>",
+	                  cmd_nor_write, 3, 0),
+	CLI_CMD_ARG_USAGE(test, NULL, "test a blank 4 KB sector", "<addr>",
+	                  cmd_nor_test, 2, 0),
 #endif
 	NOR_SVC_BOARD_SUBCMDS
 	CLI_SUBCMD_SET_END);

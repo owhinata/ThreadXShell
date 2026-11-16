@@ -95,7 +95,7 @@
  * (issue #85).  It is also the highest address in the part, so its address bits
  * differ from word 0 in more places than 0xB00000 did, and its content is known.
  */
-/* The same rule cmd_nor.c states: the layout is declared in board.cmake and
+/* The same rule cmds/cmd_nor_board.c states: the layout is declared in board.cmake and
  * nowhere else, so a tree that lost the compile definitions must not get a
  * plausible-looking default here.  Without this the failure is still a build
  * error -- these appear in _Static_assert expressions -- but it names the

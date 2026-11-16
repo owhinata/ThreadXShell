@@ -122,12 +122,25 @@ static void op_program(void *d, uint32_t addr, const uint8_t *data, uint32_t len
 	r->done = len;
 }
 
-static void op_read(void *d, uint32_t addr, uint8_t *buf, uint32_t len,
-                    struct nor_svc_result *r)
+/* The board's one read: `nor read` outside the hold, the test's inside it.
+ * Inside, it is counted and can be made to fail; a read the test makes
+ * outside the hold is counted apart (in_test, set by run()). */
+static int in_test;
+#if NOR_SVC_HAS_READ
+void nor_svc_board_read(uint32_t addr, uint8_t *buf, uint32_t len,
+                        struct nor_svc_result *r)
 {
-	int noop, fail = hit(OP_READ, &noop);
+	int noop, fail;
 
-	(void)d;
+	if (!held) {
+		read_calls++;
+		if (in_test)
+			unheld[OP_READ]++;
+		memcpy(buf, dev + addr, len);
+		r->status = NOR_SVC_OK;
+		return;
+	}
+	fail = hit(OP_READ, &noop);
 	(void)noop;
 	if (fail) {
 		r->status = NOR_SVC_IO;
@@ -137,8 +150,10 @@ static void op_read(void *d, uint32_t addr, uint8_t *buf, uint32_t len,
 	memcpy(buf, dev + addr, len);
 	r->status = NOR_SVC_OK;
 }
+#endif
 
-static const struct nor_svc_ops ops = { NULL, op_erase, op_program, op_read };
+static const struct nor_svc_ops ops = { .dev = NULL, .erase = op_erase,
+                                        .program = op_program };
 
 static void b_hold(nor_svc_body_fn body, void *ctx, struct nor_svc_result *r)
 {
@@ -176,13 +191,6 @@ static void b_range(enum nor_svc_op op, uint32_t addr, uint32_t len,
 	out->hint = " -- the fake's hint";
 }
 
-UNUSED_OK static void b_read(uint32_t addr, uint8_t *buf, uint32_t len, struct nor_svc_result *r)
-{
-	read_calls++;
-	memcpy(buf, dev + addr, len);
-	r->status = NOR_SVC_OK;
-}
-
 static int b_info(nor_svc_common_fn common, nor_svc_write_fn write, void *ctx,
                   struct nor_svc_result *r)
 {
@@ -207,12 +215,8 @@ const struct nor_svc_board nor_svc_board = {
 	.page = 256u,
 #ifdef NOR_TEST_SHAPE_ABSENT
 	.erase_cancels = 0u,
-	.no_read = "the fake's read hint", .no_write = "", .no_test = "use X",
-	.read = NULL,
 #else
 	.erase_cancels = 1u,
-	.no_read = NULL, .no_write = NULL, .no_test = NULL,
-	.read = b_read,
 #endif
 	.info = b_info, .range = b_range, .hold = b_hold,
 };
@@ -342,7 +346,9 @@ static int run(struct cli_instance *sh, const char *line)
 	s = nor_sub(argv[0]);
 	if (s == NULL)
 		return -100;
+	in_test = strcmp(argv[0], "test") == 0;
 	rc = s->handler(sh, argc, argv);
+	in_test = 0;
 	/* [!] #249: nothing reaches the device without the hold, in any run */
 	check(unheld[OP_ERASE] == 0 && unheld[OP_WRITE] == 0 && unheld[OP_READ] == 0,
 	      "no erase, program or test read without the hold", line);
@@ -391,7 +397,7 @@ int main(void)
 	check(nor_sub("probe") != NULL, "the board's own subcommand is in it", "nor");
 
 	reset();
-	check(run(&usb, "info") == 0 && info_calls == 1 && has("NOR: fake part") &&
+	check(run(&usb, "info") == 0 && info_calls == 1 && has("NOR: fake part, 1 MB, erase 4096 B, page 256 B\r\n") &&
 	      has("  jedec   : 01 02 03\r\n") && has("  board   : line"),
 	      "info: shared lines, then the board's", "info");
 
@@ -407,9 +413,9 @@ int main(void)
 		static const char *const lines[] = { "read 0x20000", "write 0x20000 00",
 		                                     "test 0x20000" };
 		static const char *const says[] = {
-			"no `nor read` on this board -- the fake's read hint\r\n",
-			"no `nor write` on this board\r\n",
-			"no `nor test` on this board -- use X\r\n" };
+			"nor: no `read` on this board; the fake's read hint\r\n",
+			"nor: no `write` on this board\r\n",
+			"nor: no `test` on this board; use X\r\n" };
 
 		for (unsigned i = 0; i < 3; i++) {
 			reset();
@@ -427,9 +433,9 @@ int main(void)
 	return failures ? 1 : 0;
 # else
 	/* ---- the arguments: nothing of the board is asked ---- */
-	refused_args("erase 0x20001 4096", "whole 4 KB sectors");
-	refused_args("erase 0x20000 4095", "whole 4 KB sectors");
-	refused_args("erase 0x20000 0", "whole 4 KB sectors");
+	refused_args("erase 0x20001 4096", "4 KB multiples");
+	refused_args("erase 0x20000 4095", "4 KB multiples");
+	refused_args("erase 0x20000 0", "4 KB multiples");
 	refused_args("erase 0x20000 x", "bad length");
 	refused_args("erase 0x100000 4096", "bad address");
 	refused_args("erase 0xFFFFF000 4096", "bad address");
@@ -452,10 +458,10 @@ int main(void)
 		check(run(&usb, line) == 0 && calls[OP_WRITE] == 1 && last_len == 256u,
 		      "256 B is one program", "write 256 B");
 	}
-	refused_args("test 0x20010", "whole 4 KB sectors");
+	refused_args("test 0x20010", "4 KB multiples");
 	refused_args("test 0x100000", "bad address");
-	refused_args("read 0x20000 0", "1 .. 1024");
-	refused_args("read 0x20000 1025", "1 .. 1024");
+	refused_args("read 0x20000 0", "1..1024");
+	refused_args("read 0x20000 1025", "1..1024");
 	refused_args("read 0xFFFFF 2", "past the end");
 	refused_args("read 0x100000", "bad address");
 	reset();
@@ -464,20 +470,20 @@ int main(void)
 
 	/* ---- the range, then the console ---- */
 	refused_before_hold(&usb, "erase 0xF000 0x2000",
-	                    "0x00F000 .. 0x010FFF is in the fake kv (0x000000 .. "
-	                    "0x00FFFF) -- the fake's hint");
-	refused_before_hold(&usb, "write 0xFFFF 00", "is in the fake kv");
-	refused_before_hold(&usb, "test 0", "is in the fake kv");
+	                    "nor: 0x00F000..0x010FFF hits the fake kv "
+	                    "0x000000..0x00FFFF -- the fake's hint\r\n");
+	refused_before_hold(&usb, "write 0xFFFF 00", "hits the fake kv");
+	refused_before_hold(&usb, "test 0", "hits the fake kv");
 	{
 		static const char *const lines[] = { "erase 0x20000 4096", "write 0x20000 00",
 		                                     "test 0x20000" };
 
 		for (unsigned i = 0; i < 3; i++) {
-			refused_before_hold(&usb_job, lines[i], "this is a background job");
+			refused_before_hold(&usb_job, lines[i], "foreground, not a job");
 #  if SHELL_HAS_NET_TTY
-			refused_before_hold(&telnet, lines[i], "this is the telnet console");
+			refused_before_hold(&telnet, lines[i], "only in the USB foreground, not telnet\r\n");
 			refused_before_hold(&telnet_job, lines[i],
-			                    "this is a background job of the telnet console");
+			                    "not a telnet job\r\n");
 #  else
 			reset();
 			check(run(&telnet, lines[i]) != 1 || hold_calls == 1,
@@ -501,14 +507,14 @@ int main(void)
 	rc = run(&usb, "erase 0x20000 0x40000");
 	check(rc == 0 && calls[OP_ERASE] == 1 && last_addr == 0x20000u &&
 	      last_len == 0x40000u, "one erase of exactly the range", "erase");
-	check(has("erasing  : 0x020000 .. 0x05FFFF (256 KB, 64 sector(s))") &&
-	      has("Ctrl+C stops it"), "the span lost is said first", "erase");
-	check(ticks == 64 && strstr(logline, "erase ok 0x20000+262144") != NULL,
+	check(has("erase 0x020000..0x05FFFF (Ctrl+C stops it; result in dmesg)\r\n"),
+	      "the span lost is said first", "erase");
+	check(ticks == 64 && strstr(logline, "erase ok 20000+262144 262144/0") != NULL,
 	      "a tick per sector, one log line", "erase");
 	reset();
 	cancel_at = 3;
 	rc = run(&usb, "erase 0x20000 0x40000");
-	check(rc == 1 && has("cancelled after 12288 B of 262144") &&
+	check(rc == 1 && has("nor: cancelled at 12288/262144 B") &&
 	      strstr(logline, "cancelled") != NULL, "Ctrl+C: said and logged", "erase");
 	reset();
 	fail_op = OP_ERASE;
@@ -528,7 +534,7 @@ int main(void)
 	blank(0x20000, 0x1000);
 	dev[0x20FFF] = 0x00;
 	rc = run(&usb, "test 0x20000");
-	check(rc == 1 && has("is not blank") && has("`nor erase 0x020000 4096` first") &&
+	check(rc == 1 && has("nor: 0x020000 not blank, not tested; `nor erase 0x020000 4096` first") &&
 	      calls[OP_ERASE] == 0 && calls[OP_WRITE] == 0 && dev[0x20FFF] == 0x00,
 	      "not blank: refused before anything is erased", "test");
 	reset();
@@ -538,9 +544,9 @@ int main(void)
 	check(rc == 0 && has("nor: PASS") && calls[OP_ERASE] == 3 &&
 	      is_blank(0x20000, 0x1000) && dev[0x21000] == 0x00,
 	      "a pass erases three times and leaves only its sector blank", "test");
-	check(has("overwrite: 0xFF -> write 0xFE -> read 0xFE -> write 0xFC -> read 0xFC"),
+	check(has("overwrite FE->FE FC->FC: accepted (not judged)"),
 	      "the overwrite is observed", "test");
-	check(strstr(logline, "test 0x20000: pass") != NULL, "logged", "test");
+	check(strstr(logline, "test 20000 pass") != NULL, "logged", "test");
 	{
 		int base[OP_N], asks;
 
@@ -554,8 +560,9 @@ int main(void)
 				rc = run(&usb, "test 0x20000");
 				check(rc == 1 && !has("PASS"), "a failure point: no PASS", "test");
 				/* the first 16 reads are the blank check before any erase */
-				check(has(o == OP_READ && k <= 16 ? "nothing was erased"
-				                                  : "before the next `nor test`"),
+				check(has(o == OP_READ && k <= 16 ? "nor: FAIL; nothing erased"
+				                                  : "nor: FAIL; 0x020000 may be dirty: "
+				                                    "`nor erase 0x020000 4096`"),
 				      "a failure point: the way out", "test");
 			}
 		/* a program or erase that does nothing (but the two observed

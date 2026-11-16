@@ -12,6 +12,20 @@
 #define NOR_SVC_HAS_DEVICE 1
 #define NOR_SVC_HELP "the test's NOR"
 
+/* NOR_TEST_SHAPE_ABSENT: a board with none of the three. */
+#ifdef NOR_TEST_SHAPE_ABSENT
+#define NOR_SVC_HAS_READ  0
+#define NOR_SVC_HAS_WRITE 0
+#define NOR_SVC_HAS_TEST  0
+#define NOR_SVC_NO_READ_SAYS  "the fake's read hint"
+#define NOR_SVC_NO_WRITE_SAYS ""
+#define NOR_SVC_NO_TEST_SAYS  "use X"
+#else
+#define NOR_SVC_HAS_READ  1
+#define NOR_SVC_HAS_WRITE 1
+#define NOR_SVC_HAS_TEST  1
+#endif
+
 #define NOR_SVC_BOARD_DECLS                                                    \
 	int nor_test_probe(struct cli_instance *sh, int argc, char **argv);
 

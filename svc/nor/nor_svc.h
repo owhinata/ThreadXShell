@@ -32,15 +32,42 @@
  * and on grove-vision-ai-v2 it runs with the memory-mapped window down: the
  * shared one only prints and asks for Ctrl+C.
  *
+ * WHAT A BOARD DOES NOT HAVE IS DECIDED AT COMPILE TIME, IN ONE PLACE: the
+ * board's svc/nor_svc_config.h says NOR_SVC_HAS_READ / _WRITE / _TEST (0 or
+ * 1) and, for each 0, the one line said instead (NOR_SVC_NO_<SUB>_SAYS).  A
+ * subcommand a board does not have is answered "not on this board" and its
+ * code is not compiled, so it is not in that board's image (issue #250: the
+ * test came out of wio-lite-ai's internal flash).  The read a board has is the
+ * fixed name nor_svc_board_read(); without NOR_SVC_HAS_READ that name is
+ * declared here as something else, so a board that still defines it does not
+ * compile, and a board that has it and does not define it does not link.  The
+ * test reads through it too (NOR_SVC_HAS_TEST needs NOR_SVC_HAS_READ).
+ *
  * Every string an adapter returns (why, names, hints) is a string literal or
  * lives as long as the image, so it outlives the call and needs no copy.
- * Freestanding: no HAL, no board header, no tx_api.h.
+ * Freestanding: no HAL, no tx_api.h; the one board header is the board's
+ * properties, svc/nor_svc_config.h (macros only).
  */
 #ifndef NOR_SVC_H
 #define NOR_SVC_H
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include "nor_svc_config.h"   /* the board says what it has */
+
+#if !defined(NOR_SVC_HAS_READ) || !defined(NOR_SVC_HAS_WRITE) || \
+    !defined(NOR_SVC_HAS_TEST)
+#error "nor_svc_config.h must define NOR_SVC_HAS_READ, NOR_SVC_HAS_WRITE and NOR_SVC_HAS_TEST"
+#endif
+#if (!NOR_SVC_HAS_READ && !defined(NOR_SVC_NO_READ_SAYS)) || \
+    (!NOR_SVC_HAS_WRITE && !defined(NOR_SVC_NO_WRITE_SAYS)) || \
+    (!NOR_SVC_HAS_TEST && !defined(NOR_SVC_NO_TEST_SAYS))
+#error "nor_svc_config.h must say NOR_SVC_NO_<SUB>_SAYS for each subcommand it does not have"
+#endif
+#if NOR_SVC_HAS_TEST && !NOR_SVC_HAS_READ
+#error "the test reads through nor_svc_board_read(): NOR_SVC_HAS_TEST needs NOR_SVC_HAS_READ"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -114,9 +141,6 @@ struct nor_svc_ops {
 	              const struct nor_svc_progress *p, struct nor_svc_result *r);
 	void (*program)(void *dev, uint32_t addr, const uint8_t *data,
 	                uint32_t len, struct nor_svc_result *r);
-	/** The test's reads, under the hold; NULL on a board without a test. */
-	void (*read)(void *dev, uint32_t addr, uint8_t *buf, uint32_t len,
-	             struct nor_svc_result *r);
 };
 
 typedef void (*nor_svc_body_fn)(void *ctx, const struct nor_svc_ops *ops);
@@ -166,11 +190,6 @@ struct nor_svc_board {
 	uint32_t page;
 	/** The erase calls the progress function after each 4 KB. */
 	uint8_t erase_cancels;
-	/** NULL: the board has the subcommand.  Otherwise it has not, and the
-	 *  string ("" for nothing) is said after "no `nor <sub>` on this board". */
-	const char *no_read;
-	const char *no_write;
-	const char *no_test;
 	/**
 	 * `nor info`: sample everything once, then call @p common with the shared
 	 * values and write the board's own lines.  @return 0; or -1 after a
@@ -178,9 +197,6 @@ struct nor_svc_board {
 	 */
 	int (*info)(nor_svc_common_fn common, nor_svc_write_fn write, void *ctx,
 	            struct nor_svc_result *r);
-	/** `nor read`, with no hold (NULL with no_read). */
-	void (*read)(uint32_t addr, uint8_t *buf, uint32_t len,
-	             struct nor_svc_result *r);
 	/** Is [addr, addr+len) one the board refuses?  A pure function; the
 	 *  board's operations ask again.  @p len is not 0 and the range is on
 	 *  the device. */
@@ -191,6 +207,18 @@ struct nor_svc_board {
 };
 
 extern const struct nor_svc_board nor_svc_board;
+
+#if NOR_SVC_HAS_READ
+/** `nor read` (no hold) and, with NOR_SVC_HAS_TEST, the test's reads inside
+ *  the hold.  The board defines it. */
+void nor_svc_board_read(uint32_t addr, uint8_t *buf, uint32_t len,
+                        struct nor_svc_result *r);
+#else
+/* [!] No read on this board: the name is taken by something no board can
+ * define as a function, so a leftover definition is a compile error. */
+struct nor_svc_absent;
+extern const struct nor_svc_absent nor_svc_board_read;
+#endif
 
 #ifdef __cplusplus
 }

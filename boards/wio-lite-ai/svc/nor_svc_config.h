@@ -22,7 +22,19 @@
 #endif
 
 /** The `nor` line of the top-level `help`. */
-#define NOR_SVC_HELP "external NOR flash (OCTOSPI2 / W25Q128JV)"
+#define NOR_SVC_HELP "external NOR (W25Q128JV)"
+
+/*
+ * The shared subcommands this board has.  [!] NO `nor test` (issue #250, the
+ * user's decision): the acceptance test's code and words are not in this
+ * board's image, for its internal flash.  It answers "no `test` on this
+ * board".  The overwrite observation it carried lives on in the shared test,
+ * on f746g-disco.
+ */
+#define NOR_SVC_HAS_READ  1
+#define NOR_SVC_HAS_WRITE 1
+#define NOR_SVC_HAS_TEST  0
+#define NOR_SVC_NO_TEST_SAYS ""
 
 /** No subcommands of the board's own.  A name here that is also a shared
  *  subcommand would be silently shadowed; the board's host test refuses one. */

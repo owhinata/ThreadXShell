@@ -26,7 +26,7 @@
  *
  * There is no `nor read` (the flash is memory-mapped: `devmem dump` reads it
  * under a lease) and no `nor test` (every `nor write` reads back what it wrote
- * and compares it).
+ * and compares it); neither is compiled here (svc/nor_svc_config.h, #250).
  *
  * [!] AND "READ-ONLY" WAS ALREADY THE WRONG WORD FOR `info` AND `scan`, which
  * an adversarial review was right to say before any of this existed.  Neither
@@ -192,7 +192,7 @@ int nor_board_scan(struct cli_instance *sh, int argc, char **argv)
 	if (nor_cmd_enter(sh, &token) != 0)
 		return 1;
 
-	cli_print(sh, "scanning %lu B in %lu B steps; Ctrl+C to stop\r\n",
+	cli_print(sh, "scan %lu B by %lu B (Ctrl+C stops)\r\n",
 	          (unsigned long)NOR_SIZE, (unsigned long)SCAN_STEP);
 	cli_print(sh, "%-10s %-10s %10s  %s\r\n", "from", "to", "bytes", "partition");
 
@@ -253,7 +253,7 @@ int nor_board_scan(struct cli_instance *sh, int argc, char **argv)
 	if (stopped)
 		cli_print(sh, "stopped at 0x%08lx\r\n", (unsigned long)off);
 	if (truncated)
-		cli_print(sh, "[!] more than %lu extents; the rest were not printed\r\n",
+		cli_print(sh, "more than %lu extents; rest not printed\r\n",
 		          (unsigned long)SCAN_MAX_RECORDS);
 	cli_print(sh, "%lu extent(s), %lu B occupied of %lu B.\r\n",
 	          (unsigned long)records, (unsigned long)occupied,
@@ -261,8 +261,7 @@ int nor_board_scan(struct cli_instance *sh, int argc, char **argv)
 	/* [!] Said out loud: every byte was read, so a gap here means every byte of
 	 * it is 0xFF.  The one thing that remains indistinguishable from erased is
 	 * a sector somebody deliberately wrote 0xFF into. */
-	cli_print(sh, "every byte read; a gap is 0xFF throughout, which is also "
-	              "what a sector written all-0xFF looks like\r\n");
+	cli_print(sh, "every byte read; a gap is all 0xFF (or written 0xFF)\r\n");
 
 	(void)nor_release(token);
 	return stopped ? 1 : 0;
@@ -314,7 +313,7 @@ static int nor_board_info(nor_svc_common_fn common, nor_svc_write_fn write,
 	in.jedec_valid = r.jedec_valid;
 	memcpy(in.jedec, r.jedec, sizeof in.jedec);
 	in.jedec_note = r.jedec_valid ? "read before XIP"
-	                              : "unreadable; the vendor refuses once XIP is on";
+	                              : "unreadable under XIP";
 	if (common(ctx, &in) != 0)
 		return -1;
 
@@ -345,7 +344,7 @@ static int nor_board_info(nor_svc_common_fn common, nor_svc_write_fn write,
 	if (nor_line(write, ctx, "  probe   : 0x%08lx = 0x%08lx  %s\r\n",
 	             (unsigned long)r.probe_off, (unsigned long)r.probe_word,
 	             r.probe_hdr ? "(slot-header magic)"
-	                         : "(no slot-header magic -- observation only)") ||
+	                         : "(no slot-header magic)") ||
 	    /* [!] The observable for issue #86: this line used to be part of the
 	     * NPU's EPK wrapset, so `nn close` unwrapped it -- and unwrapping
 	     * disables. */
@@ -358,8 +357,8 @@ static int nor_board_info(nor_svc_common_fn common, nor_svc_write_fn write,
 	 * would describe the transition and not the mapping -- and a stale value
 	 * printed without comment is indistinguishable from a current one. */
 	if (!r.regs_sampled)
-		return (nor_line(write, ctx, "  scu xip : 0x%08lx -> -- (window down; "
-		                 "registers not sampled)\r\n",
+		return (nor_line(write, ctx, "  scu xip : 0x%08lx -> -- (window down, "
+		                 "not sampled)\r\n",
 		                 (unsigned long)r.scu_xip_before) ||
 		        nor_line(write, ctx, "  mpu     : not sampled in state '%s'\r\n",
 		                 nor_state_name(r.state))) ? -1 : 0;
@@ -409,7 +408,7 @@ static const char *nor_busy_why(void)
 	if (who != NULL)
 		return who;
 	if (r.readers != 0u)
-		return "readers hold the window (`nor info` lists them)";
+		return "readers hold the window (nor info)";
 	/* In the decision's own order: readers first, then the camera
 	 * (nor_reserve_decide()) -- and the camera ONLY FROM XIP, the one state
 	 * where nothing else refuses a reservation.  RESERVED or WRITING is
@@ -451,7 +450,7 @@ static int nor_bring_up(struct nor_svc_result *r)
 		r->why = nor_fail_reason() ? nor_fail_reason() : "faulted";
 	} else {
 		r->status = NOR_SVC_BUSY;
-		r->why = "the window could not be brought up (a writer holds the part)";
+		r->why = "window not up (a writer holds it)";
 	}
 	return -1;
 }
@@ -474,7 +473,7 @@ static void nor_wr_answer(enum nor_write_status st,
 	case NOR_WRITE_OK:           r->status = NOR_SVC_OK;           break;
 	case NOR_WRITE_BUSY:
 		r->status = NOR_SVC_BUSY;
-		r->why = "a reader holds the window, or it has never been brought up";
+		r->why = "a reader holds the window";
 		break;
 	case NOR_WRITE_CAMERA:
 		/* Nothing was claimed and nothing went on the wire (#203). */
@@ -547,7 +546,8 @@ static void nor_board_hold(nor_svc_body_fn body, void *ctx,
                            struct nor_svc_result *r)
 {
 	uint32_t token = 0u;
-	struct nor_svc_ops ops = { &token, nor_op_erase, nor_op_program, NULL };
+	struct nor_svc_ops ops = { .dev = &token, .erase = nor_op_erase,
+	                           .program = nor_op_program };
 
 	if (nor_bring_up(r) != 0)
 		return;
@@ -614,8 +614,7 @@ static void nor_cycle_body(void *ctx, const struct nor_svc_ops *ops)
 	 * reader lease), and a line that said "this is now writing the status
 	 * register" followed by "busy" would be describing something that did not
 	 * happen. */
-	cli_print(c->sh, "a cycle costs two status-register writes and touches no "
-	              "data\r\n");
+	cli_print(c->sh, "cycle: 2 status-register writes, no data\r\n");
 	memset(&w, 0, sizeof w);
 	st = nor_write_cycle(*(const uint32_t *)ops->dev, &w);
 	nor_wr_answer(st, &w, &c->r);
@@ -647,16 +646,12 @@ int nor_board_cycle(struct cli_instance *sh, int argc, char **argv)
 }
 
 const struct nor_svc_board nor_svc_board = {
-	.part          = "QSPI NOR (memory-mapped at 0x3A000000)",
+	.part          = "QSPI NOR at 0x3A000000",
 	.size          = NOR_SIZE,
 	.erase_unit    = NOR_ERASE_GRAN,
 	.page          = NOR_PROGRAM_PAGE,
 	.erase_cancels = 1u,
-	.no_read       = "the flash is mapped at 0x3A000000; `devmem dump` reads it",
-	.no_write      = NULL,
-	.no_test       = "every `nor write` reads back and compares what it wrote",
 	.info          = nor_board_info,
-	.read          = NULL,
 	.range         = nor_board_range,
 	.hold          = nor_board_hold,
 };

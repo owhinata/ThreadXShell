@@ -473,7 +473,7 @@ static void nor_wr_answer(enum nor_write_status st,
 	case NOR_WRITE_OK:           r->status = NOR_SVC_OK;           break;
 	case NOR_WRITE_BUSY:
 		r->status = NOR_SVC_BUSY;
-		r->why = "a reader holds the window";
+		r->why = "a reader holds the window, or it is not up";
 		break;
 	case NOR_WRITE_CAMERA:
 		/* Nothing was claimed and nothing went on the wire (#203). */

@@ -392,6 +392,11 @@ int main(void)
 	check(run(&uart, "write 0x200000 A5") == 1 && has("busy -- the camera is streaming"),
 	      "camera at the claim", "camera");
 	reset();
+	next_st = NOR_WRITE_BUSY;
+	check(run(&uart, "write 0x200000 A5") == 1 &&
+	      has("nor: busy -- a reader holds the window, or it is not up\r\n"),
+	      "busy at the claim: both causes", "busy claim");
+	reset();
 	next_st = NOR_WRITE_NO_TRANSPORT;
 	check(run(&uart, "erase 0x200000 4096") == 1 && has("nor: no answer from the part; nothing sent"),
 	      "no transport", "transport");

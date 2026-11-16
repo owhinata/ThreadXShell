@@ -1802,8 +1802,8 @@ grove-vision-ai-v2's `nor` (`cmds/cmd_nor.c`).  Now there is one `nor`,
 | the command | `shell/cmds/cmd_nor.c` (`required`) | the grammar, the argument checks, the console question, the acceptance test, every line `nor` prints and the dmesg line of each erase, write and test |
 | the console question | `shell/cmds/nor_console.c` (`required`) | the telnet console, a job launched from it and a job of the local console are refused; whether the board has a telnet console is `SHELL_HAS_NET_TTY`, derived from `BOARD_HAS_NETX` by the top-level `CMakeLists.txt` (`cmake/README.md`), never written by a board |
 | the result lines for a board's own subcommand | `shell/cmds/nor_cmd_core.h` | `nor_cmd_report()` / `nor_cmd_not_held()`, which grove-vision-ai-v2's `nor cycle` uses |
-| the table | each board's `cmds/cmd_nor_board.c` | the facts and the four calls below |
-| the properties | each board's `svc/nor_svc_config.h` | whether the device is built (`NOR_SVC_HAS_DEVICE`: wio-lite-ai from `BSP_ENABLE_KV`, as `blob`), the `help` line, the board's own subcommands (f746g-disco `probe`; grove-vision-ai-v2 `scan` and `cycle`, `cycle` under the dangerous-commands setting) |
+| the table | each board's `cmds/cmd_nor_board.c` | the facts and the three calls below, and `nor_svc_board_read()` where the board has a read |
+| the properties | each board's `svc/nor_svc_config.h` | whether the device is built (`NOR_SVC_HAS_DEVICE`: wio-lite-ai from `BSP_ENABLE_KV`, as `blob`), **which shared subcommands it has** (`NOR_SVC_HAS_READ` / `_WRITE` / `_TEST`, and for each 0 the line said instead, `NOR_SVC_NO_<SUB>_SAYS`), the `help` line, the board's own subcommands (f746g-disco `probe`; grove-vision-ai-v2 `scan` and `cycle`, `cycle` under the dangerous-commands setting) |
 
 [!] **The protection stays with the board, and the shared command takes no
 hold and gives none back.**  The table's `hold()` takes the board's hold,
@@ -1821,9 +1821,9 @@ is in the plugin forbidden table of all three boards.
 |---|---|---|---|
 | part, size, erase unit (checked: 4 KB), page | N25Q128A on QUADSPI, 16 MB, 4 KB, 256 B | W25Q128JV on OCTOSPI2, 16 MB, 4 KB, 256 B | the QSPI NOR, 16 MB, 4 KB (`NOR_ERASE_GRAN`, the measured geometry), 256 B |
 | the erase stops between 4 KB units (Ctrl+C) | yes: subsector erases only, one per 4 KB, never the 64 KB sector erase | no: one driver call | yes: inside the one transaction, with the window down |
-| subcommands it does not have (and the line said) | `write` | -- | `read` (``the flash is mapped at 0x3A000000; `devmem dump` reads it``), `test` (``every `nor write` reads back and compares what it wrote``) |
+| subcommands it does not have (`svc/nor_svc_config.h`; the line said after ``nor: no `<sub>` on this board``) | `write` (no line) | `test` (no line; issue #250, the user's decision, for the internal flash) | `read` (``; `devmem dump 0x3A000000` reads it``), `test` (``; `nor write` verifies itself``) |
 | `info()`: sample once, then the shared lines, then the board's | the controller registers before anything is sent, then the id, the status, the registers again and the failure record | the id, the registers, the clock | the report (a reader lease only to bring the window up), the leases, the seam's writable interval, the probe, the IRQ, SCU and MPU |
-| `read()` (no hold) | the driver | the driver (refused while the device is down) | -- |
+| `nor_svc_board_read()` (a fixed name, not in the table: `nor read` with no hold, and the test's reads inside the hold) | the driver | the driver (refused while the device is down) | -- (not defined; the name is taken in `nor_svc.h`, so a definition would not compile) |
 | `range()` (pure; the board's operations ask again) | a range touching the `kv` partition | a range touching the `kv` partition | outside the seam's writable interval; a write not starting on a 32-bit word |
 | `hold()` | the driver up, then the store's busy flag | the NOR up, then the store's busy flag | the bring-up lease, then the writer reservation; the one operation inside is one call of `nor_write_erase()` / `nor_write_program()`, one transaction |
 
@@ -1832,14 +1832,33 @@ The order of an erase, write or test is the shared command's: the arguments
 nothing rounded; the range not past the end; a write of 1..256 bytes; `read`
 1..1024 bytes and refused past the end) -> the board's range -> the console
 -> the board's hold.  A refusal before the hold reads and writes nothing.
-The acceptance test is f746g-disco's (issues #194, #214) with wio-lite-ai's
-same-byte overwrite observed (issue #249): blank before (refused otherwise,
+The acceptance test (built only where `NOR_SVC_HAS_TEST` is 1: f746g-disco)
+is f746g-disco's (issues #194, #214) with wio-lite-ai's same-byte overwrite
+observed (issue #249): blank before (refused otherwise,
 before anything is erased), erase and blank, a counting pattern page by page
 read back and compared, erase and blank, the 14 partial-page writes the kv
 store makes with both pages compared after each, the overwrite (not judged),
 erase and blank, PASS; Ctrl+C before every page.  The erase's progress
 function only prints and asks for Ctrl+C: on grove-vision-ai-v2 it runs with
 the memory-mapped window down (`port/nor/nor_write.h`).
+
+[!] **What a board does not have is decided at compile time, in one place.**
+A subcommand whose `NOR_SVC_HAS_<SUB>` is 0 is still registered and answers
+``nor: no `<sub>` on this board`` (and the board's line), but its code and its
+words are not compiled, so they are not in that board's image: wio-lite-ai's
+internal flash got 4.4 KB back when its `nor test` went (issue #250).  The
+declaration cannot disagree with the code without stopping the build: with
+`NOR_SVC_HAS_READ` 0, `nor_svc.h` declares `nor_svc_board_read` as an object
+of an incomplete type, so a board that still defines the function does not
+compile, and with 1 a board that does not define it does not link;
+`NOR_SVC_HAS_TEST` without `NOR_SVC_HAS_READ`, and a 0 without its line, are
+`#error`s (all three checked by `shell/test/run_host_tests.sh` with
+`shell/test/test_nor_absent_neg.c`).
+
+The words are short on purpose (issue #250): what was refused and why, the
+addresses and ranges, `PASS` / `FAIL` / `busy` / `cancelled` and the next
+command to type (``nor erase <addr> 4096``) stay; the rest is in the boards'
+READMEs.
 
 The tests: `shell/test/test_nor_cmd.c` (the shared command over a fake
 table, in four shapes: full with and without the telnet console, subcommands

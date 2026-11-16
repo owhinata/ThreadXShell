@@ -23,7 +23,7 @@
 3. **upstream（`lib/` の submodule と、ボードが commit 固定で取る ST Cube の組 `boards/<board>/lib/`）と Grove の Himax SDK ツリーは read-only**（調整は port 側で。取得済みツリーは検査だけで直さない）。
 4. **shell の常設状態は静的割当**で、init / dispatch / 出力経路は heap を要求しない。board 固有コマンドの
    ペイロードは board が bounded heap・排他・失敗処理を明示的に提供する場合のみ heap 可。スタック
-   サイズ・優先度は `cli_config.h` で `_Static_assert` を通すこと。コンソールを借りている印もコンソールごとの回数で、全体の 1 つに戻さない（#229）。**コア（`shell/` の `cmds/`・`test/` 以外）の書き換わる領域はファイルの `static` だけ**（外から名前で触れる物はビルドが拒む、#246）。**`ymodem_send` / `ymodem_recv` を呼ぶのは `shell/cmds/xfer_console.c` だけで、telnet のあるボードは表 `xfer_console_board_facts` の telnet の欄に `net_tty_guard` を書く**（呼ぶ所が増えると転送は全体で 1 本が崩れ、「telnet 無し」の答えを書くと検査を全部通ったまま拒否が消える。出荷 ELF の読み戻しと実機で見る。#231）。
+   サイズ・優先度は `cli_config.h` で `_Static_assert` を通すこと。コンソールを借りている印もコンソールごとの回数で、全体の 1 つに戻さない（#229）。**コア（`shell/` の `cmds/`・`test/` 以外）の書き換わる領域はファイルの `static` だけ**（外から名前で触れる物はビルドが拒む、#246）。**`ymodem_send` / `ymodem_recv` を呼ぶのは `shell/cmds/xfer_console.c` だけで、telnet のあるボードは表 `xfer_console_board_facts` の telnet の欄に `net_tty_guard` を書く**（呼ぶ所が増えると転送は全体で 1 本が崩れ、「telnet 無し」の答えを書くと検査を全部通ったまま拒否が消える。出荷 ELF の読み戻しと実機で見る。#231）。**NOR の消去・書込みに届くのはボードの表 `nor_svc_board` の hold の中だけで、共有の `shell/cmds/cmd_nor.c` は排他を取らず返さない**（表の名前は 3 ボードの plugin 禁止表、telnet の有無は `BOARD_HAS_NETX` から導きボードに書かせない。#250）。
 5. **ビルドは `_ref/` を読まない**（git 管理外なので参照するとクローンしただけでは configure できない）。
 
 ### 6. Wio Lite AI（ブリックリスク。提案は特に厳格に）

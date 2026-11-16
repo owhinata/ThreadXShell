@@ -787,7 +787,7 @@ board's `cmds/cmd_blob.c` before).  What is this board's:
 |---|---|
 | `0x000000 .. 0x100000` | `kv` (FlashDB) |
 | `0x100000 .. 0x800000` | the blob store: 13 slots, below |
-| `0x800000 .. 0x1000000` | unallocated; `nor test 0x800000` is run on its first 4 KB (the old default address, gone since issue #250) |
+| `0x800000 .. 0x1000000` | unallocated (the old `nor test` default address was `0x800000`; this board has no `nor test` since issue #250) |
 
 | Slots | Base | Size | Payload |
 |---|---|---|---|
@@ -834,7 +834,8 @@ once in [svc/README.md](../../svc/README.md#the-blob-command-is-shared-issue-194
   background `blob write ... &` is refused before anything is taken, and so is
   `blob write` from the telnet console.
 - **Who holds the busy flag**: a `blob write` / `blob erase`, a `nor erase` /
-  `nor write` / `nor test` (since issue #249) and an `nn model load <name>`.
+  `nor write` (since issue #249; and `nor test` until #250) and an `nn model
+  load <name>`.
   Every busy refusal names them from one string, `BLOB_BUSY_HOLDERS` in
   `src/blob.h` (as f746g-disco's).  The `kv` store does not take it here
   (f746g-disco's does); `nor` refuses the `kv` partition's range instead
@@ -941,7 +942,7 @@ stored as one:
   it, and the erase gives the mutex back between 64 KB blocks.  A `nor erase`
   holds the mutex for its whole range, so a `kv` command during a long one
   waits 5 s and answers `store busy`.  What keeps `nor` off the partition is
-  that `nor erase` / `write` / `test` refuse a range touching
+  that `nor erase` / `write` refuse a range touching
   `0x000000-0x0FFFFF` (issue #249; the place is `KV_PART_OFFSET` /
   `KV_PART_LEN` in `port/flashdb/fal_cfg.h`, which the FAL table and
   `src/blob.c`'s check that the blob region starts above it use too).
@@ -2137,7 +2138,7 @@ What the columns mean, the same on all three boards:
 - **Addresses it refuses**: before anything is sent.
 - **From telnet / in a background job**: whether the command runs from the
   `wio-net>` console, and as `cmd &`.  `psram` asks neither question;
-  `nor erase` / `write` / `test` ask both, through the shared
+  `nor erase` / `write` ask both, through the shared
   `shell/cmds/nor_console.c` (the telnet question through the shared
   `net_tty_is_console()`, a background job by `sh->fg`; `net_tty_guard()` is
   not used, its "would destroy this session" is not true of a NOR erase).
@@ -2149,7 +2150,10 @@ What the columns mean, the same on all three boards:
 External NOR (16 MB; the map is in [The NOR asset store](#the-nor-asset-store-blob-issue-193)).
 The command is the shared `shell/cmds/cmd_nor.c` (issue #250; the contract is
 `svc/nor/nor_svc.h`, see `svc/README.md`), and what protects the device is
-this board's table, `cmds/cmd_nor_board.c`.  Each of erase, write and test
+this board's table, `cmds/cmd_nor_board.c`.  **This board has no `nor test`
+since issue #250** (the user's decision, for the internal flash): it answers
+``nor: no `test` on this board``, and the test's code and words are not in the
+image (`NOR_SVC_HAS_TEST 0` in `svc/nor_svc_config.h`).  Each of erase and write
 asks, in this order and before it touches the device:
 
 1. its arguments (shared): the address on the device; an erase's address and
@@ -2160,9 +2164,9 @@ asks, in this order and before it touches the device:
    on this board, so the range is what keeps a raw erase off FlashDB's
    sectors;
 3. the console (shared): the telnet console, a background job launched from
-   it and a background job of the USB CDC console are refused (`nor: erasing
-   or writing the flash runs only in the foreground of the USB CDC console;
-   this is ...`);
+   it and a background job of the USB CDC console are refused (`nor:
+   erase/write only in the USB CDC foreground, not telnet` / `... not a telnet
+   job` / `... not a job`);
 4. the hold (the board's): the device down is refused, then the store's busy
    flag (the one `blob write`, `blob erase` and `nn model load <name>` take)
    for the whole operation, given back at one place once taken.  The busy
@@ -2182,33 +2186,32 @@ transfer, during which a read is just what is wanted.  The NOR driver's mutex
 | `nor read <addr> [len]` | the NOR mutex, per 256 B read (waits without a limit) | outside the 16 MB; `len` outside 1..1024; **a range past the end of the device** (refused since #250, cut before).  `kv` and the blob slots are read like any other address | runs | runs | not looked at | refused while the device is down |
 | `nor erase <addr> <len>` | **the busy flag for the whole erase, and the NOR mutex for the whole erase** (one driver call): a `kv` command waits 5 s on the mutex and answers `store busy`, and works again once the erase is done; blob reads wait for the mutex | outside the 16 MB; **an address or a length that is not a whole number of 4 KB sectors, or a length of 0** (since #250; before, the range was rounded outward and the length defaulted to 4 KB); a range past the end; **a range that touches `kv` (`0x000000-0x0FFFFF`)**.  The blob slots (`0x100000-0x7FFFFF`) are not refused | **refused** | **refused** | built only with it | refused while the device is down or the flag is held (a `blob write` / `blob erase`, another `nor erase` / `write` / `test`, an `nn model load <name>`); prints the range it erases first; does not look at what it erases; no read-back; one driver call, so Ctrl+C does not stop it (no Ctrl+C line is printed); a line in `dmesg` |
 | `nor write <addr> <hex>` | the busy flag and the NOR mutex, for the one call | outside the 16 MB; data running past the end; more than 256 B; **a range that touches `kv`**.  The blob slots are not refused | **refused** | **refused** | built only with it | refused while the device is down or the flag is held; does not check that the target is erased; no read-back; a line in `dmesg` |
-| `nor test <addr>` | **the busy flag from the first blank check to the last**; the NOR mutex per driver call | outside the 16 MB; **an address that is not on a 4 KB sector** and **no address at all** (since #250 there is no default; it was `0x800000`); **a sector in `kv`**.  Any other sector is taken, the blob slots included | **refused** | **refused** | built only with it | refused while the device is down or the flag is held; **refuses a sector that does not read blank, before it erases anything**; then the shared test (since #250, the one f746g-disco had): erase and blank check, a counting pattern page by page read back and compared, erase, the 14 partial-page writes of the kv store with both pages compared after each, one byte re-programmed twice (observed, not judged -- a write or read that fails there fails the test), **erase and blank check before PASS**.  **Ctrl+C is asked before every page** (since #250).  A failure or a cancel after the first erase says `nor erase <addr> 4096`; a line in `dmesg` |
+| `nor test` | -- | -- | -- | -- | -- | **not on this board since issue #250** (the user's decision, for the internal flash): it answers ``nor: no `test` on this board`` and calls nothing; the test's code is not compiled (`svc/nor_svc_config.h`).  Until #250 it was #249's test (refused while the flag was held, refused a sector that did not read blank, left it blank) |
 
-The guards before and after the shared command (issue #250).  Not one is
-lost; four are new.
+The guards before and after the shared command (issue #250).  Every guard of
+erase, write and read is kept, and three are new; the test and its guards
+left this board with the test itself.
 
 | Guard | Until #250 (`cmds/cmd_nor.c`, #249) | Since #250 |
 |---|---|---|
-| busy flag for the whole erase / write / test, given back at one exit | `nor_busy_gate()` + one exit per command | `nor_board_hold()` in `cmds/cmd_nor_board.c` (the one exit) |
+| busy flag for the whole erase / write, given back at one exit | `nor_busy_gate()` + one exit per command | `nor_board_hold()` in `cmds/cmd_nor_board.c` (the one exit) |
 | the device down | `nor_gate()` | `nor_board_hold()`; `nor_board_read()` for `read` |
 | the `kv` partition's range | `nor_refuse_kv()` | `nor_board_range()` |
 | telnet, its jobs, a job of the USB CDC console | `nor_refuse_console()` | the shared `nor_console_refuse()` (`shell/cmds/nor_console.c`, from step 1 of #250) |
 | on the device, not past its end | `nor_parse_addr()` and the range checks | the shared `nor_arg_addr()` / `nor_arg_fits()` |
-| the test refuses a sector that is not blank, leaves it blank | `nor_test_run()` | the shared `nor_test_body()` |
+| the test refuses a sector that is not blank, leaves it blank | `nor_test_run()` | **taken out of this board in #250** (the user's decision, for the internal flash): there is no `nor test` here, so there is nothing to guard; the shared test, with these guards, runs on f746g-disco |
 | the dangerous-commands setting | `#if CLI_ENABLE_DANGEROUS_CMDS` | the same, in the shared command |
 | **new**: erase / test on whole 4 KB sectors, nothing rounded | -- | the shared `nor_arg_sectors()` |
 | **new**: `read` past the end refused | -- (cut) | the shared `nor_arg_fits()` |
-| **new**: the test's pattern pages and Ctrl+C before every page | -- | the shared `nor_test_body()` |
 | **new**: `nor_svc_board` in the plugin forbidden table | -- | `WIO_PLUGIN_FORBIDDEN` in `board.cmake` |
 
 Using `nor` since issue #250:
 
-- **`nor test <addr>` wants a blank sector and leaves one.**  A board that
-  ran `nor test` before #249 still has that test's pattern at `0x800000` (the
-  old test did not erase at the end), so the first `nor test 0x800000` there
-  answers `4 KB at 0x800000 is not blank -- not testing over data`; `nor
-  erase 0x800000 4096` once, then `nor test 0x800000`.  The same holds for
-  any address that holds data.
+- **There is no `nor test` here since issue #250.**  A board that ran
+  `nor test` before #249 may still have that test's pattern at `0x800000`
+  (the old test did not erase at the end); `nor erase 0x800000 4096` clears
+  it.  The acceptance test of the partial-page programs FlashDB relies on
+  (`FDB_WRITE_GRAN = 8`) is the shared `nor test`, built on f746g-disco.
 - **Erase and write from the USB CDC console's foreground.**  From `wio-net>`
   or with a trailing `&` they are refused before anything is sent; `nor info`
   and `nor read` run anywhere.
@@ -2222,8 +2225,9 @@ Using `nor` since issue #250:
 |---|---|
 | Internal flash free (app partition, 393,216 B), issue #249 | 10,688 B -> 9,272 B (-1,416 B: the refusals, the blank checks before and after the test and their words) |
 | Internal flash free, issue #250 step 1 (the shared console question) | 9,272 B -> 9,256 B (-16 B) |
-| Internal flash free, issue #250 step 2 (the shared `nor`) | 9,256 B -> **5,768 B** (-3,488 B: mostly the longer shared test -- the pattern pages and the 14 partial writes -- the shared `info` and result lines, and the per-outcome words) |
-| Shell stack, `nor write` / `nor test` (static frames from `.su`) | the shared `nor write` keeps its 256 B of data on the stack (`cmd_nor_write` 376 B), `nor test` its one 256 B page (`cmd_nor_test` 352 B); **the high-water on the board is not measured yet** |
+| Internal flash free, issue #250 step 2 (the shared `nor`) | 9,256 B -> 5,768 B (-3,488 B: mostly the longer shared test -- the pattern pages and the 14 partial writes -- the shared `info` and result lines, and the per-outcome words) |
+| Internal flash free, issue #250 step 4 (no `nor test` here, every `nor` line shorter) | 5,768 B -> **10,200 B** (+4,432 B; more than before #250) |
+| Shell stack, `nor write` (static frames from `.su`, the shared command as grove-vision-ai-v2 compiles it) | the shared `nor write` keeps its 256 B of data on the stack (`cmd_nor_write` 344 B); **the high-water on the board is not measured yet** |
 
 PSRAM (8 MB at `0x90000000`; the low 6 MB is non-cacheable and holds the frame
 buffers and the camera frame, `.psram_ai` at `0x90600000` is the cacheable 2 MB

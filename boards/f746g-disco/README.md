@@ -1165,15 +1165,10 @@ mode only.  Two things it does that the HAL does not:
 elided):
 
 ```
-NOR: N25Q128A on QUADSPI
-  state   : ready (indirect)
+NOR: N25Q128A on QUADSPI, 16 MB, erase 4096 B, page 256 B
+  state   : ready
   jedec   : 20 BA 18
-  size    : 16 MB (offsets 0 .. 0xFFFFFF)
-  erase   : 4096 B unit
-  page    : 256 B
-  sector  : 64 KiB (erase 0xD8, not used by `nor erase`); subsector 4 KiB (erase 0x20)
-  sclk    : ... MHz, indirect mode
-  read    : ...                 (the read mode)
+  sclk    : ... MHz, read 0x6B 1-1-4     (or 0x0B 1-1-1)
   status  : 0x00
   before : CR ... (abort 0) SR ... (busy 0 flevel 0 tcf . ftf . tef .)
              CCR ... (fmode 0 dmode .) DLR ... AR ...
@@ -1182,13 +1177,15 @@ NOR: N25Q128A on QUADSPI
   failures: 0
 ```
 
-The first six lines are the shared `nor info`'s, the same on all three
-boards; the rest are this board's.  `before` is the controller as it was
+The first three lines are the shared `nor info`'s, the same on all three
+boards; the rest are this board's (since issue #250 the lines are shorter:
+the 64 KB sector erase, 0xD8, is not used by `nor erase` and is no longer
+printed).  `before` is the controller as it was
 when the command was typed: it is sampled before `nor info` sends anything,
 although since issue #250 it is printed after the shared lines; `after`
 follows its own id and status-register reads.
 Healthy is `abort 0`, `busy 0` and `fmode 0` in both.  `failures` counts the
-driver's failures since boot; when it is not 0, `first fail` and `last fail`
+driver's failures since boot; when it is not 0, `first` and `last`
 follow, each with the step that failed (`<op>-<phase>`; phase `rxend` is a
 receive the HAL called successful that did not read idle afterwards), the
 HAL return, the registers at the failure, whether the recovery succeeded,
@@ -1351,12 +1348,12 @@ yes` mean what they mean there.  What is this board's:
   `dmesg` as it is, prefixed `(unheld) `.
 - **`nor erase` and `nor test` refuse a range that touches the store's
   partition** (`qspi erase` / `qspi test` until issue #250, which asked only
-  the address): ``nor: 0x<from> .. 0x<to> is in the kv store (0x000000 ..
-  0x0FFFFF) -- `kv format yes` erases it``.  `kv format yes` is the way to
+  the address): ``nor: 0x<from>..0x<to> hits the kv store 0x000000..0x0FFFFF
+  -- `kv format yes` erases it``.  `kv format yes` is the way to
   erase it.
 - **`nor test` refuses a subsector that is not blank before it erases
-  anything** (``nor: 4 KB at 0x<addr> is not blank -- not testing over data;
-  `nor erase 0x<addr> 4096` first if it is scratch``), and after the pattern test it
+  anything** (``nor: 0x<addr> not blank, not tested; `nor erase 0x<addr>
+  4096` first``), and after the pattern test it
   checks the partial-page programs the store relies on: 14 programs at fixed
   offsets into the subsector's first two pages (single status bytes one after
   another, a header, a record, one across the page boundary), both pages read
@@ -1912,12 +1909,13 @@ order and before it touches the device: its arguments (shared: the address on
 the device, the address and the length whole 4 KB subsectors, the range not
 past the end); the range (the board's: one that touches the `kv` partition
 by one byte is refused); the console (shared: telnet, a job launched from it
-and a job of the VCP console are refused, `nor: erasing or writing the flash
-runs only in the foreground of the VCP console; this is ...`); then the hold
+and a job of the VCP console are refused, `nor: erase/write only in the VCP
+foreground, not telnet` / `... not a telnet job` / `... not a job`); then the hold
 (the board's: the driver up, then the store's busy flag for the whole
 operation, given back at one place once taken).  The shared command takes no
 hold and gives none back.  There is no `nor write` on this board: it answers
-``nor: no `nor write` on this board`` and calls nothing.
+``nor: no `write` on this board`` and calls nothing, and its code is not in
+the image (`NOR_SVC_HAS_WRITE 0` in `svc/nor_svc_config.h`, issue #250).
 
 | Subcommand | Held while it runs | Addresses it refuses | From telnet | In a background job | Dangerous-commands setting | Other refusals and checks |
 |---|---|---|---|---|---|---|
@@ -1926,6 +1924,7 @@ hold and gives none back.  There is no `nor write` on this board: it answers
 | `nor read <addr> [len]` | **not the store's busy flag**: it reads alongside a `blob write`, a `kv` command or a `nor erase` / `test` and shows what they leave | outside the 16 MB; `len` outside 1..1024 (256 until #250); **a range past the end of the device** (since #250).  The `kv` partition and the blob slots are read like any other address | runs | runs | always built | -- |
 | `nor erase <addr> <len>` | the store's busy flag for the whole command, refused (not waited for) while a `blob write` / `blob erase`, a `nor erase` / `test`, an `nn model load <name>` or a `kv` command holds it | outside the 16 MB; an address or a length that is not a whole number of 4 KB subsectors, or a length of 0 (no rounding); a range past the end; **a range that touches the `kv` partition `0x000000-0x0FFFFF`** (#214; until #250 only the address was asked, one subsector being all an erase could name).  **The blob slots `0x100000-0x7FFFFF`, headers included, are not refused** | **refused** (since #250) | **refused** (since #250) | built only with the setting | refused while the driver is down; **only 4 KB subsector erases, in order, never the 64 KB sector erase**; since #250 any number of subsectors, with Ctrl+C after each; prints the range first; does not look at what it erases; no read-back; a line in `dmesg` |
 | `nor test <addr>` | the store's busy flag for the whole test, as `nor erase` | as `nor erase`, for its one 4 KB subsector | **refused** (since #250) | **refused** (since #250) | built only with the setting | refuses a subsector that is not blank before it erases anything; every program is read back and compared (the pattern, then the 14 partial-page writes); since #250 also one byte re-programmed twice (observed, not judged); the subsector is left blank.  Ctrl+C before every page leaves it partly programmed, and the next `nor test` there refuses it until it is erased; a line in `dmesg` |
+| `nor write` | -- | -- | -- | -- | built only with the setting | **not on this board** (issue #250): it answers ``nor: no `write` on this board`` and calls nothing; its code is not compiled |
 
 The guards before and after the shared command (issue #250).  Not one is
 lost; the console question and the range of a multi-subsector erase are new.

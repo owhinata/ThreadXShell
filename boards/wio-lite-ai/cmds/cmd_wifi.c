@@ -18,9 +18,9 @@
  *   wifi reconnect                connect again with the saved kv settings, the boot's
  *                                 own sequence -- src/kv_boot.c (issue #238; KV builds only)
  *   wifi disconnect               drop the current association
- *   wifi autoreconnect [on|off]   re-associate by ourselves when the AP goes away
- * (owhinata/wio-lite-ai#32)
- *   wifi status                   connected? + RSSI + IP/mask/gw + MAC
+ *   wifi status                   connected? + RSSI + MAC + channel plan, then the
+ *                                 host's automatic re-association (owhinata/wio-lite-ai#32):
+ *                                 on or off, what it holds, its tally (issue #240)
  *   wifi scan                     list visible APs: ch/band/rssi/security/bssid/ssid
  *   wifi link <sub>               the UART link itself -- cmd_wifi_link.c (owhinata/wio-lite-ai#23)
  *   wifi flash <sub>              the module's own SPI flash -- cmd_wifi_flash.c (owhinata/wio-lite-ai#19)
@@ -609,6 +609,15 @@ static int cmd_wifi_disconnect(struct cli_instance *sh, int argc, char **argv)
 	}
 	if (link != RTL_LINK_READY)
 		return 1;
+	/*
+	 * And again under the link (issue #240 review): an association that held the link
+	 * while this command waited for it -- the boot's -- stores its credentials before
+	 * it gives the link back, i.e. after the disarm above.  Left there, they would
+	 * re-join the network the operator is about to leave.  (The power and flash
+	 * commands need no second disarm: they forget the module, which drops such
+	 * credentials at the next look -- wifi_auto.c's forget-generation check.)
+	 */
+	wifi_auto_disarm("wifi disconnect");
 
 	wifi_opts(&o, sh, &diag);
 	/*
@@ -636,49 +645,12 @@ static int cmd_wifi_disconnect(struct cli_instance *sh, int argc, char **argv)
 }
 
 /*
- * wifi autoreconnect [on|off] (owhinata/wio-lite-ai#32): whether the HOST re-associates by itself when
- * the AP goes away.  No argument reports the state and the tally.
- *
- * Turning it on does not go near the module -- it only says that the next successful
- * `wifi connect` may keep its credentials, which is what makes holding a passphrase in RAM
- * a decision rather than a default.  Turning it off wipes them and aborts any attempt
- * already running.
+ * wifi status: report association state, RSSI, MAC and channel plan (pure query), then
+ * the host's automatic re-association -- on or off, what it holds, its tally and backoff.
+ * That report was `wifi autoreconnect` until issue #240, which removed the command (the
+ * setting is the stored wifi.autoreconnect now, read at every association); it is
+ * printed on the powered-off answer too, and after the link is given back.
  */
-static int cmd_wifi_autoreconnect(struct cli_instance *sh, int argc, char **argv)
-{
-	bool in_flight;
-
-	if (argc < 2) {
-		wifi_auto_print(sh);
-		return 0;
-	}
-	if (strcmp(argv[1], "on") == 0) {
-		wifi_auto_set_enabled(true);
-		cli_print(sh, "wifi: autoreconnect on\r\n");
-		if (!wifi_auto_armed())
-			cli_print(sh, "  arms at the next successful `wifi connect` (the "
-			          "credentials come from there)\r\n");
-		return 0;
-	}
-	if (strcmp(argv[1], "off") == 0) {
-		/* Sampled BEFORE disarming, which is what ends the attempt. */
-		in_flight = wifi_auto_attempt_in_flight();
-		wifi_auto_set_enabled(false);
-		cli_print(sh, "wifi: autoreconnect off (credentials cleared)\r\n");
-		if (in_flight)
-			/* The host stops waiting; the module does not stop trying.  Its
-			 * wifi_connect() runs to its own 20 s timeout, so it may still come
-			 * back associated -- the next refresh will simply report that as link
-			 * up, and nothing will re-join after it. */
-			cli_print(sh, "  an attempt was in flight and was cut short -- the "
-			          "module may still finish associating (`wifi status`)\r\n");
-		return 0;
-	}
-	cli_error(sh, "usage: wifi autoreconnect [on|off]\r\n");
-	return 1;
-}
-
-/* wifi status: report association state, RSSI, IP config and MAC (pure query). */
 static int cmd_wifi_status(struct cli_instance *sh, int argc, char **argv)
 {
 	struct wifi_rpc_opts o;
@@ -691,6 +663,7 @@ static int cmd_wifi_status(struct cli_instance *sh, int argc, char **argv)
 	link = rtl_link_begin(sh, false);
 	if (link == RTL_LINK_OFF) {
 		cli_print(sh, "wifi: powered off (`wifi connect <ssid> ...` to bring up)\r\n");
+		wifi_auto_print(sh);
 		return 0;
 	}
 	if (link != RTL_LINK_READY)
@@ -735,6 +708,7 @@ static int cmd_wifi_status(struct cli_instance *sh, int argc, char **argv)
 	/* No address here: L3 belongs to `net` (owhinata/wio-lite-ai#30 B1).  The module's own lwIP no
 	 * longer takes one, so printing it would only ever show 0.0.0.0. */
 	cli_print(sh, "  (`net info` for the address)\r\n");
+	wifi_auto_print(sh);
 	return 0;
 }
 
@@ -1075,10 +1049,7 @@ CLI_SUBCMD_SET_CREATE(wifi_subcmds,
 	                  "<ssid> [pw] [sec_hex]", cmd_wifi_connect, 2, 2),
 	WIFI_RECONNECT_ENTRY
 	CLI_CMD_ARG(disconnect, NULL, "drop the current WiFi association",     cmd_wifi_disconnect, 1, 0),
-	CLI_CMD_ARG_USAGE(autoreconnect, NULL,
-	                  "re-associate by ourselves when the AP goes away: autoreconnect [on|off]",
-	                  "[on|off]", cmd_wifi_autoreconnect, 1, 1),
-	CLI_CMD_ARG(status,     NULL, "show connection state / RSSI / IP / MAC", cmd_wifi_status, 1, 0),
+	CLI_CMD_ARG(status,     NULL, "show connection state / RSSI / MAC / autoreconnect", cmd_wifi_status, 1, 0),
 	CLI_CMD_ARG(scan,       NULL, "list visible APs (ch/band/rssi/security/bssid/ssid)", cmd_wifi_scan, 1, 0),
 	CLI_CMD_ARG_USAGE(chplan, NULL,
 	                  "regulatory domain: chplan [set <hex> confirm] (writes PERSIST)",

@@ -10,6 +10,10 @@
 #ifndef APP_KV_BOOT_H
 #define APP_KV_BOOT_H
 
+#include <stdbool.h>
+
+#include "wifi_auto.h"   /* enum wifi_auto_setting */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -33,6 +37,19 @@ struct cli_instance;
  * (whatever net.mode then did), 1 otherwise; every refusal is printed.
  */
 int kv_boot_reconnect(struct cli_instance *sh);
+
+/**
+ * wifi.autoreconnect (issue #240): what the store holds now
+ * (src/wifi_auto.h; only WIFI_AUTO_SET_ON is on).  A store that is not open is
+ * not read.  With @p warn, a key that is there but not taken is reported as
+ * `wifi.autoreconnect: ignored (<why>)` to the log (and to a running `wifi
+ * reconnect`'s console).  *@p store_state (when not NULL) is kv_state_str()
+ * for WIFI_AUTO_SET_NO_STORE, "" otherwise.  Called through
+ * wifi_auto_setting_read(): at the start of every association, and by `wifi
+ * status`, from any thread; it takes the store's hold for the one read (up to
+ * 5 s) and gives it back.
+ */
+enum wifi_auto_setting kv_boot_autoreconnect_read(bool warn, const char **store_state);
 
 #ifdef __cplusplus
 }

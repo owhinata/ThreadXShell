@@ -20,6 +20,10 @@
  *     wifi.autoconnect.  Every read asked for must be of a key still unread,
  *     which is what bounds the caller's loop at KV_WIFI_KEYS.
  *
+ * Since issue #240 it also walks kv_wifi_autoreconnect_of(): wifi.autoreconnect
+ * turns the re-association on only when it reads true.  That it is read at every
+ * association, after the early refusals, is test_wifi_connect_auto.c's.
+ *
  * [!] WHAT IT DOES NOT COVER: the lines kv_boot.c prints for each answer, and
  * that it passes the read values on to wifi_connect_run().
  */
@@ -27,6 +31,7 @@
 #include <string.h>
 
 #include "kv_wifi.h"
+#include "kv.h"         /* KV_OK, KV_ERR_*: the codes kv_get_bool() returns */
 #include "wifi_rpc.h"
 
 static int fails;
@@ -256,6 +261,74 @@ static void test_bad_call(void)
 	EQ(kv_wifi_next(&in).step, KV_WIFI_BAD_CALL, "an unread-by-console key out of range");
 }
 
+/*
+ * wifi.autoreconnect (issue #240): on only when the key reads true.  Every way the
+ * read can end is walked with both values, and with the store closed (the caller
+ * then does not read, and whatever rc / value it passes must not matter).  Each
+ * answer names its reason (`wifi status` prints it); a key that is there but not
+ * taken is reported with the shared readers' words; a missing key and a closed
+ * store are not reported.
+ */
+static void test_autoreconnect(void)
+{
+	static const struct {
+		int rc; enum wifi_auto_setting set; const char *ignored;
+	} t[] = {
+		{ KV_ERR_NOTFOUND, WIFI_AUTO_SET_MISSING,    NULL },
+		{ KV_ERR_TYPE,     WIFI_AUTO_SET_NOT_BOOL,   "not a bool" },  /* `kv set ... 1` */
+		{ KV_ERR_PARAM,    WIFI_AUTO_SET_UNREADABLE, "unreadable" },
+		{ KV_ERR_STATE,    WIFI_AUTO_SET_UNREADABLE, "unreadable" },  /* down after the look */
+		{ KV_ERR_BUSY,     WIFI_AUTO_SET_UNREADABLE, "unreadable" },
+		{ KV_ERR_IO,       WIFI_AUTO_SET_UNREADABLE, "unreadable" },
+		{ KV_ERR_FORMAT,   WIFI_AUTO_SET_UNREADABLE, "unreadable" },
+		{ KV_ERR_TRUNC,    WIFI_AUTO_SET_UNREADABLE, "unreadable" },
+		{ -100,            WIFI_AUTO_SET_UNREADABLE, "unreadable" },  /* a code not heard of */
+	};
+	unsigned i;
+	int v;
+
+	for (v = 0; v <= 2; v++) {
+		struct kv_wifi_auto a = kv_wifi_autoreconnect_of(1, KV_OK, v);
+		char what[64];
+
+		(void)snprintf(what, sizeof what, "open, KV_OK, value %d", v);
+		EQ(a.setting, v ? WIFI_AUTO_SET_ON : WIFI_AUTO_SET_FALSE, what);
+		EQ(a.ignored == NULL, 1, what);
+	}
+	for (i = 0; i < sizeof t / sizeof t[0]; i++) {
+		for (v = 0; v <= 2; v++) {
+			struct kv_wifi_auto a = kv_wifi_autoreconnect_of(1, t[i].rc, v);
+			char what[64];
+
+			(void)snprintf(what, sizeof what, "open, rc %d, value %d", t[i].rc, v);
+			EQ(a.setting, t[i].set, what);
+			if (t[i].ignored == NULL)
+				EQ(a.ignored == NULL, 1, what);
+			else if (a.ignored == NULL)
+				EQ(0, 1, what);   /* wanted a warning, got none */
+			else
+				STREQ(a.ignored, t[i].ignored, what);
+
+			a = kv_wifi_autoreconnect_of(0, t[i].rc, v);
+			(void)snprintf(what, sizeof what, "closed, rc %d, value %d", t[i].rc, v);
+			EQ(a.setting, WIFI_AUTO_SET_NO_STORE, what);
+			EQ(a.ignored == NULL, 1, what);
+		}
+	}
+	EQ(kv_wifi_autoreconnect_of(0, KV_OK, 1).setting, WIFI_AUTO_SET_NO_STORE,
+	   "closed, KV_OK, true: still not open");
+
+	/* The five the decision names, spelled out: only true is on. */
+	EQ(kv_wifi_autoreconnect_of(1, KV_OK, 1).setting, WIFI_AUTO_SET_ON, "true -> on");
+	EQ(kv_wifi_autoreconnect_of(1, KV_OK, 0).setting, WIFI_AUTO_SET_FALSE, "false -> off");
+	EQ(kv_wifi_autoreconnect_of(1, KV_ERR_NOTFOUND, 1).setting, WIFI_AUTO_SET_MISSING,
+	   "no key -> off");
+	EQ(kv_wifi_autoreconnect_of(1, KV_ERR_TYPE, 1).setting, WIFI_AUTO_SET_NOT_BOOL,
+	   "not a bool -> off");
+	EQ(kv_wifi_autoreconnect_of(1, KV_ERR_IO, 1).setting, WIFI_AUTO_SET_UNREADABLE,
+	   "a failed read -> off");
+}
+
 int main(void)
 {
 	test_boot_unchanged();
@@ -263,6 +336,7 @@ int main(void)
 	test_store_closed();
 	test_rows();
 	test_bad_call();
+	test_autoreconnect();
 
 	if (fails) {
 		printf("test_kv_wifi: %d of %d checks FAILED\n", fails, checks);

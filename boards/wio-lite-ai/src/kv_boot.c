@@ -25,7 +25,20 @@
  *   net.shell.port     the telnet console's port     : 23 (issue #221)
  *   wifi.enable      ? power the radio               : leave it off
  *   wifi.autoconnect ? associate with wifi.ssid      : leave it to the operator
+ *     wifi.ssid / wifi.psk / wifi.security   what to associate with
  *   net.mode           dhcp / static / manual
+ *
+ * and one key read elsewhere (issue #240):
+ *
+ *   wifi.autoreconnect ? the host re-associates by itself : it does not
+ *
+ * read by kv_boot_autoreconnect_read() below at the start of EVERY
+ * association -- this thread's, `wifi reconnect`'s and a typed `wifi
+ * connect`'s -- because that is the only moment it decides anything: the
+ * credentials are kept by a successful association or not at all.  `wifi
+ * status` reads it too, to show what it holds now.  Only a bool true turns it on
+ * (`kv set wifi.autoreconnect true bool`; without `bool` the value is stored
+ * as a string and ignored, with a warning).
  *
  * The telnet console is resident from boot (issue #221) and is not armed from here any
  * more: `net.shell.autoarm` is not read, whatever it holds.  It only waits for its port,
@@ -186,6 +199,46 @@ const struct kv_cfg_facts kv_cfg_board_facts = {
 };
 
 /* ------------------------------------------------------------------ *
+ *  wifi.autoreconnect (issue #240)
+ * ------------------------------------------------------------------ */
+
+/*
+ * Read at the start of every association (wifi_connect_run(), src/wifi_connect.c):
+ * the boot's, a `wifi reconnect`'s and a typed `wifi connect`'s -- and by every
+ * `wifi status`, from any console or a background job.  The answer is
+ * src/kv_wifi.c's; this does the read and, when @warn, the warning (an
+ * association warns; `wifi status` says it in its heading instead of adding a
+ * line to dmesg each time).
+ *
+ * Not through kv_cfg_bool(): that one says "unreadable" for a store that is not
+ * open, and this is called on every typed `wifi connect`, including during the
+ * boot's kv_init() and on a board whose store never opened -- where "off" is the
+ * whole answer and a warning per connect would say nothing new.
+ *
+ * noinline: the read costs a whole record buffer and a decoded value (about
+ * 700 B, see KV_BOOT_STACK_SIZE).  Kept out of line, that stack is given back
+ * before the association goes any deeper; folded into wifi_connect_run() by LTO,
+ * it would sit under every eRPC call of the association instead.
+ */
+__attribute__((noinline)) enum wifi_auto_setting
+kv_boot_autoreconnect_read(bool warn, const char **store_state)
+{
+	int open = (kv_state() == KV_STATE_READY);
+	int value = 0;
+	int rc = KV_ERR_STATE;
+	struct kv_wifi_auto a;
+
+	if (open)
+		rc = kv_get_bool("wifi.autoreconnect", &value);
+	a = kv_wifi_autoreconnect_of(open, rc, value);
+	if (warn && a.ignored != NULL)
+		KV_WRN("wifi.autoreconnect: ignored (%s)", a.ignored);
+	if (store_state != NULL)
+		*store_state = (a.setting == WIFI_AUTO_SET_NO_STORE) ? kv_state_str() : "";
+	return a.setting;
+}
+
+/* ------------------------------------------------------------------ *
  *  Steps
  * ------------------------------------------------------------------ */
 
@@ -289,14 +342,11 @@ static enum cfg_wifi_end cfg_wifi(struct cli_instance *sh, enum kv_wifi_caller c
 		security = a.default_security;
 
 	/*
-	 * Arm the re-association policy BEFORE associating, not after
-	 * (owhinata/wio-lite-ai#32).  wifi_connect_run() captures the credentials on success
-	 * by calling wifi_auto_arm(), and that call is a no-op while the policy is disabled --
-	 * so enabling it afterwards would leave it armed with nothing, and the first
-	 * AP outage would find no credentials to retry with.
+	 * wifi.autoreconnect is not read here (issue #240): wifi_connect_run()
+	 * reads it at the start of every association, this one included, through
+	 * kv_boot_autoreconnect_read() above.  Until #240 this step turned the
+	 * re-association on when the key was true and never off.
 	 */
-	if (kv_cfg_bool("wifi.autoreconnect", 0))
-		wifi_auto_set_enabled(true);
 
 	/*
 	 * This used to fail every single time, and owhinata/wio-lite-ai#40 explains why: the
@@ -321,10 +371,11 @@ static enum cfg_wifi_end cfg_wifi(struct cli_instance *sh, enum kv_wifi_caller c
 	rc = wifi_connect_run(sh, ssid, (in.psk == KV_WIFI_YES) ? psk : NULL,
 	                      security, in.security == KV_WIFI_YES, /* earn_gen */ true);
 
-	/* The passphrase is on the stack here and in host RAM inside wifi_auto after
-	 * this; wipe our copy on the way out so it is not left in a thread stack that
-	 * `devmem` can read.  This is hygiene, not protection -- the value is stored
-	 * in the clear on the external flash regardless (see kv.h). */
+	/* The passphrase is on the stack here and, when wifi.autoreconnect is true, in
+	 * host RAM inside wifi_auto after this (issue #240); wipe our copy on the way
+	 * out so it is not left in a thread stack that `devmem` can read.  This is
+	 * hygiene, not protection -- the value is stored in the clear on the external
+	 * flash regardless (see kv.h). */
 	memset(psk, 0, sizeof psk);
 
 	if (caller == KV_WIFI_BOOT) {

@@ -8,8 +8,8 @@
  *
  * When the AP disappears, is switched off or deauthenticates us, the association goes and
  * nothing brings it back.  This file is the policy that does: the credentials of the last
- * successful `wifi connect`, an enable flag, a backoff, and the one eRPC call that
- * re-associates.  The DETECTION and the SEQUENCING live in app/link_bridge.c, which already
+ * successful association that was allowed to keep them (wifi.autoreconnect, read by
+ * that association), a backoff, and the one eRPC call that re-associates.  The DETECTION and the SEQUENCING live in app/link_bridge.c, which already
  * samples the association every NXN_REFRESH_MS with the coarse link mutex in hand; this
  * file never claims anything and never decides when it is safe to talk to the module.
  *
@@ -34,14 +34,22 @@
  *
  * Re-associating needs the SSID and the passphrase, so they are kept in host RAM.
  *
- * THIS IS ON BY DEFAULT, so an ordinary `wifi connect` leaves its passphrase there.  That
- * is a real exposure -- `devmem` and the telnet console can both read RAM -- and it was an
- * opt-in when the feature landed for exactly that reason.  It is a default now because the
- * preference could only ever be set BEFORE the outage it protects against, so requiring it
- * meant the feature was off in most of the cases it exists for.  `wifi autoreconnect off`
- * opts out and wipes what is held; nothing is persisted, so a reset comes back on.
+ * THAT IS AN EXPOSURE -- `devmem` and the telnet console can both read RAM -- so it is
+ * OFF unless the stored wifi.autoreconnect reads true (issue #240).  The key is read at
+ * the start of every association (wifi_connect_run()), and only a successful
+ * association with it true keeps anything; with it false or absent the credentials
+ * held from before are dropped by that same association and nothing new is kept.
+ * (Until issue #240 it was on by default, `wifi autoreconnect off` turned it off for
+ * the session, and a reset turned it back on.)
  *
- * The credentials are captured by a successful `wifi connect` rather than dug out of the
+ * Measure the cost against what is already there: an operator who connects with the
+ * saved settings (`wifi.ssid` / `wifi.psk`, at boot or by `wifi reconnect`) already
+ * keeps the same passphrase IN THE CLEAR on the external NOR, which `kv get` and
+ * `nor read` can show.  Turning this on adds a copy in RAM; it is the operator who
+ * types `wifi connect <ssid> <pw>` by hand and keeps nothing in the store for whom it
+ * is a new place the passphrase lives.
+ *
+ * The credentials are captured by a successful association rather than dug out of the
  * module, and they are zeroed on every path that ends the association or changes the
  * module underneath us (see wifi_auto_disarm() and the forget-generation backstop below).
  *
@@ -79,19 +87,44 @@ struct cli_instance;
 #define WIFI_AUTO_BACKOFF_MIN_MS 8000u
 #define WIFI_AUTO_BACKOFF_MAX_MS 60000u
 
-/* `wifi autoreconnect on|off`.  Turning it off also disarms (the credentials go). */
-void wifi_auto_set_enabled(bool on);
-bool wifi_auto_enabled(void);
-
 /*
- * Remember what `wifi connect` just associated with, so an attempt can repeat it.  A no-op
- * unless autoreconnect is enabled -- that is what makes keeping the passphrase opt-in.
- * @password may be NULL (open network).
+ * What the stored wifi.autoreconnect says (issue #240).  Only ON turns the
+ * re-association on; every other value is off, each for its own reason, so
+ * `wifi status` can say which.  NO_KV is a build without the store.
  */
-void wifi_auto_arm(const char *ssid, const char *password, uint32_t security);
+enum wifi_auto_setting {
+	WIFI_AUTO_SET_ON = 1,       /* reads true                              */
+	WIFI_AUTO_SET_FALSE,        /* reads false                             */
+	WIFI_AUTO_SET_MISSING,      /* no such key                             */
+	WIFI_AUTO_SET_NOT_BOOL,     /* stored as another type (`kv set` without `bool`) */
+	WIFI_AUTO_SET_UNREADABLE,   /* the store is open but the read failed   */
+	WIFI_AUTO_SET_NO_STORE,     /* the store is not open (starting, down, damaged) */
+	WIFI_AUTO_SET_NO_KV,        /* this build has no store                 */
+};
 
 /*
- * Forget the credentials and stop attempting.  @why is remembered for `wifi autoreconnect`.
+ * Read wifi.autoreconnect now.  @warn: report a key that is there but not taken
+ * (`wifi.autoreconnect: ignored (<why>)`, to the log) -- an association does, `wifi
+ * status` does not (it says so in its own lines, and would repeat the warning every
+ * time).  *@store_state, when @store_state is not NULL, is the store's state in words
+ * when the answer is NO_STORE, "" otherwise.  May wait for the NOR (up to the store's
+ * 5 s), so never call it with the link held.
+ */
+enum wifi_auto_setting wifi_auto_setting_read(bool warn, const char **store_state);
+
+/*
+ * Remember what an association just joined, so an attempt can repeat it -- only when
+ * @keep, the wifi.autoreconnect THIS association read at its start (issue #240): that
+ * is what makes keeping the passphrase opt-in.  The value is passed in rather than
+ * left somewhere shared, because the boot's association and one typed on the USB
+ * console can both be between their read and this call.  With @keep false nothing is
+ * kept and what was held is dropped, in the same critical section.  @password may be
+ * NULL (open network).  Returns true when the credentials are now held.
+ */
+bool wifi_auto_arm(const char *ssid, const char *password, uint32_t security, bool keep);
+
+/*
+ * Forget the credentials and stop attempting.  @why is remembered for `wifi status`.
  *
  * This is ALSO the abort: an attempt in flight sees wifi_auto_armed() go false through its
  * should_abort hook and returns within about a millisecond.  Making disarm and abort the
@@ -104,14 +137,6 @@ void wifi_auto_disarm(const char *why);
 
 /* Polled from erpc_call_ex()'s abort hook: a single volatile read, no generation check. */
 bool wifi_auto_armed(void);
-
-/*
- * Is an attempt blocked on the module right now?  Only for the console, and only so that
- * disarming can say whether it actually cut a join short -- claiming it unconditionally
- * would describe a module-side state that usually does not exist.  Inherently a snapshot:
- * the attempt may finish between this call and the next line.
- */
-bool wifi_auto_attempt_in_flight(void);
 
 /* Armed, the module still the one we armed against, and the backoff expired. */
 bool wifi_auto_should_try(void);
@@ -127,7 +152,24 @@ bool wifi_auto_should_try(void);
  */
 int wifi_auto_attempt(const struct wifi_rpc_opts *o);
 
-/* The `wifi autoreconnect` report: state, credentials in force, tally, backoff. */
+/*
+ * What `wifi status` says about the re-association (issue #240), as a pure function
+ * of the stored setting and whether credentials are held: the heading (one "%s", the
+ * store's state in words, used by NO_STORE only) and the line that says what happens
+ * next when the two disagree, or what to do (NULL for none).  test/test_wifi_auto.c
+ * walks every combination.
+ */
+struct wifi_auto_status_text {
+	const char *heading;
+	const char *next;
+};
+struct wifi_auto_status_text wifi_auto_status_text(enum wifi_auto_setting s, bool armed);
+
+/*
+ * The end of `wifi status` (issue #240): the setting as the store holds it NOW, then
+ * what is actually held, the tally and the backoff, then the line above.  Reads the
+ * store, so it is called after the link is given back.
+ */
 void wifi_auto_print(struct cli_instance *sh);
 
 #endif /* APP_WIFI_AUTO_H */

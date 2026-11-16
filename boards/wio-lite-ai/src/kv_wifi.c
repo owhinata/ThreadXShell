@@ -3,13 +3,40 @@
  * Copyright (c) 2026 Wio Lite AI ThreadX Shell Project
  */
 /*
- * Wio Lite AI -- what the stored WiFi settings say to do (issue #238).  The rules
- * and the order of the reads are in kv_wifi.h; this is the function.
+ * Wio Lite AI -- what the stored WiFi settings say to do (issue #238), and
+ * whether wifi.autoreconnect turns the re-association on (issue #240).  The
+ * rules and the order of the reads are in kv_wifi.h; these are the functions.
  */
 #include "kv_wifi.h"
+#include "kv.h"         /* KV_OK, KV_ERR_*: constants only */
 #include "wifi_rpc.h"   /* WIFI_RPC_SEC_*: constants only */
 
 #include <stddef.h>
+
+/* wifi.autoreconnect (issue #240): the rules are in kv_wifi.h. */
+struct kv_wifi_auto kv_wifi_autoreconnect_of(int store_open, int rc, int value)
+{
+	struct kv_wifi_auto a = { WIFI_AUTO_SET_NO_STORE, NULL };
+
+	if (!store_open)
+		return a;
+	if (rc == KV_ERR_NOTFOUND) {
+		a.setting = WIFI_AUTO_SET_MISSING;
+		return a;
+	}
+	if (rc == KV_OK) {
+		a.setting = (value != 0) ? WIFI_AUTO_SET_ON : WIFI_AUTO_SET_FALSE;
+		return a;
+	}
+	if (rc == KV_ERR_TYPE) {
+		a.setting = WIFI_AUTO_SET_NOT_BOOL;
+		a.ignored = "not a bool";
+		return a;
+	}
+	a.setting = WIFI_AUTO_SET_UNREADABLE;
+	a.ignored = "unreadable";
+	return a;
+}
 
 static int seen_ok(enum kv_wifi_seen s)
 {

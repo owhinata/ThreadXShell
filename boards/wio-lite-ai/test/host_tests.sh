@@ -519,10 +519,43 @@ gcc $CFLAGS -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
 # (a read of an unreadable key adds a warning to `dmesg`), and end on the same
 # answer; the console never reads wifi.enable or wifi.autoconnect and is
 # refused without wifi.ssid.  wifi_rpc.h is the real one (constants only).
-gcc $CFLAGS -I "$board/src" \
+# issue #240 -- and wifi.autoreconnect: on only when it reads true (false, no
+# key, another type, a failed read and a closed store are all off).  kv.h is
+# the real one too (the KV_* codes).
+gcc $CFLAGS -I "$board/src" -I "$svc/kv" \
     "$here/test_kv_wifi.c" "$board/src/kv_wifi.c" \
     $LDFLAGS -o "$out/test_kv_wifi"
 "$out/test_kv_wifi"
+
+# issue #240 -- wifi.autoreconnect is read at the start of every association:
+# src/wifi_connect.c compiled unchanged with the store (BSP_ENABLE_KV=1)
+# against the stand-ins in the test, which record the order.  A refused command
+# reads nothing and changes nothing (issue #244); otherwise the read comes after
+# the disarm and before the link is claimed, and a successful association keeps
+# its credentials only when the key read true (every setting is walked).
+# connect_shim/ holds the HAL calls the files make.
+gcc $CFLAGS -DBSP_ENABLE_KV=1 -I "$here/connect_shim" \
+    -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
+    -I "$inc" -I "$HOST_TEST_CORE" -I "$st/../cmds" -I "$svc" -I "$svc/net" \
+    -I "$board/cmds" -I "$board/src" -I "$board/svc" \
+    "$here/test_wifi_connect_auto.c" "$board/src/wifi_connect.c" \
+    $LDFLAGS -o "$out/test_wifi_connect_auto"
+"$out/test_wifi_connect_auto"
+
+# issue #240 -- src/wifi_auto.c and src/wifi_connect.c together, unchanged:
+# two associations at once (the boot's and one typed on the USB console, both
+# past their read before either arms), in both orders -- one that read false
+# never leaves its credentials held, one that read true holds them when it
+# arms -- and every line `wifi status` prints about the setting (each setting,
+# held and not; no `kv set` / `wifi reconnect` while the store cannot be used;
+# no warning added by `wifi status`).
+gcc $CFLAGS -DBSP_ENABLE_KV=1 -I "$here/connect_shim" \
+    -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
+    -I "$inc" -I "$HOST_TEST_CORE" -I "$st/../cmds" -I "$svc" -I "$svc/net" \
+    -I "$board/cmds" -I "$board/src" -I "$board/svc" \
+    "$here/test_wifi_auto.c" "$board/src/wifi_auto.c" "$board/src/wifi_connect.c" \
+    $LDFLAGS -o "$out/test_wifi_auto"
+"$out/test_wifi_auto"
 
 # issue #175 -- the model I/O check this board's host gate (verify_tflite) compiles from
 # svc/nn/tflm/nn_tflm_model_check.h, the function the backend runs before it plans a

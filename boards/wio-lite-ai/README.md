@@ -912,6 +912,20 @@ What is this board's:
 | `svc/kv_svc_config.h` | The words: `external NOR`, and `erasing 1 MB and rebuilding -- about 15 s...` |
 | `BSP_ENABLE_KV` | The build option (ON); OFF builds neither the store nor the two shared files |
 
+The keys this board reads.  `kv set` stores a string unless a type is
+named, and every key here that is not a string is ignored, with a warning
+in `dmesg` (`<key>: ignored (not a bool)`, or `(not a u32)`), when it was
+stored as one:
+
+| Key | Type | Missing | Read |
+|---|---|---|---|
+| `net.shell.port` | u32 | 23 | once, at boot ([telnet](#the-telnet-console-issue-221)) |
+| `wifi.enable` | bool | radio stays off | at boot |
+| `wifi.autoconnect` | bool | the boot does not associate | at boot |
+| `wifi.ssid` / `wifi.psk` / `wifi.security` | str / str / u32 | no saved network / open network / WPA2-AES with a `wifi.psk`, open without | at boot (when associating) and by `wifi reconnect` |
+| `wifi.autoreconnect` | bool | **off**: on only when it reads true (`kv set wifi.autoreconnect true bool`) | at the start of every association: the boot's, `wifi reconnect`'s and a typed `wifi connect`'s; and by every `wifi status`, to show it ([below](#automatic-re-association-wifiautoreconnect-issue-240)) |
+| `net.mode` | str | the address is left alone | at boot, and by `wifi reconnect` after it connects |
+
 - **The part.**  FlashDB at an 8-bit write granularity programs only bytes
   that still read 0xFF, which the W25Q128JV datasheet's page program
   describes (sec 8.2.13).  `kv format yes` took about 14 s on board #2
@@ -2341,11 +2355,13 @@ CDC console, runs the boot configuration's own sequence -- one function in
 `wifi.enable` and `wifi.autoconnect` are not read: they say what the boot
 does by itself, and the command runs because the operator asked (the
 association powers the module when it is off, as `wifi connect` does).  The
-host's re-association is turned on only when `wifi.autoreconnect` reads true;
-otherwise whether it is on or off is left as it was.  Its stored credentials
-are handled as by `wifi connect`: dropped when the association starts, taken
-again when it connects and re-association is on.  Nothing is written to the
-store.
+host's re-association follows `wifi.autoreconnect`, read at the start of the
+association as for every association since issue #240
+([below](#automatic-re-association-wifiautoreconnect-issue-240); until then
+a true key turned it on and anything else left it as it was).  Its stored
+credentials are handled as by `wifi connect`: dropped when the association
+starts, taken again when it connects and re-association is on.  Nothing is
+written to the store.
 
 | When | Answer |
 |---|---|
@@ -2403,7 +2419,8 @@ Two things it does that may surprise:
 - **The association's progress is on the console only.**  At boot the
   sequence prints through the `cfg` instance, whose output is the log, so
   the firmware version, `wifi: connecting to ...`, the retries and the
-  module's reason, `wifi: connected`, `autoreconnect armed for ...` and the
+  module's reason, `wifi: connected`, `autoreconnect armed for ...` (or,
+  since issue #240, ``autoreconnect off -- `kv set ...` ``) and the
   host-stack lines are all in `dmesg`.  A `wifi reconnect` prints them on its
   own console, and `dmesg` keeps, under `cfg`, only what `src/kv_boot.c` and
   the shared kv steps report: `wifi reconnect: applying the saved settings`
@@ -2427,6 +2444,196 @@ figures are `thread` peaks since the reboot of the test run):
 | USB console thread (`wio>`, 4,096 B) | peak **1,884 B** (2,212 B left), reached by `wifi flash info` and the `wifi reconnect` after it; a reconnect while connected, a Ctrl+C during the association and the reconnect after it did not raise it |
 | `cfg` thread (4,096 B, DTCM) | peak 1,620 B before issue #238 -> 1,636 B (`3bf7a4a`) -> **1,676 B** (`b27da53`) |
 | Not measured | `net.mode=static` and `manual` (the board's store holds `dhcp`, and it was not rewritten), an association that fails, and a warning from a key read |
+
+### Automatic re-association: `wifi.autoreconnect` (issue #240)
+
+When the AP goes away the host re-associates by itself with the credentials
+of the last successful association (owhinata/wio-lite-ai#32, `src/wifi_auto.c`;
+the detection is `src/link_bridge.c`'s).  Doing that means keeping the SSID
+and the passphrase in host RAM, which `devmem` and the telnet console can
+read, so since issue #240 it is **off unless the store says otherwise**:
+
+- **On only when `wifi.autoreconnect` reads true**:
+  `kv set wifi.autoreconnect true bool`.  False, no key, a value of another
+  type, a read that fails and a store that is not open are all off.  The
+  type has to be named: `kv set wifi.autoreconnect 1` (or `... true`) stores
+  a string, which is ignored, with `wifi.autoreconnect: ignored (not a bool)`
+  in `dmesg` when an association reads it.
+- **Read at the start of every association** -- the boot's (`wifi.enable`
+  and `wifi.autoconnect` true), `wifi reconnect`'s and a typed `wifi
+  connect`'s, all of which run `wifi_connect_run()` (`src/wifi_connect.c`),
+  which reads it through `wifi_auto_setting_read()` and
+  `kv_boot_autoreconnect_read()` (`src/kv_boot.c`; the rule is
+  `src/kv_wifi.c`'s).  Only the end of a successful association keeps
+  credentials, so a change takes effect at the next `wifi reconnect` or
+  `wifi connect`, without a reboot.  The read is after the telnet and
+  background refusals (a refused command changes nothing, issue #244), after
+  the association has dropped what was held (owhinata/wio-lite-ai#32), and
+  before the link is claimed.
+- **What is held follows the association that finished last.**  The boot's
+  association and one typed on the USB console can run at once; the coarse
+  link mutex puts the two one after the other, and nothing else does.  So:
+  - each association keeps what IT read and hands it to `wifi_auto_arm()`;
+    there is no shared on / off flag (a shared one could hand an association
+    that read false the other's true, and keep its passphrase -- the first
+    review of issue #240);
+  - it arms **before** it gives the link back (`rtl_link_end()`), not after:
+    the boot's thread (priority 15, above the USB console's 16) waiting for
+    the link takes it the moment it is given back and runs to the end, and an
+    arm left until after would land on top of the boot's -- dropping the
+    credentials of the network that is joined, or replacing them with a
+    network that is not (the second review).  The arm is a short
+    interrupt-masked section and one log record (a RAM ring, no ThreadX call,
+    no link), and the console lines come after the release;
+  - it drops what is held a second time once the link is its own, since an
+    association that held the link meanwhile may have stored its
+    credentials after the first drop; `wifi disconnect` does the same under
+    the link.  The power commands and `wifi flash` need not: they forget the
+    module, which drops such credentials at the next look.
+
+  An association that read false keeps nothing and drops what is held, in
+  the same critical section; one that read true stores its own.
+  `test/test_wifi_auto.c` runs the order above against the real files with a
+  stand-in link that refuses overlapping holders, for both pairs of answers
+  (A false and B true: B's held; A true and B false: nothing held).
+- **A build without the store** (`BSP_ENABLE_KV=OFF`) has no way to set it,
+  and it is always off.
+- **`wifi autoreconnect [on|off]` is gone**, with its report.  Until issue
+  #240 the re-association was on from boot, `wifi autoreconnect off` turned
+  it off until the next reset, and a true `wifi.autoreconnect` turned it on
+  at the boot's association only (a false one did nothing).  An operator who
+  never set the key goes from on to off.  `wifi autoreconnect` now answers as
+  any unknown subcommand does: `wifi: missing or unknown subcommand`.
+- **The passphrase in RAM, against what is already stored**: an operator who
+  uses the saved settings already keeps the same passphrase in the clear on
+  the external NOR (`wifi.psk`, which `kv get` prints); turning this on adds
+  a copy in RAM.  For one who types `wifi connect <ssid> <pw>` and keeps
+  nothing in the store, RAM is a new place it lives.
+
+A successful association says which it did, on the console it was typed on
+(in `dmesg` for the boot's):
+
+```
+wifi: connected
+  autoreconnect armed for "<ssid>"
+```
+
+or, in a build with the store,
+
+```
+wifi: connected
+  autoreconnect off -- `kv set wifi.autoreconnect true bool` turns it on at the next connect
+```
+
+The one line on every connect that keeps nothing is there because the
+default changed: without it an operator who relied on the old default would
+lose the re-association with no other sign.  A build without the store
+prints neither.
+
+**`wifi status` ends with the report** that was `wifi autoreconnect`'s.  Its
+heading is the store as it is NOW -- `wifi status` reads the key every time,
+after the link is given back (the read may wait up to 5 s for the NOR), and
+without the warning an association adds to `dmesg` (the heading says it
+instead).  The lines after it are what is actually held, as before: the
+network, or why nothing is, the tally, the last attempt and the backoff.  When
+the two disagree, the last line says what the next association does.  Before
+it reports, it drops credentials that belong to a module that has since been
+power-cycled or reflashed, as before.  `wifi status` still answers on telnet
+and as a background job; the text is one pure function,
+`wifi_auto_status_text()`, which `test/test_wifi_auto.c` walks for every
+setting, held and not.
+
+| Store | Held | Heading | Last line |
+|---|---|---|---|
+| true | yes | `wifi: autoreconnect on (wifi.autoreconnect is true)` | -- |
+| true | no | the same | ``the next successful `wifi connect` / `wifi reconnect` keeps the credentials`` |
+| false | yes | `wifi: autoreconnect off (wifi.autoreconnect is false)` | ``held until the next `wifi connect` / `wifi reconnect`; if the link is lost before then, it re-associates with it`` |
+| false | no | the same | ``` `kv set wifi.autoreconnect true bool`, then `wifi reconnect` (or `wifi connect`) to arm it ``` |
+| no key | yes / no | `wifi: autoreconnect off (wifi.autoreconnect is not set)` | as for false |
+| another type | yes / no | ``wifi: autoreconnect off (wifi.autoreconnect is not a bool -- it was stored without `bool`)`` | as for false |
+| read failed | yes / no | `wifi: autoreconnect off (wifi.autoreconnect could not be read -- the store is busy or failing)` | the "held until" line / none |
+| store not open | yes / no | `wifi: autoreconnect off (the configuration store is not open: <state>)`, `<state>` as `kv info` words it | the "held until" line / none |
+| no store in the build | no | `wifi: autoreconnect off` | `this build has no configuration store, so it stays off` |
+
+The "held until" line does not say what the next association will keep: it
+always drops what is held first, and then keeps its own only if it reads
+true at that time.  In a build without the store, the reason after an
+association is `not armed -- this build has no configuration store, so
+nothing is kept`.
+
+A store that cannot be used gets no `kv set` or `wifi reconnect` advice: both
+would be refused.  Examples (the lines between are as before):
+
+```
+wio> wifi status
+wifi: connected
+  mac  ...
+  rssi -63 dBm
+  channel plan: 0x7f
+  (`net info` for the address)
+wifi: autoreconnect on (wifi.autoreconnect is true)
+  armed for "<ssid>" (passphrase held in RAM, sec 0x00400004)
+  attempts 2, ok 1, failed 1
+  last attempt 40 s ago (rc 0, result 0)
+```
+
+`backoff <n> s, next try in <n> s` follows while a failed attempt is
+waiting.  The store true, nothing held (here straight after boot, before any
+association):
+
+```
+wifi: autoreconnect on (wifi.autoreconnect is true)
+  not armed -- no association since boot
+  attempts 0, ok 0, failed 0
+  the next successful `wifi connect` / `wifi reconnect` keeps the credentials
+```
+
+The store set false after an association that kept its credentials:
+
+```
+wifi: autoreconnect off (wifi.autoreconnect is false)
+  armed for "<ssid>" (passphrase held in RAM, sec 0x00400004)
+  attempts 0, ok 0, failed 0
+  held until the next `wifi connect` / `wifi reconnect`; if the link is lost before then, it re-associates with it
+```
+
+No key, after an association (which then read it):
+
+```
+wifi: autoreconnect off (wifi.autoreconnect is not set)
+  not armed -- wifi.autoreconnect was not true at the last association
+  attempts 0, ok 0, failed 0
+  `kv set wifi.autoreconnect true bool`, then `wifi reconnect` (or `wifi connect`) to arm it
+```
+
+The store not open, and the module powered off (`wifi off` dropped what was
+held):
+
+```
+wio> wifi status
+wifi: powered off (`wifi connect <ssid> ...` to bring up)
+wifi: autoreconnect off (the configuration store is not open: NOR flash device is down)
+  not armed -- wifi off
+  attempts 0, ok 0, failed 0
+```
+
+Measured for issue #240 (run on the board 2026-11-16; the stack figures in
+the table are static bounds from `cmake/thumb_stack_analysis.py` over `shell.elf`,
+which follow FlashDB's assert path into newlib's `fprintf` and stop at its
+recursion, so they bound the code walked rather than prove a peak; the last row is the
+peak the board reported):
+
+| What | Value |
+|---|---|
+| `shell.bin` | 381,864 B (issue #244) -> **382,504 B** (+640 B: the command and its strings went; the read, the setting's words and the status text came); internal flash free 10,712 B of 393,216 B |
+| `shell.bin` without the store (`BSP_ENABLE_KV=OFF`) | 333,472 B |
+| `wifi_connect_run()` frame | 176 B, unchanged: the read is out of line (`kv_boot_autoreconnect_read()`, above `kv_get_bool()`) |
+| `wifi connect` below its handler | 864 B -> 2,656 B static, now through the store read |
+| `wifi status` below its handler | 416 B -> 2,712 B static, now through the store read, after the link is given back |
+| The same consoles' `kv get` / `kv set` | 2,432 B / 2,792 B static, before and after: the store read was already reachable from every console |
+| Where `wifi status` runs | the USB console and the telnet console (both `CLI_INSTANCE_STACK_SIZE`, 4,096 B); as `wifi status &` it is refused where it claims the link, before the store is read (seen on the board); `wifi connect` / `reconnect` only on the USB console's foreground |
+| `cfg` thread | the read moved from `cfg_wifi()` (through `kv_cfg_bool()`) to `wifi_connect_run()`, 176 B deeper; `kv_boot_entry()` static bound 2,832 B before and after (4,096 B) |
+| Stack peaks on the board (`thread`, after every step of the check: `kv set` / `kv del`, `wifi reconnect`, `wifi status` on USB and telnet, `wifi off` / `on`, `wifi disconnect`) | USB console 2,076 B, telnet console 1,832 B, `cfg` 1,728 B, each of 4,096 B |
 
 ### The WiFi link layer (issue #222)
 

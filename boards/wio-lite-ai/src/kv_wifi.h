@@ -35,6 +35,8 @@
 
 #include <stdint.h>
 
+#include "wifi_auto.h"   /* enum wifi_auto_setting */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -91,6 +93,33 @@ struct kv_wifi_answer {
 };
 
 struct kv_wifi_answer kv_wifi_next(const struct kv_wifi_in *in);
+
+/*
+ * wifi.autoreconnect (issue #240): is the host's automatic re-association on?
+ *
+ * ON ONLY WHEN THE KEY READS TRUE.  A false, a missing key, a value of another
+ * type (`kv set wifi.autoreconnect 1` stores the string "1"), a read that
+ * failed and a store that is not open are all OFF: holding the passphrase in
+ * RAM is the operator's choice, so anything short of a clear yes says no.
+ *
+ * @store_open is whether the store was open when the caller looked; when it
+ * was not, the caller does not read and @rc and @value are ignored.  @rc is
+ * what kv_get_bool() returned (a KV_* code, svc/kv/kv.h) and @value what it
+ * stored.  `setting` says which (src/wifi_auto.h; only WIFI_AUTO_SET_ON is
+ * on).  `ignored` is NULL, or why a key that is there was not taken -- the
+ * words the shared readers use (shell/cmds/kv_cfg.c) -- for a caller that
+ * warns to report as "wifi.autoreconnect: ignored (<why>)".  A missing key and
+ * a store that is not open are not warned about: they are the ordinary "off".
+ *
+ * Read by src/kv_boot.c's kv_boot_autoreconnect_read(), at the start of every
+ * association and by `wifi status`; test/test_kv_wifi.c walks every answer.
+ */
+struct kv_wifi_auto {
+	enum wifi_auto_setting setting;
+	const char            *ignored;
+};
+
+struct kv_wifi_auto kv_wifi_autoreconnect_of(int store_open, int rc, int value);
 
 /* A read's result as the input wants it: nonzero is YES. */
 static inline enum kv_wifi_seen kv_wifi_seen_of(int found)

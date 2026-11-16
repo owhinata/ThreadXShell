@@ -227,6 +227,7 @@ int wifi_connect_run(struct cli_instance *sh, const char *ssid, const char *pass
 	uint32_t t_start = HAL_GetTick();
 	unsigned attempt;
 	int32_t result = -1;
+	bool keep, armed;
 	int rc;
 
 	/* Not from the telnet console: dropping the association takes the very session
@@ -243,8 +244,41 @@ int wifi_connect_run(struct cli_instance *sh, const char *ssid, const char *pass
 	 * anyway, so cutting the attempt short costs nothing: success re-arms below.
 	 */
 	wifi_auto_disarm("superseded by `wifi connect`");
+	/*
+	 * Whether this association may keep its credentials: wifi.autoreconnect, read
+	 * here for every caller (issue #240) -- the boot, `wifi reconnect` and a typed
+	 * `wifi connect` all come through this function, and wifi_auto_arm() below is
+	 * the only place the setting decides anything.  So a `kv set` takes effect at
+	 * the next connect, and a false one leaves nothing held (the disarm above
+	 * already dropped what was).
+	 *
+	 * The value read is THIS association's, kept in @keep and handed to
+	 * wifi_auto_arm() -- not left anywhere shared for the arm to read back.  The
+	 * boot's association and one typed on the USB console can both be past this
+	 * read at once (the second then waits in rtl_link_begin()), and a shared value
+	 * holds whichever read came last: an association that read false would keep
+	 * its passphrase because the other one read true (issue #240 review).  Only
+	 * a bool true is on (src/wifi_auto.h); a build without the store reads off.
+	 *
+	 * After the early refusals, so a refused command changes nothing (issue #244);
+	 * after the disarm, so no automatic attempt can take the link while the store
+	 * is read; and before rtl_link_begin(), so the coarse link mutex is not held
+	 * across a NOR read that may wait for the store.
+	 */
+	keep = (wifi_auto_setting_read(true, NULL) == WIFI_AUTO_SET_ON);
 	if (rtl_link_begin(sh, true) != RTL_LINK_READY)
 		return 1;
+	/*
+	 * And again now that the link is ours (issue #240 review).  The disarm above ran
+	 * before the claim, so another association that held the link meanwhile -- the
+	 * boot's, while this one waited in rtl_link_begin() -- may have stored its
+	 * credentials since.  This one is about to take the module off that network
+	 * (wifi_enter_sta() cycles the radio), so whatever it ends with, they no longer
+	 * describe what is joined: drop them here, under the link, as a lone `wifi
+	 * connect` would have at its start.  No automatic attempt can be in flight -- it
+	 * needs the link -- so this aborts nothing and only forgets.
+	 */
+	wifi_auto_disarm("superseded by `wifi connect`");
 	/*
 	 * Check the firmware proof BEFORE spending 15 s associating (owhinata/wio-lite-ai#30 B2b).
 	 *
@@ -445,16 +479,37 @@ no_retry:
 	 * the WLAN driver filters received IP against it).  So association is all that
 	 * happens here, and L3 lives entirely in `net`.
 	 */
+	/*
+	 * Capture the credentials for owhinata/wio-lite-ai#32.  Only when wifi.autoreconnect
+	 * read true at the top of this function (issue #240, @keep), which is what keeps
+	 * holding a passphrase in RAM an opt-in rather than something every association does
+	 * behind the operator's back.
+	 *
+	 * BEFORE rtl_link_end(), with the coarse link mutex still held (issue #240 review):
+	 * what is held must follow the association that FINISHED last, and the mutex is what
+	 * orders associations.  Armed after the release, the boot's thread (priority 15,
+	 * above the USB console's 16) waiting in rtl_link_begin() could take the link the
+	 * moment it was given back, associate and arm, and this arm would then land on top
+	 * of it -- dropping the credentials of the network that is joined, or replacing them
+	 * with this one's, which is no longer joined.  The arm is a short interrupt-masked
+	 * section and one log record (svc/log.c: a RAM ring under PRIMASK, no ThreadX call,
+	 * no link, no console), so holding the link across it costs nothing.  The lines
+	 * that say what it did are printed after the release.
+	 */
+	armed = wifi_auto_arm(ssid, pass, security, keep);
 	rtl_link_end(sh);
 	cli_print(sh, "wifi: connected\r\n");
-	/*
-	 * Capture the credentials for owhinata/wio-lite-ai#32.  A no-op unless `wifi autoreconnect
-	 * on` has been run, which is what keeps holding a passphrase in RAM an opt-in rather than
-	 * something every association does behind the operator's back.
-	 */
-	wifi_auto_arm(ssid, pass, security);
-	if (wifi_auto_enabled())
+	if (armed)
 		cli_print(sh, "  autoreconnect armed for \"%s\"\r\n", ssid);
+#if BSP_ENABLE_KV
+	else if (!keep)
+		/* One line, on every connect that keeps nothing: until issue #240 the
+		 * re-association was on by default, so an operator who never set the key
+		 * lost it with no other sign.  A build without the store says nothing --
+		 * there is no way to turn it on there. */
+		cli_print(sh, "  autoreconnect off -- `kv set wifi.autoreconnect true bool` "
+		          "turns it on at the next connect\r\n");
+#endif
 	/*
 	 * Bring the bridge up as part of associating (owhinata/wio-lite-ai#30 B2b), so there is no
 	 * user-visible "which stack owns the network" mode left.

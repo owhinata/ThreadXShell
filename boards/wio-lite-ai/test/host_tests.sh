@@ -514,6 +514,22 @@ gcc $CFLAGS -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
     $LDFLAGS -o "$out/test_wifi_flash_guard"
 "$out/test_wifi_flash_guard"
 
+# issue #249 -- what guards `nor erase` / `nor write` / `nor test`.  cmds/cmd_nor.c
+# compiled unchanged against a 16 MB array for the NOR (every call counted, any one
+# made to fail or to do nothing), a counted busy flag and the telnet question:
+# the refusals before the flag (the kv partition's range, telnet and its jobs, a
+# job of the USB console, the NOR down) touch neither the NOR nor the flag; a
+# held flag is one failed take; `nor test` refuses a sector that is not blank
+# without erasing it, and every failure after the flag gives it back once and
+# never says PASS.  fal_cfg.h is the real one (the kv partition's place).
+gcc $CFLAGS -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
+    -I "$inc" -I "$HOST_TEST_CORE" -I "$st/../cmds" -I "$svc" -I "$svc/net" \
+    -I "$svc/blob" -I "$board/src" -I "$board/port/nor" -I "$board/port/flashdb" \
+    "$here/test_nor_guard.c" "$board/cmds/cmd_nor.c" \
+    "$HOST_TEST_CORE/cli_parse.c" \
+    $LDFLAGS -o "$out/test_nor_guard"
+"$out/test_nor_guard"
+
 # issue #238 -- what the stored wifi.* keys say to do (src/kv_wifi.c), driven
 # the way src/kv_boot.c drives it: every combination of the five keys found or
 # not, for the boot and for a console command, with the store open and closed.

@@ -568,7 +568,7 @@ static int nn_life_prepare(struct nn_core_model_job *j)
 	 * this turns a mysterious "CRC32 mismatch" into an accurate "blob busy".
 	 */
 	if (blob_busy_acquire() != BLOB_OK) {
-		nn_detail_set("blob busy (a blob write or erase is running)");
+		nn_detail_set("blob busy (" BLOB_BUSY_HOLDERS " is running)");
 		return NN_SVC_ERR_BUSY;
 	}
 	nn_life_blob = 1u;

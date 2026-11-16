@@ -186,6 +186,18 @@ int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed);
 int blob_find(const char *name, unsigned *slot, struct blob_info *out,
               enum blob_lookup *why);
 
+/**
+ * Who can hold the busy flag, in the words every refusal names them with:
+ * shell/cmds/cmd_blob.c through cmds/cmd_blob_board.c (`blob write` / `blob
+ * erase`), cmds/cmd_nor.c (`nor erase` / `nor write` / `nor test`, issue #249)
+ * and port/nn/nn_svc_wio.c (`nn model load <name>`).  The kv store does not
+ * take it on this board: `nor` refuses the kv partition's range instead.  One
+ * string, so a new holder is added to every refusal at once (as f746g-disco's).
+ */
+#define BLOB_BUSY_HOLDERS \
+	"a `blob write` / `blob erase`, a `nor erase` / `nor write` / `nor test` " \
+	"or an `nn model load <name>`"
+
 /* ---- mutating side (all of it under blob_busy_acquire) -------------------- */
 
 /**

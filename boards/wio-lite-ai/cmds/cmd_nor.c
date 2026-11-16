@@ -8,10 +8,10 @@
  *
  *   nor info               bring-up state, JEDEC id, geometry, device clock
  *   nor read <addr> [len]  hexdump from a device offset (default 64 B)
- *   nor erase <addr> [len] erase 4 KB sector(s) -- destructive
- *   nor write <addr> <hex> program bytes given as a hex string
+ *   nor erase <addr> [len] erase 4 KB sector(s)                        (danger)
+ *   nor write <addr> <hex> program bytes given as a hex string         (danger)
  *   nor test [addr]        acceptance test for the partial-page programming that
- *                          the KV store's FDB_WRITE_GRAN = 8 depends on
+ *                          the KV store's FDB_WRITE_GRAN = 8 depends on (danger)
  *
  * `nor test` is the reason this command exists.  The whole KV design rests on one
  * datasheet reading -- that "program at previously erased (FFh) memory locations"
@@ -26,22 +26,46 @@
  * Addresses are device offsets (0 .. 16 MB), not 0x70000000 pointers: the window
  * is never memory-mapped and stays fenced off in the MPU (see port/nor).
  *
- * EVERY SUBCOMMAND HERE REACHES THE BARE DEVICE, past both of its tenants.  Two
- * ranges hold live data and nothing in this file will stop you from erasing them:
- * [0, 1 MB) is the `kv` configuration partition (svc/kv/kv.c) and [1 MB, 8 MB) is the
- * blob region's asset slots (src/blob.c, src/blob_slots.c).  Use `kv` and `blob` for
- * those; this is the tool for looking at the device itself, and it is deliberately
- * unguarded.
+ * WHAT GUARDS erase / write / test (issue #249).  They rewrite flash content, so
+ * they compile in only with CLI_ENABLE_DANGEROUS_CMDS, like devmem.  Each asks,
+ * in this order and before it touches the device:
+ *   1. its arguments, and whether the range lies on the device;
+ *   2. whether the range it would ACTUALLY erase or program (erase: rounded out
+ *      to whole sectors; test: the 4 KB sector) touches the kv partition
+ *      (port/flashdb/fal_cfg.h) -- refused outright, `kv format yes` is the way
+ *      to erase it.  The kv store does not take the busy flag on this board, so
+ *      the range is what keeps a raw erase off FlashDB's sectors;
+ *   3. whether it runs on the telnet console, in a background job launched from
+ *      it, or in a background job of the local console -- refused: these run in
+ *      the foreground of the local console only;
+ *   4. whether the NOR is up;
+ *   5. the blob store's busy flag (src/blob.h), held for the whole operation and
+ *      given back at one place on every path once it was taken.  It is what
+ *      orders a raw erase against a `blob write` / `blob erase` / `nn model load`
+ *      and against another erase or test.  The blob slots themselves are NOT
+ *      refused: under the flag a slot can be erased here, as on f746g-disco.
+ * `nor test` further refuses a sector that does not read blank, BEFORE it erases
+ * anything (a test is not a way to destroy data), and leaves the sector blank
+ * when it passes.
+ *
+ * `nor info` and `nor read` take no flag: nothing on this board orders a read
+ * against the flag (neither the blob reads nor kv take it), and `blob write`
+ * holds it for a whole transfer, during which a read is exactly what is wanted.
+ * A read interleaves with an erase or a program one driver call at a time under
+ * the device mutex and disturbs neither.
  *
  * Clean-room design; no third-party code reused.
  */
 #include "cli.h"
+#include "cli_instance.h"    /* sh->fg: is this a background job */
 #include "nor_flash.h"
-/* For BLOB_REGION_END only: the `nor test` default address must stay clear of the
- * asset region, and the assert below is what keeps the two from drifting apart.
- * Both files are compiled only under BSP_ENABLE_KV (CMakeLists.txt), so the include
- * is always resolvable wherever this file is built. */
+/* BLOB_REGION_END (the `nor test` default must stay clear of the asset region,
+ * and the assert below keeps the two from drifting apart), the busy flag and
+ * BLOB_BUSY_HOLDERS.  Both files are compiled only under BSP_ENABLE_KV
+ * (board.cmake), so the include is always resolvable wherever this is built. */
 #include "blob.h"
+#include "fal_cfg.h"         /* KV_PART_OFFSET / KV_PART_LEN (issue #249) */
+#include "net_tty.h"         /* net_tty_is_console, the other console's name */
 
 #include <stdint.h>
 #include <string.h>
@@ -52,9 +76,6 @@
 /* `nor read` bounds. */
 #define NOR_READ_DEFAULT  64u
 #define NOR_READ_MAX      1024u
-
-/* `nor write` bound: one page per invocation keeps the hex argument sane. */
-#define NOR_WRITE_MAX     NOR_PAGE_SIZE
 
 /*
  * Default scratch sector for `nor test`.  At 8 MB -- the first sector ABOVE the
@@ -69,15 +90,15 @@
  * #193 -- each time exactly where the next region put a slot header (0x400000 is
  * now the first 512 KB slot's).  Boards that ran `nor test` under an old default
  * may still have that residue there: it decodes as `invalid` rather than as a
- * blob, and one `blob erase <slot>` clears it.
+ * blob, and one `blob erase <slot>` clears it.  Since issue #249 a `nor test`
+ * also refuses a sector that is not blank, so a board whose 0x800000 still
+ * holds an earlier test's pattern needs one `nor erase 0x800000` first.
  *
  * It used to be 0x00100000, chosen when everything past the KV partition was spare;
  * the blob region moved in on top of it, which would have made a bare `nor test`
  * erase slot 0's HEADER and silently retire the blob stored there.  The lesson is
- * in the default, not in a check: `nor` is the raw-device debugging tool, so an
- * EXPLICIT address inside the blob region is still honoured (as `nor erase` and
- * `nor write` would be) -- it is the argument-less form, the one that gets typed
- * without thinking, that has to land somewhere harmless.
+ * in the default: it is the argument-less form, the one that gets typed without
+ * thinking, that has to land somewhere harmless.
  */
 #define NOR_TEST_DEFAULT_HEX   0x800000
 #define NOR_TEST_DEFAULT_ADDR  ((uint32_t)NOR_TEST_DEFAULT_HEX)
@@ -130,33 +151,6 @@ static int nor_parse_addr(struct cli_instance *sh, const char *s, uint32_t *out)
 		return -1;
 	}
 	return 0;
-}
-
-static int hex_nibble(char c)
-{
-	if (c >= '0' && c <= '9') return c - '0';
-	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-	return -1;
-}
-
-/* "DEADBEEF" -> bytes.  Returns the byte count, or -1 on a malformed string. */
-static int hex_to_bytes(const char *s, uint8_t *out, uint32_t max)
-{
-	uint32_t n = 0u;
-
-	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
-		s += 2;
-	while (*s != '\0') {
-		int hi = hex_nibble(s[0]);
-		int lo = (hi >= 0) ? hex_nibble(s[1]) : -1;
-
-		if (hi < 0 || lo < 0 || n >= max)
-			return -1;
-		out[n++] = (uint8_t)((hi << 4) | lo);
-		s += 2;
-	}
-	return (n == 0u) ? -1 : (int)n;
 }
 
 /* ---- subcommands --------------------------------------------------------- */
@@ -226,12 +220,117 @@ static int cmd_nor_read(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
+#if CLI_ENABLE_DANGEROUS_CMDS
+
+/* `nor write` bound: one page per invocation keeps the hex argument sane. */
+#define NOR_WRITE_MAX     NOR_PAGE_SIZE
+
+/* The end of the kv partition, one past its last byte. */
+#define NOR_KV_END        (KV_PART_OFFSET + KV_PART_LEN)
+
+/*
+ * Refuse a range that touches the kv partition by even one byte.  @p len is
+ * non-zero and the caller has already checked addr + len <= NOR_SIZE_BYTES, so
+ * the sum cannot wrap.  Asked of the range the operation will ACTUALLY erase or
+ * program: today the partition ends on a sector boundary, so the address the
+ * user typed would give the same answer, but the range is the one that stays
+ * right if the rounding ever goes.
+ */
+static int nor_refuse_kv(struct cli_instance *sh, uint32_t addr, uint32_t len)
+{
+	if (addr >= NOR_KV_END || addr + len <= KV_PART_OFFSET)
+		return 0;
+	cli_error(sh, "nor: 0x%06lX .. 0x%06lX is in the kv store (0x%06lX .. "
+	              "0x%06lX) -- `kv format yes` erases it\r\n",
+	          (unsigned long)addr, (unsigned long)(addr + len - 1u),
+	          (unsigned long)KV_PART_OFFSET, (unsigned long)(NOR_KV_END - 1u));
+	return -1;
+}
+
+/*
+ * Erasing and programming run in the foreground of the local console only: not
+ * on the telnet console, not in a background job launched from it, and not in a
+ * background job (`... &`) of the local console.  No board fact here -- the
+ * question about telnet is net_tty's (a job answers for its launcher) and the
+ * other console's name is its table -- so this can move to shell/cmds as it is.
+ * The reason given is only the rule: such an erase does not end the telnet
+ * session, so net_tty_guard()'s sentence would not be true here.
+ */
+static int nor_refuse_console(struct cli_instance *sh)
+{
+	const char *here;
+
+	if (net_tty_is_console(sh))
+		here = (sh->fg != NULL) ? "a background job of the telnet console"
+		                        : "the telnet console";
+	else if (sh->fg != NULL)
+		here = "a background job";
+	else
+		return 0;
+	cli_error(sh, "nor: erase, write and test run only in the foreground of the "
+	              "%s console; this is %s\r\n",
+	          net_tty_board_facts.other_console, here);
+	return -1;
+}
+
+/*
+ * The blob store's busy flag, for the whole of one erase, write or test.  On
+ * success the caller owns it and gives it back with blob_busy_release() at its
+ * one exit; on refusal nothing was taken and nothing is to be given back.
+ */
+static int nor_busy_gate(struct cli_instance *sh)
+{
+	if (blob_busy_acquire() != BLOB_OK) {
+		cli_error(sh, "nor: busy -- " BLOB_BUSY_HOLDERS " is running; "
+		              "try again\r\n");
+		return -1;
+	}
+	return 0;
+}
+
+/* Everything an erase, write or test asks once its range is known, in order
+ * (see the file comment).  0 = go ahead, holding the busy flag. */
+static int nor_admit(struct cli_instance *sh, uint32_t addr, uint32_t len)
+{
+	if (nor_refuse_kv(sh, addr, len) || nor_refuse_console(sh) ||
+	    nor_gate(sh) || nor_busy_gate(sh))
+		return -1;
+	return 0;
+}
+
+static int hex_nibble(char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+/* "DEADBEEF" -> bytes.  Returns the byte count, or -1 on a malformed string. */
+static int hex_to_bytes(const char *s, uint8_t *out, uint32_t max)
+{
+	uint32_t n = 0u;
+
+	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+		s += 2;
+	while (*s != '\0') {
+		int hi = hex_nibble(s[0]);
+		int lo = (hi >= 0) ? hex_nibble(s[1]) : -1;
+
+		if (hi < 0 || lo < 0 || n >= max)
+			return -1;
+		out[n++] = (uint8_t)((hi << 4) | lo);
+		s += 2;
+	}
+	return (n == 0u) ? -1 : (int)n;
+}
+
 static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t addr, base, len = NOR_SECTOR_SIZE;
 	int rc;
 
-	if (nor_gate(sh) || nor_parse_addr(sh, argv[1], &addr))
+	if (nor_parse_addr(sh, argv[1], &addr))
 		return 1;
 	if (argc > 2 && (cli_parse_u32(argv[2], &len) != 0 || len == 0u)) {
 		cli_error(sh, "nor: bad length\r\n");
@@ -248,7 +347,8 @@ static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
 	 * request it should have rejected -- turning an out-of-range argument into a
 	 * short erase somewhere else.  After the check, addr + len <= NOR_SIZE_BYTES
 	 * holds, and because base and NOR_SIZE_BYTES are both sector multiples the
-	 * rounded span still fits inside the device with nothing to overflow.
+	 * rounded span still fits inside the device with nothing to overflow.  The kv
+	 * refusal (nor_admit) is then asked of the rounded span, the one erased.
 	 */
 	if (len > NOR_SIZE_BYTES - addr) {
 		cli_error(sh, "nor: range runs past the end of the device\r\n");
@@ -259,7 +359,10 @@ static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
 	len = (len + NOR_SECTOR_SIZE - 1u) & ~(NOR_SECTOR_SIZE - 1u);
 	addr = base;
 
+	if (nor_admit(sh, addr, len))
+		return 1;
 	rc = nor_erase(addr, len);
+	blob_busy_release();
 	if (rc != NOR_OK) {
 		cli_error(sh, "nor: erase failed: %s\r\n", nor_strerror(rc));
 		return 1;
@@ -277,7 +380,7 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 	int n, rc;
 
 	(void)argc;
-	if (nor_gate(sh) || nor_parse_addr(sh, argv[1], &addr))
+	if (nor_parse_addr(sh, argv[1], &addr))
 		return 1;
 	n = hex_to_bytes(argv[2], data, sizeof data);
 	if (n < 0) {
@@ -290,7 +393,10 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 
+	if (nor_admit(sh, addr, (uint32_t)n))
+		return 1;
 	rc = nor_write(addr, data, (uint32_t)n);
+	blob_busy_release();
 	if (rc != NOR_OK) {
 		cli_error(sh, "nor: write failed: %s\r\n", nor_strerror(rc));
 		return 1;
@@ -302,7 +408,10 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 
 /* ---- nor test ------------------------------------------------------------ */
 
-/* Verify that [addr, addr+len) reads all 0xFF, chunk by chunk. */
+/*
+ * Does [addr, addr+len) read all 0xFF, chunk by chunk?  0 = blank, 1 = not (the
+ * first offending byte reported), -1 = a read failed (reported).
+ */
 static int nor_check_erased(struct cli_instance *sh, uint32_t addr, uint32_t len)
 {
 	uint8_t buf[NOR_CHUNK];
@@ -325,7 +434,7 @@ static int nor_check_erased(struct cli_instance *sh, uint32_t addr, uint32_t len
 			if (buf[i] != 0xFFu) {
 				cli_error(sh, "  0x%06lX = 0x%02X, expected 0xFF\r\n",
 				          (unsigned long)(addr + done + i), buf[i]);
-				return -1;
+				return 1;
 			}
 		}
 		done += chunk;
@@ -391,37 +500,126 @@ static int nor_test_partial(struct cli_instance *sh, uint32_t page)
 /*
  * Observation only: re-program a byte that has already been programmed.  This is
  * what FDB_WRITE_GRAN = 1 would need and what the datasheet does not promise, so
- * the result is reported and never turned into a pass/fail -- the shipped
+ * what the byte reads is reported and never turned into a pass/fail -- the shipped
  * configuration does not depend on it.  Recording the answer here is what makes a
- * future decision about gran = 1 a measurement rather than a guess.
+ * future decision about gran = 1 a measurement rather than a guess.  A write or
+ * read that FAILS is another matter: that is the device not answering, and the
+ * test fails on it (-1).
  */
-static void nor_test_overwrite(struct cli_instance *sh, uint32_t addr)
+static int nor_test_overwrite(struct cli_instance *sh, uint32_t addr)
 {
 	static const uint8_t seq[2] = {0xFEu, 0xFCu};
 	uint8_t got[2] = {0u, 0u};
 	uint32_t i;
+	int rc;
 
 	for (i = 0u; i < 2u; i++) {
-		if (nor_write(addr, &seq[i], 1u) != NOR_OK ||
-		    nor_read(addr, &got[i], 1u) != NOR_OK) {
-			cli_print(sh, "  (overwrite probe aborted on an I/O error)\r\n");
-			return;
+		rc = nor_write(addr, &seq[i], 1u);
+		if (rc == NOR_OK)
+			rc = nor_read(addr, &got[i], 1u);
+		if (rc != NOR_OK) {
+			cli_error(sh, "  overwrite write/read %lu failed: %s\r\n",
+			          (unsigned long)i, nor_strerror(rc));
+			return -1;
 		}
 	}
 	cli_print(sh, "  0xFF -> write 0xFE -> read 0x%02X -> write 0xFC -> read 0x%02X%s\r\n",
 	          got[0], got[1],
 	          (got[0] == 0xFEu && got[1] == 0xFCu) ? "  (accepted)"
 	                                               : "  (NOT accepted)");
+	return 0;
+}
+
+/*
+ * The destructive part, on a sector that read blank: erase -> blank check ->
+ * the partial page programs -> the overwrite observation -> erase -> blank
+ * check.  0, or -1 after reporting what failed; the sector may then be left
+ * programmed, which the caller says.
+ */
+static int nor_test_steps(struct cli_instance *sh, uint32_t addr)
+{
+	int rc = nor_erase(addr, NOR_SECTOR_SIZE);
+
+	if (rc != NOR_OK) {
+		cli_error(sh, "nor: FAIL -- erase failed: %s\r\n", nor_strerror(rc));
+		return -1;
+	}
+	cli_print(sh, "erase: OK\r\n");
+	if (nor_check_erased(sh, addr, NOR_SECTOR_SIZE) != 0) {
+		cli_error(sh, "nor: FAIL -- sector is not blank after erase\r\n");
+		return -1;
+	}
+	cli_print(sh, "blank check: OK (4096 B all 0xFF)\r\n");
+
+	cli_print(sh, "partial page programs (what FDB_WRITE_GRAN=8 needs):\r\n");
+	if (nor_test_partial(sh, addr)) {
+		cli_error(sh, "nor: FAIL -- partial page programming disturbs the page\r\n");
+		return -1;
+	}
+
+	cli_print(sh, "same-byte overwrite (observation only, gran=1 would need it):\r\n");
+	if (nor_test_overwrite(sh, addr + 64u)) {
+		cli_error(sh, "nor: FAIL -- the device did not complete a write or read "
+		              "of the overwrite observation\r\n");
+		return -1;
+	}
+
+	/* Leave it as it was found: blank. */
+	rc = nor_erase(addr, NOR_SECTOR_SIZE);
+	if (rc != NOR_OK) {
+		cli_error(sh, "nor: FAIL -- final erase failed: %s\r\n", nor_strerror(rc));
+		return -1;
+	}
+	if (nor_check_erased(sh, addr, NOR_SECTOR_SIZE) != 0) {
+		cli_error(sh, "nor: FAIL -- sector is not blank after the final erase\r\n");
+		return -1;
+	}
+	cli_print(sh, "final erase: OK (left blank)\r\n");
+	return 0;
+}
+
+/* The whole test, under the busy flag the caller holds. */
+static int nor_test_run(struct cli_instance *sh, uint32_t addr)
+{
+	uint8_t id[3];
+	int rc;
+
+	nor_flash_get_id(id);
+	cli_print(sh, "nor test: sector 0x%06lX (must read blank; 4 KB will be "
+	              "ERASED and left blank)\r\n", (unsigned long)addr);
+	cli_print(sh, "jedec %02X %02X %02X @ %lu Hz\r\n", id[0], id[1], id[2],
+	          (unsigned long)nor_flash_clock_hz());
+
+	/* [!] Before anything is erased: refuse to test over data. */
+	rc = nor_check_erased(sh, addr, NOR_SECTOR_SIZE);
+	if (rc > 0) {
+		cli_error(sh, "nor: 4 KB at 0x%06lX is not blank -- not testing over "
+		              "data; `nor erase 0x%06lX` first if it is scratch\r\n",
+		          (unsigned long)addr, (unsigned long)addr);
+		return 1;
+	}
+	if (rc < 0) {
+		cli_error(sh, "nor: FAIL -- could not read the sector; nothing was "
+		              "erased\r\n");
+		return 1;
+	}
+	cli_print(sh, "blank before the test: OK\r\n");
+
+	if (nor_test_steps(sh, addr) != 0) {
+		cli_error(sh, "nor: the 4 KB at 0x%06lX may not be blank now -- "
+		              "`nor erase 0x%06lX` before the next `nor test`\r\n",
+		          (unsigned long)addr, (unsigned long)addr);
+		return 1;
+	}
+	cli_print(sh, "nor: PASS\r\n");
+	return 0;
 }
 
 static int cmd_nor_test(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t addr = NOR_TEST_DEFAULT_ADDR;
-	uint8_t id[3];
 	int rc;
 
-	if (nor_gate(sh))
-		return 1;
 	if (argc > 1 && nor_parse_addr(sh, argv[1], &addr))
 		return 1;
 	addr -= addr % NOR_SECTOR_SIZE;
@@ -431,48 +629,29 @@ static int cmd_nor_test(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 
-	nor_flash_get_id(id);
-	cli_print(sh, "nor test: sector 0x%06lX (4 KB will be ERASED)\r\n",
-	          (unsigned long)addr);
-	cli_print(sh, "jedec %02X %02X %02X @ %lu Hz\r\n", id[0], id[1], id[2],
-	          (unsigned long)nor_flash_clock_hz());
-
-	rc = nor_erase(addr, NOR_SECTOR_SIZE);
-	if (rc != NOR_OK) {
-		cli_error(sh, "nor: erase failed: %s\r\n", nor_strerror(rc));
+	if (nor_admit(sh, addr, NOR_SECTOR_SIZE))
 		return 1;
-	}
-	cli_print(sh, "erase: OK\r\n");
-	if (nor_check_erased(sh, addr, NOR_SECTOR_SIZE)) {
-		cli_error(sh, "nor: FAIL -- sector is not blank after erase\r\n");
-		return 1;
-	}
-	cli_print(sh, "blank check: OK (4096 B all 0xFF)\r\n");
-
-	cli_print(sh, "partial page programs (what FDB_WRITE_GRAN=8 needs):\r\n");
-	if (nor_test_partial(sh, addr)) {
-		cli_error(sh, "nor: FAIL -- partial page programming disturbs the page\r\n");
-		return 1;
-	}
-
-	cli_print(sh, "same-byte overwrite (observation only, gran=1 would need it):\r\n");
-	nor_test_overwrite(sh, addr + 64u);
-
-	cli_print(sh, "nor: PASS\r\n");
-	return 0;
+	rc = nor_test_run(sh, addr);
+	blob_busy_release();
+	return rc;
 }
+
+#endif /* CLI_ENABLE_DANGEROUS_CMDS */
 
 CLI_SUBCMD_SET_CREATE(nor_subcmds,
 	CLI_CMD_ARG(info,  NULL, "bring-up state, JEDEC id, geometry, clock", cmd_nor_info,  1, 0),
 	CLI_CMD_ARG_USAGE(read,  NULL, "hexdump <addr> [len]",
 	                  "<addr> [len]", cmd_nor_read, 2, 1),
+#if CLI_ENABLE_DANGEROUS_CMDS
 	CLI_CMD_ARG_USAGE(erase, NULL, "erase 4 KB sector(s) <addr> [len]",
 	                  "<addr> [len]", cmd_nor_erase, 2, 1),
 	CLI_CMD_ARG_USAGE(write, NULL, "program <addr> <hex> (erase first)",
 	                  "<addr> <hex>", cmd_nor_write, 3, 0),
-	CLI_CMD_ARG_USAGE(test,  NULL, "partial-page-program acceptance test [addr] (defaults to "
+	CLI_CMD_ARG_USAGE(test,  NULL, "partial-page-program acceptance test on a blank "
+	                               "sector [addr] (defaults to "
 	                               NOR_TEST_DEFAULT_STR ", above kv+blob)",
 	                  "[addr]", cmd_nor_test, 1, 1),
+#endif
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(nor, nor_subcmds,

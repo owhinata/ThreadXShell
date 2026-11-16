@@ -15,6 +15,7 @@
  */
 #include "cli.h"
 #include "blob_cmd_board.h"
+#include "blob.h"             /* BLOB_BUSY_HOLDERS */
 #include "blob_err.h"
 
 /* Any console, foreground or background: the busy flag is what orders an
@@ -32,9 +33,8 @@ int blob_board_say(struct cli_instance *sh, int rc)
 		cli_error(sh, "blob: NOR device down (see `nor info`)\r\n");
 		return 1;
 	case BLOB_ERR_BUSY:
-		/* The busy flag is held by exactly these three. */
-		cli_error(sh, "blob: another blob operation is running (a `blob "
-		              "write` / `erase`, or `nn model load`)\r\n");
+		cli_error(sh, "blob: another NOR operation is running ("
+		              BLOB_BUSY_HOLDERS ")\r\n");
 		return 1;
 	default:
 		break;

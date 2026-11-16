@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "crc32.h"           /* crc32_update -- FlashDB's, port/nn/crc32_fdb.c */
+#include "fal_cfg.h"         /* KV_PART_OFFSET / KV_PART_LEN (issue #249) */
 #include "nor_flash.h"
 #include "stm32h7xx_hal.h"   /* __get_PRIMASK / __disable_irq / __set_PRIMASK */
 
@@ -31,7 +32,7 @@ _Static_assert(BLOB_HDR_SPAN <= BLOB_ERASE_UNIT,
                "the two header pages must fit in the header sector");
 _Static_assert(BLOB_REGION_END <= NOR_SIZE_BYTES,
                "the blob region must fit on the device");
-_Static_assert(BLOB_REGION_BASE >= 1024u * 1024u,
+_Static_assert(BLOB_REGION_BASE >= KV_PART_OFFSET + KV_PART_LEN,
                "the blob region must start above the kv partition");
 _Static_assert((BLOB_REGION_BASE % NOR_BLOCK_SIZE) == 0u &&
                (BLOB_REGION_END % NOR_BLOCK_SIZE) == 0u,

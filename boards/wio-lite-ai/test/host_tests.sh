@@ -71,7 +71,8 @@ gcc $CFLAGS \
 # reads' range checks and the busy flag -- the cases a console cannot stage
 # without spending flash cycles.
 gcc $CFLAGS -I "$here/blob_shim" \
-    -I "$board/src" -I "$board/port/nor" -I "$svc" -I "$svc/blob" \
+    -I "$board/src" -I "$board/port/nor" -I "$board/port/flashdb" \
+    -I "$svc" -I "$svc/blob" \
     "$here/test_blob_store.c" "$board/src/blob.c" "$board/src/blob_slots.c" \
     "$svc/blob/blob_map.c" "$svc/blob/blob_state.c" "$svc/crc32.c" \
     $LDFLAGS -o "$out/test_blob_store_wio"
@@ -84,7 +85,8 @@ gcc $CFLAGS -I "$here/blob_shim" \
 # busy flag is taken and given back once.  blob_shim/ stands in for the HAL's
 # PRIMASK, svc/log.h and include/mem_sections.h.
 gcc $CFLAGS -I "$here/blob_shim" \
-    -I "$board/src" -I "$board/port/nor" -I "$svc" -I "$svc/blob" \
+    -I "$board/src" -I "$board/port/nor" -I "$board/port/flashdb" \
+    -I "$svc" -I "$svc/blob" \
     "$here/test_blob_writer.c" "$board/src/blob.c" "$board/src/blob_writer.c" \
     "$board/src/blob_slots.c" "$svc/blob/blob_map.c" "$svc/blob/blob_state.c" \
     "$svc/blob/blob_write.c" "$svc/crc32.c" \

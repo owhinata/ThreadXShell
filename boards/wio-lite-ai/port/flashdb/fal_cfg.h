@@ -39,7 +39,15 @@
  * point: FlashDB is log-structured, so spare sectors are what turn a rewrite into
  * an append instead of an erase, and at 100K erase cycles per sector this makes
  * the store effectively unwearable for configuration traffic.
+ *
+ * The partition's place on the device, named as on f746g-disco (issue #249):
+ * the table below is written from these, and so are src/blob.c's check that the
+ * blob region starts above it and the `nor` commands' refusal of a range that
+ * touches it.  Unsigned, so a caller's range arithmetic stays unsigned.
  */
+#define KV_PART_OFFSET                 0u
+#define KV_PART_LEN                    (1024u * 1024u)
+
 #define FAL_PART_HAS_TABLE_CFG
 
 extern const struct fal_flash_dev nor_flash_dev;
@@ -53,7 +61,8 @@ extern const struct fal_flash_dev nor_flash_dev;
  * this macro is expanded -- expansion is lazy, so the reference resolves there. */
 #define FAL_PART_TABLE                                                         \
 {                                                                              \
-	{FAL_PART_MAGIC_WORD, KV_PART_NAME, NOR_FLASH_DEV_NAME, 0, 1024 * 1024, 0},\
+	{FAL_PART_MAGIC_WORD, KV_PART_NAME, NOR_FLASH_DEV_NAME,                    \
+	 KV_PART_OFFSET, KV_PART_LEN, 0},                                          \
 }
 
 /* Route FAL's own logging into the same line-assembling shim FlashDB uses, so it

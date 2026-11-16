@@ -242,6 +242,22 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_console"
 "$out/test_console"
 
+# issue #243 -- the background-job pool is set up by cli_init() itself, once,
+# whichever instance comes first (cli_jobs_init_once, cli_job.c).  cli_job.c is
+# compiled as it is over the ThreadX type shim, with the ThreadX calls it makes
+# faked in the test: a 2nd / 3rd / nested call creates nothing, a failed create
+# leaves that slot unused and is not retried, a pool with no usable slot
+# refuses with today's text, and a launch while the creates are still running
+# is refused or takes a slot the rest of the initialisation leaves alone.
+# Each case runs in its own child process, since the pool is file-static.
+# That cli_init() makes the call is checked on the firmware (cli_core.c does
+# not build on the host).
+gcc $CFLAGS \
+    -I "$here/shim" -I "$inc" -I "$core" \
+    "$here/test_cli_job.c" "$core/cli_job.c" \
+    $LDFLAGS -o "$out/test_cli_job"
+"$out/test_cli_job"
+
 # Tab completion: word boundary + read-only token walk (command-set resolution),
 # prefix scan with longest-common-prefix tracking, single-candidate complete +
 # trailing space, bash-style two-stage candidate list, BEL on no match / argument

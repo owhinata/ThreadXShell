@@ -205,6 +205,12 @@ int cli_init(struct cli_instance *sh)
 {
 	struct cli_transport *tr = sh->tr;
 
+	/* The background-job pool is one for the whole shell (issue #243): set it
+	 * up here, before this instance's own checks, so it happens on the first
+	 * cli_init() whichever instance that is and whether or not its init then
+	 * fails.  Every later call returns at once (cli_job.c). */
+	cli_jobs_init_once();
+
 	/* One-shot: cli_init runs once per instance (a failed init is terminal for
 	 * that instance and must not be retried -- see the create-order note below). */
 	if (sh->state != CLI_UNINIT)

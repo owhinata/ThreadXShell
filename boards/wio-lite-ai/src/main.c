@@ -119,7 +119,6 @@ void tx_application_define(void *first_unused_memory)
     cli_start(&cdc_sh);
   if (cli_init(&net_sh) == 0)   /* telnet console; idle until a client connects */
     cli_start(&net_sh);
-  cli_job_pool_init();          /* background-job worker pool (`cmd &`) */
 
   /* USB device pump thread (priority 8): the sole owner of tud_task()/tud_cdc_*.
    * Above the shell instance thread (CLI_INSTANCE_PRIORITY=16) so USB stays

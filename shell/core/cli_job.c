@@ -155,20 +155,58 @@ static void cli_job_entry(ULONG arg)
 
 /* ---- pool init ---------------------------------------------------------- */
 
-void cli_job_pool_init(void)
-{
-	int i;
+/* Set once, by the first cli_jobs_init_once() call (issue #243).  The pool is
+ * one for the whole shell, not one per console, so whichever instance's
+ * cli_init() runs first initialises it and every later call does nothing. */
+static uint8_t cli_jobs_init_taken;
 
+/*
+ * Called at the top of every cli_init() (issue #243); the boards no longer
+ * call it.  Runs the pool's initialisation exactly once:
+ *  - the "already done" mark is tested and set in ONE masked section, and the
+ *    event-flags creates run outside it, so only the caller that set the mark
+ *    ever creates (ThreadX refuses to create an existing group, and a second
+ *    run would leave every slot unusable);
+ *  - every write that makes a slot free happens BEFORE any create, so once a
+ *    slot is marked usable this function never writes to it again -- a launch
+ *    that took it in the meantime keeps it;
+ *  - the usable mark is set under the same masking the launcher reads it
+ *    under, so a launch racing an unfinished initialisation sees either "not
+ *    usable yet" (and is refused) or a slot whose group exists;
+ *  - a slot whose group failed to create stays unusable and is never retried
+ *    (re-creating would refuse, and a retry is not this function's business).
+ */
+void cli_jobs_init_once(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+	int i, first;
+
+	TX_DISABLE
+	first = !cli_jobs_init_taken;
+	cli_jobs_init_taken = 1u;
+	TX_RESTORE
+
+	if (!first)
+		return;
+
+	/* Already FREE / 0 from static zeroing; written anyway, and only here,
+	 * before the first slot can be marked usable. */
 	for (i = 0; i < CLI_MAX_BG_JOBS; i++) {
 		cli_jobs[i].state = CLI_JOB_FREE;
 		cli_jobs[i].id    = 0;
+	}
+
+	for (i = 0; i < CLI_MAX_BG_JOBS; i++) {
 		/* One event-flags group per worker, created once and reused (kill wakeup
 		 * + cancellable sleep / TX-full poll).  Mark the slot usable only if the
 		 * group was created: without it cli_sleep()/kill on a worker would hit
 		 * TX_GROUP_ERROR, so cli_job_launch() refuses to use a failed slot. */
-		cli_jobs[i].evt_ok =
-			(tx_event_flags_create(&cli_jobs[i].inst.events, "cli_job_evt")
-			 == TX_SUCCESS) ? 1u : 0u;
+		if (tx_event_flags_create(&cli_jobs[i].inst.events, "cli_job_evt")
+		    == TX_SUCCESS) {
+			TX_DISABLE
+			cli_jobs[i].evt_ok = 1u;
+			TX_RESTORE
+		}
 	}
 }
 

@@ -22,6 +22,11 @@
  * those calls and the TX_DISABLE / TX_RESTORE section are declared below as
  * calls into the test (test_net_core.c and test_net_tty.c define them and
  * record what was held when), and nothing else uses them.
+ *
+ * The background-job pool (shell/core/cli_job.c, issue #243) also reads a
+ * thread's state and deletes completed threads: the state field, its two
+ * values and tx_thread_delete() are declared below for test_cli_job.c, which
+ * defines every ThreadX call that file makes.
  */
 #ifndef TX_API_H
 #define TX_API_H
@@ -35,7 +40,7 @@ typedef char           CHAR;
 #define VOID void
 
 /* Opaque control blocks, sized only so they can be embedded by value. */
-typedef struct { void *opaque; } TX_THREAD;
+typedef struct { void *opaque; UINT tx_thread_state; } TX_THREAD;
 typedef struct { void *opaque; } TX_EVENT_FLAGS_GROUP;
 typedef struct { void *opaque; } TX_MUTEX;
 
@@ -46,8 +51,12 @@ typedef struct { void *opaque; } TX_MUTEX;
 #define TX_INHERIT      ((UINT)1)
 #define TX_OR           ((UINT)0)
 #define TX_OR_CLEAR     ((UINT)1)
+#define TX_AND          ((UINT)2)
 #define TX_NO_TIME_SLICE ((ULONG)0)
 #define TX_AUTO_START   ((UINT)1)
+/* Thread states, ThreadX's values (tx_api.h): READY 0, COMPLETED 1, TERMINATED 2. */
+#define TX_COMPLETED    ((UINT)1)
+#define TX_TERMINATED   ((UINT)2)
 
 ULONG tx_time_get(void);
 /* The KV boot steps' DHCP wait (shell/cmds/kv_cfg.c, issue #214). */
@@ -68,6 +77,7 @@ UINT tx_thread_create(TX_THREAD *thread_ptr, CHAR *name_ptr,
                       ULONG entry_input, VOID *stack_start, ULONG stack_size,
                       UINT priority, UINT preempt_threshold, ULONG time_slice,
                       UINT auto_start);
+UINT tx_thread_delete(TX_THREAD *thread_ptr);
 
 /* The interrupt-masked section, as calls the test counts. */
 UINT tx_shim_disable(void);

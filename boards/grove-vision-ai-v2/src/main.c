@@ -127,7 +127,6 @@ void tx_application_define(void *first_unused_memory)
 	 * on the shell thread, after the scheduler starts. */
 	if (cli_init(&uart_sh) == 0)
 		cli_start(&uart_sh);
-	cli_job_pool_init();            /* background-job worker pool (`cmd &`) */
 
 	/* ST7789 driver objects (issue #30).  Created here, not in lcd_init():
 	 * the port's rule is that a ThreadX object exists before any interrupt

@@ -226,6 +226,14 @@ void cli_out_putc(struct cli_instance *sh, char c);
 void cli_out_flush(struct cli_instance *sh);
 void cli_out_discard(struct cli_instance *sh);
 
+/* Background-job pool initialisation (cli_job.c, issue #243).  cli_init()
+ * calls it first thing, for every instance; only the first call creates the
+ * pool's event groups and every later one returns at once.  Core-internal on
+ * purpose: a board that called it as well would be a second run, so it has no
+ * public declaration and a different name from the old public
+ * cli_job_pool_init(), which no longer exists. */
+void cli_jobs_init_once(void);
+
 #ifdef __cplusplus
 }
 #endif

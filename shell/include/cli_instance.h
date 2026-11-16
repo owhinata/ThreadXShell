@@ -399,9 +399,10 @@ struct cli_console_stat {
 size_t cli_console_snapshot(struct cli_console_stat *out, size_t cap, size_t *found);
 
 /* Background jobs (owhinata/stm32f746g-disco#25, cli_job.c).  `cmd &` runs the command in a worker thread
- * drawn from a fixed static pool.  cli_job_pool_init() creates the pool's event
- * groups once at boot (call after the interactive instances start).  The other
- * entry points run on the foreground thread: cli_job_launch() spawns a worker
+ * drawn from a fixed static pool.  cli_init() creates the pool's event groups on
+ * its first call, whichever instance that is (issue #243); a board does not
+ * initialise the pool itself.  The entry points below run on the foreground
+ * thread: cli_job_launch() spawns a worker
  * for an already-`&`-stripped segment (returns 0 on success, <0 if the pool /
  * thread registry is full -- it prints its own error); cli_jobs_reap() deletes
  * any completed workers (TX_COMPLETED) and prints their done/killed notice;
@@ -409,7 +410,6 @@ size_t cli_console_snapshot(struct cli_console_stat *out, size_t cap, size_t *fo
  * stop of the running job with id @p id (returns 0 if found+signalled, <0 if no
  * such running job).  cli_job_launch / cli_jobs_reap are also referenced by the
  * ThreadX-free cli_session.c, so the host test harness stubs them. */
-void cli_job_pool_init(void);
 int  cli_job_launch(struct cli_instance *fg, char *seg);
 void cli_jobs_reap(struct cli_instance *fg);
 void cli_jobs_print(struct cli_instance *sh);

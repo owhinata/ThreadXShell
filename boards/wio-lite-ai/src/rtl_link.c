@@ -14,6 +14,7 @@
 #include "cli.h"
 #include "erpc.h"
 #include "rtl8720.h"
+#include "net_tty.h"   /* net_tty_guard(): rtl_link_refuse_early() asks it first */
 
 /* Rate-change timings (owhinata/wio-lite-ai#23 U4-3).  The CTRL timeout matches `link`'s. */
 #define RTL_RATE_CTRL_TMO_MS  500u
@@ -250,6 +251,27 @@ static int link_claim_common(struct cli_instance *sh)
 		cli_console_release(sh);
 		cli_error(sh, "wifi: the RTL8720 link is busy (another command owns it)\r\n");
 		return -1;
+	}
+	return 0;
+}
+
+/* The two questions link_claim_common() would answer too late for a command that
+ * changes something first (issue #244): asked before the first change, a refusal
+ * changes nothing.  Moves nothing itself; the claim can still fail afterwards. */
+int rtl_link_refuse_early(struct cli_instance *sh, const char *what)
+{
+	int rc;
+
+	if (net_tty_guard(sh, what))
+		return 1;
+	rc = cli_console_claimable(sh);
+	if (rc == -2) {
+		cli_error(sh, "%s: run in the foreground (not `... &`)\r\n", what);
+		return 1;
+	}
+	if (rc != 0) {
+		cli_error(sh, "%s: the console could not be claimed (%d)\r\n", what, rc);
+		return 1;
 	}
 	return 0;
 }

@@ -45,7 +45,6 @@
 #include "rtl_link.h"
 #include "wifi_auto.h"       /* #32: a flash session disarms the host's re-association */
 #include "link_bridge.h"   /* the bridge has to be given back before we take the link */
-#include "net_tty.h"       /* net_tty_guard(): taking the link down ends a telnet session */
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -82,8 +81,10 @@ static int flash_claim(struct cli_instance *sh, const char *what)
 {
 	unsigned waited = 0u;
 
-	/* Before the disarm, which drops the stored credentials: a refusal changes nothing. */
-	if (net_tty_guard(sh, what))
+	/* Before the disarm, which drops the stored credentials: a refusal changes nothing.
+	 * Telnet first, then `... &` -- the claim below would refuse a background job
+	 * too, but only after the teardown (issue #244). */
+	if (rtl_link_refuse_early(sh, what))
 		return -1;
 
 	/*
@@ -736,8 +737,9 @@ static int cmd_flash_write(struct cli_instance *sh, int argc, char **argv)
 	/* Before the staged-image check and the `confirm` prompt (issue #235): telling a
 	 * telnet operator to re-run with `confirm` -- or to run `imgload`, which telnet
 	 * refuses too -- only to refuse the re-run would be advice that cannot be followed.
-	 * flash_claim() asks the same question again and gets the same answer. */
-	if (net_tty_guard(sh, "wifi flash write"))
+	 * flash_claim() asks the same question again and gets the same answer.  The
+	 * same holds for `... &` (issue #244), so both are asked here. */
+	if (rtl_link_refuse_early(sh, "wifi flash write"))
 		return 1;
 	if (!im->valid) {
 		cli_error(sh, "wifi: no image staged -- run `wifi flash imgload` first\r\n");

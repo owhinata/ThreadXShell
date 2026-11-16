@@ -2,10 +2,12 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Stand-ins for everything cmds/cmd_wifi_flash.c calls, for test_wifi_flash_guard.c
- * (issue #235).  They only count: the question under test is whether a subcommand
- * reaches wifi_auto_disarm() / link_bridge_down() before the telnet refusal.  Every
- * call that would move hardware fails, so a path that got past the guard stops there.
+ * Stand-ins for everything cmds/cmd_wifi_flash.c and src/rtl_link.c call, for
+ * test_wifi_flash_guard.c (issue #235; rtl_link.c since issue #244, so the refusal
+ * flash_claim() asks first is the board's own).  They only count: the question under
+ * test is whether a subcommand reaches wifi_auto_disarm() / link_bridge_down() before
+ * the telnet or background refusal.  Every call that would move hardware fails, so a
+ * path that got past the refusals stops there.
  * The prototypes come from the board's real headers, so a signature change breaks
  * this build instead of drifting.
  */
@@ -22,15 +24,32 @@
 #include "rtl_link.h"
 #include "wifi_auto.h"
 #include "link_bridge.h"
+#include "erpc.h"
+#include "tx_api.h"
+
+#include <stdarg.h>
+#include <string.h>
 
 /* Read and reset by the test (declared there as extern). */
 struct cli_instance *fk_telnet_sh;   /* the console the test calls telnet, or NULL */
-int fk_guard_calls, fk_disarm, fk_bridge_down, fk_hw_claim, fk_psram, fk_out;
+int fk_guard_calls, fk_disarm, fk_bridge_down, fk_console_claim, fk_psram, fk_out;
 const char *fk_refused_as;
+const char *fk_fg_refused_as;        /* the name a "run in the foreground" line used */
 
-/* Refuse only when asked about the telnet console itself, as net_tty_is_console() does. */
+/* Refuse only the telnet console itself or a job launched from it, as
+ * net_tty_is_console() does (a job answers for its launcher). */
 static int refuse(struct cli_instance *sh, const char *as)
-{ if (sh == NULL || sh != fk_telnet_sh) return 0; fk_refused_as = as; return 1; }
+{
+	struct cli_instance *owner;
+
+	if (sh == NULL)
+		return 0;
+	owner = (sh->fg != NULL) ? sh->fg : sh;
+	if (owner != fk_telnet_sh)
+		return 0;
+	fk_refused_as = as;
+	return 1;
+}
 int net_tty_guard(struct cli_instance *sh, const char *what)
 { fk_guard_calls++; return refuse(sh, what); }
 int xfer_refuse_if_telnet(struct cli_instance *sh) { return refuse(sh, "xfer"); }
@@ -38,8 +57,6 @@ void wifi_auto_disarm(const char *why) { fk_disarm++; }
 enum link_bridge_state link_bridge_state(void) { return LINK_BRIDGE_UP; }
 void link_bridge_down(void) { fk_bridge_down++; }
 const char *link_bridge_state_name(enum link_bridge_state s) { return "up"; }
-int rtl_link_hw_claim(struct cli_instance *sh, bool b) { fk_hw_claim++; return -1; }
-void rtl_link_hw_release(struct cli_instance *sh) { }
 int psram_ready(void) { return 1; }
 int psram_acquire(void) { fk_psram++; return 0; }
 void psram_release(void) { }
@@ -47,20 +64,48 @@ void psram_release(void) { }
 /* Text out: counted, not formatted.  The guard fake prints nothing, so a non-zero
  * count on a refused run means the command spoke before it asked. */
 int cli_print(struct cli_instance *sh, const char *f, ...) { return ++fk_out; }
-int cli_error(struct cli_instance *sh, const char *f, ...) { return ++fk_out; }
+int cli_error(struct cli_instance *sh, const char *f, ...)
+{
+	if (strncmp(f, "%s: run in the foreground", 25) == 0) {
+		va_list ap;
+
+		va_start(ap, f);
+		fk_fg_refused_as = va_arg(ap, const char *);
+		va_end(ap);
+	}
+	return ++fk_out;
+}
 int cli_warn(struct cli_instance *sh, const char *f, ...) { return ++fk_out; }
 int cli_hexdump_base(struct cli_instance *sh, const void *d, size_t n, unsigned long long b)
 { return ++fk_out; }
 int cli_sleep(struct cli_instance *sh, unsigned t) { return 1; }  /* Ctrl+C */
-int cli_console_claim(struct cli_instance *sh) { return -1; }
+/* The claim fails, so rtl_link_hw_claim() (the real one) stops there.  Claimable
+ * answers as shell/core/cli_printf.c does for these cases: -2 for a background job. */
+int cli_console_claim(struct cli_instance *sh) { fk_console_claim++; return -1; }
+int cli_console_claimable(struct cli_instance *sh) { return (sh->fg != NULL) ? -2 : 0; }
 void cli_console_release(struct cli_instance *sh) { }
+bool cli_cancel_requested(struct cli_instance *sh) { return true; }
 void log_write(unsigned l, const char *t, const char *f, ...) { }
 
 /* Never reached by the cases tested; failing values all the same. */
 void rtl8720_reset(void) { }
 void rtl8720_uart_close(void) { }
-void rtl_link_forget_module(void) { }
-int rtl_abort_cb(void *ctx) { return 1; }
+/* What src/rtl_link.c calls; never reached past the failed console claim. */
+UINT tx_mutex_create(TX_MUTEX *m, CHAR *n, UINT i) { return TX_SUCCESS; }
+UINT tx_mutex_get(TX_MUTEX *m, ULONG w) { return 1u; }
+UINT tx_mutex_put(TX_MUTEX *m) { return TX_SUCCESS; }
+UINT tx_thread_sleep(ULONG t) { return TX_SUCCESS; }
+void erpc_link_lock(void) { }
+void erpc_link_unlock(void) { }
+void erpc_link_opened(int carries_erpc) { }
+void erpc_link_closed(void) { }
+void erpc_set_module_gen(uint8_t gen) { }
+int erpc_ctrl_call(uint8_t cmd, const uint8_t *req, uint16_t req_len, uint8_t *out,
+                   uint16_t out_cap, uint32_t timeout_ms, struct erpc_diag *diag)
+{ return -1; }
+int rtl8720_uart_open(enum rtl8720_uart which, uint32_t baud) { return -1; }
+void rtl8720_power(bool on) { }
+bool rtl8720_powered(void) { return false; }
 int rtl_dl_enter(uint32_t h, int (*a)(void *), void *c) { return -1; }
 int rtl_dl_load_flashloader(uint32_t b, int (*a)(void *), void *c) { return -1; }
 int rtl_dl_detect_size(struct rtl_dl_size *s, int (*a)(void *), void *c) { return -2; }

@@ -2235,7 +2235,7 @@ this board's own `src/net_shell.c`, operated with `net shell start` / `stop` /
 | `src/link_bridge.c` | The bridge session: every path that takes the link away closes the driver's gate (`nx_link_driver_set_link(0)`) and neither stops the console nor waits for it (issues #218 and #221; until issue #222 this was in `src/nx_net.c`) |
 | `src/main.c` | `NET_TTY_TRANSPORT_DEFINE(net_tr)` and the `wio-net>` instance bound to it; `net_tty_init()` right after `nx_net_init()`, and the default port at once when the KV thread will not hand one over |
 | `src/kv_boot.c` | The port: `net.shell.port`, read once, right after the store opens and before the association |
-| `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c`, `cmds/cmd_wifi_flash.c` | The commands that ask `net_tty_guard()` and refuse on the telnet console (below); in `cmd_wifi_flash.c` the question is the first thing `flash_claim()` does, so every `wifi flash` subcommand that takes the link down asks it under its own name (issue #235) |
+| `cmds/cmd_wifi.c`, `src/wifi_connect.c`, `cmds/cmd_mlperf.c`, `cmds/cmd_wifi_flash.c`, `src/rtl_link.c` | The commands that ask `net_tty_guard()` and refuse on the telnet console (below); in `cmd_wifi_flash.c` the question is the first thing `flash_claim()` does, so every `wifi flash` subcommand that takes the link down asks it under its own name (issue #235).  Since issue #244 the `wifi` commands ask it through `rtl_link_refuse_early()` (`src/rtl_link.c`), which then asks whether the command runs in the foreground; `mlperf` still asks `net_tty_guard()` itself |
 | `cmds/cmd_xfer_board.c`, `cmds/cmd_wifi_flash.c` | The YMODEM transfers: the table's telnet field is `net_tty_guard`, which the shared wiring (`shell/cmds/xfer_console.c`) and the shared `blob write` ask through `xfer_refuse_if_telnet()`, and `wifi flash imgload` / `backup` ask the same before they touch anything (issue #231; until then `cmds/cmd_xfer.c` and `cmds/cmd_blob_board.c` called `net_tty_guard()` themselves) |
 | `port/netxduo/nx_user.h` | `NX_ENABLE_EXTENDED_NOTIFY_SUPPORT` (new in #221) and `NX_ENABLE_TCP_QUEUE_DEPTH_UPDATE_NOTIFY`, which `net_tty.c` requires |
 
@@ -2283,6 +2283,21 @@ this board's own `src/net_shell.c`, operated with `net shell start` / `stop` /
   anything (a malformed offset is still reported first) -- `write` before
   it reports a missing staged image or asks for `confirm`, since neither
   can be acted on from telnet.
+- **Refused as a background job before anything changes** (issue #244):
+  `wifi connect` / `reconnect` / `disconnect` / `on` / `off` / `reset` and
+  `wifi flash info` / `read` / `backup` / `write`, typed with `&`, answer
+  ``<what>: run in the foreground (not `... &`)`` before they turn off the
+  automatic re-association (which drops its stored credentials) or take the
+  host stack down -- `wifi flash write` before it reports a missing staged
+  image or asks for `confirm`.  (`wifi on` against a module that is already
+  on still answers `wifi: already on ...` first: it changes nothing.)  The
+  telnet question is asked first, so a job
+  started on the telnet console gets the telnet answer.  Until issue #244 only
+  `wifi reconnect` asked this early; the others were refused by the console
+  claim, after the re-association was off and, for `wifi flash`, after WiFi
+  was down.  The claim still refuses on its own (`wifi: run in the foreground
+  ...`) for the commands that change nothing before it (`wifi ver`,
+  `status`, `scan`, `log`, `link ...`).
 - **`net info` has two `telnet:` lines** (above); nothing of the console goes
   to `dmesg` any more (until issue #221 its connect, disconnect, arm and stop
   lines did).

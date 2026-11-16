@@ -21,7 +21,6 @@
 #include "rtl_link.h"
 #include "wifi_auto.h"   /* issue #32: the host's own re-association policy */
 #include "net_core.h"   /* net_core_source_is_dhcp() (issue #220) */
-#include "net_tty.h"
 #include "link_bridge.h" /* the host stack owns the module while it is up (#23 U3) */
 #include "nx_net.h"      /* nx_net_write_status() */
 #include "stm32h7xx_hal.h"   /* HAL_GetTick: the retry budget in issue #40 */
@@ -231,8 +230,10 @@ int wifi_connect_run(struct cli_instance *sh, const char *ssid, const char *pass
 	int rc;
 
 	/* Not from the telnet console: dropping the association takes the very session
-	 * running this command away.  Run it from USB CDC. */
-	if (net_tty_guard(sh, "wifi connect"))
+	 * running this command away.  Run it from USB CDC.  Nor as `... &`: asked before
+	 * the disarm, so a refusal leaves autoreconnect as it was (issue #244).  The boot
+	 * thread's instance (kv_boot.c) is neither, so the boot is never refused here. */
+	if (rtl_link_refuse_early(sh, "wifi connect"))
 		return 1;
 	/*
 	 * Disarm before claiming (owhinata/wio-lite-ai#32).  An operator typing `wifi connect` during

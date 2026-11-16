@@ -499,12 +499,16 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 -DTX_TIMER_TICKS_PER_SECOND=1000 \
 # asking the question about another console (NULL, say) fails the test.  cmds/cmd_wifi_flash.c
 # compiled unchanged against wifi_flash_fake.c, which counts the calls that matter;
 # from a console that is not telnet the same four do reach the teardown.
+# issue #244 -- and as a background job from that console the same four are refused
+# before the disarm and the teardown too; src/rtl_link.c is compiled in, so the
+# refusal asked first is the board's own.
 st="$HOST_TEST_SHELL_TEST"
 gcc $CFLAGS -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
     -I "$inc" -I "$HOST_TEST_CORE" -I "$st/../cmds" -I "$svc" -I "$svc/net" \
     -I "$board/cmds" -I "$board/src" -I "$board/svc" \
     "$here/test_wifi_flash_guard.c" "$here/wifi_flash_fake.c" \
-    "$board/cmds/cmd_wifi_flash.c" "$HOST_TEST_CORE/cli_parse.c" \
+    "$board/cmds/cmd_wifi_flash.c" "$board/src/rtl_link.c" \
+    "$HOST_TEST_CORE/cli_parse.c" \
     $LDFLAGS -o "$out/test_wifi_flash_guard"
 "$out/test_wifi_flash_guard"
 

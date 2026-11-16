@@ -55,7 +55,6 @@
 #include "rtl_link.h"
 #include "wifi_auto.h" /* issue #32: the host's own re-association policy */
 #include "wifi_connect.h" /* the association sequence, shared with boot (#37) */
-#include "net_tty.h"
 #include "link_bridge.h" /* the host stack owns the module while it is up (issue #23 U3) */
 #if BSP_ENABLE_KV
 #include "kv_boot.h"     /* `wifi reconnect`: the boot's sequence (issue #238) */
@@ -172,8 +171,10 @@ static int cmd_wifi_info(struct cli_instance *sh, int argc, char **argv)
 static int wifi_power_claim(struct cli_instance *sh, const char *what)
 {
 	/* Not on the telnet console: cutting CHIP_EN takes the WiFi link -- and therefore the
-	 * very session running this command -- away.  Run it from the USB CDC console. */
-	if (net_tty_guard(sh, what))
+	 * very session running this command -- away.  Run it from the USB CDC console.
+	 * Nor as `... &`, asked here too so the disarm below never runs for a command the
+	 * claim then refuses (issue #244). */
+	if (rtl_link_refuse_early(sh, what))
 		return 1;
 	/*
 	 * BEFORE the claim, not after (owhinata/wio-lite-ai#32).  An automatic re-association holds the
@@ -572,21 +573,10 @@ static int cmd_wifi_connect(struct cli_instance *sh, int argc, char **argv)
  */
 static int cmd_wifi_reconnect(struct cli_instance *sh, int argc, char **argv)
 {
-	int rc;
-
 	(void)argc;
 	(void)argv;
-	if (net_tty_guard(sh, "wifi reconnect"))
+	if (rtl_link_refuse_early(sh, "wifi reconnect"))   /* both, in that order */
 		return 1;
-	rc = cli_console_claimable(sh);
-	if (rc == -2) {
-		cli_error(sh, "wifi reconnect: run in the foreground (not `... &`)\r\n");
-		return 1;
-	}
-	if (rc != 0) {
-		cli_error(sh, "wifi reconnect: the console could not be claimed (%d)\r\n", rc);
-		return 1;
-	}
 	return kv_boot_reconnect(sh);
 }
 #endif
@@ -602,7 +592,9 @@ static int cmd_wifi_disconnect(struct cli_instance *sh, int argc, char **argv)
 	(void)argc; (void)argv;
 	/* Dropping the association is a link-down event, not a teardown: the bridge stays
 	 * (owhinata/wio-lite-ai#30 B2b treats an operator disconnect exactly like the AP going away). */
-	if (net_tty_guard(sh, "wifi disconnect"))
+	/* Not from telnet, nor as `... &`: asked before the disarm, so a refusal leaves
+	 * autoreconnect as it was (issue #244). */
+	if (rtl_link_refuse_early(sh, "wifi disconnect"))
 		return 1;
 	/*
 	 * Disarm BEFORE the claim (owhinata/wio-lite-ai#32).  An operator disconnect has to win: leaving

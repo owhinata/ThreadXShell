@@ -250,6 +250,17 @@ void rtl_tcpip_set_inited(bool v);
 /* ---- (b) shell adapters ------------------------------------------------------- */
 
 /*
+ * Refuse a `wifi` command before it changes anything (issue #244): on the telnet
+ * console (net_tty_guard()), then as a background job or at the console's claim
+ * limit (cli_console_claimable()) -- the questions rtl_link_begin() /
+ * rtl_link_hw_claim() answer only once they claim.  A command that disarms the
+ * re-association or takes the host stack down before it claims asks this first.
+ * Prints "<what>: ..." and returns 1 when refused, 0 otherwise; takes nothing, so
+ * the claim after it can still fail (and is then reported by that claim).
+ */
+int  rtl_link_refuse_early(struct cli_instance *sh, const char *what);
+
+/*
  * Open an eRPC session for a shell command: claim the console (foreground only), take
  * the coarse mutex, ensure the module is powered and reference the eRPC UART
  * (USART1 @2 Mbaud).

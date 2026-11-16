@@ -114,8 +114,8 @@ void nn_camera_frame_geom(uint16_t *w, uint16_t *h);
 /*
  * nn_camera_start()'s refusals about the decoder (issue #159; the same three
  * questions, and the same values, as wio-lite-ai's).  Outside the -2..-10 the
- * start already returns, and apart from NN_ERR_SCRATCH_HELD (-50).  NODRAW is
- * also a stream with no plugin at all (Step 4c): nothing would draw.
+ * start already returns.  NODRAW is also a stream with no plugin at all (Step
+ * 4c): nothing would draw.
  */
 #define NNCAM_ERR_SHAPES  (-12) /**< the loaded decoder cannot read these outputs  */
 #define NNCAM_ERR_NODRAW  (-13) /**< a stream was asked for; nothing draws          */
@@ -155,8 +155,7 @@ extern struct cam_sink_step nncam_step;
  * sink, -3 model, NNCAM_ERR_QUANT / NNCAM_ERR_IN_* the model input (issue #162),
  * -5 objects, -6 nn session busy, -9 the camera is
  * not streaming RGB565 / its mode cannot stream RGB565 (issue #142 D3), -10 the
- * camera could not be held or started, NN_ERR_SCRATCH_HELD `sdram test` holds
- * .sdram.ai -- retryable, issue #152; NNCAM_ERR_SHAPES / _NODRAW / _DECBUSY,
+ * camera could not be held or started; NNCAM_ERR_SHAPES / _NODRAW / _DECBUSY,
  * issue #159 -- _NODRAW for a stream with no plugin too).  Holds the camera open (issue #142): joins
  * a running stream, or starts it holding the operator's place too.
  * @p oneshot is non-zero for `nn run`'s session, which counts nothing in the

@@ -121,31 +121,13 @@ static enum nn_claim nn_claim_of_stop(int stop_rc)
 
 /* ---- tensors ------------------------------------------------------------- */
 
-/* What an nn_model_open() refusal means to the caller: `sdram test` holding
- * .sdram.ai (issue #152) is a transient claim elsewhere -- BUSY, retry later --
- * not a missing model.  Every other failure keeps its old answer. */
-static int nn_open_status(int rc)
-{
-	return (rc == NN_ERR_SCRATCH_HELD) ? NN_SVC_ERR_BUSY : NN_SVC_ERR_STATE;
-}
-
-/* The detail for a session or open refused for the same reason. */
-static void nn_busy_detail(struct nn_op_result *res, int rc)
-{
-	if (rc == NN_ERR_SCRATCH_HELD)
-		nn_detail_set(".sdram.ai is held by `sdram test`; try again "
-		              "when it finishes");
-	else
-		nn_detail_set("NN busy (a stream or run is active)");
-}
-
 int nn_svc_tensors_pin(void)
 {
 	struct nn_model *m = NULL;
 	int rc = nn_model_open(&m);
 
 	if (rc != 0 || m == NULL)
-		return nn_open_status(rc);
+		return NN_SVC_ERR_STATE;
 	if (nn_session_try_acquire() != 0)
 		return NN_SVC_ERR_BUSY;
 	return NN_SVC_OK;
@@ -162,7 +144,7 @@ int nn_svc_output_count(void)
 	int rc = nn_model_open(&m);
 
 	if (rc != 0 || m == NULL)
-		return nn_open_status(rc);
+		return NN_SVC_ERR_STATE;
 	return nn_output_count(m);
 }
 
@@ -173,7 +155,7 @@ int nn_svc_output(unsigned index, struct tensor_desc *out)
 	int rc = nn_model_open(&m);
 
 	if (rc != 0 || m == NULL)
-		return nn_open_status(rc);
+		return NN_SVC_ERR_STATE;
 	t = nn_output(m, (int)index);
 	if (t == NULL)
 		return NN_SVC_ERR_ARG;
@@ -188,7 +170,7 @@ int nn_svc_input(struct tensor_desc *out)
 	int rc = nn_model_open(&m);
 
 	if (rc != 0 || m == NULL)
-		return nn_open_status(rc);
+		return NN_SVC_ERR_STATE;
 	t = nn_input(m, 0);
 	if (t == NULL)
 		return NN_SVC_ERR_ARG;
@@ -233,8 +215,6 @@ int nn_svc_input(struct tensor_desc *out)
  * name, with status HW and nothing held, as wio-lite-ai reports them.  No model
  * (no usable input tensor, NNCAM_ERR_MODEL) is STATE, as on the other two
  * boards and this board's own `nn bench` (issue #164; it said HW until then).
- * `sdram test` holding .sdram.ai never reaches here: nn_camera_start() returns
- * the session's NN_ERR_SCRATCH_HELD and its callers answer it as BUSY.
  */
 static void nn_start_refusal(struct nn_op_result *res, int rc)
 {
@@ -436,11 +416,6 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		(void)nn_core_abort(&nn_core, &nn_core_board);
 		/* The same words and status as `nn stream start` -- one refusal from
 		 * one worker reads the same from either command. */
-		if (rc == NN_ERR_SCRATCH_HELD) {
-			nn_busy_detail(res, rc);        /* `sdram test` (#152) */
-			nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-			return;
-		}
 		nn_start_refusal(res, rc);
 		return;
 	}
@@ -633,16 +608,13 @@ static struct nn_model *nn_bench_acquire(struct nn_op_result *res)
 
 	rc = nn_model_open(&m);
 	if (rc != 0 || m == NULL) {
-		if (rc == NN_ERR_SCRATCH_HELD)
-			nn_busy_detail(res, rc);
-		else
-			nn_detail_set("no model is loaded");
-		nn_result(res, nn_open_status(rc), NN_CLAIM_NONE);
+		nn_detail_set("no model is loaded");
+		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return NULL;
 	}
 	rc = nn_session_try_acquire();
 	if (rc != 0) {
-		nn_busy_detail(res, rc);
+		nn_detail_set("NN busy (a stream or run is active)");
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return NULL;
 	}
@@ -747,11 +719,6 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	rc = nn_camera_start(CAM_RES_QVGA, 0);
 	if (rc != 0) {
 		(void)nn_core_abort(&nn_core, &nn_core_board);
-		if (rc == NN_ERR_SCRATCH_HELD) {
-			nn_busy_detail(res, rc);        /* `sdram test` (#152) */
-			nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-			return;
-		}
 		nn_start_refusal(res, rc);
 		return;
 	}

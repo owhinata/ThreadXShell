@@ -7,12 +7,11 @@
  * shell/test/test_nn_input_codes.c, and what only this board can say is that
  * none of its values lands on a code that already means something else here.
  * This board's other start codes are bare numbers (port/nn/nn_camera.h):
- * 0, -2, -4 .. -10, the decoder's three and NN_ERR_SCRATCH_HELD.
+ * 0, -2, -4 .. -10 and the decoder's three.
  */
 #include <assert.h>
 #include <stdio.h>
 
-#include "nn.h"                 /* NN_ERR_SCRATCH_HELD */
 #include "nn_camera.h"
 #include "nn_input_codes.h"
 
@@ -26,7 +25,6 @@ int main(void)
 	static const int other[] = {
 		0, -2, -4, -5, -6, -7, -8, -9, -10,
 		NNCAM_ERR_SHAPES, NNCAM_ERR_NODRAW, NNCAM_ERR_DECBUSY,
-		NN_ERR_SCRATCH_HELD,
 	};
 	unsigned i, j;
 

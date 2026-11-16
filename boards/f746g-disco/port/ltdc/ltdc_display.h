@@ -220,7 +220,7 @@ int ltdc_set_scanout(bool on);
 /**
  * The display owner's side of `sdram test` (issue #152): ltdc_fb lives in
  * .sdram bank0, so the test asks HERE before writing over it -- the same shape
- * as camera_scratch_claim() and nn_scratch_claim().
+ * as camera_scratch_claim().
  *
  * ltdc_scanout_hold(), under the LTDC lock: refused with LTDC_ERR_STATE while
  * GUIX owns the display, LTDC_ERR_HELD if already held; otherwise remembers

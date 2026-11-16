@@ -302,8 +302,6 @@ static int nn_life_admit(struct nn_core_model_job *j)
 	struct nn_model *m = NULL;
 	int rc;
 
-	/* An unload's open may be refused while `sdram test` holds .sdram.ai
-	 * (issue #152); the claim below then refuses it as busy, worded there. */
 	if (j->spec == NULL)
 		(void)nn_model_open(&m);
 	if (nn_camera_running()) {
@@ -317,12 +315,6 @@ static int nn_life_admit(struct nn_core_model_job *j)
 			return NN_SVC_ERR_STATE;
 		}
 		rc = nn_model_open(&m);
-		if (rc == NN_ERR_SCRATCH_HELD) {
-			/* Transient, and nothing was built: BUSY, before the swap. */
-			nn_detail_set(".sdram.ai is held by `sdram test`; try "
-			              "again when it finishes");
-			return NN_SVC_ERR_BUSY;
-		}
 		if (rc != 0 || m == NULL) {
 			nn_detail_set("the model could not be opened");
 			return NN_SVC_ERR_STATE;
@@ -346,11 +338,6 @@ static int nn_life_claim_take(struct nn_core_model_job *j)
 
 	int rc = nn_session_try_acquire();
 
-	if (rc == NN_ERR_SCRATCH_HELD) {
-		nn_detail_set(".sdram.ai is held by `sdram test`; try again when "
-		              "it finishes");
-		return NN_SVC_ERR_BUSY;
-	}
 	if (rc != 0) {
 		nn_detail_set("NN busy (a stream, run or bench is active)");
 		return NN_SVC_ERR_BUSY;

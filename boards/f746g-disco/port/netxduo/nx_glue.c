@@ -202,16 +202,20 @@ bool nx_net_is_up(void)
 }
 
 /*
- * [!] Before the scheduler only (nx_glue.h).  It writes the source the shared
- * operations keep under the address lock without taking the lock: nothing else
- * runs yet, and the link worker reads the source under the lock on its first
- * pass, after the scheduler starts.  net_core_init() already decided the
- * client exists (dhcp_created) and made the operations ready.
+ * [!] Before the scheduler only (nx_glue.h).  The source is the shared
+ * operations' and is written by them, under their address lock taken without
+ * waiting (net_core_boot_dhcp_source(), issue #241); this board no longer
+ * touches their state.  They check that net_core_init() succeeded and that
+ * the client exists; the link worker's first pass, after the scheduler
+ * starts, starts the client on the up.  Their "not set" is not repeated
+ * here: nx_up means net_core_init() succeeded, so the only way to get it at
+ * this point is a client that could not be created, and nx_net_init() has
+ * already said that (with the one remedy that works without a client).
  */
 void nx_net_boot_dhcp(void)
 {
-	if (nx_up && net_core_board_state.ready && net_core_board_state.dhcp_created)
-		net_core_board_state.source = NET_CORE_SRC_DHCP;
+	if (nx_up)
+		(void)net_core_boot_dhcp_source();
 }
 
 void *nx_net_ip(void)

@@ -556,6 +556,28 @@ void net_core_dhcp_source(struct net_svc_result *res)
 	net_core_say(res, NET_SVC_OK, NULL);
 }
 
+/*
+ * The boot-time twin of net_core_dhcp_source() (issue #241): the source is
+ * still written under the address lock, but taken with TX_NO_WAIT -- the only
+ * wait ThreadX accepts before the scheduler (txe_mutex_get.c refuses any
+ * other from initialisation) -- and its answer is looked at here, not thrown
+ * away as net_core_lock() does: a lock not taken writes nothing.  No wake:
+ * the worker's first pass, after the scheduler starts, reads the source under
+ * the lock and starts the client on the up.
+ */
+bool net_core_boot_dhcp_source(void)
+{
+	struct net_core_state *s = &net_core_board_state;
+
+	if (!s->ready || !s->dhcp_created)
+		return false;
+	if (tx_mutex_get(&s->addr_lock, TX_NO_WAIT) != TX_SUCCESS)
+		return false;
+	s->source = NET_CORE_SRC_DHCP;
+	net_core_unlock();
+	return true;
+}
+
 bool net_core_last_failure(struct net_core_failure *out)
 {
 	struct net_core_state *s = &net_core_board_state;

@@ -54,6 +54,10 @@
  *  - the KV "source DHCP": not refused with the link down, starts nothing by
  *    itself, wakes the worker -- which starts the client if the up was
  *    already handled, or on the up;
+ *  - the boot-time source (issue #241): ready with a client sets DHCP under
+ *    one take of the lock WITHOUT waiting and one release, no NetX, no wake,
+ *    and the next pass starts the client; not ready, no client, or a lock
+ *    not taken changes nothing (and a lock not taken is not released);
  *  - the worker thread waits for its flag and runs one pass per wake;
  *  - the fall count (issue #221): every down notice adds one, inside the
  *    notification's masked section, before the worker runs; an up adds
@@ -117,6 +121,10 @@ struct fake {
 	/* the lock and the masked sections */
 	int mutex_fail, mutex_created;
 	int held, takes, irq_depth, irq_sections;
+	/* the wait of the last take, the takes that did not wait, the releases,
+	 * and "the lock is taken by someone else" for a take that does not
+	 * wait (issue #241) */
+	ULONG last_wait; int nowait_takes, puts, mutex_busy;
 	/* the event flags, the worker thread and the notification */
 	int flags_fail, flags_created, thread_fail, threads, notify_fail, notifies;
 	int wakes, wakes_masked, wakes_locked, waits;
@@ -166,7 +174,12 @@ UINT tx_mutex_create(TX_MUTEX *m, CHAR *name, UINT inherit)
 
 UINT tx_mutex_get(TX_MUTEX *m, ULONG wait)
 {
-	(void)m; (void)wait;
+	(void)m;
+	fk.last_wait = wait;
+	if (wait == TX_NO_WAIT)
+		fk.nowait_takes++;
+	if (fk.mutex_busy && wait == TX_NO_WAIT)
+		return 0x1Du;                /* TX_NOT_AVAILABLE */
 	if (fk.held)
 		fk.unlocked_netx += 1000;    /* a nested take: never expected */
 	fk.held = 1;
@@ -177,6 +190,7 @@ UINT tx_mutex_get(TX_MUTEX *m, ULONG wait)
 UINT tx_mutex_put(TX_MUTEX *m)
 {
 	(void)m;
+	fk.puts++;
 	fk.held = 0;
 	return TX_SUCCESS;
 }
@@ -453,6 +467,8 @@ static void clear_calls(void)
 	fk.wakes = 0;
 	fk.wakes_masked = 0;
 	fk.wakes_locked = 0;
+	fk.nowait_takes = 0;
+	fk.puts = 0;
 }
 
 /* The IP thread reports the link: the notification init registered. */
@@ -1321,6 +1337,62 @@ static void check_kv(void)
 	no_lock_left("kv");
 }
 
+/* ---- the boot-time source (issue #241) ------------------------------------ */
+
+static void check_boot_source(void)
+{
+	bool set;
+
+	/* Ready, a client: DHCP, one take without waiting and one release,
+	 * no NetX, no wake. */
+	fresh(true);
+	S->source = NET_CORE_SRC_NONE;
+	clear_calls();
+	set = net_core_boot_dhcp_source();
+	expect("boot: ready with a client -> source DHCP, reported set",
+	       set && S->source == NET_CORE_SRC_DHCP);
+	expect("boot: ... the lock taken once, without waiting, and released",
+	       fk.takes == 1 && fk.nowait_takes == 1 &&
+	       fk.last_wait == TX_NO_WAIT && fk.puts == 1 && !fk.held);
+	expect("boot: ... no NetX call and no wake",
+	       fk.nlog == 0 && fk.wakes == 0 && S->dhcp_running == 0);
+	react();
+	expect("boot: ... the worker's first pass with the link up starts DHCP",
+	       calls_are("reinit, addr_set 0, gw_clear, start") &&
+	       S->dhcp_running == 1);
+	no_lock_left("boot");
+
+	/* Not ready: nothing touched. */
+	fresh(true);
+	S->source = NET_CORE_SRC_NONE;
+	S->ready = 0u;
+	clear_calls();
+	set = net_core_boot_dhcp_source();
+	expect("boot: not ready -> not set, nothing touched",
+	       !set && S->source == NET_CORE_SRC_NONE && fk.takes == 0 &&
+	       fk.puts == 0 && fk.nlog == 0 && fk.wakes == 0);
+
+	/* No DHCP client: nothing touched. */
+	fresh(false);
+	clear_calls();
+	set = net_core_boot_dhcp_source();
+	expect("boot: no client -> not set, nothing touched",
+	       !set && S->source == NET_CORE_SRC_NONE && fk.takes == 0 &&
+	       fk.puts == 0 && fk.nlog == 0 && fk.wakes == 0);
+
+	/* The lock not available: nothing written, nothing released. */
+	fresh(true);
+	S->source = NET_CORE_SRC_NONE;
+	clear_calls();
+	fk.mutex_busy = 1;
+	set = net_core_boot_dhcp_source();
+	expect("boot: the lock not taken -> not set, the source unchanged, no "
+	       "release",
+	       !set && S->source == NET_CORE_SRC_NONE && fk.nowait_takes == 1 &&
+	       fk.puts == 0 && !fk.held && fk.nlog == 0 && fk.wakes == 0);
+	fk.mutex_busy = 0;
+}
+
 /* ---- the worker thread --------------------------------------------------- */
 
 static void check_thread(void)
@@ -1388,6 +1460,7 @@ int main(void)
 	check_bounce_then_dhcp();
 	check_failures();
 	check_kv();
+	check_boot_source();
 	check_thread();
 	check_fall_count();
 	if (failures != 0) {

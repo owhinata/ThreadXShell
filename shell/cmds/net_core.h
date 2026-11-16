@@ -265,6 +265,19 @@ void net_core_ping(uint32_t ip, unsigned timeout_ms, unsigned *rtt_ms,
  */
 void net_core_dhcp_source(struct net_svc_result *res);
 
+/**
+ * Make DHCP the source from tx_application_define(), BEFORE the scheduler
+ * starts (issue #241): f746g-disco's fallback when its configuration thread,
+ * which would otherwise call net_core_dhcp_source(), could not be created.
+ * Does nothing unless net_core_init() succeeded and the DHCP client exists.
+ * The address lock is taken with TX_NO_WAIT (ThreadX refuses any wait before
+ * the scheduler) and its answer is checked: not taken, nothing is written.
+ * Calls no NetX and does not wake the worker -- its first pass reads the
+ * source and starts the client on the up.
+ * @return true when the source was set to DHCP, false when nothing was done.
+ */
+bool net_core_boot_dhcp_source(void);
+
 #ifdef __cplusplus
 }
 #endif

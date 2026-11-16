@@ -45,9 +45,11 @@ bool nx_net_is_up(void);
 /**
  * Make DHCP the boot-time address source, when the configuration thread that
  * would otherwise decide it could not be created (src/main.c, issue #214).
- * tx_application_define() ONLY, after nx_net_init() succeeded: the shared
- * net_core_dhcp_source() waits on the address lock, which ThreadX refuses
- * before the scheduler runs.  Does nothing without a DHCP client.
+ * tx_application_define() ONLY, after nx_net_init() succeeded.  The shared
+ * net_core_boot_dhcp_source() writes it, under the address lock taken without
+ * waiting (the shared net_core_dhcp_source() waits on that lock, which ThreadX
+ * refuses before the scheduler runs; issue #241).  Does nothing without a DHCP
+ * client (nx_net_init() has already reported that it could not be created).
  */
 void nx_net_boot_dhcp(void);
 

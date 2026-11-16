@@ -147,24 +147,54 @@ static void cam_report_stop(struct cli_instance *sh, int rc, int retry)
  * the remaining pair -- cannot be settled from an unknown scene by any amount
  * of arithmetic, so it is reported rather than guessed.
  */
+
+/*
+ * What `camera raw` prints, taken from the mosaic while the capture still
+ * holds the camera's API mutex (issue #245): the four phase means and the
+ * first 16 bytes of the first two rows.  Until #245 they were read after
+ * camera_capture_raw() had returned, with the mutex released, so another
+ * console's stream start or capture could overwrite the buffer part-way.
+ */
+struct cam_raw_desc {
+	uint32_t m[4];
+	uint8_t  row0[16];
+	uint8_t  row1[16];
+};
+
+_Static_assert(CAM_FRAME_WIDTH >= 16u,
+               "the second row's 16 bytes start CAM_FRAME_WIDTH in");
+
+/*
+ * camera_frame_reader_fn: runs INSIDE the camera's API mutex, so CPU work and
+ * copies only -- no camera_* call (the mutex is recursive, a nested entry
+ * would not be refused), no sleep and no cli_* output; the printing is
+ * camera_board_cmd_raw()'s, after the capture has returned.
+ */
+static void cam_raw_describe(const uint8_t *raw, void *arg)
+{
+	struct cam_raw_desc *d = arg;
+
+	cam_bayer_phase_means_x100(raw, CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT, d->m);
+	memcpy(d->row0, raw, sizeof d->row0);
+	memcpy(d->row1, raw + CAM_FRAME_WIDTH, sizeof d->row1);
+}
+
 int camera_board_cmd_raw(struct cli_instance *sh, int argc, char **argv)
 {
 	static const char *const pos[4] = { "(0,0)", "(1,0)", "(0,1)", "(1,1)" };
-	const uint8_t *raw;
-	uint32_t m[4];
+	struct cam_raw_desc d;
+	const uint32_t *m = d.m;
 	uint32_t i, hi_a, hi_b;
 	int rc;
 
 	(void)argc; (void)argv;
 
-	rc = camera_capture_raw();
+	memset(&d, 0, sizeof d);
+	rc = camera_capture_raw(cam_raw_describe, &d);
 	if (rc != CAM_OK) {
 		cam_report(sh, "raw capture", rc);
 		return 1;
 	}
-
-	raw = camera_raw_frame();
-	cam_bayer_phase_means_x100(raw, CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT, m);
 
 	cli_print(sh, "raw      : %ux%u 8-bit Bayer (no demosaic)\r\n",
 	          (unsigned)CAM_FRAME_WIDTH, (unsigned)CAM_FRAME_HEIGHT);
@@ -230,8 +260,8 @@ int camera_board_cmd_raw(struct cli_instance *sh, int argc, char **argv)
 	              "point at something RED)\r\n");
 
 	/* Two full rows, so the 2x2 structure is visible by eye as well. */
-	cli_hexdump(sh, raw, 16u);
-	cli_hexdump(sh, raw + CAM_FRAME_WIDTH, 16u);
+	cli_hexdump(sh, d.row0, sizeof d.row0);
+	cli_hexdump(sh, d.row1, sizeof d.row1);
 	return 0;
 }
 

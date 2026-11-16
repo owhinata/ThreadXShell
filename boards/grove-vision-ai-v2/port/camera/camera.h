@@ -124,12 +124,36 @@ int camera_probe(struct camera_probe_info *out);
 /**
  * @brief  Capture exactly one frame and stop.
  *
- * Blocking, bounded, and it leaves the raw planar frame in the WDMA3 buffer for
- * camera_raw_frame() -- which is what lets `camera capture` report per-channel
- * statistics straight off the hardware's own output, before any packing this
- * firmware does can be blamed for the colours.
+ * Blocking, bounded, and it leaves the raw planar frame in the WDMA3 buffer
+ * (for camera_capture_read(), the generation-checked read `camera send` uses).
+ * A caller that wants to describe the frame passes a reader to
+ * camera_capture_settled() instead -- which is what lets `camera capture`
+ * report per-channel statistics straight off the hardware's own output, before
+ * any packing this firmware does can be blamed for the colours.
  */
 int camera_capture(void);
+
+/**
+ * The caller's reading of the frame a one-shot capture took (issue #245).
+ *
+ * Called ONCE by camera_capture_settled() / camera_capture_raw(), only when the
+ * capture succeeded, with the datapath already quiesced and the API mutex
+ * STILL HELD -- so nothing can start writing the landing buffer while it runs.
+ * @p frame is the completed buffer (CAM_RAW_BYTES: B, G, R planes, or the
+ * Bayer mosaic for a raw capture), valid for this call only.  Never called on
+ * a failure, a cancel or a timeout.
+ *
+ * [!] What it may do is narrow, because it runs inside the camera's API:
+ *  - CPU work on @p frame and copies into the caller's own memory only;
+ *  - NO camera_* entry point: ThreadX mutexes are recursive, so a nested
+ *    entry is not refused -- it takes the mutex again and could start a
+ *    datapath on the buffer being read;
+ *  - NO sleep or wait, and NO console output: every other camera entry is
+ *    refused BUSY for as long as this runs, and camera_stream_stop() waits for
+ *    it (CAM_STOP_LOCK_TICKS in camera.c counts it in the capture's hold).
+ *    Print after the capture call has returned.
+ */
+typedef void (*camera_frame_reader_fn)(const uint8_t *frame, void *arg);
 
 /** The frames a capture right after bring-up lets go by before it takes one --
  *  the same count, counted the same way, as a one-shot `nn run`
@@ -155,18 +179,24 @@ int camera_capture(void);
  * deadline all the frames share (CAM_FRAME_TIMEOUT_TICKS of wall clock after
  * the bring-up, the bound a single capture always had) -- the frames let go
  * by then stay counted, so the next capture carries on settling.
+ *
+ * @p read (may be NULL) is called with @p read_arg on success only, before
+ * the API mutex is released (camera_frame_reader_fn, issue #245).
  */
 int camera_capture_settled(uint32_t warm, uint32_t *dropped,
-                           int (*cancelled)(void *ctx), void *ctx);
+                           int (*cancelled)(void *ctx), void *ctx,
+                           camera_frame_reader_fn read, void *read_arg);
 
 /**
  * @brief  Capture one frame with the demosaic OUT of the path.
  *
- * camera_raw_frame() then holds the 320x240 8-bit Bayer mosaic the demosaic
- * would have been fed -- which is what lets the true Bayer phase be read off
- * the hardware instead of inferred from the sensor's mirror setting.
+ * @p read (may be NULL) is then handed the 320x240 8-bit Bayer mosaic the
+ * demosaic would have been fed, under the API mutex as for
+ * camera_capture_settled() (issue #245) -- which is what lets the true Bayer
+ * phase be read off the hardware instead of inferred from the sensor's mirror
+ * setting.
  */
-int camera_capture_raw(void);
+int camera_capture_raw(camera_frame_reader_fn read, void *read_arg);
 
 /*
  * The last `camera capture`, for `camera send` (issue #143).
@@ -214,15 +244,18 @@ void camera_info_sample(struct camera_info_sample *out);
  *    sink's consume().  The producer commits the index before publishing and
  *    moves it again only on the next frame-ready, so the frame is stable for
  *    the whole call.
- *  - OTHERWISE: only after a successful camera_capture() / camera_capture_raw()
- *    with the producer idle -- which those calls guarantee, since they refuse
- *    while a stream runs and quiesce before returning.
- *  - EITHER WAY the pointer is valid for that call's duration only.  Do not
- *    store it.
+ *  - OTHERWISE: NOT THROUGH THIS CALL (issue #245).  A one-shot capture hands
+ *    its frame to the caller's camera_frame_reader_fn while it still holds
+ *    the API mutex, and `camera send` reads through camera_capture_read(),
+ *    which checks and copies in one hold.  Reading here after a capture had
+ *    returned -- what `camera capture` and `camera raw` did until #245 -- is
+ *    a read with the mutex already released, which the next stream start or
+ *    capture from another console can overwrite part-way.
+ *  - The pointer is valid for that call's duration only.  Do not store it.
  *
- * Those are exactly today's callers: the nn overlay's process() (on the
- * producer, inside consume()) and the command paths behind camera_capture().
- * A new caller from any other context is a data race, not a grey area.
+ * That is exactly today's caller: the nn overlay's prep (on the producer,
+ * inside consume()).  A new caller from any other context is a data race, not
+ * a grey area.
  */
 const uint8_t *camera_raw_frame(void);
 

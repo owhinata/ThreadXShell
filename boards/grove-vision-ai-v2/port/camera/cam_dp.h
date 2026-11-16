@@ -66,7 +66,9 @@ extern "C" {
  * transition machine's read index, so the pointer MOVES between frames.
  * Callers inherit camera_raw_frame()'s exclusivity contract (camera.h): read
  * it where that contract allows, hold it no longer than the call that
- * obtained it.
+ * obtained it.  Outside a stream that means camera.c itself, with the API
+ * mutex held: a one-shot capture's reader and camera_capture_read() (issue
+ * #245).
  */
 const uint8_t *cam_dp_completed_buffer(void);
 

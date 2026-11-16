@@ -139,9 +139,15 @@ void camera_svc_probe(struct camera_op_result *res,
 /* ---- one-shot capture ----------------------------------------------------- */
 
 /*
- * [!] THE FRAME IS DESCRIBED THE MOMENT THE CAPTURE RETURNS, inside
- * camera_svc_capture(), as the old command did it -- before anything else can
- * reuse the landing buffer -- and the description is what the report prints.
+ * [!] THE FRAME IS DESCRIBED INSIDE THE CAPTURE, while it still holds the
+ * camera's API mutex (issue #245): camera_capture_settled() calls
+ * cam_capture_describe() on success, after the datapath is quiesced and before
+ * the mutex is released, and the description is what the report prints.
+ * Until #245 this ran after the capture had RETURNED, with the mutex already
+ * released -- so a foreground `camera stream start`, `camera capture`, `camera
+ * raw`, `camera bench`, `nn stream start` or `nn run` typed while a background
+ * capture was still computing could start writing the same buffer part-way
+ * through, and a `camera bayer` could change the phase the Bayer line names.
  * The record names the thread that captured it: a report prints it only for
  * that thread, so a console never prints another console's capture (A
  * captures, B captures, A's report would otherwise show B's frame).
@@ -186,6 +192,37 @@ static void cam_plane_rec_of(struct cam_plane_rec *p, const uint8_t *plane)
 _Static_assert(CAMERA_ONESHOT_WARM_FRAMES == NN_ONESHOT_WARM_FRAMES,
                "camera capture and nn run settle the sensor by the same count");
 
+/*
+ * The capture's reader (camera_frame_reader_fn, issue #245): every number the
+ * report prints, taken from @p raw into the caller's record @p arg.
+ *
+ * [!] RUNS INSIDE THE CAMERA'S API MUTEX.  CPU work and copies only: no
+ * camera_* call (the mutex is recursive, so a nested entry would not be
+ * refused), no sleep, no console output -- the printing happens after
+ * camera_capture_settled() has returned.  cam_dp_bayer() is a read of the
+ * phase the datapath was configured with, not an entry point; camera_set_bayer()
+ * writes it under this same mutex, so it is the phase of THIS frame.
+ * About 10 ms of CPU, estimated in camera.c (CAM_STOP_LOCK_TICKS).
+ */
+static void cam_capture_describe(const uint8_t *raw, void *arg)
+{
+	struct cam_capture_rec *r = arg;
+
+	/* The plane ORDER is the hardware's, not a preference: WDMA3 writes B
+	   first.  Printing them in that order is what makes a swapped pair
+	   visible against a scene somebody can describe. */
+	for (unsigned k = 0; k < 3u; k++)
+		cam_plane_rec_of(&r->plane[k], raw + k * CAM_FRAME_PIXELS);
+	r->seam_x100 = cam_plane_row_seam_x100(raw + CAM_FRAME_PIXELS,
+	                                       CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT,
+	                                       &r->seam_row);
+	r->colour_x100 = cam_frame_colour_x100(raw, CAM_FRAME_PIXELS);
+	r->bayer = cam_dp_bayer();
+	memcpy(r->head, raw, CAMERA_SVC_HEAD_MAX);
+	/* Set last: the capture only installs a record its reader filled. */
+	r->valid = 1u;
+}
+
 void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
                         struct camera_op_result *res,
                         camera_svc_write_fn write,
@@ -193,7 +230,6 @@ void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
 {
 	struct camera_out o = { write, ctx, 0 };
 	struct cam_capture_rec r;
-	const uint8_t *raw;
 	uint32_t dropped = 0u;
 	int rc;
 	TX_INTERRUPT_SAVE_AREA
@@ -206,9 +242,11 @@ void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
 	   them leaves this line and nothing after it. */
 	camera_out_capturing(&o, 0, NULL);
 	/* Frames since bring-up at or below the count are let go, the
-	   operator's Ctrl+C asked between them (issue #143). */
+	   operator's Ctrl+C asked between them (issue #143).  The frame is
+	   described inside the call, under the camera's mutex (issue #245). */
+	memset(&r, 0, sizeof r);
 	rc = camera_capture_settled(CAMERA_ONESHOT_WARM_FRAMES, &dropped,
-	                            cancelled, ctx);
+	                            cancelled, ctx, cam_capture_describe, &r);
 	if (rc == CAM_ERR_CANCELLED) {
 		camera_res_fail(res, CAMERA_SVC_ERR_CANCELLED, "cancelled");
 		return;
@@ -217,24 +255,16 @@ void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
 		cam_res_report(res, cam_status(rc), "capture", rc);
 		return;
 	}
+	/* A success the reader never saw is not a frame to report: fail closed
+	   with the driver's own "nothing has been captured" (camera.c calls the
+	   reader on every success, so this is a broken contract, not a path). */
+	if (!r.valid) {
+		cam_res_report(res, CAMERA_SVC_ERR_HW, "capture", CAM_ERR_NO_FRAME);
+		return;
+	}
 	rep->warmup = dropped;
 	rep->warmup_unit = (uint8_t)CAMERA_SVC_WARMUP_FRAMES;
-
-	memset(&r, 0, sizeof r);
-	raw = camera_raw_frame();
-	/* The plane ORDER is the hardware's, not a preference: WDMA3 writes B
-	   first.  Printing them in that order is what makes a swapped pair
-	   visible against a scene somebody can describe. */
-	for (unsigned k = 0; k < 3u; k++)
-		cam_plane_rec_of(&r.plane[k], raw + k * CAM_FRAME_PIXELS);
-	r.seam_x100 = cam_plane_row_seam_x100(raw + CAM_FRAME_PIXELS,
-	                                      CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT,
-	                                      &r.seam_row);
-	r.colour_x100 = cam_frame_colour_x100(raw, CAM_FRAME_PIXELS);
-	r.bayer = cam_dp_bayer();
-	memcpy(r.head, raw, CAMERA_SVC_HEAD_MAX);
 	r.owner = tx_thread_identify();
-	r.valid = 1u;
 
 	TX_DISABLE
 	cam_last_capture = r;

@@ -154,9 +154,14 @@ _Static_assert(CAM_PRODUCER_STACK >= 1024u,
  *     (CAM_STOP_JOIN_TICKS, 6 s), and
  *   - a one-shot capture, which holds it for a bring-up (the 100 ms Timer0
  *     delivery probe dominates) plus CAM_FRAME_TIMEOUT_TICKS (2 s) plus the
- *     quiesce -- under 3 s.  Since issue #143 a capture may take several
- *     frames to let the sensor settle, but they share that ONE 2 s deadline
- *     (cam_capture_one()), so the hold is still bring-up + 2 s + a quiesce.
+ *     quiesce plus the caller's reading of the frame -- under 3 s.  Since
+ *     issue #143 a capture may take several frames to let the sensor settle,
+ *     but they share that ONE 2 s deadline (cam_capture_one()), so the hold
+ *     is still bring-up + 2 s + a quiesce + the read.  The read (issue #245)
+ *     is `camera capture`'s statistics or `camera raw`'s means, CPU only over
+ *     the 230,400-byte frame: about 0.8 million byte steps, a few cycles each
+ *     at 400 MHz, so ESTIMATED (not measured) at around 10 ms and well under
+ *     100 ms -- it does not move the 3 s.
  *
  * So the join dominates, and 8 s clears it with room for scheduling.  Like the
  * join deadline this is NOT a correctness parameter: reaching it means a holder
@@ -2014,9 +2019,31 @@ uint32_t camera_frames_since_bringup(void)
  * still deciding whether it was allowed to run at all -- see cam_api_exit() for
  * what a producer restart does with it in that window.  Passing it in means it
  * cannot be set before the answer.
+ *
+ * [!] AND THE FRAME IS READ BEFORE THE MUTEX GOES BACK (issue #245).
+ *
+ * The one landing buffer this capture filled is the one the next stream start,
+ * capture, `camera raw`, `camera bench`, `nn stream start` or `nn run` writes,
+ * and every one of those comes in through cam_bus_enter() -- so the only thing
+ * keeping them off it is this mutex.  A caller that read the frame after the
+ * call returned (as `camera capture` and `camera raw` did until #245) was
+ * reading it unprotected: a background capture's statistics interrupted by a
+ * foreground `camera stream start` could mix two frames, and a `camera bayer`
+ * in between could make the Bayer line disagree with the frame.  Nothing but
+ * thread priority kept two foreground commands apart.
+ *
+ * So @p read, when given, is called ONCE, only on success, after the datapath
+ * is quiesced (nothing writes the buffer any more) and before the mutex is
+ * released, with the completed buffer (already invalidated when the frame
+ * landed).  Never on a failure, a cancel or a timeout.  The rules for @p read
+ * are in camera.h (camera_frame_reader_fn): CPU work only, no camera_*
+ * entry point (ThreadX mutexes are recursive, so a nested entry is not
+ * refused -- it takes the mutex again, finds the port READY and may start a
+ * datapath on the very buffer being read), no sleep, no console output.
  */
 static int cam_capture_one(uint8_t raw, uint32_t warm, uint32_t *dropped,
-                           int (*cancelled)(void *ctx), void *ctx)
+                           int (*cancelled)(void *ctx), void *ctx,
+                           camera_frame_reader_fn read, void *read_arg)
 {
 	enum cam_bus_owner owner;
 	ULONG start;
@@ -2146,26 +2173,32 @@ static int cam_capture_one(uint8_t raw, uint32_t warm, uint32_t *dropped,
 	   may read.  A raw Bayer frame is not the capture. */
 	if (rc == CAM_OK && !raw)
 		cam_capture_valid = 1u;
+	/* The caller reads the frame here, still holding the mutex, the
+	   datapath quiesced above (issue #245; see the note on this function). */
+	if (rc == CAM_OK && read != NULL)
+		read(cam_dp_completed_buffer(), read_arg);
 	cam_api_exit();
 	return rc;
 }
 
 int camera_capture(void)
 {
-	return cam_capture_one(0u, 0u, NULL, NULL, NULL);
+	return cam_capture_one(0u, 0u, NULL, NULL, NULL, NULL, NULL);
 }
 
 int camera_capture_settled(uint32_t warm, uint32_t *dropped,
-                           int (*cancelled)(void *ctx), void *ctx)
+                           int (*cancelled)(void *ctx), void *ctx,
+                           camera_frame_reader_fn read, void *read_arg)
 {
-	return cam_capture_one(0u, warm, dropped, cancelled, ctx);
+	return cam_capture_one(0u, warm, dropped, cancelled, ctx,
+	                       read, read_arg);
 }
 
 /* `camera raw` is a phase measurement, not a picture: it takes the first frame
    as before, which still counts towards the settling. */
-int camera_capture_raw(void)
+int camera_capture_raw(camera_frame_reader_fn read, void *read_arg)
 {
-	return cam_capture_one(1u, 0u, NULL, NULL, NULL);
+	return cam_capture_one(1u, 0u, NULL, NULL, NULL, read, read_arg);
 }
 
 int camera_stream_start(struct frame_sink *sink)

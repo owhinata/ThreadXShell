@@ -973,10 +973,28 @@ image knobs.
 - **The settled capture has ONE deadline**: all its passes share
   `CAM_FRAME_TIMEOUT_TICKS` (2 s of wall clock after the bring-up), the bound a
   single capture always had.  That keeps its hold of the API mutex and the bus
-  at bring-up + 2 s + a quiesce, under 3 s, which is what `CAM_STOP_LOCK_TICKS`
-  (8 s) is derived from.  Running out is an ordinary timeout; the frames let go
-  stay counted, so the next capture carries on settling.  A Ctrl+C between
-  frames ends the capture: the announcement stays and nothing follows it.
+  at bring-up + 2 s + a quiesce + the reading of the frame (below), under 3 s,
+  which is what `CAM_STOP_LOCK_TICKS` (8 s) is derived from.  Running out is an
+  ordinary timeout; the frames let go stay counted, so the next capture carries
+  on settling.  A Ctrl+C between frames ends the capture: the announcement
+  stays and nothing follows it.
+- **The numbers are read while the capture still holds the API mutex** (issue
+  #245).  `camera capture`'s statistics (min / max / mean, mosaic, seam,
+  colour separation, the Bayer phase, the first 32 bytes) and `camera raw`'s
+  four phase means and its two 16-byte rows are computed by a reader the
+  capture calls once, on success only, after the datapath is quiesced and
+  before the mutex goes back; the lines are printed after the capture has
+  returned.  Until #245 they were computed after the capture had returned,
+  with the mutex already released, so a background `camera capture &` still
+  computing could have the buffer overwritten part-way by a foreground
+  `camera stream start`, `nn stream start`, `nn run`, `camera bench`,
+  `camera capture` or `camera raw`, and a `camera bayer` in between could make
+  the Bayer line disagree with the frame.  Now those commands are refused
+  while the reader runs, the same way as during the rest of the capture
+  (`camera: busy -- a stream start or stop, ...` for `camera stream start`,
+  `camera: raw capture failed: camera busy` for `camera raw`).  The reader is CPU only
+  over the 230,400-byte frame -- estimated, not measured, at around 10 ms at
+  400 MHz -- and does no console output, no sleep and no other camera call.
 - **`camera capture` prints the shared report** (issue #237; the shape, the
   order and the seam's definition are in
   [`svc/README.md`](../../svc/README.md#the-camera-command-is-shared-issue-143)),
@@ -5864,7 +5882,8 @@ So `camera_stream_stop()` now **tries, and then waits**:
   "had to wait" an exact count rather than an inference;
 - the bounded wait clears the worst hold a healthy system can have: a concurrent
   stop's whole join (6 s) dominates a one-shot capture's bring-up + frame wait +
-  quiesce (under 3 s), so the deadline is 8 s. Like the join deadline it is not
+  quiesce + reading of the frame (under 3 s; the reading, since issue #245, is
+  estimated at around 10 ms), so the deadline is 8 s. Like the join deadline it is not
   a correctness parameter -- reaching it means a holder is wedged;
 - **the poison is re-tested on the far side of the wait.** This is a hazard the
   wait introduces: a stop blocked behind another stop's join wakes up owning the

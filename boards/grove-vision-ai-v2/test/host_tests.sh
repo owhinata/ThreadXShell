@@ -242,7 +242,12 @@ gcc $CFLAGS \
 # over a fake driver: it announces itself before the frames it lets go, and a
 # Ctrl+C among them leaves that one line and nothing after it; a test pattern
 # is refused unannounced; the report's numbers (B, G, R at 8 bits, the seam of
-# G alone) and this board's own lines.  camera_svc_shim/ stands in for
+# G alone) and this board's own lines.  Since issue #245 the numbers are taken
+# by the adapter's reader inside the capture: the fake overwrites the buffer
+# and the Bayer phase right after the reader, as another command could once
+# the real driver lets go of its mutex, and the report must still print the
+# first frame; a failed, cancelled or unread capture installs no record.
+# camera_svc_shim/ stands in for
 # tx_api.h and the one SDK type cam_sensor.h names; the numbers are the real
 # cam_convert.c's.
 gcc $CFLAGS -I "$here/camera_svc_shim" -I "$board/port/camera" -I "$board/svc" \

@@ -20,6 +20,8 @@
  *     once, no erase and no program, the sector as it was;
  *   - each accepted run gives the flag back once, and `nor test` erases twice,
  *     passes and leaves the sector blank;
+ *   - in every run of erase / write / test, no NOR erase, program or read is
+ *     made while the flag is not held (`nor read` runs without it);
  *   - a failed `nor erase` / `nor write` gives the flag back once;
  *   - every failure point of `nor test` after the flag (each erase, program and
  *     read failing, the last erase doing nothing, each partial program doing
@@ -51,9 +53,18 @@ static int fail_op = -1, fail_at;           /* the fail_at-th call of fail_op fa
 static int noop_op = -1, noop_at;           /* ...or does nothing and says OK */
 static uint32_t last_erase_addr, last_erase_len;
 
+/* The busy flag's state, read by every NOR call below: an erase, program or read
+ * made while the flag is not held is counted, so "gave the flag back, then
+ * touched the NOR" fails even though the take and the give-back balance.
+ * `nor read` / `nor info` take no flag and are not held to it (run()). */
+static int flag_held;
+static int unheld[OP_N];
+
 static int hit(enum op o, int *noop)
 {
 	calls[o]++;
+	if (!flag_held)
+		unheld[o]++;
 	*noop = (noop_op == (int)o && noop_at == calls[o]);
 	return (fail_op == (int)o && fail_at == calls[o]) ? NOR_ERR_IO : NOR_OK;
 }
@@ -94,7 +105,7 @@ int nor_erase(uint32_t addr, uint32_t len)
 	return rc;
 }
 
-static int flag_held, flag_other, takes, take_fails, gives;
+static int flag_other, takes, take_fails, gives;
 
 int blob_busy_acquire(void)
 {
@@ -178,6 +189,7 @@ static const struct cli_cmd *nor_sub(const char *name)
 static void reset(void)
 {
 	memset(calls, 0, sizeof calls);
+	memset(unheld, 0, sizeof unheld);
 	fail_op = noop_op = -1;
 	takes = take_fails = gives = 0;
 	flag_held = flag_other = 0;
@@ -194,6 +206,7 @@ static int run(struct cli_instance *sh, const char *line)
 	int argc = 0;
 	const struct cli_cmd *s;
 	char *p;
+	int rc;
 
 	snprintf(buf, sizeof buf, "%s", line);
 	for (p = strtok(buf, " "); p != NULL && argc < 8; p = strtok(NULL, " "))
@@ -204,7 +217,13 @@ static int run(struct cli_instance *sh, const char *line)
 		failures++;
 		return -1;
 	}
-	return s->handler(sh, argc, argv);
+	rc = s->handler(sh, argc, argv);
+	/* erase / write / test touch the NOR only while they hold the flag: in
+	 * every run, accepted, refused or failed */
+	if (strcmp(argv[0], "read") != 0 && strcmp(argv[0], "info") != 0)
+		check(unheld[OP_ERASE] == 0 && unheld[OP_WRITE] == 0 &&
+		      unheld[OP_READ] == 0, "no NOR call without the flag", line);
+	return rc;
 }
 
 static int has(const char *s) { return strstr(text, s) != NULL; }
@@ -286,6 +305,12 @@ int main(void)
 		check(takes == 1 && gives == 1 && !flag_held, "and the flag given back once",
 		      line);
 	}
+
+	/* `nor read` takes no flag and runs from telnet: the reads are made without it */
+	reset();
+	rc = run(&telnet, "read 0x100000 16");
+	check(rc == 0 && takes == 0 && calls[OP_READ] == 1 && unheld[OP_READ] == 1,
+	      "read: from telnet, no flag", "read 0x100000 16");
 
 	/* -- the console, the device, the flag: for each of the three -- */
 	for (i = 0; i < sizeof ops / sizeof ops[0]; i++) {

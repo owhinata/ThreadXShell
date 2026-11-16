@@ -2101,6 +2101,66 @@ applies to both.  The boot-time
 KV shell (`src/kv_boot.c`) is an instance too, but it is never started as a
 console -- its output goes to `dmesg` -- so it is not listed.
 
+### What guards `nor` and `psram` today (issue #248)
+
+`nor` and `psram` go past the stores (`kv`, `blob`) and past the owners of the
+PSRAM, to the devices themselves.  The two tables say, per subcommand, what
+keeps it from destroying somebody else's data **as the code stands at
+`3ee40b2`** -- including what does not.  They were read from the source
+(`cmds/cmd_nor.c`, `cmds/cmd_psram.c` and what they call), not tried on the
+board; the cells marked *(source only)* are the ones nobody has seen happen.
+f746g-disco's `qspi` / `sdram` and grove-vision-ai-v2's `nor` have the same
+columns in those boards' READMEs.  Issue #213 changes these commands and
+updates the tables; a guard that is in a table now has to be in it afterwards.
+
+What the columns mean, the same on all three boards:
+
+- **Held while it runs**: what the command takes, and for how long.
+- **Addresses it refuses**: before anything is sent.
+- **From telnet / in a background job**: whether the command runs from the
+  `wio-net>` console, and as `cmd &`.  Nothing in these two commands asks
+  either question (`net_tty_guard()` is not called, `sh->fg` is not read).
+- **Dangerous-commands setting**: whether the subcommand is built only with
+  `CLI_ENABLE_DANGEROUS_CMDS`.  On this board the setting is fixed at 1
+  (`board.cmake`), and neither file looks at it.
+
+External NOR (16 MB; the map is in [The NOR asset store](#the-nor-asset-store-blob-issue-193)).
+[!] **No `nor` subcommand takes the store's busy flag** (the one `blob write`,
+`blob erase` and `nn model load <name>` take), and none refuses the `kv`
+partition or the blob slots.  The only thing held is the NOR driver's mutex
+(`port/nor/nor_flash.c`), for one driver call at a time: so a `nor erase` from
+one console can land between the steps of a `blob write` on the other, on the
+same slot.  Every subcommand but `info` is refused while the device is down.
+
+| Subcommand | Held while it runs | Addresses it refuses | From telnet | In a background job | Dangerous-commands setting | Other refusals and checks |
+|---|---|---|---|---|---|---|
+| `nor info` | nothing (prints the id read at boot and the controller registers) | -- | runs | runs | not looked at | -- |
+| `nor read <addr> [len]` | the NOR mutex, per 256 B read (waits without a limit) | outside the 16 MB; `len` outside 1..1024 (cut at the end of the device).  `kv` and the blob slots are read like any other address | runs | runs | not looked at | -- |
+| `nor erase <addr> [len]` | **the NOR mutex for the whole erase, nothing else**: a `kv` command waits 5 s on it and answers `store busy`; blob reads and writes wait for it | outside the 16 MB; a range past the end.  **`kv` (`0x000000-0x0FFFFF`) and the blob slots (`0x100000-0x7FFFFF`) are not refused** | **runs** | **runs** | not looked at | `len` defaults to 4 KB and the range is rounded outward to whole 4 KB sectors; does not look at what it erases; no read-back; one driver call, so Ctrl+C does not stop it |
+| `nor write <addr> <hex>` | the NOR mutex for the one call | outside the 16 MB; data running past the end; more than 256 B.  **`kv` and the blob slots are not refused** | **runs** | **runs** | not looked at | does not check that the target is erased; no read-back |
+| `nor test [addr]` | the NOR mutex per driver call, not across the test | outside the 16 MB.  The default is `0x800000`, above the blob slots; **an explicit address anywhere is taken**, `kv` and the blob slots included (rounded down to its 4 KB sector) | **runs** | **runs** | not looked at | **erases the sector without looking at what is there**; then reads it back blank and checks three partial-page programs, and re-programs one byte once (observed, not judged); **leaves the pattern behind** (the sector is not erased at the end) |
+
+PSRAM (8 MB at `0x90000000`; the low 6 MB is non-cacheable and holds the frame
+buffers and the camera frame, `.psram_ai` at `0x90600000` is the cacheable 2 MB
+with the TFLM arena and the model buffer, [Memory map](#memory-map)).  "The
+mark" below is the OCTOSPI1 guard's reconfigurer mark ([The OCTOSPI1
+guard](#the-octospi1-guard-users-and-one-reconfigurer-issue-142)): taken only
+when no user and no other reconfigurer holds the guard, and then refused while
+the LTDC scans out, a DMA2D draw was not confirmed stopped, or the camera
+streams; never waited for.  Users are a scan-out start, `camera capture` /
+`send` / a stream, an nn command or `nn stream` / `nn bench`, the `lcd`
+drawing commands and an mlperf run; the other reconfigurers are the `psram`
+tuning subcommands, `membench`, `devmem` on PSRAM and `wifi flash`.  A model
+that stays loaded between nn commands holds no place in the guard.
+
+| Subcommand | Held while it runs | Addresses it refuses | From telnet | In a background job | Dangerous-commands setting | Other refusals and checks |
+|---|---|---|---|---|---|---|
+| `psram info` | nothing (prints values kept since bring-up) | -- | runs | runs | not looked at | -- |
+| `psram test [bytes]` | the mark, across all three passes | from `0x90000000`, never past the 6 MB non-cacheable pool, so never `.psram_ai`.  **The length is not refused**: 0 means 6 MB, more than 6 MB is cut to 6 MB with a warning, a length that is not a multiple of 4 is rounded down silently, and 1..3 tests 0 bytes and prints PASS *(source only)* | runs | runs | not looked at | refused while the PSRAM is not up; drops the camera's last capture before the first write; Ctrl+C every 64 KB; **the frame buffers are not repainted afterwards** |
+| `psram set <rd> <wr>`, `psram mr0 <hex>`, `psram phase <sel> [units]`, `psram clk <presc>` | the mark, for the one change | -- (no address; each value has a bound) | runs | runs | not looked at | change the live bus timing or the device's MR0; `mr0` is refused while the PSRAM is not up |
+| `psram mmapscan start [phase] \| show \| stop` | `start`: the mark, then the board resets once per tested setting; `show` / `stop`: nothing | -- | runs | runs | not looked at | `start` is refused in a build without the IWDG and while the PSRAM is not up |
+| `psram wtune [addr]` | the mark, for the sweep | outside `0x90000000-0x907FFFF8`.  **That is the whole 8 MB, `.psram_ai` included**: it writes 8 bytes of markers there, over a loaded model as well *(source only)* | runs | runs | not looked at | refused while the PSRAM is not up; applies the lowest write latency that passed.  Its help, and `psram info` / `mr0`'s, point to `psram snap` / `probe` / `eye`, which do not exist |
+
 ### `net`: the command shared with f746g-disco (issue #219)
 
 `net info`, `net ip`, `net dhcp` and `net ping` are the one shared command

@@ -3832,17 +3832,17 @@ rule is about SSPI and WDMA3, not this path.
 ```
 nor cycle                      the transaction with no operation
 nor erase <addr> <len>         whole 4 KB sectors; prints the footprint first
-nor write <addr> <len> [byte]  one program page of a byte pattern
+nor write <addr> <len> [byte]  up to 64 KB of a pattern or one byte value
 ```
 
 `nor erase` prints the **footprint** -- what is lost, not what was asked for --
 *before* it runs, both because an erase destroys whole units and because if the
 vendor ever wedges, the last line on the console is what was in flight.
 
-`nor write` is capped at one program page. That is enough to prove the path in
-both directions (write a sentinel that is not `0xFF`, read it back through the
-restored window, erase, see `0xFF`); bulk data does not come through a console,
-and issue #49's blob writer calls `nor_write_program()` directly.
+`nor write` was capped at one program page when it was written; since issue
+#92 the cap is 64 KB, the blob staging buffer (see [`nor`](#nor----reading-the-flash-and-who-owns-the-window-issue-86)).
+Bulk data still does not come through a console: issue #49's blob writer calls
+`nor_write_program()` directly.
 
 None of the three brings the window up on its own -- that is a reader's errand
 (`NOR_ST_OFF` is `BUSY`). Each does the reader's part explicitly first and hands
@@ -3948,6 +3948,47 @@ particular that the first unit went. A vendor refusal on the very first sector
 leaves `done == 0`, the old header intact and the slot still valid -- so
 "the erase did not succeed, therefore the slot is empty" is **not** a valid
 inference. Only a cancel supports it.
+
+### What guards each `nor` subcommand today (issue #248)
+
+`nor` goes past the asset store (`blob`) to the part itself.  The table says,
+per subcommand, what keeps it from destroying somebody else's data **as the
+code stands at `3ee40b2`**.  It was read from the source (`cmds/cmd_nor.c`,
+`port/nor/nor_write.c`, `port/nor/nor_span.c`, `port/sdk_seam/nor_seam.c`), not
+tried on the board for this table; the behaviour it summarises is described,
+with what was seen on the board, in the sections above and in [Why a write is
+refused while the camera streams](#why-a-write-is-refused-while-the-camera-streams-issue-203).
+f746g-disco's `qspi` / `sdram` and wio-lite-ai's `nor` / `psram` have the same
+columns in those boards' READMEs.  Issue #213 changes these commands and
+updates the table; a guard that is in it now has to be in it afterwards.  This
+board has no external RAM, so there is no second table.
+
+What the columns mean, the same on all three boards:
+
+- **Held while it runs**: what the command takes, and for how long.  "The
+  reservation" is the writer reservation (`nor_reserve()`), the same one
+  `blob write` and `blob erase` take; it is refused, not waited for, while a
+  reader holds a lease (an open model, a `blob` read, a `devmem` access of
+  the window, a `nor scan`), another writer holds it, the camera streams, or
+  the port is faulted.
+- **Addresses it refuses**: before anything is sent.  The writable interval
+  is the blob partition, `0x200000-0xFFDFFF`, read from the seam's own record
+  (`nor_seam_limits`, the interval `nor info` prints), and checked again by the
+  seam on every vendor call (`check_nor_seam.py` confirms from the linker map
+  that only `nor_seam.c` reaches the vendor's erase and program).
+- **From telnet / in a background job**: this board has no telnet console.
+  The background question is asked by `nor_cmd_foreground()`.
+- **Dangerous-commands setting**: whether the subcommand is built only with
+  `CLI_ENABLE_DANGEROUS_CMDS`.  On this board the setting is fixed at 1
+  (`board.cmake`), and `cmds/cmd_nor.c` does not look at it.
+
+| Subcommand | Held while it runs | Addresses it refuses | From telnet | In a background job | Dangerous-commands setting | Other refusals and checks |
+|---|---|---|---|---|---|---|
+| `nor info` | nothing, except when the window has never been brought up: then a reader lease for the bring-up, given back at once | -- | no telnet console | runs | not looked at | the bring-up writes the QE bit of the status register ([`nor`](#nor----reading-the-flash-and-who-owns-the-window-issue-86)) |
+| `nor scan` | a reader lease for the whole scan, so every writer is refused meanwhile | -- (reads every byte of the 16 MB through the window) | no telnet console | runs | not looked at | refused while a writer holds the reservation or the port is faulted; Ctrl+C every 64 sectors |
+| `nor cycle` | the reservation, then one transaction | -- (touches no data) | no telnet console | **refused** (#203) | not looked at | the JEDEC id read again with the window down, the window re-probed after; costs two status-register writes |
+| `nor erase <addr> <len>` | the reservation, then one transaction | everything outside the writable interval: the firmware and bootloader area and the bootloader's slot header.  Inside it the range is rounded outward to whole 4 KB sectors.  **The blob slots, headers included, are not refused** | no telnet console | **refused** (#203) | not looked at | prints the sectors it will destroy first; does not look at what it erases; reads the range back as `0xFF`, and a mismatch is terminal (`FAULTED`, refused until reset); Ctrl+C between sectors, the result in `dmesg` |
+| `nor write <addr> <len> [byte]` | the reservation, then one transaction | outside the writable interval; an address not on a 4-byte boundary; `len` outside 1..64 KB (the staging buffer) | no telnet console | **refused** (#203) | not looked at | refused when the target is not erased, before the window goes down; reads the bytes back and compares, and a mismatch is terminal (`FAULTED`) |
 
 ### What is actually on this board's flash
 

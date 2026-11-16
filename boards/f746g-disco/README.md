@@ -1033,9 +1033,9 @@ What is this board's:
   command (reads included, [below](#the-configuration-store-kv-issue-214))
   runs on another console or in the background, rather than describe flash
   that is being changed.  They only
-  look at the flag, so two readers do not refuse each other.  `qspi erase` and
-  `qspi test` take the flag for their whole run (`qspi: busy -- ...` when they
-  cannot); `qspi probe`, `qspi info` and `qspi read` do not look at it.  Every
+  look at the flag, so two readers do not refuse each other.  Which `qspi`
+  subcommands take the flag (`qspi: busy -- ...` when they cannot) is in
+  [What guards `qspi` and `sdram` today](#what-guards-qspi-and-sdram-today-issue-248).  Every
   refusal names the same holders -- `blob`'s, `qspi`'s and `nn model load`'s
   BUSY -- from one string, `BLOB_BUSY_HOLDERS` in `src/blob.h` (which names
   "a `kv` command" too since #214).
@@ -1856,6 +1856,49 @@ before).  `tx_drop` applies to both, because the no-progress
 deadline that drops output lives in the shared output path.  What counts as a
 console, and what the two columns mean, is in the root
 [README](../../README.md#a-board-can-run-more-than-one-console).
+
+### What guards `qspi` and `sdram` today (issue #248)
+
+`qspi` and `sdram` go past the stores (`blob`, `kv`) and past the owners of
+the SDRAM, to the devices themselves.  The two tables say, per subcommand, what
+keeps it from destroying somebody else's data **as the code stands at
+`3ee40b2`** -- including what does not.  They were read from the source
+(`cmds/cmd_qspi.c`, `cmds/cmd_sdram.c` and what they call), not tried on the
+board; the cells marked *(source only)* are the ones nobody has seen happen.
+wio-lite-ai's `nor` / `psram` and grove-vision-ai-v2's `nor` have the same
+columns in those boards' READMEs.  Issue #213 changes these commands and
+updates the tables; a guard that is in a table now has to be in it afterwards.
+
+What the columns mean, the same on all three boards:
+
+- **Held while it runs**: what the command takes, and for how long.  Every
+  `qspi` subcommand also holds the QSPI driver's mutex for each driver call
+  (`port/qspi/qspi_flash.c`, waits without a limit), which serialises the
+  wire and protects no data; it is not repeated in the rows.
+- **Addresses it refuses**: before anything is sent.
+- **From telnet / in a background job**: whether the command runs from the
+  `net>` console, and as `cmd &`.  Nothing in these two commands asks either
+  question (`net_tty_guard()` is not called, `sh->fg` is not read).
+- **Dangerous-commands setting**: whether the subcommand is built only with
+  `CLI_ENABLE_DANGEROUS_CMDS` (a CMake option on this board, ON by default,
+  `board.cmake`).
+
+QSPI NOR (16 MB; the map is in [The QSPI asset store](#the-qspi-asset-store-blob-issue-194)):
+
+| Subcommand | Held while it runs | Addresses it refuses | From telnet | In a background job | Dangerous-commands setting | Other refusals and checks |
+|---|---|---|---|---|---|---|
+| `qspi probe` | nothing else | -- (reads the JEDEC id) | runs | runs | always built | -- |
+| `qspi info` | nothing else | -- (reads the status register and the controller registers) | runs | runs | always built | -- |
+| `qspi read <addr> [len]` | **not the store's busy flag**: it reads alongside a `blob write`, a `kv` command or a `qspi erase` / `test` and shows what they leave | outside the 16 MB (driver); `len` over 256.  The `kv` partition and the blob slots are read like any other address | runs | runs | always built | -- |
+| `qspi erase <addr>` | the store's busy flag for the whole command, refused (not waited for) while a `blob write` / `blob erase`, a `qspi erase` / `test`, an `nn model load <name>` or a `kv` command holds it | outside the 16 MB; not on a 4 KB boundary (no rounding); the `kv` partition `0x000000-0x0FFFFF` (#214).  **The blob slots `0x100000-0x7FFFFF`, headers included, are not refused** | **runs** | **runs** | built only with the setting | one 4 KB subsector per command; does not look at what it erases; no read-back |
+| `qspi test <addr>` | the store's busy flag for the whole test, as `qspi erase` | as `qspi erase` | **runs** | **runs** | built only with the setting | refuses a subsector that is not blank before it erases anything; every program is read back and compared (the pattern, then the 14 partial-page writes); the subsector is left blank.  Ctrl+C between pages leaves it partly programmed, and the next `qspi test` there refuses it until it is erased |
+
+SDRAM (8 MB; the banks are in [The SDRAM's internal banks are assigned by use](#-the-sdrams-internal-banks-are-assigned-by-use-and-the-linker-enforces-it)):
+
+| Subcommand | Held while it runs | Addresses it refuses | From telnet | In a background job | Dangerous-commands setting | Other refusals and checks |
+|---|---|---|---|---|---|---|
+| `sdram info` | nothing | -- (prints the window and whether the FMC came up) | runs | runs | not under the setting | prints `MPU: Normal, non-cacheable` for the whole window, which has been wrong for bank 3 since #173 (MPU region 1 is write-back, [MPU regions](#mpu-regions)) |
+| `sdram test [bytes]` | for the whole run, three claims taken in this order: the camera's frame buffer and stream ring (`camera_scratch_claim()`: refused while a stream runs or is held, or another `sdram test` holds it); nn's `.sdram.ai` (`nn_scratch_claim()`: refused while an nn command or stream holds the session, or **while a model is loaded**); the display (`ltdc_scanout_hold()`: refused while GUIX owns it; scan-out stops, and `lcd on`, `gui start`, the `lcd` draws and flips are refused) | from `0xC0000000`; `bytes` must be a multiple of 4 in 4..8 MB, otherwise an error.  Bank 2 (`0xC0400000-0xC05FFFFF`, the Ethernet descriptors and pool) is skipped while the network is up, and the test is refused if `.sdram.eth` is not inside bank 2 | runs | runs | not under the setting | **not refused: a running `membench`**, whose 64 KB buffer is in bank 0 (`.sdram.fixed`); neither command looks at the other *(source only)*.  **Bank 3 (`0xC0600000-0xC07FFFFF`) is tested although it is cacheable since #173**; how much of the read-back the D-cache answers is not measured.  Ctrl+C between 64 KB chunks.  Afterwards both frame buffers are repainted black and scan-out is restored; the captured frame stays invalid until the next capture |
 
 ### The camera streams while somebody holds it (issue #142)
 

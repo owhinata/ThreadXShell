@@ -275,7 +275,9 @@ that would catch the two drifting apart).
   errors` (4096 KB while the network is up).
 - **`membench` and `sdram test` refuse each other** through one word kept by
   `cmds/cmd_sdram.c` (`cmds/sdram_owner.h`): ``sdram: `membench` is running`` /
-  ``membench: `sdram test` is running``.  `membench` takes it for every region,
+  ``membench: `sdram test` is running``.  The word also names a second test
+  that got past the camera claim (when the camera never came up, the claim
+  refuses nothing): ``sdram: another `sdram test` is running``.  `membench` takes it for every region,
   not only the SDRAM rows (the test keeps the FMC busy, which moves the other
   rows too), and it still refuses a second `membench` (`membench: already
   running`).
@@ -2003,7 +2005,7 @@ out on purpose (nn's claim, which has nothing left to guard); two are new.
 | Guard | Until #251 (`cmds/cmd_sdram.c`, the whole command) | Since #251 |
 |---|---|---|
 | the camera's frame and ring, for the whole run | `camera_scratch_claim()` | the same, step 1 of `cmds/cmd_sdram.c` |
-| nn's `.sdram.ai` (bank 3) | `nn_scratch_claim()`, refused while a model is loaded or nn is busy | **taken out**: bank 3 is cacheable and the shared command never tests it, so the test writes nothing of nn's.  nn's claim mechanism stays in `svc/nn` for now (a later issue removes it) |
+| nn's `.sdram.ai` (bank 3) | `nn_scratch_claim()`, refused while a model is loaded or nn is busy | **taken out**: bank 3 is cacheable and the shared command never tests it, so the test writes nothing of nn's.  nn's claim mechanism (`nn_scratch_claim()` and its refusal ``.sdram.ai is held by `sdram test` ``) is still in `svc/nn`, but `sdram test` no longer uses it |
 | bank 2 while the network is up | skipped, `.sdram.eth` checked | the same, step 3 |
 | the display | `ltdc_scanout_hold()` / `unhold()` | the same, step 4 |
 | every taken claim given back once, in reverse | three `goto` exits | the shared command's one give loop |
@@ -2214,7 +2216,9 @@ camera res | format | fps | set   (this board's own)
   happens**: the test stops at 6 MB and never writes bank 3, so it takes no nn
   claim; during a test `nn model load` / `unload`, `nn bench` and `nn info`
   run as usual, and `nn run` / `nn stream start` are refused by the camera
-  claim instead.  Bank 2 (`.sdram.eth`) holds the ETH DMA
+  claim instead.  nn's side of the claim (`nn_scratch_claim()` and the
+  ``.sdram.ai is held by `sdram test` `` refusal) is still in `svc/nn`, but
+  `sdram test` no longer takes it, so that refusal is no longer seen.  Bank 2 (`.sdram.eth`) holds the ETH DMA
   descriptors and the NetX pool; the IP instance never goes down once boot
   created it, so while the network is up the test skips the whole bank
   (since #251 `sdram: 0xc0400000..0xc05fffff skipped: the network is up (ETH

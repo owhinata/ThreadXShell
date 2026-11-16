@@ -106,10 +106,14 @@ static const char *give_camera(void)
 
 static int take_owner(struct ext_ram_claim *c)
 {
-	if (sdram_owner_take(SDRAM_OWNER_TEST) == SDRAM_OWNER_NONE)
+	enum sdram_owner held = sdram_owner_take(SDRAM_OWNER_TEST);
+
+	if (held == SDRAM_OWNER_NONE)
 		return 0;
-	/* The camera claim already refuses a second test, so it is membench. */
-	c->why = "`membench` is running";
+	/* Say who holds it: the camera claim does not refuse a second test when
+	 * the camera never came up, so it can be another test too. */
+	c->why = (held == SDRAM_OWNER_TEST) ? "another `sdram test` is running"
+	                                    : "`membench` is running";
 	return -1;
 }
 

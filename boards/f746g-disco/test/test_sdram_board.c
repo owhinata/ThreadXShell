@@ -390,6 +390,21 @@ int main(void)
 		      "membench still holds the word", "test");
 	}
 	sdram_owner_give();
+	/* Another test holds the word (the camera claim lets a second test
+	 * through when the camera never came up): named as such, not membench. */
+	reset();
+	check(sdram_owner_take(SDRAM_OWNER_TEST) == SDRAM_OWNER_NONE, "a test runs",
+	      "test");
+	{
+		static char line[] = "test";
+		char *argv[1] = { line };
+		int rc = sdram_sub("test")->handler(&vcp, 1, argv);
+
+		check(rc == 1 && strcmp(seq, "cam+ cam- ") == 0 && stores == 0 &&
+		      has("sdram: another `sdram test` is running\r\n") &&
+		      !has("membench"), "a second test: refused as such", "test");
+	}
+	sdram_owner_give();
 	reset();
 	ltdc_rc = LTDC_ERR_STATE;
 	check(run("test") == 1 && strcmp(seq, "cam+ cam- ") == 0 && stores == 0 &&

@@ -493,6 +493,7 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_net.c"    # the one shared command (#219)
     "${CMAKE_SOURCE_DIR}/shell/cmds/net_core.c"   # ...its one NetX implementation (#220)
     "${CMAKE_SOURCE_DIR}/shell/cmds/net_tty.c"    # ...and the one telnet console (#221)
+    "${CMAKE_SOURCE_DIR}/shell/cmds/nor_console.c"  # where a NOR erase may run (#250)
     "${BOARD_DIR}/cmds/cmd_wifi_link.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/xfer_console.c"  # YMODEM over the console (#231)
     "${BOARD_DIR}/cmds/cmd_xfer_board.c"          # ...and this board's owner

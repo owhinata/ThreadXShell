@@ -589,6 +589,7 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_wdt.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_jobs.c"
     "${BOARD_DIR}/cmds/cmd_qspi.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/nor_console.c"  # ...where it may erase (#250)
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_sd.c"     # the one shared `sd` (#232)
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_camera.c"  # the one shared command (#143)
     # The shared `blob` command (#194) and this board's console pieces of it:

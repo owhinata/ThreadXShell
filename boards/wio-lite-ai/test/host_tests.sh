@@ -521,11 +521,13 @@ gcc $CFLAGS -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
 # job of the USB console, the NOR down) touch neither the NOR nor the flag; a
 # held flag is one failed take; `nor test` refuses a sector that is not blank
 # without erasing it, and every failure after the flag gives it back once and
-# never says PASS.  fal_cfg.h is the real one (the kv partition's place).
-gcc $CFLAGS -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
+# never says PASS.  fal_cfg.h is the real one (the kv partition's place).  The
+# telnet and background question is the shared shell/cmds/nor_console.c (issue
+# #250), compiled in this board's shape: it has the telnet console.
+gcc $CFLAGS -DSHELL_HAS_NET_TTY=1 -I "$st/shim" -I "$st/nx_shim" -I "$HOST_TEST_BACKEND" \
     -I "$inc" -I "$HOST_TEST_CORE" -I "$st/../cmds" -I "$svc" -I "$svc/net" \
     -I "$svc/blob" -I "$board/src" -I "$board/port/nor" -I "$board/port/flashdb" \
-    "$here/test_nor_guard.c" "$board/cmds/cmd_nor.c" \
+    "$here/test_nor_guard.c" "$board/cmds/cmd_nor.c" "$st/../cmds/nor_console.c" \
     "$HOST_TEST_CORE/cli_parse.c" \
     $LDFLAGS -o "$out/test_nor_guard"
 "$out/test_nor_guard"

@@ -407,6 +407,7 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
     "${BOARD_DIR}/cmds/cmd_nor.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/nor_console.c"  # ...where it may write (#250)
     # The shared `blob` command (#194) and this board's console pieces of it
     # (who may erase, who holds the NOR, why the port is faulted).
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_blob.c"

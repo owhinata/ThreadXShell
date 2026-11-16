@@ -37,7 +37,8 @@
  *      the range is what keeps a raw erase off FlashDB's sectors;
  *   3. whether it runs on the telnet console, in a background job launched from
  *      it, or in a background job of the local console -- refused: these run in
- *      the foreground of the local console only;
+ *      the foreground of the local console only.  The question is the shared
+ *      one (shell/cmds/nor_console.c, issue #250), asked on every board;
  *   4. whether the NOR is up;
  *   5. the blob store's busy flag (src/blob.h), held for the whole operation and
  *      given back at one place on every path once it was taken.  It is what
@@ -57,7 +58,6 @@
  * Clean-room design; no third-party code reused.
  */
 #include "cli.h"
-#include "cli_instance.h"    /* sh->fg: is this a background job */
 #include "nor_flash.h"
 /* BLOB_REGION_END (the `nor test` default must stay clear of the asset region,
  * and the assert below keeps the two from drifting apart), the busy flag and
@@ -65,7 +65,7 @@
  * (board.cmake), so the include is always resolvable wherever this is built. */
 #include "blob.h"
 #include "fal_cfg.h"         /* KV_PART_OFFSET / KV_PART_LEN (issue #249) */
-#include "net_tty.h"         /* net_tty_is_console, the other console's name */
+#include "nor_console.h"     /* telnet and background jobs (issue #250) */
 
 #include <stdint.h>
 #include <string.h>
@@ -248,32 +248,6 @@ static int nor_refuse_kv(struct cli_instance *sh, uint32_t addr, uint32_t len)
 }
 
 /*
- * Erasing and programming run in the foreground of the local console only: not
- * on the telnet console, not in a background job launched from it, and not in a
- * background job (`... &`) of the local console.  No board fact here -- the
- * question about telnet is net_tty's (a job answers for its launcher) and the
- * other console's name is its table -- so this can move to shell/cmds as it is.
- * The reason given is only the rule: such an erase does not end the telnet
- * session, so net_tty_guard()'s sentence would not be true here.
- */
-static int nor_refuse_console(struct cli_instance *sh)
-{
-	const char *here;
-
-	if (net_tty_is_console(sh))
-		here = (sh->fg != NULL) ? "a background job of the telnet console"
-		                        : "the telnet console";
-	else if (sh->fg != NULL)
-		here = "a background job";
-	else
-		return 0;
-	cli_error(sh, "nor: erase, write and test run only in the foreground of the "
-	              "%s console; this is %s\r\n",
-	          net_tty_board_facts.other_console, here);
-	return -1;
-}
-
-/*
  * The blob store's busy flag, for the whole of one erase, write or test.  On
  * success the caller owns it and gives it back with blob_busy_release() at its
  * one exit; on refusal nothing was taken and nothing is to be given back.
@@ -292,7 +266,7 @@ static int nor_busy_gate(struct cli_instance *sh)
  * (see the file comment).  0 = go ahead, holding the busy flag. */
 static int nor_admit(struct cli_instance *sh, uint32_t addr, uint32_t len)
 {
-	if (nor_refuse_kv(sh, addr, len) || nor_refuse_console(sh) ||
+	if (nor_refuse_kv(sh, addr, len) || nor_console_refuse(sh, "nor") ||
 	    nor_gate(sh) || nor_busy_gate(sh))
 		return -1;
 	return 0;

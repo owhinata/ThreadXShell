@@ -131,6 +131,25 @@ endif()
 set(BOARD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD}")
 include("${BOARD_CMAKE}")
 
+# --- Does this board have the telnet console (issue #250) --------------------
+# shell/cmds/nor_console.c asks "is this the telnet console" only on a board
+# that has one, and the answer is derived here from BOARD_HAS_NETX -- the
+# variable that decides whether shell/cmds/net_tty.c is compiled (the shared
+# storage audit checks that both ways, cmake/README.md) -- and never written
+# by a board: a board that could say "no telnet" would lose the refusal on its
+# telnet console without a check noticing.  1 without net_tty.c does not link;
+# the file refuses to compile without the define.  For that one file only.
+if(BOARD_HAS_NETX STREQUAL "ON")
+    set(_shell_has_net_tty 1)
+elseif(BOARD_HAS_NETX STREQUAL "OFF")
+    set(_shell_has_net_tty 0)
+else()
+    message(FATAL_ERROR "boards/${BOARD}/board.cmake must set BOARD_HAS_NETX to ON or OFF "
+                        "(got '${BOARD_HAS_NETX}')")
+endif()
+set_property(SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/nor_console.c" APPEND PROPERTY
+             COMPILE_DEFINITIONS "SHELL_HAS_NET_TTY=${_shell_has_net_tty}")
+
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/shared_storage_gate.cmake")
 add_shared_storage_build_gate()
 

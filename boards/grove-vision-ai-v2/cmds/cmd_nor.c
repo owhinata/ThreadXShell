@@ -42,7 +42,7 @@
  * there on the strength of it -- and now something can.
  */
 #include "cli.h"
-#include "cli_instance.h"     /* sh->fg: a background job's view (#203) */
+#include "nor_console.h"      /* background jobs: the shared question (#203, #250) */
 
 #include <stdint.h>
 #include <string.h>
@@ -402,23 +402,17 @@ static int nor_cmd_bring_up(struct cli_instance *sh)
  * take a lease between the bring-up above and the transaction below.
  */
 /*
- * [!] A WRITE SUBCOMMAND RUNS IN THE FOREGROUND ONLY (issue #203), in the words
- * `blob write` uses.  The writer refuses while the camera streams, and the
+ * [!] A WRITE SUBCOMMAND RUNS IN THE FOREGROUND ONLY (issue #203), as
+ * `blob write` does.  The writer refuses while the camera streams, and the
  * check holds only because nothing can start the camera between a
  * transaction's claim and its commit -- true for a writer on the foreground
  * shell thread, which background jobs run below and cannot preempt, and false
  * for one in a background job: a foreground `camera stream start`, woken by the
  * RX interrupt, preempts it mid-program.  Asked first, before `nor write`
- * fills the staging buffer.
+ * fills the staging buffer.  The question is the shared one every board asks
+ * before it erases or writes its NOR (shell/cmds/nor_console.c, issue #250);
+ * this board has no telnet console, so it is only the background half.
  */
-static int nor_cmd_foreground(struct cli_instance *sh)
-{
-	if (sh->fg == NULL)
-		return 0;
-	cli_error(sh, "nor: cannot run in the background -- drop the trailing "
-	              "'&'\r\n");
-	return -1;
-}
 
 int nor_cmd_writer_enter(struct cli_instance *sh, uint32_t *token)
 {
@@ -593,7 +587,7 @@ static int cmd_nor_cycle(struct cli_instance *sh, int argc, char **argv)
 	(void)argc;
 	(void)argv;
 
-	if (nor_cmd_foreground(sh) != 0)
+	if (nor_console_refuse(sh, "nor") != 0)
 		return 1;
 	if (nor_cmd_writer_enter(sh, &token) != 0)
 		return 1;
@@ -648,7 +642,7 @@ static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
 	int rc;
 
 	(void)argc;
-	if (nor_cmd_foreground(sh) != 0)
+	if (nor_console_refuse(sh, "nor") != 0)
 		return 1;
 	if (cli_parse_u32(argv[1], &addr) != 0 ||
 	    cli_parse_u32(argv[2], &len) != 0) {
@@ -742,7 +736,7 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 	uint32_t addr, len, token, byte = 0u, t0, t1;
 	int rc, constant = 0;
 
-	if (nor_cmd_foreground(sh) != 0)
+	if (nor_console_refuse(sh, "nor") != 0)
 		return 1;
 	if (cli_parse_u32(argv[1], &addr) != 0 ||
 	    cli_parse_u32(argv[2], &len) != 0 ||

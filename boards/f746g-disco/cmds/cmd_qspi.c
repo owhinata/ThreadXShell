@@ -34,15 +34,20 @@
  * QSPI FileX/LevelX volume was mounted; since issue #194 the QSPI NOR is the
  * blob store, and they take the store's busy flag (src/blob.h) for as long as
  * they run -- so they are refused while a blob operation, a `kv` command, or
- * another erase/test from the other console or a background job, has it.  And
- * since issue #214 they refuse the key-value store's partition, the first
- * megabyte, outright: `kv format yes` is the way to erase it.
+ * another erase/test, has it.  And since issue #214 they refuse the key-value
+ * store's partition, the first megabyte, outright: `kv format yes` is the way
+ * to erase it.  Since issue #250 they also run only in the foreground of the
+ * VCP console -- not on the telnet console, not in a background job launched
+ * from it, not in a background job of the VCP console -- which is the question
+ * every board asks before it erases or writes its NOR
+ * (shell/cmds/nor_console.c), asked after the address and before the flag.
  *
  * Clean-room design; no third-party code reused.
  */
 #include "blob.h"            /* blob_busy_acquire / _release */
 #include "cli.h"
 #include "fal_cfg.h"         /* KV_PART_OFFSET / KV_PART_LEN (issue #214) */
+#include "nor_console.h"     /* telnet and background jobs (issue #250) */
 #include "qspi_flash.h"
 
 #include "stm32f7xx_hal.h"   /* HAL_GetTick for the self-test timing */
@@ -266,6 +271,8 @@ static int cmd_qspi_erase(struct cli_instance *sh, int argc, char **argv)
 	(void)argc;
 
 	if (parse_subsector(sh, argv[1], &addr) != 0)
+		return 1;
+	if (nor_console_refuse(sh, "qspi") != 0)
 		return 1;
 	if (qspi_busy_gate(sh) != 0)
 		return 1;
@@ -502,6 +509,8 @@ static int cmd_qspi_test(struct cli_instance *sh, int argc, char **argv)
 	(void)argc;
 
 	if (parse_subsector(sh, argv[1], &addr) != 0)
+		return 1;
+	if (nor_console_refuse(sh, "qspi") != 0)
 		return 1;
 	if (qspi_busy_gate(sh) != 0)
 		return 1;

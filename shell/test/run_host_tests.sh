@@ -1507,6 +1507,35 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 -I "$here/shim" -I "$here/nx_shim" -I "$here/../cm
     $LDFLAGS -o "$out/test_net_tty"
 "$out/test_net_tty"
 
+# issue #250 -- where an erase or a write of the NOR may run
+# (shell/cmds/nor_console.c), in both shapes the top-level CMakeLists.txt gives
+# it from BOARD_HAS_NETX: with the telnet console (the console, a job launched
+# from it and a job of the local console refused, each named, the telnet
+# question asked every time) and without (a job refused, no console named).
+# Without the define the file must not compile, on its own #error.
+for has in 1 0; do
+    gcc $CFLAGS -DCLI_USE_COLOR=0 -DSHELL_HAS_NET_TTY=$has \
+        -I "$here/shim" -I "$here/nx_shim" -I "$here/../cmds" \
+        -I "$inc" -I "$core" -I "$backend" -I "$svc" -I "$svc/net" \
+        "$here/test_nor_console.c" "$here/../cmds/nor_console.c" \
+        $LDFLAGS -o "$out/test_nor_console_$has"
+    "$out/test_nor_console_$has"
+done
+if LC_ALL=C gcc $CFLAGS -DCLI_USE_COLOR=0 -I "$here/shim" -I "$here/../cmds" \
+       -I "$inc" -I "$core" -I "$backend" -I "$svc" \
+       -c "$here/../cmds/nor_console.c" -o "$out/nor_console_undef.o" \
+       > "$out/nor_console_undef.log" 2>&1; then
+    echo "test_nor_console: nor_console.c COMPILED without SHELL_HAS_NET_TTY" >&2
+    exit 1
+fi
+if ! LC_ALL=C grep -q "SHELL_HAS_NET_TTY is defined from BOARD_HAS_NETX" \
+       "$out/nor_console_undef.log"; then
+    echo "test_nor_console: no SHELL_HAS_NET_TTY failed to compile, but not on its #error:" >&2
+    cat "$out/nor_console_undef.log" >&2
+    exit 1
+fi
+echo "  ok   nor_console.c without SHELL_HAS_NET_TTY refused at compile time"
+
 # issue #99 -- the shared stream lifecycle (svc/nn/nn_stream_life.c).
 #
 # A `--frames` waiter and a second console racing over one stream: the waiter
